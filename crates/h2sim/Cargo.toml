@@ -1,12 +1,10 @@
 [package]
-name = "h2tool"
+name = "h2sim"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Command-line tool for inspecting Halo 2 PC map files"
+description = "Halo 2 game simulation: collision and player movement"
 
 [dependencies]
 blam-cache = { path = "../blam-cache" }
-h2sim = { path = "../h2sim" }
 glam = "0.33"
-png = "0.17"

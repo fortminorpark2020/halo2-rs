@@ -10,14 +10,17 @@ install. No game files are included in this repository.
   names, tag groups, tag data, shared-map lookups, level collision and render
   geometry, shaders and bitmaps (DXT and uncompressed formats decoded to RGBA).
 - `h2tool`: command-line inspector.
-- `h2viewer`: fly around a level with its real geometry and textures (simple lighting; lightmaps not yet).
+- `h2sim`: game simulation (no rendering): level collision and Spartan movement
+  using the speeds, jump velocity and size from the game's own globals and biped tags.
+- `h2viewer`: walk or fly around a level with its real geometry and textures (simple lighting; lightmaps not yet).
 
 ### h2viewer
 
 Double-click `h2viewer.exe` to open Lockout from `C:\Games\Halo 2 Project Cartographer\maps`
-(or drag any `.map` file onto it). Click in the window to look around with the mouse,
-WASD to fly, Space / C to go up / down, hold Shift to go fast, Esc to release the mouse,
-Esc again to quit.
+(or drag any `.map` file onto it). You start on foot at a player spawn.
+Click in the window to look around with the mouse, WASD to move, Space to jump,
+Ctrl or C to crouch, Tab to switch between walking and flying (flying: Space / C up / down,
+Shift fast), Esc to release the mouse, Esc again to quit.
 
 ```
 h2tool scan  "C:\Games\Halo 2 Project Cartographer\maps"
@@ -27,6 +30,7 @@ h2tool check lockout.map
 h2tool obj    lockout.map lockout.obj   # export level collision geometry
 h2tool render lockout.map lockout.png   # software-rendered preview, no GPU needed
 h2tool level  lockout.map [texdir]      # render geometry, shaders, textures (optionally dumped as PNGs)
+h2tool sim    lockout.map               # drop a Spartan at every spawn and walk (collision sanity check)
 ```
 
 Multiplayer maps only store the tags unique to them; the rest live in
@@ -36,7 +40,7 @@ Multiplayer maps only store the tags unique to them; the rest live in
 
 1. Map file reader (done)
 2. Fly-camera level viewer (textured geometry done; lightmaps, scenery and skybox next)
-3. Spartan movement, collision, weapons
+3. Spartan movement, collision (done), weapons
 4. Splitscreen and LAN multiplayer
 5. Matchmaking, 1-50 ranks, parties
 6. Campaign and AI

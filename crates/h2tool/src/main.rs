@@ -8,6 +8,7 @@
 //!   h2tool obj   <file.map> <out.obj>    export level collision geometry
 //!   h2tool render <file.map> <out.png>   software-rendered preview of the level
 //!   h2tool level <file.map> [png dir]    render geometry + shader/texture summary (optionally dump textures)
+//!   h2tool sim   <file.map>              drop a Spartan at every spawn and walk; reports collision sanity
 //!   h2tool scan  <maps folder>           summary line for every .map in a folder
 
 mod render;
@@ -25,12 +26,13 @@ fn main() -> ExitCode {
         Some("groups") if args.len() >= 2 => groups(&args[1]),
         Some("check") if args.len() >= 2 => check(&args[1]),
         Some("scan") if args.len() >= 2 => scan(&args[1]),
+        Some("sim") if args.len() >= 2 => sim(&args[1]),
         Some("level") if args.len() >= 2 => level(&args[1], args.get(2).map(String::as_str)),
         Some("obj") if args.len() >= 3 => obj(&args[1], &args[2]),
         Some("render") if args.len() >= 3 => render_png(&args[1], &args[2]),
         _ => {
             eprintln!(
-                "usage: h2tool <info|tags|groups|check|obj|render|level|scan> <path> [group]"
+                "usage: h2tool <info|tags|groups|check|obj|render|level|sim|scan> <path> [group]"
             );
             return ExitCode::from(2);
         }
@@ -220,5 +222,47 @@ fn level(path: &str, dump: Option<&str>) -> Res {
             println!("  {i:2} {name}\n     -> {tex}");
         }
     }
+    Ok(())
+}
+
+fn sim(path: &str) -> Res {
+    use blam_cache::{physics, MapSet};
+    use h2sim::{Input, Player, World};
+    let mut set = MapSet::open(path)?;
+    let movement = physics::player_movement(&mut set)?;
+    let biped = physics::player_biped(&mut set)?;
+    println!("{movement:?}\n{biped:?}");
+    let mesh = level_mesh(path)?;
+    let world = World::new(&mesh.positions, &mesh.indices);
+    let spawns = set.map.player_spawns()?;
+    let (mut landed, mut fell, mut walked) = (0, 0, 0.0f32);
+    for s in &spawns {
+        let start = glam::Vec3::from(s.position) + glam::Vec3::Z * 0.05;
+        let mut p = Player::new(start, movement, biped);
+        for _ in 0..120 {
+            p.update(&world, Input::default(), 1.0 / 60.0);
+        }
+        if p.grounded && (p.position.z - start.z).abs() < 0.3 {
+            landed += 1;
+        }
+        let before = p.position;
+        let input = Input {
+            movement: glam::Vec2::new(0.0, 1.0),
+            yaw: s.facing,
+            ..Default::default()
+        };
+        for _ in 0..180 {
+            p.update(&world, input, 1.0 / 60.0);
+        }
+        if p.position.z < world.min.z + 1.0 {
+            fell += 1;
+        }
+        walked += (p.position - before).truncate().length();
+    }
+    println!(
+        "{} spawns: {landed} landed on ground, {fell} fell out of the world, avg 3s walk {:.2} units",
+        spawns.len(),
+        walked / spawns.len().max(1) as f32
+    );
     Ok(())
 }

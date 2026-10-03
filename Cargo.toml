@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/blam-cache", "crates/h2tool", "crates/h2viewer"]
+members = ["crates/blam-cache", "crates/h2sim", "crates/h2tool", "crates/h2viewer"]
 
 [workspace.package]
 edition = "2021"

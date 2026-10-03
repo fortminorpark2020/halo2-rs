@@ -2,6 +2,7 @@
 
 use blam_cache::bitmap::{self, Image};
 use blam_cache::geometry::Mesh;
+use blam_cache::physics::{self, BipedPhysics, PlayerMovement};
 use blam_cache::{render, shader, DatumIndex, MapSet, PlayerSpawn};
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,8 +28,10 @@ pub struct Scene {
     pub textures: Vec<Image>,
     pub batches: Vec<Batch>,
     pub spawn: Option<PlayerSpawn>,
-    /// Collision geometry, kept for framing and (later) movement.
+    /// Collision geometry, used for walking and framing.
     pub collision: Mesh,
+    pub movement: PlayerMovement,
+    pub biped: BipedPhysics,
 }
 
 fn fallback_texture() -> Image {
@@ -57,6 +60,8 @@ impl Scene {
             .player_spawns()
             .ok()
             .and_then(|s| s.first().copied());
+        let movement = physics::player_movement(&mut set).unwrap_or_default();
+        let biped = physics::player_biped(&mut set).unwrap_or_default();
 
         let mut scene = Scene {
             vertices: Vec::new(),
@@ -65,6 +70,8 @@ impl Scene {
             batches: Vec::new(),
             spawn,
             collision,
+            movement,
+            biped,
         };
 
         // Render geometry grouped by texture.

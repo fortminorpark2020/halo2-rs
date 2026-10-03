@@ -575,6 +575,7 @@ fn cstr(b: &[u8]) -> String {
 pub mod bitmap;
 pub mod geometry;
 pub mod mapset;
+pub mod physics;
 pub mod render;
 pub mod shader;
 

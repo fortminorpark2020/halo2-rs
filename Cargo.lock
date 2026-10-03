@@ -579,10 +579,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2sim"
+version = "0.1.0"
+dependencies = [
+ "blam-cache",
+ "glam",
+]
+
+[[package]]
 name = "h2tool"
 version = "0.1.0"
 dependencies = [
  "blam-cache",
+ "glam",
+ "h2sim",
  "png",
 ]
 
@@ -593,6 +603,7 @@ dependencies = [
  "blam-cache",
  "bytemuck",
  "glam",
+ "h2sim",
  "pollster",
  "wgpu",
  "winit",

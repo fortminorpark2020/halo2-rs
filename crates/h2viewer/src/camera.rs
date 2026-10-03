@@ -7,7 +7,7 @@ use winit::keyboard::KeyCode;
 pub struct FlyCamera {
     pub position: Vec3,
     /// Radians around +z, 0 = looking down +x.
-    yaw: f32,
+    pub yaw: f32,
     /// Radians above the horizon.
     pitch: f32,
 }

@@ -7,6 +7,7 @@ description = "Fly-camera viewer for Halo 2 levels"
 
 [dependencies]
 blam-cache = { path = "../blam-cache" }
+h2sim = { path = "../h2sim" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.33"
 pollster = "1"

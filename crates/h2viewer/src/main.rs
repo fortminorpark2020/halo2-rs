@@ -3,8 +3,9 @@
 //! Usage: h2viewer [path\to\level.map]
 //! With no argument it looks for lockout.map in the usual install folders.
 //!
-//! Controls: click to capture the mouse, WASD move, Space/C up/down,
-//! Shift fast, Esc releases the mouse (Esc again quits).
+//! Controls: click to capture the mouse, WASD move, Space jump, Ctrl/C crouch,
+//! Tab toggles walking / flying (fly: Space/C up/down, Shift fast),
+//! Esc releases the mouse (Esc again quits).
 
 mod camera;
 mod gpu;
@@ -12,6 +13,7 @@ mod scene;
 
 use blam_cache::geometry::Mesh;
 use camera::FlyCamera;
+use h2sim::{Input, Player, World};
 use scene::Scene;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -43,9 +45,6 @@ fn find_map() -> Result<PathBuf, String> {
         })
 }
 
-/// Spartan eye height above a spawn point, in world units (1 unit = 10 ft).
-const EYE_HEIGHT: f32 = 0.62;
-
 /// Center of the densest part of the level, used as the spawn point.
 fn level_focus(mesh: &Mesh) -> (glam::Vec3, f32) {
     let mut lo = [0f32; 3];
@@ -63,6 +62,10 @@ fn level_focus(mesh: &Mesh) -> (glam::Vec3, f32) {
 
 struct App {
     scene: Scene,
+    world: World,
+    player: Player,
+    walking: bool,
+    spawn_point: glam::Vec3,
     title: String,
     window: Option<Arc<Window>>,
     gpu: Option<gpu::Gpu>,
@@ -136,6 +139,16 @@ impl ApplicationHandler for App {
                 };
                 match event.state {
                     ElementState::Pressed => {
+                        if code == KeyCode::Tab && !event.repeat {
+                            self.walking = !self.walking;
+                            if self.walking {
+                                // Drop in where the fly camera is.
+                                let feet = self.camera.position
+                                    - glam::Vec3::Z * self.player.biped.standing_camera_height;
+                                self.player.position = feet;
+                                self.player.velocity = glam::Vec3::ZERO;
+                            }
+                        }
                         if code == KeyCode::Escape && !event.repeat {
                             if self.captured {
                                 self.set_capture(false);
@@ -154,7 +167,30 @@ impl ApplicationHandler for App {
                 let now = Instant::now();
                 let dt = (now - self.last_frame).as_secs_f32().min(0.1);
                 self.last_frame = now;
-                self.camera.update(&self.keys, dt);
+                if self.walking {
+                    let held = |k: KeyCode| self.keys.contains(&k);
+                    let axis = |pos: KeyCode, neg: KeyCode| {
+                        held(pos) as i32 as f32 - held(neg) as i32 as f32
+                    };
+                    let input = Input {
+                        movement: glam::vec2(
+                            axis(KeyCode::KeyD, KeyCode::KeyA),
+                            axis(KeyCode::KeyW, KeyCode::KeyS),
+                        ),
+                        yaw: self.camera.yaw,
+                        jump: held(KeyCode::Space),
+                        crouch: held(KeyCode::ControlLeft) || held(KeyCode::KeyC),
+                    };
+                    self.player.update(&self.world, input, dt);
+                    // Fell out of the level: back to the spawn.
+                    if self.player.position.z < self.world.min.z - 1.0 {
+                        self.player.position = self.spawn_point;
+                        self.player.velocity = glam::Vec3::ZERO;
+                    }
+                    self.camera.position = self.player.eye();
+                } else {
+                    self.camera.update(&self.keys, dt);
+                }
                 if let Some(g) = &mut self.gpu {
                     g.render(self.camera.view_proj(g.aspect()), self.camera.position);
                 }
@@ -204,7 +240,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     let camera = match scene.spawn {
         Some(s) => {
-            let eye = glam::Vec3::from(s.position) + glam::Vec3::Z * EYE_HEIGHT;
+            let eye =
+                glam::Vec3::from(s.position) + glam::Vec3::Z * scene.biped.standing_camera_height;
             FlyCamera::looking_at(eye, eye + glam::vec3(s.facing.cos(), s.facing.sin(), 0.0))
         }
         None => {
@@ -220,11 +257,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
 
+    let world = World::new(&scene.collision.positions, &scene.collision.indices);
+    let walking = scene.spawn.is_some();
+    let spawn_point =
+        camera.position - glam::Vec3::Z * scene.biped.standing_camera_height + glam::Vec3::Z * 0.05;
+    let player = Player::new(spawn_point, scene.movement, scene.biped);
+
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
         scene,
-        title: format!("Halo 2 Rust: {name} (click to look, WASD to fly, Esc to release)"),
+        world,
+        player,
+        walking,
+        spawn_point,
+        title: format!("Halo 2 Rust: {name} (click to look, WASD move, Space jump, Ctrl crouch, Tab walk/fly, Esc release)"),
         window: None,
         gpu: None,
         camera,
