@@ -5,7 +5,11 @@
 //!   h2tool tags  <file.map> [group]      list tags, optionally only one group (e.g. sbsp)
 //!   h2tool groups <file.map>             tag group counts
 //!   h2tool check <file.map>              read every tag stored in the map to verify it
+//!   h2tool obj   <file.map> <out.obj>    export level collision geometry
+//!   h2tool render <file.map> <out.png>   software-rendered preview of the level
 //!   h2tool scan  <maps folder>           summary line for every .map in a folder
+
+mod render;
 
 use blam_cache::{CacheFile, GroupTag};
 use std::collections::BTreeMap;
@@ -20,8 +24,10 @@ fn main() -> ExitCode {
         Some("groups") if args.len() >= 2 => groups(&args[1]),
         Some("check") if args.len() >= 2 => check(&args[1]),
         Some("scan") if args.len() >= 2 => scan(&args[1]),
+        Some("obj") if args.len() >= 3 => obj(&args[1], &args[2]),
+        Some("render") if args.len() >= 3 => render_png(&args[1], &args[2]),
         _ => {
-            eprintln!("usage: h2tool <info|tags|groups|check|scan> <path> [group]");
+            eprintln!("usage: h2tool <info|tags|groups|check|obj|render|scan> <path> [group]");
             return ExitCode::from(2);
         }
     };
@@ -128,5 +134,39 @@ fn scan(dir: &str) -> Res {
             Err(e) => println!("FAIL  {name:<28} {e}"),
         }
     }
+    Ok(())
+}
+
+fn level_mesh(path: &str) -> Result<blam_cache::geometry::Mesh, Box<dyn std::error::Error>> {
+    let mut map = CacheFile::open(path)?;
+    let mut mesh = blam_cache::geometry::Mesh::default();
+    for bsp in map.structure_bsps()? {
+        let m = map.bsp_collision_mesh(&bsp)?;
+        println!(
+            "bsp {:08x}: {} vertices, {} triangles",
+            bsp.sbsp.0,
+            m.positions.len(),
+            m.triangle_count()
+        );
+        mesh.append(&m);
+    }
+    if let Some((lo, hi)) = mesh.bounds() {
+        println!("bounds: {lo:?} .. {hi:?}");
+    }
+    Ok(mesh)
+}
+
+fn obj(path: &str, out: &str) -> Res {
+    std::fs::write(out, level_mesh(path)?.to_obj())?;
+    Ok(())
+}
+
+fn render_png(path: &str, out: &str) -> Res {
+    let mesh = level_mesh(path)?;
+    let (w, h) = (1280, 720);
+    // Kill floors / soft ceilings sit well outside the playable space; skip the lowest slab.
+    let clip = mesh.bounds().map(|(lo, _)| lo[2] + 1.0);
+    render::write_png(out, &render::render(&mesh, w, h, clip), w, h)?;
+    println!("wrote {out}");
     Ok(())
 }

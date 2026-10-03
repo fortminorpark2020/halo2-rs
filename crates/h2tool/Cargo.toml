@@ -7,3 +7,4 @@ description = "Command-line tool for inspecting Halo 2 PC map files"
 
 [dependencies]
 blam-cache = { path = "../blam-cache" }
+png = "0.17"

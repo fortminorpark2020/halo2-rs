@@ -189,6 +189,34 @@ impl Tag {
     }
 }
 
+/// A span of the file addressed by 32-bit memory addresses starting at `base`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub file_offset: u64,
+    pub base: u32,
+    pub size: u32,
+}
+
+impl Region {
+    pub fn to_offset(&self, address: u32) -> Option<u64> {
+        let rel = address.checked_sub(self.base)?;
+        (rel < self.size).then_some(self.file_offset + rel as u64)
+    }
+}
+
+/// A structure BSP (level geometry) loaded through the scenario. On Xbox each
+/// BSP and its lightmap live in their own region; on Vista they are normal meta tags.
+#[derive(Debug, Clone)]
+pub struct StructureBsp {
+    pub sbsp: DatumIndex,
+    pub lightmap: DatumIndex,
+    pub region: Region,
+    /// Address of the `sbsp` tag data within `region`.
+    pub bsp_address: u32,
+    /// Address of the `ltmp` tag data within `region`.
+    pub lightmap_address: u32,
+}
+
 pub struct CacheFile<R> {
     reader: R,
     pub header: Header,
@@ -281,12 +309,110 @@ impl<R: Read + Seek> CacheFile<R> {
         })
     }
 
+    pub fn meta_region(&self) -> Region {
+        Region {
+            file_offset: self.header.meta_offset as u64,
+            base: self.header.meta_mask,
+            size: self.header.meta_size,
+        }
+    }
+
     /// Convert a meta memory address into a file offset.
     pub fn pointer_to_offset(&self, address: u32) -> Option<u64> {
-        let rel = address.checked_sub(self.header.meta_mask)?;
-        let off = self.header.meta_offset as u64 + rel as u64;
-        let end = self.header.meta_offset as u64 + self.header.meta_size as u64;
-        (off < end).then_some(off)
+        self.meta_region().to_offset(address)
+    }
+
+    /// Read `len` bytes at `address` within `region`.
+    pub fn read_in(&mut self, region: Region, address: u32, len: usize) -> Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let off = region.to_offset(address).ok_or_else(|| {
+            Error::Corrupt(format!("address {address:#x} outside region {region:?}"))
+        })?;
+        if address as u64 - region.base as u64 + len as u64 > region.size as u64 {
+            return Err(Error::Corrupt(format!(
+                "read of {len:#x} at {address:#x} overruns region"
+            )));
+        }
+        read_at(&mut self.reader, off, len)
+    }
+
+    /// Read the elements of a tag block whose 8-byte header (count, address)
+    /// sits at `header_offset` in `parent`. Returns the raw bytes of all elements.
+    pub fn read_block(
+        &mut self,
+        region: Region,
+        parent: &[u8],
+        header_offset: usize,
+        element_size: usize,
+    ) -> Result<Vec<u8>> {
+        let count = i32_at(parent, header_offset);
+        let address = u32_at(parent, header_offset + 4);
+        if count <= 0 {
+            return Ok(Vec::new());
+        }
+        if count > 0x100000 {
+            return Err(Error::Corrupt(format!("tag block count {count} too large")));
+        }
+        self.read_in(region, address, count as usize * element_size)
+    }
+
+    /// The scenario's structure BSPs, located through its "Structure BSPs" block.
+    pub fn structure_bsps(&mut self) -> Result<Vec<StructureBsp>> {
+        const SCNR_BSP_BLOCK: usize = 0x210;
+        const ENTRY_SIZE: usize = 0x44;
+        let scnr = self
+            .tag(self.scenario)
+            .cloned()
+            .ok_or_else(|| Error::Corrupt("scenario tag missing".into()))?;
+        let meta = self.meta_region();
+        let scnr_data = self.read_tag_data(&scnr)?;
+        if scnr_data.len() < SCNR_BSP_BLOCK + 8 {
+            return Err(Error::Corrupt("scenario tag too small".into()));
+        }
+        let entries = self.read_block(meta, &scnr_data, SCNR_BSP_BLOCK, ENTRY_SIZE)?;
+        let mut out = Vec::new();
+        for e in entries.chunks_exact(ENTRY_SIZE) {
+            let sbsp = DatumIndex(u32_at(e, 0x14));
+            let lightmap = DatumIndex(u32_at(e, 0x1C));
+            let offset = u32_at(e, 0x0);
+            if offset == 0 || offset == u32::MAX {
+                // Halo 2 Vista: the BSP and lightmap are ordinary tags in the meta area.
+                let Some(tag) = self.tag(sbsp).filter(|t| t.has_data()) else {
+                    continue;
+                };
+                let bsp_address = tag.address;
+                let lightmap_address = self.tag(lightmap).map_or(0, |t| t.address);
+                out.push(StructureBsp {
+                    sbsp,
+                    lightmap,
+                    region: meta,
+                    bsp_address,
+                    lightmap_address,
+                });
+                continue;
+            }
+            // Xbox layout: a separate region starting with a bsp header
+            // (size, bsp address, lightmap address, 'sbsp').
+            let region = Region {
+                file_offset: offset as u64,
+                base: u32_at(e, 0x8),
+                size: u32_at(e, 0x4),
+            };
+            let head = read_at(&mut self.reader, offset as u64, 0x10)?;
+            if be_magic(&head, 0xC) != u32::from_be_bytes(*b"sbsp") {
+                return Err(Error::BadMagic("missing 'sbsp' in bsp header"));
+            }
+            out.push(StructureBsp {
+                sbsp,
+                lightmap,
+                region,
+                bsp_address: u32_at(&head, 0x4),
+                lightmap_address: u32_at(&head, 0x8),
+            });
+        }
+        Ok(out)
     }
 
     pub fn tag(&self, datum: DatumIndex) -> Option<&Tag> {
@@ -381,6 +507,14 @@ pub fn i32_at(b: &[u8], o: usize) -> i32 {
     u32_at(b, o) as i32
 }
 
+pub fn i16_at(b: &[u8], o: usize) -> i16 {
+    i16::from_le_bytes(b[o..o + 2].try_into().unwrap())
+}
+
+pub fn f32_at(b: &[u8], o: usize) -> f32 {
+    f32::from_bits(u32_at(b, o))
+}
+
 /// Magic values are stored little-endian, so `head` appears on disk as `daeh`.
 fn be_magic(b: &[u8], o: usize) -> u32 {
     u32_at(b, o)
@@ -390,6 +524,8 @@ fn cstr(b: &[u8]) -> String {
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     String::from_utf8_lossy(&b[..end]).into_owned()
 }
+
+pub mod geometry;
 
 #[cfg(test)]
 mod tests;
