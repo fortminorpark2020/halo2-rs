@@ -28,9 +28,9 @@ const MATERIAL_SIZE: usize = 0x20;
 const OBJECT_MODEL: usize = 0x34;
 const HLMT_RENDER_MODEL: usize = 0x0;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Node {
-    pub name: u32,
+    pub name: String,
     pub parent: i16,
     /// Default pose relative to the parent.
     pub translation: [f32; 3],
@@ -172,7 +172,7 @@ pub fn read_render_model(set: &mut MapSet, mode: DatumIndex) -> Result<RenderMod
         .0
         .iter()
         .map(|n| Node {
-            name: u32_at(n, 0),
+            name: file.string_id(u32_at(n, 0)).unwrap_or("").to_string(),
             parent: i16_at(n, 4),
             translation: [f32_at(n, 0xC), f32_at(n, 0x10), f32_at(n, 0x14)],
             rotation: [

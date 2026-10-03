@@ -84,9 +84,11 @@ pub struct Section {
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub parts: Vec<Part>,
-    /// Model sections only: the node each vertex follows most (already
-    /// remapped through the section's node map), empty for level geometry.
-    pub nodes: Vec<u8>,
+    /// Model sections only (empty for level geometry): up to four nodes each
+    /// vertex follows (already remapped through the section's node map) and
+    /// how much it follows each, strongest first; weights add up to 1.
+    pub bones: Vec<[u8; 4]>,
+    pub weights: Vec<[f32; 4]>,
 }
 
 impl Section {
@@ -126,7 +128,8 @@ impl Section {
             normals: self.normals.iter().map(|&n| rot(n)).collect(),
             uvs: self.uvs.clone(),
             parts: self.parts.clone(),
-            nodes: self.nodes.clone(),
+            bones: self.bones.clone(),
+            weights: self.weights.clone(),
         }
     }
 }
@@ -262,28 +265,35 @@ pub fn read_section(
             [f32_at(vbuf, o), f32_at(vbuf, o + 4), f32_at(vbuf, o + 8)]
         })
         .collect();
-    // Model vertices carry their node right after the position (rigid-boned:
-    // one index; skinned: four indices then four weights, strongest first).
-    let nodes = if layout.model && stride > 12 {
+    // Model vertices carry their nodes right after the position: rigid-boned
+    // vertices (16 bytes) one node index, skinned ones (20 bytes) four node
+    // indices then four byte weights. Rigid sections follow one node.
+    let (mut bones, mut weights) = (Vec::new(), Vec::new());
+    if layout.model {
         let map = match find(RES_NODE_MAP, None) {
             Some(r) => slice(&data, base + r.offset, r.size)?.to_vec(),
             None => Vec::new(),
         };
-        (0..vertex_count)
-            .map(|i| {
-                let n = vbuf[i * stride + 12];
-                map.get(n as usize).copied().unwrap_or(n)
-            })
-            .collect()
-    } else if layout.model {
-        // Rigid section: every vertex follows the first mapped node.
-        let first = find(RES_NODE_MAP, None)
-            .and_then(|r| data.get(base + r.offset).copied())
-            .unwrap_or(0);
-        vec![first; vertex_count]
-    } else {
-        Vec::new()
-    };
+        let remap = |n: u8| map.get(n as usize).copied().unwrap_or(n);
+        for i in 0..vertex_count {
+            let v = &vbuf[i * stride..(i + 1) * stride];
+            if stride >= 20 {
+                let mut w = [0, 1, 2, 3].map(|k| v[16 + k] as f32 / 255.0);
+                let sum: f32 = w.iter().sum();
+                if sum > 0.0 {
+                    w = w.map(|x| x / sum);
+                } else {
+                    w = [1.0, 0.0, 0.0, 0.0];
+                }
+                bones.push([0, 1, 2, 3].map(|k| remap(v[12 + k])));
+                weights.push(w);
+            } else {
+                let n = if stride > 12 { v[12] } else { 0 };
+                bones.push([remap(n), 0, 0, 0]);
+                weights.push([1.0, 0.0, 0.0, 0.0]);
+            }
+        }
+    }
     let uvs = match find(RES_VERTEX_BUFFERS, Some(1)) {
         Some(r) => {
             let b = slice(&data, base + r.offset, vertex_count * 8)?;
@@ -344,7 +354,8 @@ pub fn read_section(
         normals,
         uvs,
         parts,
-        nodes,
+        bones,
+        weights,
     }))
 }
 

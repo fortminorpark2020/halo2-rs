@@ -13,6 +13,8 @@
 //!   h2tool model <file.map> <tag> [png]  render model summary for an object or `mode` tag
 //!   h2tool weapon <file.map> <tag>       a weapon's firing stats (magazine, barrel, projectile)
 //!   h2tool hud   <file.map> <nhdt> [dir] a HUD's bitmap widgets (optionally dump their images)
+//!   h2tool jmad  <file.map> <tag>        an animation graph's skeleton and animations
+//!   h2tool jmadscan <file.map>           decode every animation the map can see
 
 mod render;
 
@@ -35,6 +37,9 @@ fn main() -> ExitCode {
         Some("render") if args.len() >= 3 => render_png(&args[1], &args[2]),
         Some("weapon") if args.len() >= 3 => weapon(&args[1], &args[2]),
         Some("hud") if args.len() >= 3 => hud(&args[1], &args[2], args.get(3).map(String::as_str)),
+        Some("jmad") if args.len() >= 3 => jmad(&args[1], &args[2]),
+        Some("jmadscan") if args.len() >= 2 => jmadscan(&args[1]),
+        Some("shader") if args.len() >= 3 => shader_dump(&args[1], &args[2]),
         Some("model") if args.len() >= 3 => {
             model(&args[1], &args[2], args.get(3).map(String::as_str))
         }
@@ -304,8 +309,12 @@ fn model(path: &str, name: &str, png: Option<&str>) -> Res {
                 hi[k] = hi[k].max(p[k]);
             }
         }
+        let mut per_node = BTreeMap::new();
+        for b in &s.bones {
+            *per_node.entry(b[0]).or_insert(0) += 1;
+        }
         println!(
-            "  section: {} vertices, {} triangles, bounds {lo:.3?} .. {hi:.3?}",
+            "  section: {} vertices, {} triangles, bounds {lo:.3?} .. {hi:.3?}, vertices per main node {per_node:?}",
             s.positions.len(),
             s.triangle_count()
         );
@@ -313,10 +322,7 @@ fn model(path: &str, name: &str, png: Option<&str>) -> Res {
     for (i, n) in m.nodes.iter().enumerate() {
         println!(
             "  node {i:>2} {:<24} parent {:>2} t {:.3?} q {:.3?}",
-            set.map.string_id(n.name).unwrap_or("?"),
-            n.parent,
-            n.translation,
-            n.rotation
+            n.name, n.parent, n.translation, n.rotation
         );
     }
     for g in &m.markers {
@@ -421,5 +427,145 @@ fn sim(path: &str) -> Res {
         spawns.len(),
         walked / spawns.len().max(1) as f32
     );
+    Ok(())
+}
+
+fn find_tag(set: &blam_cache::MapSet, group: &str, name: &str) -> Option<blam_cache::Tag> {
+    let g = GroupTag::parse(group)?;
+    let tags = &set.map.tags;
+    tags.iter()
+        .find(|t| t.group == g && t.name == name)
+        .or_else(|| tags.iter().find(|t| t.group == g && t.name.ends_with(name)))
+        .cloned()
+}
+
+fn jmad(path: &str, name: &str) -> Res {
+    use blam_cache::{animation, MapSet};
+    let mut set = MapSet::open(path)?;
+    let tag = find_tag(&set, "jmad", name).ok_or("no jmad with that name")?;
+    println!("{}", tag.name);
+    let g = animation::read_animation_graph(&mut set, tag.datum)?;
+    for (i, n) in g.nodes.iter().enumerate() {
+        println!("  node {i:>2} {:<20} parent {:>3}", n.name, n.parent);
+    }
+    for (i, a) in g.animations.iter().enumerate() {
+        if std::env::var("H2_NODES").is_ok() {
+            let list = |v: Vec<bool>| -> String {
+                v.iter()
+                    .enumerate()
+                    .filter(|(_, &b)| b)
+                    .map(|(i, _)| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            println!(
+                "      rot [{}] trans [{}]",
+                list(a.rotations.iter().map(Option::is_some).collect()),
+                list(a.translations.iter().map(Option::is_some).collect())
+            );
+        }
+        println!(
+            "  anim {i:>3} {:<40} {:?} {} frames{} rot {} trans {} scale {}",
+            a.name,
+            a.kind,
+            a.frame_count,
+            if a.decoded { "" } else { " (not decoded)" },
+            a.rotations.iter().flatten().count(),
+            a.translations.iter().flatten().count(),
+            a.scales.iter().flatten().count(),
+        );
+    }
+    Ok(())
+}
+
+/// Decode every animation graph the map can see; report failures.
+fn jmadscan(path: &str) -> Res {
+    use blam_cache::{animation, MapSet};
+    let mut set = MapSet::open(path)?;
+    let g = GroupTag::parse("jmad").unwrap();
+    let tags: Vec<_> = set
+        .map
+        .tags
+        .iter()
+        .filter(|t| t.group == g)
+        .cloned()
+        .collect();
+    let (mut total, mut ok) = (0, 0);
+    let mut failed = BTreeMap::new();
+    for tag in tags {
+        let graph = match animation::read_animation_graph(&mut set, tag.datum) {
+            Ok(g) => g,
+            Err(e) => {
+                println!("{}: {e}", tag.name);
+                continue;
+            }
+        };
+        for a in &graph.animations {
+            total += 1;
+            if a.decoded {
+                ok += 1;
+            } else {
+                *failed.entry(tag.name.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    println!("{ok} of {total} animations decoded");
+    for (name, n) in failed {
+        println!("  {n:>4} not decoded in {name}");
+    }
+    Ok(())
+}
+
+/// Raw view of a shader's template, parameters and postprocess data.
+fn shader_dump(path: &str, name: &str) -> Res {
+    use blam_cache::{f32_at, i16_at, u32_at, DatumIndex, MapSet};
+    let mut set = MapSet::open(path)?;
+    let tag = find_tag(&set, "shad", name).ok_or("no shader with that name")?;
+    println!("{}", tag.name);
+    let (src, _, data) = set.tag_data(tag.datum)?;
+    let tag_name = |set: &MapSet, d: u32| {
+        set.locate(DatumIndex(d))
+            .map(|(_, t)| t.name)
+            .unwrap_or_else(|| format!("{d:08x}"))
+    };
+    println!("template {}", tag_name(&set, u32_at(&data, 4)));
+    let file = set.get(src);
+    let region = file.meta_region();
+    let params = file.read_block(region, &data, 0x18, 0x28)?;
+    let mut lines = Vec::new();
+    for p in params.chunks(0x28) {
+        lines.push((
+            file.string_id(u32_at(p, 0)).unwrap_or("?").to_string(),
+            i16_at(p, 4),
+            u32_at(p, 0xC),
+            f32_at(p, 0x10),
+            [f32_at(p, 0x14), f32_at(p, 0x18), f32_at(p, 0x1C)],
+        ));
+    }
+    let pp = file.read_block(region, &data, 0x20, 0x7C)?;
+    let mut pp_lines = Vec::new();
+    let mut pp_bitmaps = Vec::new();
+    if let Some(p) = pp.get(..0x7C) {
+        let bitmaps = file.read_block(region, p, 0x4, 0xC)?;
+        for b in bitmaps.chunks(0xC) {
+            pp_bitmaps.push(u32_at(b, 0));
+        }
+        let consts = file.read_block(region, p, 0xC, 0x4)?;
+        for c in consts.chunks(4) {
+            pp_lines.push(format!("  pp pixel constant argb {:02x?}", c));
+        }
+    }
+    for (n, ty, bitmap, value, color) in lines {
+        println!(
+            "  param {n:<28} type {ty} bitmap {} value {value} color {color:.3?}",
+            tag_name(&set, bitmap)
+        );
+    }
+    for b in pp_bitmaps {
+        println!("  pp bitmap {}", tag_name(&set, b));
+    }
+    for l in pp_lines {
+        println!("{l}");
+    }
     Ok(())
 }

@@ -389,7 +389,8 @@ impl Gpu {
                 vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("vertices"),
                     contents: bytemuck::cast_slice(&m.vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
+                    // Skinned meshes are re-posed every frame.
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 }),
                 indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("indices"),
@@ -654,6 +655,16 @@ impl Gpu {
         self.staging.extend_from_slice(bytemuck::bytes_of(&u));
         self.staging.resize((offset + SLOT) as usize, 0);
         Some(offset as u32)
+    }
+
+    /// Replace a mesh's vertices (same count) with a newly posed set.
+    pub fn update_mesh(&self, mesh: usize, vertices: &[Vertex]) {
+        if let Some(m) = self.meshes.get(mesh) {
+            let bytes: &[u8] = bytemuck::cast_slice(vertices);
+            if bytes.len() as u64 <= m.vertices.size() && !bytes.is_empty() {
+                self.queue.write_buffer(&m.vertices, 0, bytes);
+            }
+        }
     }
 
     fn vertex_buffer<T: bytemuck::Pod>(&self, v: &[T]) -> Option<wgpu::Buffer> {

@@ -4,8 +4,8 @@
 //! With no argument it looks for lockout.map in the usual install folders.
 //!
 //! Controls: click to capture the mouse, WASD move, Space jump, Ctrl/C crouch,
-//! left mouse fire, right mouse / Z zoom, R reload, Q / mouse wheel / 1-9
-//! switch weapon, Tab toggles walking / flying (fly: Space/C up/down, Shift
+//! left mouse fire, right mouse / Z zoom, R reload, F melee, Q / mouse wheel /
+//! 1-9 switch weapon, Tab toggles walking / flying (fly: Space/C up/down, Shift
 //! fast), Esc releases the mouse (Esc again quits).
 
 mod camera;
@@ -13,6 +13,7 @@ mod effects;
 mod font;
 mod gpu;
 mod hud;
+mod rig;
 mod scene;
 
 use blam_cache::geometry::Mesh;
@@ -104,6 +105,12 @@ fn hud_role(name: &str, magnification: f32) -> HudRole {
     }
 }
 
+/// Alternate between a weapon's melee swings.
+fn melee_strike(rig: &rig::FirstPersonRig, n: usize) -> Option<usize> {
+    rig.find(&format!("first_person:melee_strike_{}", 1 + n % 2), 0)
+        .or_else(|| rig.find("first_person:melee_strike_1", 0))
+}
+
 fn smoothstep(x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
     x * x * (3.0 - 2.0 * x)
@@ -133,6 +140,11 @@ struct App {
     readying: f32,
     effects: Effects,
     bob_phase: f32,
+    /// First person arms and gun animation.
+    animator: rig::Animator,
+    shots_fired: usize,
+    melee_tapped: bool,
+    reload_tapped: bool,
 }
 
 impl App {
@@ -168,6 +180,13 @@ impl App {
         }
         self.weapon = to % n;
         self.readying = READY_TIME;
+        if let Some(rig) = self.scene.weapons[self.weapon].rig.as_ref() {
+            let ready = rig.find("first_person:ready", 0);
+            if let Some(a) = ready.and_then(|i| rig.graph.animations.get(i)) {
+                self.readying = a.duration();
+            }
+            self.animator.play(ready, false);
+        }
         if let Some((w, _)) = self.current() {
             println!("weapon: {}", w.def.name);
         }
@@ -212,47 +231,108 @@ impl App {
         self.readying = (self.readying - dt).max(0.0);
         let input = WeaponInput {
             fire: (self.fire_held || self.fire_tapped) && self.captured && self.readying <= 0.0,
-            reload: self.keys.contains(&KeyCode::KeyR),
+            reload: self.keys.contains(&KeyCode::KeyR) || std::mem::take(&mut self.reload_tapped),
             zoom: self.zoom_held || self.zoom_tapped || self.keys.contains(&KeyCode::KeyZ),
         };
         self.fire_tapped = false;
         self.zoom_tapped = false;
         let (eye, (f, r, u)) = (self.camera.position, self.camera.basis());
+        let (mut fired, mut reload) = (false, None);
         if let (Some(w), Some(state)) = (
             self.scene.weapons.get(self.weapon),
             self.weapon_states.get_mut(self.weapon),
         ) {
+            let (was_reloading, was_empty) = (state.reloading.is_some(), state.loaded == 0);
             for shot in state.update(&w.def, input, dt) {
+                fired = true;
                 let dir = shot.direction(f, r, u);
                 if let Some((t, n)) = self.world.raycast_hit(eye, dir, w.def.range) {
                     self.effects.impact(eye + dir * t, n);
                 }
             }
+            if state.reloading.is_some() && !was_reloading {
+                reload = Some(was_empty);
+            }
         }
+        let melee = std::mem::take(&mut self.melee_tapped) && self.captured;
+        self.animate_view_model(dt, fired, melee, reload);
         self.effects.update(dt);
     }
 
-    /// Where the first person weapon sits: camera space is x forward, y left, z up.
-    fn view_model_matrix(&self, weapon: &WeaponAssets, state: &WeaponState) -> Mat4 {
-        let def = &weapon.def;
+    /// Pick and advance the first person animation: fire on a shot, reload,
+    /// otherwise idle once the current one has played out.
+    fn animate_view_model(&mut self, dt: f32, fired: bool, melee: bool, reload: Option<bool>) {
+        let Some(rig) = self
+            .scene
+            .weapons
+            .get(self.weapon)
+            .and_then(|w| w.rig.as_ref())
+        else {
+            return;
+        };
+        if fired {
+            self.shots_fired += 1;
+            // The energy sword has no firing animation; it swings.
+            let anim = rig
+                .find("first_person:fire_1", self.shots_fired)
+                .or_else(|| melee_strike(rig, self.shots_fired));
+            if anim.is_some() {
+                self.animator.play(anim, false);
+            }
+        }
+        if melee {
+            self.shots_fired += 1;
+            let anim = melee_strike(rig, self.shots_fired);
+            if anim.is_some() {
+                self.animator.play(anim, false);
+            }
+        }
+        if let Some(empty) = reload {
+            let name = if empty {
+                "first_person:reload_empty"
+            } else {
+                "first_person:reload_full"
+            };
+            let anim = rig
+                .find(name, 0)
+                .or_else(|| rig.find("first_person:reload_full", 0));
+            self.animator.play(anim, false);
+        }
+        if self.animator.finished(rig) {
+            self.animator.play(rig.find("first_person:idle", 0), true);
+        }
+        self.animator.update(rig, dt);
+    }
+
+    /// The camera's frame (x forward, y left, z up, like Halo's first person
+    /// models), swaying a little while walking.
+    fn view_frame(&self) -> Mat4 {
         let (f, r, u) = self.camera.basis();
-        let cam = Mat4::from_cols(
-            f.extend(0.0),
-            (-r).extend(0.0),
-            u.extend(0.0),
-            self.camera.position.extend(1.0),
-        );
         let speed = (self.player.velocity.truncate().length() / 2.25).min(1.0);
         let bob = if self.walking && self.player.grounded {
             speed
         } else {
             0.0
         };
-        // Until first person animations pose them, every gun holds its root
-        // node at the same spot: low on the right, a little ahead of the eye.
+        let sway = Vec3::new(
+            0.0,
+            self.bob_phase.sin() * 0.004 * bob,
+            -self.bob_phase.cos().abs() * 0.003 * bob,
+        );
+        Mat4::from_cols(
+            f.extend(0.0),
+            (-r).extend(0.0),
+            u.extend(0.0),
+            self.camera.position.extend(1.0),
+        ) * Mat4::from_translation(sway)
+    }
+
+    /// Where an unanimated first person weapon sits.
+    fn view_model_matrix(&self, weapon: &WeaponAssets, state: &WeaponState) -> Mat4 {
+        let def = &weapon.def;
+        // Without animations every gun holds its root node at the same spot:
+        // low on the right, a little ahead of the eye.
         let mut offset = Vec3::new(0.105, -0.048, -0.068) - Vec3::from(weapon.grip);
-        offset.y += self.bob_phase.sin() * 0.004 * bob;
-        offset.z -= self.bob_phase.cos().abs() * 0.003 * bob;
         // Kick back after each shot.
         offset.x -= 0.012 * (-state.since_shot * 18.0).exp();
         // Dip while reloading and while bringing the weapon up.
@@ -263,7 +343,8 @@ impl App {
         }
         dip = dip.max(self.readying / READY_TIME);
         offset.z -= dip * 0.05;
-        cam * Mat4::from_translation(offset)
+        self.view_frame()
+            * Mat4::from_translation(offset)
             * Mat4::from_rotation_z(0.04)
             * Mat4::from_rotation_y(dip * 0.6)
     }
@@ -378,12 +459,44 @@ impl App {
         let sprites = self.effects.sprites(r, u);
         let mut view_models = Vec::new();
         let mut view_sprites = Vec::new();
+        let mut posed = Vec::new();
         if let Some((weapon, state)) = self.current() {
             if let (Some(mesh), 0) = (weapon.view_mesh, state.zoom) {
-                let model = self.view_model_matrix(weapon, state);
+                let (model, muzzle_frame) = match (&weapon.rig, &self.scene.arms) {
+                    (Some(rig), Some(arms)) if !self.animator.pose().is_empty() => {
+                        // Arms and gun posed by the animation, in camera space.
+                        let world = rig.world(self.animator.pose());
+                        let frame = self.view_frame();
+                        posed.push((
+                            arms.mesh,
+                            arms.skin.pose(&rig.arms_skin(&world, &arms.skeleton)),
+                        ));
+                        posed.push((
+                            mesh,
+                            weapon.skin.pose(&rig.gun_skin(&world, &weapon.skeleton)),
+                        ));
+                        view_models.push(DrawCall {
+                            mesh: arms.mesh,
+                            model: frame,
+                        });
+                        let muzzle = rig
+                            .gun_node_world(&world, weapon.muzzle_node)
+                            .map_or(frame, |m| frame * m);
+                        (frame, muzzle)
+                    }
+                    _ => {
+                        let m = self.view_model_matrix(weapon, state);
+                        let node = weapon
+                            .skeleton
+                            .inverse_bind
+                            .get(weapon.muzzle_node)
+                            .map_or(Mat4::IDENTITY, Mat4::inverse);
+                        (m, m * node)
+                    }
+                };
                 view_models.push(DrawCall { mesh, model });
                 if state.since_shot < 0.05 {
-                    let muzzle = model.transform_point3(Vec3::from(weapon.muzzle));
+                    let muzzle = muzzle_frame.transform_point3(Vec3::from(weapon.muzzle));
                     let size = 0.012 + 0.006 * (state.since_shot * 300.0).sin().abs();
                     effects::quad(
                         &mut view_sprites,
@@ -408,6 +521,9 @@ impl App {
             hud: &hud,
         };
         if let Some(g) = &mut self.gpu {
+            for (mesh, vertices) in &posed {
+                g.update_mesh(*mesh, vertices);
+            }
             g.render(&frame);
         }
     }
@@ -544,6 +660,8 @@ impl App {
                 }
             }
             KeyCode::KeyQ => self.switch_weapon(self.weapon + 1),
+            KeyCode::KeyF => self.melee_tapped = true,
+            KeyCode::KeyR => self.reload_tapped = true,
             KeyCode::Digit1
             | KeyCode::Digit2
             | KeyCode::Digit3
@@ -638,7 +756,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         readying: 0.0,
         effects: Effects::new(),
         bob_phase: 0.0,
+        animator: rig::Animator::default(),
+        shots_fired: 0,
+        melee_tapped: false,
+        reload_tapped: false,
     };
+    // Start holding the first weapon (or H2_WEAPON=<n>, for testing).
+    if let Some(rig) = app.scene.weapons.first().and_then(|w| w.rig.as_ref()) {
+        app.animator.play(rig.find("first_person:idle", 0), true);
+    }
+    if let Some(n) = std::env::var("H2_WEAPON").ok().and_then(|v| v.parse().ok()) {
+        app.switch_weapon(n);
+    }
     event_loop.run_app(&mut app)?;
     Ok(())
 }

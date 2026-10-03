@@ -1,6 +1,8 @@
 //! CPU-side scene: meshes (level, weapons), their textures, HUD bitmaps and
 //! the gameplay data read from the map's tags.
 
+use crate::rig::{FirstPersonRig, Skeleton, SkinnedMesh};
+use blam_cache::animation;
 use blam_cache::bitmap::{self, Image};
 use blam_cache::geometry::Mesh;
 use blam_cache::hud::{self, Anchor};
@@ -31,6 +33,9 @@ pub struct MeshData {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub batches: Vec<Batch>,
+    /// Model meshes only: per vertex, the nodes it follows and their weights.
+    pub bones: Vec<[u8; 4]>,
+    pub weights: Vec<[f32; 4]>,
 }
 
 impl MeshData {
@@ -53,6 +58,15 @@ impl MeshData {
                     normal: section.normals[i],
                     uv: section.uvs[i],
                 });
+                mesh.bones
+                    .push(section.bones.get(i).copied().unwrap_or_default());
+                mesh.weights.push(
+                    section
+                        .weights
+                        .get(i)
+                        .copied()
+                        .unwrap_or([1.0, 0.0, 0.0, 0.0]),
+                );
             }
             for part in &section.parts {
                 let tex = usize::try_from(part.material)
@@ -98,12 +112,23 @@ pub struct WeaponAssets {
     pub def: WeaponDef,
     /// First person model, in `Scene::meshes`.
     pub view_mesh: Option<usize>,
-    /// Muzzle position in the first person model's space.
+    pub skeleton: Skeleton,
+    pub skin: SkinnedMesh,
+    /// The muzzle: a gun node and the offset from it.
+    pub muzzle_node: usize,
     pub muzzle: [f32; 3],
-    /// Bounding box of the first person model.
     /// Where the gun's root node sits in its first person model.
     pub grip: [f32; 3],
+    /// First person animations (arms and gun), when the map has them.
+    pub rig: Option<FirstPersonRig>,
     pub hud: Vec<HudWidget>,
+}
+
+/// Master Chief's first person arms.
+pub struct Arms {
+    pub mesh: usize,
+    pub skeleton: Skeleton,
+    pub skin: SkinnedMesh,
 }
 
 pub struct Scene {
@@ -120,6 +145,7 @@ pub struct Scene {
     pub biped: BipedPhysics,
     /// Weapons the player can switch between; the Battle Rifle first.
     pub weapons: Vec<WeaponAssets>,
+    pub arms: Option<Arms>,
     /// The player's own HUD (shields, motion tracker, grenades).
     pub player_hud: Vec<HudWidget>,
     /// HUD textures for text and solid fills.
@@ -257,7 +283,12 @@ impl Loader {
             .map(|t| t.datum)
     }
 
-    fn weapon(&mut self, name: &str, meshes: &mut Vec<MeshData>) -> Option<WeaponAssets> {
+    fn weapon(
+        &mut self,
+        name: &str,
+        arms: Option<&Skeleton>,
+        meshes: &mut Vec<MeshData>,
+    ) -> Option<WeaponAssets> {
         let datum = self.find("weap", name)?;
         let w = match weapon::read_weapon(&mut self.set, datum) {
             Ok(w) => w,
@@ -275,7 +306,10 @@ impl Loader {
 
         let mut view_mesh = None;
         let mut muzzle = [0.2, 0.0, 0.04];
+        let mut muzzle_node = 0;
         let mut grip = [0.0; 3];
+        let mut skeleton = Skeleton::default();
+        let mut skin = SkinnedMesh::default();
         let fp = w
             .first_person_model
             .or_else(|| model::object_render_model(&mut self.set, datum).ok());
@@ -284,24 +318,62 @@ impl Loader {
                 Ok(m) => {
                     if let Some(mk) = m.marker("muzzle_flash") {
                         muzzle = mk.translation;
+                        muzzle_node = mk.node as usize;
                     }
                     if let Some(root) = m.nodes.first() {
                         grip = root.translation;
                     }
+                    skeleton = Skeleton::new(&m.nodes);
                     let mesh = self.model_mesh(&m);
+                    skin = SkinnedMesh::new(&mesh);
                     meshes.push(mesh);
                     view_mesh = Some(meshes.len() - 1);
                 }
                 Err(e) => println!("warning: first person model for {name}: {e}"),
             }
         }
+        let rig = match (w.first_person_animations, arms) {
+            (Some(jmad), Some(arms)) if view_mesh.is_some() => {
+                match animation::read_animation_graph(&mut self.set, jmad) {
+                    Ok(g) => Some(FirstPersonRig::new(g, arms, &skeleton)),
+                    Err(e) => {
+                        println!("warning: first person animations for {name}: {e}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let hud = w.hud.map(|h| self.hud_widgets(h)).unwrap_or_default();
         Some(WeaponAssets {
             def,
             view_mesh,
+            skeleton,
+            skin,
+            muzzle_node,
             muzzle,
             grip,
+            rig,
             hud,
+        })
+    }
+
+    fn arms(&mut self, meshes: &mut Vec<MeshData>) -> Option<Arms> {
+        let mode = self.find("mode", "objects\\characters\\masterchief\\fp\\fp")?;
+        let m = match model::read_render_model(&mut self.set, mode) {
+            Ok(m) => m,
+            Err(e) => {
+                println!("warning: first person arms: {e}");
+                return None;
+            }
+        };
+        let mesh = self.model_mesh(&m);
+        let skin = SkinnedMesh::new(&mesh);
+        meshes.push(mesh);
+        Some(Arms {
+            mesh: meshes.len() - 1,
+            skeleton: Skeleton::new(&m.nodes),
+            skin,
         })
     }
 }
@@ -377,9 +449,10 @@ impl Scene {
         }
 
         let mut meshes = vec![level];
+        let arms = loader.arms(&mut meshes);
         let weapons = WEAPONS
             .iter()
-            .filter_map(|name| loader.weapon(name, &mut meshes))
+            .filter_map(|name| loader.weapon(name, arms.as_ref().map(|a| &a.skeleton), &mut meshes))
             .collect();
         let player_hud = match loader.find("nhdt", "ui\\hud\\masterchief") {
             Some(h) => loader.hud_widgets(h),
@@ -405,6 +478,7 @@ impl Scene {
             movement,
             biped,
             weapons,
+            arms,
             player_hud,
             hud_font,
             hud_white,
@@ -501,7 +575,8 @@ mod tests {
                     indices: vec![1, 2, 3],
                 },
             ],
-            nodes: Vec::new(),
+            bones: Vec::new(),
+            weights: Vec::new(),
         };
         let mesh = MeshData::from_sections([&section], &[5, 7]);
         assert_eq!(mesh.batches.len(), 2);
