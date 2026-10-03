@@ -14,7 +14,7 @@ pub use discovery::{local_ip, Browser, LanGame};
 pub use host::{Host, HostEvent};
 
 /// Bumped whenever the messages change; PCs on different versions can't play.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 /// The host listens here (or the next free port above it).
 pub const GAME_PORT: u16 = 47040;
 /// Hosts announce their games to this port.

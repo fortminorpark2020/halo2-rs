@@ -33,6 +33,12 @@ const DROPPED_WEAPON_LIFETIME: f32 = 60.0;
 const GRENADE_THROW_COOLDOWN: f32 = 0.6;
 /// Below this distance from the top of the body, a hit is a headshot.
 const HEAD_HEIGHT: f32 = 0.16;
+/// Seconds between kills that still chain into a multi-kill.
+const MULTI_KILL_WINDOW: f64 = 4.0;
+/// A killing spree medal every this many kills without dying.
+const SPREE_STEP: u32 = 5;
+/// The last spree medal.
+const SPREE_MAX: u32 = 25;
 
 /// Damage values and timings, from the game's tags where the map has them.
 #[derive(Debug, Clone, PartialEq)]
@@ -176,6 +182,11 @@ pub struct Spartan {
     pub grenade: GrenadeKind,
     pub kills: u32,
     pub deaths: u32,
+    /// Kills since last spawning.
+    pub spree: u32,
+    /// Kills in the current multi-kill chain, and when the last one was.
+    pub multi_kill: u32,
+    pub last_kill: f64,
     /// Seconds left bringing the weapon in hand up.
     pub readying: f32,
     melee_cooldown: f32,
@@ -282,6 +293,32 @@ pub enum Event {
     DryFire {
         player: usize,
     },
+    /// Earned a medal the announcer calls out.
+    Medal {
+        player: usize,
+        medal: Medal,
+    },
+    /// Took, lost or tied the lead in kills.
+    Lead {
+        player: usize,
+        change: LeadChange,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Medal {
+    /// Kills chained within a few seconds of each other: 2 (double kill)
+    /// up to 7 (Killimanjaro) and beyond.
+    MultiKill(u8),
+    /// Kills without dying: 5, 10, 15, 20 and 25.
+    Spree(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeadChange {
+    Gained,
+    Lost,
+    Tied,
 }
 
 pub struct Game {
@@ -410,6 +447,9 @@ impl Game {
             grenade: GrenadeKind::Frag,
             kills: 0,
             deaths: 0,
+            spree: 0,
+            multi_kill: 0,
+            last_kill: f64::NEG_INFINITY,
             readying: 0.0,
             melee_cooldown: 0.0,
             grenade_cooldown: 0.0,
@@ -831,6 +871,8 @@ impl Game {
         p.shield = 0.0;
         p.respawn_in = respawn;
         p.deaths += 1;
+        p.spree = 0;
+        p.multi_kill = 0;
         // Drop the weapon in hand.
         let drop = p.held().cloned();
         let (pos, yaw) = (p.body.position + Vec3::Z * 0.1, p.yaw);
@@ -843,18 +885,73 @@ impl Game {
                 ttl: DROPPED_WEAPON_LIFETIME,
             });
         }
-        // Grenades stuck to the dead fall to the floor where they were.
-        if let Some(k) = killer.filter(|&k| k != victim) {
-            self.players[k].kills += 1;
-            if self.rules.score_to_win > 0 && self.players[k].kills >= self.rules.score_to_win {
-                self.winner.get_or_insert(k);
-            }
-        }
         self.events.push(Event::Killed {
             killer,
             victim,
             headshot,
         });
+        if let Some(k) = killer.filter(|&k| k != victim) {
+            let leaders = self.leaders();
+            let time = self.time;
+            let p = &mut self.players[k];
+            p.kills += 1;
+            p.spree += 1;
+            let chained = p.multi_kill > 0 && time - p.last_kill <= MULTI_KILL_WINDOW;
+            p.multi_kill = if chained { p.multi_kill + 1 } else { 1 };
+            p.last_kill = time;
+            let (multi, spree) = (p.multi_kill, p.spree);
+            if multi >= 2 {
+                self.events.push(Event::Medal {
+                    player: k,
+                    medal: Medal::MultiKill(multi.min(u8::MAX as u32) as u8),
+                });
+            }
+            if spree % SPREE_STEP == 0 && spree <= SPREE_MAX {
+                self.events.push(Event::Medal {
+                    player: k,
+                    medal: Medal::Spree(spree as u8),
+                });
+            }
+            self.lead_changes(k, &leaders);
+            if self.rules.score_to_win > 0 && self.players[k].kills >= self.rules.score_to_win {
+                self.winner.get_or_insert(k);
+            }
+        }
+    }
+
+    /// Who has the most kills (no one before the first kill).
+    fn leaders(&self) -> Vec<usize> {
+        let top = self.players.iter().map(|p| p.kills).max().unwrap_or(0);
+        if top == 0 {
+            return Vec::new();
+        }
+        (0..self.players.len())
+            .filter(|&i| self.players[i].kills == top)
+            .collect()
+    }
+
+    /// Announce how `scorer`'s kill changed the lead.
+    fn lead_changes(&mut self, scorer: usize, before: &[usize]) {
+        let after = self.leaders();
+        if after == [scorer] && before != [scorer] {
+            self.events.push(Event::Lead {
+                player: scorer,
+                change: LeadChange::Gained,
+            });
+        } else if after.len() > 1 && after.contains(&scorer) && !before.contains(&scorer) {
+            self.events.push(Event::Lead {
+                player: scorer,
+                change: LeadChange::Tied,
+            });
+        }
+        for &j in before {
+            if j != scorer && !after.contains(&j) {
+                self.events.push(Event::Lead {
+                    player: j,
+                    change: LeadChange::Lost,
+                });
+            }
+        }
     }
 
     /// Walk over ammo and grenades; hold the action key to take a weapon.
@@ -1084,6 +1181,71 @@ pub(crate) mod tests {
         assert!(g.players[1].alive);
         assert_eq!(g.players[1].shield, 70.0);
         assert_eq!(g.players[1].deaths, 1);
+    }
+
+    #[test]
+    fn quick_kills_and_sprees_earn_medals() {
+        let mut g = game();
+        for _ in 0..3 {
+            g.add_player();
+        }
+        let medals = |g: &mut Game| -> Vec<Medal> {
+            g.events
+                .drain(..)
+                .filter_map(|e| match e {
+                    Event::Medal { player: 0, medal } => Some(medal),
+                    _ => None,
+                })
+                .collect()
+        };
+        g.damage(1, Some(0), 500.0, false);
+        assert_eq!(medals(&mut g), vec![]);
+        g.damage(2, Some(0), 500.0, false);
+        assert_eq!(medals(&mut g), vec![Medal::MultiKill(2)]);
+        // Too slow for a triple kill: the chain starts again.
+        g.time += 5.0;
+        g.respawn(1);
+        g.damage(1, Some(0), 500.0, false);
+        assert_eq!(medals(&mut g), vec![]);
+        g.respawn(1);
+        g.respawn(2);
+        g.damage(1, Some(0), 500.0, false);
+        g.damage(2, Some(0), 500.0, false);
+        // Five kills without dying.
+        assert_eq!(
+            medals(&mut g),
+            vec![Medal::MultiKill(2), Medal::MultiKill(3), Medal::Spree(5)]
+        );
+        // Dying ends the spree.
+        g.damage(0, Some(1), 500.0, false);
+        assert_eq!(g.players[0].spree, 0);
+    }
+
+    #[test]
+    fn the_lead_changes_hands() {
+        let mut g = game();
+        g.add_player();
+        g.add_player();
+        let leads = |g: &mut Game| -> Vec<(usize, LeadChange)> {
+            g.events
+                .drain(..)
+                .filter_map(|e| match e {
+                    Event::Lead { player, change } => Some((player, change)),
+                    _ => None,
+                })
+                .collect()
+        };
+        g.damage(1, Some(0), 500.0, false);
+        assert_eq!(leads(&mut g), vec![(0, LeadChange::Gained)]);
+        g.respawn(1);
+        g.damage(0, Some(1), 500.0, false);
+        assert_eq!(leads(&mut g), vec![(1, LeadChange::Tied)]);
+        g.respawn(0);
+        g.damage(0, Some(1), 500.0, false);
+        assert_eq!(
+            leads(&mut g),
+            vec![(1, LeadChange::Gained), (0, LeadChange::Lost)]
+        );
     }
 
     #[test]

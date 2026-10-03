@@ -1,12 +1,14 @@
 //! What the game sounds like: weapons, grenades, footsteps and shields,
 //! placed around whoever is listening (each splitscreen view hears through
-//! its own camera; the nearest one wins).
+//! its own camera; the nearest one wins), and the announcer calling out
+//! medals and the lead for the players at this PC.
 
 use crate::audio::Audio;
 use crate::scene::Scene;
 use glam::Vec3;
-use h2sim::game::{Event, GrenadeKind};
+use h2sim::game::{Event, GrenadeKind, LeadChange, Medal};
 use h2sim::{Game, ItemKind};
+use std::collections::VecDeque;
 
 /// One view's ears.
 pub struct Listener {
@@ -22,6 +24,14 @@ pub struct Listener {
 const STRIDE: f32 = 0.8;
 /// Shots closer together than this are one burst (one burst sound).
 const BURST_GAP: f64 = 0.15;
+/// Announcer lines waiting their turn; beyond this the oldest is dropped.
+const ANNOUNCER_QUEUE: usize = 4;
+/// Pause between announcer lines, seconds.
+const ANNOUNCER_GAP: f32 = 0.15;
+/// The announcer speaks up over the fighting.
+const ANNOUNCER_VOLUME: f32 = 1.4;
+/// The respawn countdown ticks over its last seconds.
+const RESPAWN_TICKS: u32 = 3;
 
 #[derive(Default, Clone)]
 struct PlayerSounds {
@@ -46,6 +56,13 @@ pub struct Soundscape {
     /// Per local view, by player.
     shields: Vec<(usize, ShieldSounds)>,
     rng: u32,
+    announcer: VecDeque<usize>,
+    /// Seconds until the announcer is free to speak.
+    speaking: f32,
+    announced_start: bool,
+    announced_winner: bool,
+    /// Per local player: the respawn countdown's whole second last ticked.
+    respawn_ticks: Vec<(usize, u32)>,
 }
 
 /// Volume at distance `d` for a sound carrying over `range`.
@@ -74,6 +91,42 @@ impl Soundscape {
             players: Vec::new(),
             shields: Vec::new(),
             rng: 0x1234_5678,
+            announcer: VecDeque::new(),
+            speaking: 0.0,
+            announced_start: false,
+            announced_winner: false,
+            respawn_ticks: Vec::new(),
+        }
+    }
+
+    /// A sound with no place in the world (interface, announcer).
+    fn play_flat(&mut self, scene: &Scene, sound: Option<usize>, volume: f32) -> f32 {
+        let Some(asset) = sound.and_then(|s| scene.sounds.get(s)) else {
+            return 0.0;
+        };
+        let clip = asset.clips[self.pick(asset.clips.len())].clone();
+        let g = asset.gain * volume;
+        self.audio.play(&clip, [g, g], 1.0, false);
+        clip.duration()
+    }
+
+    /// Queue an announcer line; lines play one after another.
+    fn announce(&mut self, line: Option<usize>) {
+        if let Some(line) = line {
+            if self.announcer.len() >= ANNOUNCER_QUEUE {
+                self.announcer.pop_front();
+            }
+            self.announcer.push_back(line);
+        }
+    }
+
+    fn speak(&mut self, scene: &Scene, dt: f32) {
+        self.speaking -= dt;
+        if self.speaking > 0.0 {
+            return;
+        }
+        if let Some(line) = self.announcer.pop_front() {
+            self.speaking = self.play_flat(scene, Some(line), ANNOUNCER_VOLUME) + ANNOUNCER_GAP;
         }
     }
 
@@ -134,7 +187,31 @@ impl Soundscape {
                 .map_or(Vec3::ZERO, |p| p.body.position + Vec3::Z * 0.5)
         };
         let g = scene.game_sounds;
+        let a = g.announcer;
+        let local = |player: usize| listeners.iter().any(|l| l.player == player);
         match *e {
+            Event::Medal { player, medal } if local(player) => {
+                let line = match medal {
+                    Medal::MultiKill(n) => a.multi_kill[n.clamp(2, 7) as usize - 2],
+                    Medal::Spree(n) => a.spree.get((n / 5).max(1) as usize - 1).copied().flatten(),
+                };
+                self.announce(line);
+            }
+            Event::Lead { player, change } if local(player) => {
+                self.announce(match change {
+                    LeadChange::Gained => a.gained_lead,
+                    LeadChange::Lost => a.lost_lead,
+                    LeadChange::Tied => a.tied_lead,
+                });
+            }
+            Event::Killed { killer, victim, .. }
+                if local(victim) && killer.is_none_or(|k| k == victim) =>
+            {
+                self.announce(a.suicide);
+            }
+            Event::Spawned { player, .. } if local(player) => {
+                self.play_flat(scene, g.respawn, 1.0);
+            }
             Event::Shot {
                 player,
                 origin,
@@ -201,7 +278,7 @@ impl Soundscape {
                 self.play(scene, s, body(player), Some(player), listeners, 1.0);
             }
             Event::PickedUp { player, kind } => {
-                if !listeners.iter().any(|l| l.player == player) {
+                if !local(player) {
                     return;
                 }
                 let s = match kind {
@@ -259,6 +336,47 @@ impl Soundscape {
             }
         }
         self.shield_alarms(scene, game, listeners);
+        self.respawn_countdown(scene, game, listeners);
+
+        // The game type as play begins, and the end of the game.
+        let a = g.announcer;
+        if !self.announced_start {
+            self.announced_start = true;
+            self.announce(a.slayer);
+        }
+        if game.winner.is_some() != self.announced_winner {
+            self.announced_winner = game.winner.is_some();
+            if self.announced_winner {
+                self.announce(a.game_over);
+            }
+        }
+        self.speak(scene, dt);
+    }
+
+    /// Ticks over the last seconds before a local player respawns.
+    fn respawn_countdown(&mut self, scene: &Scene, game: &Game, listeners: &[Listener]) {
+        self.respawn_ticks
+            .retain(|(p, _)| listeners.iter().any(|l| l.player == *p));
+        for l in listeners {
+            let Some(p) = game.players.get(l.player) else {
+                continue;
+            };
+            let second = if p.alive {
+                0
+            } else {
+                p.respawn_in.ceil().max(0.0) as u32
+            };
+            let last = match self.respawn_ticks.iter_mut().find(|t| t.0 == l.player) {
+                Some(t) => std::mem::replace(&mut t.1, second),
+                None => {
+                    self.respawn_ticks.push((l.player, second));
+                    second
+                }
+            };
+            if second != last && (1..=RESPAWN_TICKS).contains(&second) {
+                self.play_flat(scene, scene.game_sounds.respawn_tick, 1.0);
+            }
+        }
     }
 
     fn shield_alarms(&mut self, scene: &Scene, game: &Game, listeners: &[Listener]) {

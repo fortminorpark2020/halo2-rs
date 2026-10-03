@@ -278,7 +278,44 @@ pub struct GameSounds {
     pub shield_hit: Option<usize>,
     pub shield_charge: Option<usize>,
     pub shield_low: Option<usize>,
+    /// Ticks counting down to respawning, and respawning.
+    pub respawn_tick: Option<usize>,
+    pub respawn: Option<usize>,
+    pub announcer: Announcer,
 }
+
+/// The announcer's lines, in `Scene::sounds`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Announcer {
+    pub slayer: Option<usize>,
+    pub game_over: Option<usize>,
+    /// Double kill (2 kills) to Killimanjaro (7).
+    pub multi_kill: [Option<usize>; 6],
+    /// Kill sprees of 5, 10, 15, 20 and 25.
+    pub spree: [Option<usize>; 5],
+    pub suicide: Option<usize>,
+    pub gained_lead: Option<usize>,
+    pub lost_lead: Option<usize>,
+    pub tied_lead: Option<usize>,
+}
+
+/// Where the announcer's lines are, under `sound\dialog\multiplayer\`.
+const MULTI_KILLS: [&str; 6] = [
+    "double_kill",
+    "triple_kill",
+    "killtacular",
+    "kill_frenzy",
+    "killtrocity",
+    "killimanjaro",
+];
+/// As the multiplayer globals pair them with 5..25 kills.
+const SPREES: [&str; 5] = [
+    "killing_spree",
+    "running_riot",
+    "in_the_zone",
+    "untouchable",
+    "un_frikin_believable",
+];
 
 /// An object placed in the level, drawn with the level's light where it stands.
 pub struct SceneObject {
@@ -1034,6 +1071,25 @@ impl Scene {
             shield_hit: named(&mut loader, "sound\\ui\\shield_hit"),
             shield_charge: named(&mut loader, "sound\\ui\\shield_charge\\charge\\loop"),
             shield_low: named(&mut loader, "sound\\ui\\shield_low\\low\\loop"),
+            respawn_tick: named(
+                &mut loader,
+                "sound\\game_sfx\\multiplayer\\countdown_for_respawn",
+            ),
+            respawn: named(&mut loader, "sound\\game_sfx\\multiplayer\\player_respawn"),
+            announcer: {
+                let mut line =
+                    |name: &str| loader.sound_named(&format!("sound\\dialog\\multiplayer\\{name}"));
+                Announcer {
+                    slayer: line("games\\names\\slayer"),
+                    game_over: line("general\\misc\\game_over"),
+                    multi_kill: MULTI_KILLS.map(|n| line(&format!("flavor\\{n}"))),
+                    spree: SPREES.map(|n| line(&format!("flavor\\{n}"))),
+                    suicide: line("general\\misc\\suicide"),
+                    gained_lead: line("general\\misc\\gained_the_lead"),
+                    lost_lead: line("general\\misc\\lost_the_lead"),
+                    tied_lead: line("general\\misc\\tied_the_leader"),
+                }
+            },
         };
         let player_hud = match loader.find("nhdt", "ui\\hud\\masterchief") {
             Some(h) => loader.hud_widgets(h),

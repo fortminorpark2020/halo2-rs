@@ -1,8 +1,7 @@
 //! Sounds. A `snd!` tag is a small header pointing into the map's sound
 //! gestalt (`ugh!`), which holds every sound's pitch ranges, permutations
 //! (variations picked at random) and the chunks of raw sample data. Most
-//! Halo 2 PC effects are Xbox ADPCM; music and dialogue may be WMA, which
-//! isn't decoded here.
+//! Halo 2 PC effects are Xbox ADPCM; dialogue (the announcer) is WMA 2.
 
 use crate::mapset::{MapSet, Source};
 use crate::{f32_at, i16_at, u32_at, DatumIndex, Error, GroupTag, Result};
@@ -41,7 +40,7 @@ impl Codec {
     }
 
     pub fn decodable(self) -> bool {
-        !matches!(self, Codec::Wma | Codec::Unknown(_))
+        !matches!(self, Codec::Unknown(_))
     }
 }
 
@@ -61,6 +60,8 @@ pub struct Sound {
     pub gain_db: f32,
     /// Variations, one picked at random each play: interleaved 16-bit samples.
     pub permutations: Vec<Vec<i16>>,
+    /// The raw data of variations that couldn't be decoded.
+    pub encoded: Vec<Vec<u8>>,
 }
 
 impl Sound {
@@ -127,20 +128,20 @@ impl SoundReader {
             .and_then(|g| g.1.as_ref()))
     }
 
-    /// Read and decode a `snd!` tag. Sounds in a codec that isn't decoded
-    /// (WMA) come back without permutations.
+    /// Read and decode a `snd!` tag. Variations that can't be decoded come
+    /// back in `encoded` instead of `permutations`.
     pub fn read(&mut self, set: &mut MapSet, snd: DatumIndex) -> Result<Sound> {
         let (src, tag, d) = set.tag_data(snd)?;
         if d.len() < 0x14 {
             return Err(Error::Corrupt(format!("sound {} too short", tag.name)));
         }
         let class = d[2];
-        let sample_rate = match d[3] {
+        let mut sample_rate = match d[3] {
             1 => 44100,
             2 => 32000,
             _ => 22050,
         };
-        let channels = if d[4] == 1 { 2 } else { 1 };
+        let mut channels = if d[4] == 1 { 2 } else { 1 };
         let codec = Codec::from_byte(d[5]);
         let playback_index = i16_at(&d, 0x6) as i32;
         let first_pitch_range = i16_at(&d, 0x8) as i32;
@@ -180,13 +181,26 @@ impl SoundReader {
         };
 
         let mut permutations = Vec::new();
-        if codec.decodable() {
-            for chunks in chunk_lists {
-                let mut data = Vec::new();
-                for (pointer, size) in chunks {
-                    data.extend(set.read_resource(src, pointer, size)?);
+        let mut encoded = Vec::new();
+        for chunks in chunk_lists {
+            let mut data = Vec::new();
+            for (pointer, size) in chunks {
+                data.extend(set.read_resource(src, pointer, size)?);
+            }
+            if codec == Codec::Wma {
+                // The stream says how many channels it has (the tag may not).
+                match decode_wma(&data) {
+                    Ok((samples, ch, rate)) => {
+                        permutations.push(samples);
+                        channels = ch;
+                        sample_rate = rate;
+                    }
+                    Err(_) => encoded.push(data),
                 }
+            } else if codec.decodable() {
                 permutations.push(decode(codec, &data, channels as usize));
+            } else {
+                encoded.push(data);
             }
         }
         Ok(Sound {
@@ -198,6 +212,7 @@ impl SoundReader {
             distance,
             gain_db,
             permutations,
+            encoded,
         })
     }
 }
@@ -240,6 +255,37 @@ pub fn effect_sounds(set: &mut MapSet, effect: DatumIndex) -> Result<Vec<DatumIn
     Ok(out)
 }
 
+/// DirectShow's MEDIATYPE_Audio and FORMAT_WaveFormatEx.
+const MEDIATYPE_AUDIO: [u8; 16] = *b"auds\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71";
+const FORMAT_WAVE_FORMAT_EX: [u8; 16] = [
+    0x81, 0x9f, 0x58, 0x05, 0x56, 0xc3, 0xce, 0x11, 0xbf, 0x01, 0x00, 0xaa, 0x00, 0x55, 0x59, 0x5a,
+];
+
+/// Decode a WMA sound: a DirectShow media type (AM_MEDIA_TYPE, stored
+/// without its pointers) holding a WAVEFORMATEX, then the packets. Returns
+/// interleaved samples, channels and sample rate.
+pub fn decode_wma(data: &[u8]) -> Result<(Vec<i16>, u16, u32)> {
+    let bad = |what: &str| Error::Corrupt(format!("WMA sound: {what}"));
+    if data.len() < 0x40
+        || data[..16] != MEDIATYPE_AUDIO
+        || data[0x2C..0x3C] != FORMAT_WAVE_FORMAT_EX
+    {
+        return Err(bad("unknown media type"));
+    }
+    let format_len = u32_at(data, 0x3C) as usize;
+    let format = data
+        .get(0x40..0x40 + format_len)
+        .ok_or_else(|| bad("truncated format"))?;
+    let format = wma::Format::parse(format).map_err(|e| bad(&e.to_string()))?;
+    let samples =
+        wma::decode(&format, &data[0x40 + format_len..]).map_err(|e| bad(&e.to_string()))?;
+    let samples = samples
+        .iter()
+        .map(|&s| (s * 32768.0).round().clamp(-32768.0, 32767.0) as i16)
+        .collect();
+    Ok((samples, format.channels, format.sample_rate))
+}
+
 /// Decode raw sample data to interleaved 16-bit samples.
 pub fn decode(codec: Codec, data: &[u8], channels: usize) -> Vec<i16> {
     match codec {
@@ -256,7 +302,8 @@ pub fn decode(codec: Codec, data: &[u8], channels: usize) -> Vec<i16> {
             .iter()
             .map(|b| i16::from_be_bytes(*b))
             .collect(),
-        Codec::Wma | Codec::Unknown(_) => Vec::new(),
+        Codec::Wma => decode_wma(data).map(|w| w.0).unwrap_or_default(),
+        Codec::Unknown(_) => Vec::new(),
     }
 }
 

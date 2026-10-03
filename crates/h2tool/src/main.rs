@@ -53,6 +53,8 @@ fn main() -> ExitCode {
         }
         Some("soundscan") if args.len() >= 2 => soundscan(&args[1]),
         Some("bitmap") if args.len() >= 4 => bitmap_png(&args[1], &args[2], &args[3]),
+        Some("refs") if args.len() >= 3 => refs(&args[1], &args[2]),
+        Some("events") if args.len() >= 2 => events(&args[1]),
         Some("hex") if args.len() >= 3 => hex(&args[1], &args[2], args.get(3).map(String::as_str)),
         Some("model") if args.len() >= 3 => {
             model(&args[1], &args[2], args.get(3).map(String::as_str))
@@ -589,6 +591,105 @@ fn hex(path: &str, tag: &str, block_path: Option<&str>) -> Res {
     Ok(())
 }
 
+/// The multiplayer announcer events (globals' event blocks): type, event,
+/// fields, display string and English sound.
+fn events(path: &str) -> Res {
+    use blam_cache::{i16_at, u32_at, DatumIndex, MapSet};
+    let mut set = MapSet::open(path)?;
+    let tag = find_tag(&set, "mulg", "multiplayer\\multiplayer_globals").ok_or("no mulg")?;
+    let (src, _, data) = set.tag_data(tag.datum)?;
+    let names = [
+        "general",
+        "flavor",
+        "slayer",
+        "ctf",
+        "oddball",
+        "unused",
+        "king",
+        "race",
+        "juggernaut",
+        "territories",
+        "assault",
+    ];
+    for (i, kind) in names.iter().enumerate() {
+        let map = set.get(src);
+        let region = map.meta_region();
+        let block = map.read_block(region, &data, 0x134 + i * 8, 0xA8)?;
+        println!("{kind} events: {}", block.len() / 0xA8);
+        for e in block.as_chunks::<0xA8>().0 {
+            let sid = |o: usize| {
+                let id = u32_at(e, o);
+                set.map.string_id(id).unwrap_or("").to_string()
+            };
+            let sound = DatumIndex(u32_at(e, 0x48));
+            let sound = set.locate(sound).map(|(_, t)| t.name).unwrap_or_default();
+            println!(
+                "  type {} event {:2} | {:04x} {:04x} {:04x} | {:?} | {:08x} {:08x} | {}",
+                i16_at(e, 2),
+                i16_at(e, 4),
+                i16_at(e, 6),
+                i16_at(e, 8),
+                i16_at(e, 0xA),
+                sid(0xC),
+                u32_at(e, 0x10),
+                u32_at(e, 0x40),
+                sound.trim_start_matches("sound\\dialog\\multiplayer\\")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Which tags refer to a tag: every place its datum index appears in the
+/// tag data of the map and the shared maps.
+fn refs(path: &str, tag: &str) -> Res {
+    use blam_cache::mapset::Source;
+    use blam_cache::MapSet;
+    let mut set = MapSet::open(path)?;
+    let (group, name) = tag.split_once(':').ok_or("tag as group:name")?;
+    let target = find_tag(&set, group, name).ok_or("no such tag")?;
+    println!("{} {} {:08x}", target.group, target.name, target.datum.0);
+    let needle = target.datum.0.to_le_bytes();
+    for src in [Source::Map, Source::Shared, Source::SpShared] {
+        let present = match src {
+            Source::Map => true,
+            Source::Shared => set.shared.is_some(),
+            Source::SpShared => set.sp_shared.is_some(),
+        };
+        if !present {
+            continue;
+        }
+        let map = set.get(src);
+        let region = map.meta_region();
+        let meta = map.read_in(region, region.base, region.size as usize)?;
+        let mut tags: Vec<_> = map.tags.iter().filter(|t| t.has_data()).cloned().collect();
+        tags.sort_by_key(|t| t.address);
+        for (i, w) in meta.windows(4).enumerate() {
+            if w != needle {
+                continue;
+            }
+            let address = region.base + i as u32;
+            let owner = tags.iter().rev().find(|t| t.address <= address);
+            match owner {
+                Some(t) => println!(
+                    "  {src:?} {:#x}: {} {} +{:#x}{}",
+                    address,
+                    t.group,
+                    t.name,
+                    address - t.address,
+                    if address - t.address >= t.size {
+                        " (past its size)"
+                    } else {
+                        ""
+                    }
+                ),
+                None => println!("  {src:?} {address:#x}: before any tag"),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn find_tag(set: &blam_cache::MapSet, group: &str, name: &str) -> Option<blam_cache::Tag> {
     let g = GroupTag::parse(group)?;
     let tags = &set.map.tags;
@@ -711,6 +812,18 @@ fn sound(path: &str, name: &str, out: Option<&str>) -> Res {
             diff / rms.max(1.0)
         );
     }
+    for (i, e) in s.encoded.iter().enumerate() {
+        let head: Vec<String> = e.iter().take(16).map(|b| format!("{b:02x}")).collect();
+        println!(
+            "  permutation {i}: {} bytes encoded, starts {}",
+            e.len(),
+            head.join(" ")
+        );
+    }
+    if let (Some(out), Some(e)) = (out, s.encoded.first()) {
+        std::fs::write(out, e)?;
+        println!("wrote {out} (raw {:?} data)", s.codec);
+    }
     if let (Some(out), Some(p)) = (out, s.permutations.first()) {
         let mut wav = Vec::new();
         let data_len = (p.len() * 2) as u32;
@@ -755,6 +868,13 @@ fn soundscan(path: &str) -> Res {
             Ok(s) => {
                 if std::env::var("H2_LIST").is_ok() {
                     println!("{:?} class {} {}", s.codec, s.class, s.name);
+                }
+                // H2_DUMP=dir writes undecoded sounds' raw data there.
+                if let Ok(dir) = std::env::var("H2_DUMP") {
+                    for (i, e) in s.encoded.iter().enumerate() {
+                        let name = s.name.replace('\\', "_");
+                        std::fs::write(format!("{dir}/{name}_{i}.raw"), e)?;
+                    }
                 }
                 *codecs.entry(format!("{:?}", s.codec)).or_default() += 1
             }

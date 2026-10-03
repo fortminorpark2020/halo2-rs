@@ -11,13 +11,16 @@ install. No game files are included in this repository.
   geometry, shaders and bitmaps (DXT and uncompressed formats decoded to RGBA),
   render models with nodes, markers and skinning weights, animation graphs
   (keyframe codecs decoded), weapons, projectiles, damage, HUD widgets, and
-  sounds (Xbox ADPCM decoded; WMA dialog not yet).
+  sounds (Xbox ADPCM and WMA).
 - `h2tool`: command-line inspector.
 - `h2sim`: game simulation (no rendering): level collision, Spartan movement
   using the speeds, jump velocity and size from the game's own globals and biped tags,
   weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
-  Slayer rules (shields, health, grenades, pickups, respawns), bots and their walking graph.
+  Slayer rules (shields, health, grenades, pickups, respawns, multi-kill and
+  spree medals, the lead), bots and their walking graph.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
+- `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
+  FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
 - `h2viewer`: the game: Halo 2's maps with their lighting, Spartans, weapons, HUD
   and sounds, bots, splitscreen for up to four with controllers, and LAN play.
 
@@ -50,6 +53,9 @@ joined PC carries on alone with bots.
 Sound: weapons, reloads, grenades, footsteps, landings, shield recharge and the
 low shield alarm play from the game's own sound files, placed left or right and
 fading with distance (each splitscreen player hears through their own view).
+The announcer calls the game type, multi-kills (Double Kill to Killimanjaro),
+killing sprees, taking, losing and tying the lead, suicides and game over, as
+Halo 2's multiplayer globals pair them.
 `H2_MUTE=1` turns sound off; `H2_AUDIO_WAV=out.wav` records the mix to a file
 instead of the speakers.
 
@@ -70,6 +76,8 @@ h2tool jmadscan lockout.map             # decode every animation (reports failur
 h2tool shader lockout.map fp_arms       # shader template and bitmaps
 h2tool sound  lockout.map frag_expl out.wav  # decode a sound to WAV
 h2tool soundscan lockout.map            # decode every sound (reports failures)
+h2tool events lockout.map               # announcer events from the multiplayer globals
+h2tool refs   lockout.map snd!:double_kill  # which tags refer to a tag
 ```
 
 Multiplayer maps only store the tags unique to them; the rest live in

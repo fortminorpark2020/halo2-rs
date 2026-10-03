@@ -1,0 +1,8 @@
+[package]
+name = "wma"
+version = "0.1.0"
+edition.workspace = true
+description = "Windows Media Audio 2 decoder, ported from FFmpeg"
+license = "LGPL-2.1-or-later"
+
+[dependencies]

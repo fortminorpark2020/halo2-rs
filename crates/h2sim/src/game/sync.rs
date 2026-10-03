@@ -3,8 +3,8 @@
 //! joined PCs send their players' controls.
 
 use super::{
-    DroppedWeapon, Event, Game, Grenade, GrenadeKind, HeldWeapon, ItemKind, Spartan,
-    DROPPED_WEAPON_LIFETIME,
+    DroppedWeapon, Event, Game, Grenade, GrenadeKind, HeldWeapon, ItemKind, LeadChange, Medal,
+    Spartan, DROPPED_WEAPON_LIFETIME,
 };
 use crate::game::Command;
 use crate::weapon::WeaponState;
@@ -314,6 +314,21 @@ impl Event {
                 w.u8(10);
                 w.index(Some(player));
             }
+            Event::Medal { player, medal } => {
+                w.u8(11);
+                w.index(Some(player));
+                let (kind, count) = match medal {
+                    Medal::MultiKill(n) => (0, n),
+                    Medal::Spree(n) => (1, n),
+                };
+                w.u8(kind);
+                w.u8(count);
+            }
+            Event::Lead { player, change } => {
+                w.u8(12);
+                w.index(Some(player));
+                w.u8(change as u8);
+            }
         }
     }
 
@@ -381,6 +396,23 @@ impl Event {
             10 => Event::DryFire {
                 player: r.index_below(players)?,
             },
+            11 => Event::Medal {
+                player: r.index_below(players)?,
+                medal: match (r.u8()?, r.u8()?) {
+                    (0, n) => Medal::MultiKill(n),
+                    (1, n) => Medal::Spree(n),
+                    _ => return Err(Malformed),
+                },
+            },
+            12 => Event::Lead {
+                player: r.index_below(players)?,
+                change: match r.u8()? {
+                    0 => LeadChange::Gained,
+                    1 => LeadChange::Lost,
+                    2 => LeadChange::Tied,
+                    _ => return Err(Malformed),
+                },
+            },
             _ => return Err(Malformed),
         })
     }
@@ -423,6 +455,9 @@ impl Game {
             w.u8(p.grenade as u8);
             w.u32(p.kills);
             w.u32(p.deaths);
+            w.u32(p.spree);
+            w.u32(p.multi_kill);
+            w.f64(p.last_kill);
             w.f32(p.readying);
         }
         w.u16(self.dropped.len() as u16);
@@ -506,6 +541,9 @@ impl Game {
             p.grenade = grenade_kind(r.u8()?)?;
             p.kills = r.u32()?;
             p.deaths = r.u32()?;
+            p.spree = r.u32()?;
+            p.multi_kill = r.u32()?;
+            p.last_kill = r.f64()?;
             p.readying = r.f32()?;
         }
         self.winner = match winner {
@@ -574,6 +612,33 @@ mod tests {
         assert!(r.at_end());
         // Cut short: an error, not a panic.
         assert!(Command::read(&mut Reader::new(&w.0[..5])).is_err());
+    }
+
+    #[test]
+    fn announcer_events_survive_the_trip() {
+        let events = [
+            Event::Medal {
+                player: 1,
+                medal: Medal::MultiKill(3),
+            },
+            Event::Medal {
+                player: 0,
+                medal: Medal::Spree(25),
+            },
+            Event::Lead {
+                player: 1,
+                change: LeadChange::Tied,
+            },
+        ];
+        let mut w = Writer::default();
+        for e in &events {
+            e.write(&mut w);
+        }
+        let mut r = Reader::new(&w.0);
+        for e in &events {
+            assert_eq!(Event::read(&mut r, 2, 0), Ok(*e));
+        }
+        assert!(r.at_end());
     }
 
     #[test]

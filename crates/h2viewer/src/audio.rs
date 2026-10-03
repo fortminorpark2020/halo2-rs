@@ -19,6 +19,11 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Seconds long.
+    pub fn duration(&self) -> f32 {
+        self.frames() as f32 / self.rate.max(1) as f32
+    }
+
     fn frames(&self) -> usize {
         self.samples.len() / self.channels.max(1) as usize
     }
