@@ -15,6 +15,9 @@
 //!   h2tool hud   <file.map> <nhdt> [dir] a HUD's bitmap widgets (optionally dump their images)
 //!   h2tool jmad  <file.map> <tag>        an animation graph's skeleton and animations
 //!   h2tool jmadscan <file.map>           decode every animation the map can see
+//!   h2tool hex   <file.map> <datum|group:name> [path]
+//!                                        hex dump of a tag, or of a block inside it;
+//!                                        path = `offset:size[@index]/...` (hex), e.g. 8:c/0:10
 
 mod render;
 
@@ -41,6 +44,7 @@ fn main() -> ExitCode {
         Some("jmadscan") if args.len() >= 2 => jmadscan(&args[1]),
         Some("shader") if args.len() >= 3 => shader_dump(&args[1], &args[2]),
         Some("lightmap") if args.len() >= 2 => lightmap_dump(&args[1]),
+        Some("hex") if args.len() >= 3 => hex(&args[1], &args[2], args.get(3).map(String::as_str)),
         Some("model") if args.len() >= 3 => {
             model(&args[1], &args[2], args.get(3).map(String::as_str))
         }
@@ -279,14 +283,18 @@ fn weapon(path: &str, name: &str) -> Res {
 fn model(path: &str, name: &str, png: Option<&str>) -> Res {
     use blam_cache::{model, MapSet};
     let mut set = MapSet::open(path)?;
-    let tag = set
-        .map
-        .tags
-        .iter()
-        .find(|t| t.name == name)
-        .or_else(|| set.map.tags.iter().find(|t| t.name.ends_with(name)))
-        .ok_or("no tag with that name")?
-        .clone();
+    // `group:name` picks between tags sharing a name.
+    let tag = match name.split_once(':').and_then(|(g, n)| find_tag(&set, g, n)) {
+        Some(t) => t,
+        None => set
+            .map
+            .tags
+            .iter()
+            .find(|t| t.name == name)
+            .or_else(|| set.map.tags.iter().find(|t| t.name.ends_with(name)))
+            .ok_or("no tag with that name")?
+            .clone(),
+    };
     println!("{} {}", tag.group, tag.name);
     let mode = if tag.group == GroupTag::parse("mode").unwrap() {
         tag.datum
@@ -367,17 +375,27 @@ fn level(path: &str, dump: Option<&str>) -> Res {
             let name = set.map.tag(sh).map(|t| t.name.clone()).unwrap_or_default();
             let info = shader::read_shader(&mut set, sh);
             let tex = match &info {
-                Ok(shader::ShaderInfo { diffuse: Some(b) }) => {
-                    let bname = set.map.tag(*b).map(|t| t.name.clone()).unwrap_or_default();
+                Ok(shader::ShaderInfo {
+                    diffuse: Some(b),
+                    template,
+                    blend,
+                    illum,
+                    ..
+                }) => {
+                    let bname = set.locate(*b).map(|(_, t)| t.name).unwrap_or_default();
+                    let extra = format!(
+                        "[{template} {blend:?}{}]",
+                        if illum.is_some() { " glow" } else { "" }
+                    );
                     match bitmap::read_bitmap(&mut set, *b) {
                         Ok(img) => {
                             if let Some(dir) = dump {
                                 let file = format!("{dir}/{i:02}.png");
                                 render::write_rgba_png(&file, &img.rgba, img.width, img.height)?;
                             }
-                            format!("{bname} {}x{}", img.width, img.height)
+                            format!("{bname} {}x{} {extra}", img.width, img.height)
                         }
-                        Err(e) => format!("{bname} ERROR {e}"),
+                        Err(e) => format!("{bname} ERROR {e} {extra}"),
                     }
                 }
                 Ok(_) => "no diffuse".into(),
@@ -428,6 +446,63 @@ fn sim(path: &str) -> Res {
         spawns.len(),
         walked / spawns.len().max(1) as f32
     );
+    Ok(())
+}
+
+fn hex_dump(bytes: &[u8], limit: usize) {
+    for (row, chunk) in bytes.chunks(32).enumerate().take(limit.div_ceil(32)) {
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        println!("  {:04x}: {}", row * 32, hex.join(" "));
+    }
+}
+
+fn hex(path: &str, tag: &str, block_path: Option<&str>) -> Res {
+    use blam_cache::{DatumIndex, MapSet};
+    let mut set = MapSet::open(path)?;
+    let datum = match tag.split_once(':') {
+        Some((group, name)) => find_tag(&set, group, name).ok_or("no such tag")?.datum,
+        None => DatumIndex(u32::from_str_radix(tag, 16)?),
+    };
+    let (src, t, mut data) = set.tag_data(datum)?;
+    println!("{} {} ({} bytes)", t.group, t.name, data.len());
+    let region = set.get(src).meta_region();
+    let mut size = data.len();
+    for step in block_path
+        .unwrap_or("")
+        .split('/')
+        .filter(|s| !s.is_empty())
+    {
+        let (offset, rest) = step.split_once(':').ok_or("path step needs offset:size")?;
+        let (elem, index) = match rest.split_once('@') {
+            Some((e, i)) => (e, Some(usize::from_str_radix(i, 16)?)),
+            None => (rest, None),
+        };
+        let offset = usize::from_str_radix(offset, 16)?;
+        size = usize::from_str_radix(elem, 16)?;
+        let block = set.get(src).read_block(region, &data, offset, size)?;
+        println!(
+            "block @{offset:#x}: {} x {size:#x}",
+            block.len() / size.max(1)
+        );
+        data = match index {
+            Some(i) => block
+                .get(i * size..(i + 1) * size)
+                .ok_or("index past the block")?
+                .to_vec(),
+            None => block,
+        };
+    }
+    let limit = std::env::var("H2_LIMIT")
+        .ok()
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(0x400);
+    for (i, e) in data.chunks(size.max(1)).enumerate() {
+        if i * size >= limit {
+            break;
+        }
+        println!("[{i}]");
+        hex_dump(e, size);
+    }
     Ok(())
 }
 

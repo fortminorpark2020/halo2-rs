@@ -10,7 +10,8 @@ use blam_cache::lightmap::{self, InstanceLighting};
 use blam_cache::model::{self, RenderModel};
 use blam_cache::physics::{self, BipedPhysics, PlayerMovement};
 use blam_cache::render::{LevelGeometry, Section, SectionOwner};
-use blam_cache::{render, shader, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp};
+use blam_cache::shader::{self, Blend};
+use blam_cache::{render, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp};
 use h2sim::WeaponDef;
 use std::collections::HashMap;
 use std::path::Path;
@@ -40,8 +41,43 @@ impl Vertex {
     }
 }
 
-pub struct Batch {
+/// What a glow-or-mask texture slot holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AuxKind {
+    #[default]
+    None,
+    /// Self-illumination, scaled by `Material::illum_color`.
+    Illum,
+    /// Opacity.
+    Mask,
+}
+
+/// How a surface is drawn: its textures and how it blends.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Material {
     pub texture: usize,
+    /// Glow or opacity map (texture 0 when unused).
+    pub aux: usize,
+    pub aux_kind: AuxKind,
+    pub blend: Blend,
+    pub illum_color: [f32; 3],
+    pub tint: [f32; 3],
+    pub opacity: f32,
+}
+
+impl Material {
+    fn plain(texture: usize) -> Material {
+        Material {
+            texture,
+            tint: [1.0; 3],
+            opacity: 1.0,
+            ..Material::default()
+        }
+    }
+}
+
+pub struct Batch {
+    pub material: usize,
     /// Lightmap page texture (texture 0 when unused).
     pub lightmap: usize,
     pub first_index: u32,
@@ -78,11 +114,12 @@ impl MeshData {
         self.indices.len() / 3
     }
 
-    /// Build from sections whose parts index `material_texture`. Level
-    /// geometry passes each section's baked lighting in `lights`.
+    /// Build from sections whose parts index `materials` (the model's
+    /// shaders, mapped to scene materials). Level geometry passes each
+    /// section's baked lighting in `lights`.
     fn from_sections<'a>(
         sections: impl IntoIterator<Item = &'a Section>,
-        material_texture: &[usize],
+        materials: &[usize],
         lights: &[SectionLight],
     ) -> MeshData {
         let mut mesh = MeshData {
@@ -126,23 +163,25 @@ impl MeshData {
                 );
             }
             for part in &section.parts {
-                let tex = usize::try_from(part.material)
+                let material = usize::try_from(part.material)
                     .ok()
-                    .and_then(|m| material_texture.get(m))
+                    .and_then(|m| materials.get(m))
                     .copied()
                     .unwrap_or(0);
                 by_material
-                    .entry((tex, page))
+                    .entry((material, page))
                     .or_default()
                     .extend(part.indices.iter().map(|i| i + base));
             }
         }
+        // In material order: a model's materials follow its shader list,
+        // which is the order skies layer their transparent parts in.
         let mut keys: Vec<(usize, usize)> = by_material.keys().copied().collect();
         keys.sort_unstable();
         for k in keys {
             let idx = &by_material[&k];
             mesh.batches.push(Batch {
-                texture: k.0,
+                material: k.0,
                 lightmap: k.1,
                 first_index: mesh.indices.len() as u32,
                 index_count: idx.len() as u32,
@@ -192,6 +231,8 @@ pub struct Arms {
 pub struct Scene {
     /// Texture 0 is always a plain light-grey fallback.
     pub textures: Vec<Image>,
+    /// Material 0 is the fallback texture, opaque.
+    pub materials: Vec<Material>,
     /// Mesh 0 is the level.
     pub meshes: Vec<MeshData>,
     /// HUD bitmaps; their channels are data (meters, masks), not colours.
@@ -204,6 +245,8 @@ pub struct Scene {
     /// Weapons the player can switch between; the Battle Rifle first.
     pub weapons: Vec<WeaponAssets>,
     pub arms: Option<Arms>,
+    /// The sky's model, drawn around the camera behind everything.
+    pub sky: Option<usize>,
     /// The player's own HUD (shields, motion tracker, grenades).
     pub player_hud: Vec<HudWidget>,
     /// HUD textures for text and solid fills.
@@ -243,7 +286,8 @@ struct Loader {
     set: MapSet,
     textures: Vec<Image>,
     texture_of_bitmap: HashMap<DatumIndex, usize>,
-    texture_of_shader: HashMap<DatumIndex, usize>,
+    materials: Vec<Material>,
+    material_of_shader: HashMap<DatumIndex, usize>,
     lightmap_pages: HashMap<(DatumIndex, usize), usize>,
     hud_textures: Vec<Image>,
     hud_of_bitmap: HashMap<(DatumIndex, i8), usize>,
@@ -251,33 +295,54 @@ struct Loader {
 }
 
 impl Loader {
-    fn shader_texture(&mut self, shader: DatumIndex) -> usize {
-        if let Some(&t) = self.texture_of_shader.get(&shader) {
+    /// The texture of a bitmap tag's first image (0 if it can't be read).
+    fn bitmap_texture(&mut self, b: DatumIndex) -> usize {
+        if let Some(&t) = self.texture_of_bitmap.get(&b) {
             return t;
         }
-        let t = match shader::read_shader(&mut self.set, shader) {
-            Ok(shader::ShaderInfo { diffuse: Some(b) }) => {
-                if let Some(&t) = self.texture_of_bitmap.get(&b) {
-                    t
-                } else {
-                    let t = match bitmap::read_bitmap(&mut self.set, b) {
-                        Ok(img) => {
-                            self.textures.push(img);
-                            self.textures.len() - 1
-                        }
-                        Err(_) => {
-                            self.failures += 1;
-                            0
-                        }
-                    };
-                    self.texture_of_bitmap.insert(b, t);
-                    t
-                }
+        let t = match bitmap::read_bitmap(&mut self.set, b) {
+            Ok(img) => {
+                self.textures.push(img);
+                self.textures.len() - 1
             }
-            _ => 0,
+            Err(_) => {
+                self.failures += 1;
+                0
+            }
         };
-        self.texture_of_shader.insert(shader, t);
+        self.texture_of_bitmap.insert(b, t);
         t
+    }
+
+    fn shader_material(&mut self, shader: DatumIndex) -> usize {
+        if let Some(&m) = self.material_of_shader.get(&shader) {
+            return m;
+        }
+        let material = match shader::read_shader(&mut self.set, shader) {
+            Ok(info) => {
+                let mut m = Material {
+                    texture: info.diffuse.map_or(0, |b| self.bitmap_texture(b)),
+                    blend: info.blend,
+                    tint: info.tint,
+                    opacity: info.opacity,
+                    ..Material::default()
+                };
+                if let Some((b, color)) = info.illum {
+                    m.aux = self.bitmap_texture(b);
+                    m.aux_kind = AuxKind::Illum;
+                    m.illum_color = color;
+                } else if let Some(b) = info.mask {
+                    m.aux = self.bitmap_texture(b);
+                    m.aux_kind = AuxKind::Mask;
+                }
+                m
+            }
+            Err(_) => Material::plain(0),
+        };
+        self.materials.push(material);
+        let m = self.materials.len() - 1;
+        self.material_of_shader.insert(shader, m);
+        m
     }
 
     /// Lighting for each section of a BSP's render geometry, loading the
@@ -336,12 +401,12 @@ impl Loader {
     }
 
     fn model_mesh(&mut self, model: &RenderModel) -> MeshData {
-        let material_texture: Vec<usize> = model
+        let materials: Vec<usize> = model
             .shaders
             .iter()
-            .map(|&s| self.shader_texture(s))
+            .map(|&s| self.shader_material(s))
             .collect();
-        MeshData::from_sections(&model.sections, &material_texture, &[])
+        MeshData::from_sections(&model.sections, &materials, &[])
     }
 
     fn hud_widgets(&mut self, nhdt: DatumIndex) -> Vec<HudWidget> {
@@ -472,6 +537,22 @@ impl Loader {
         })
     }
 
+    fn sky(&mut self, meshes: &mut Vec<MeshData>) -> Option<usize> {
+        let sky = *self.set.map.skies().ok()?.first()?;
+        let model = model::sky_render_model(&mut self.set, sky)
+            .and_then(|mode| model::read_render_model(&mut self.set, mode));
+        match model {
+            Ok(m) => {
+                meshes.push(self.model_mesh(&m));
+                Some(meshes.len() - 1)
+            }
+            Err(e) => {
+                println!("warning: sky: {e}");
+                None
+            }
+        }
+    }
+
     fn arms(&mut self, meshes: &mut Vec<MeshData>) -> Option<Arms> {
         let mode = self.find("mode", "objects\\characters\\masterchief\\fp\\fp")?;
         let m = match model::read_render_model(&mut self.set, mode) {
@@ -517,7 +598,8 @@ impl Scene {
             set,
             textures: vec![fallback_texture()],
             texture_of_bitmap: HashMap::new(),
-            texture_of_shader: HashMap::new(),
+            materials: vec![Material::plain(0)],
+            material_of_shader: HashMap::new(),
             lightmap_pages: HashMap::new(),
             hud_textures: Vec::new(),
             hud_of_bitmap: HashMap::new(),
@@ -542,7 +624,7 @@ impl Scene {
             let mats: Vec<usize> = geo
                 .shaders
                 .iter()
-                .map(|&s| loader.shader_texture(s))
+                .map(|&s| loader.shader_material(s))
                 .collect();
             let lights = loader.level_lights(bsp, &geo);
             let part = MeshData::from_sections(&geo.sections, &mats, &lights);
@@ -562,6 +644,7 @@ impl Scene {
         }
 
         let mut meshes = vec![level];
+        let sky = loader.sky(&mut meshes);
         let arms = loader.arms(&mut meshes);
         let weapons = WEAPONS
             .iter()
@@ -584,6 +667,7 @@ impl Scene {
         }
         Ok(Scene {
             textures: loader.textures,
+            materials: loader.materials,
             meshes,
             hud_textures: loader.hud_textures,
             spawn,
@@ -592,6 +676,7 @@ impl Scene {
             biped,
             weapons,
             arms,
+            sky,
             player_hud,
             hud_font,
             hud_white,
@@ -616,7 +701,7 @@ fn collision_mesh(collision: &Mesh) -> MeshData {
         }
     }
     mesh.batches = vec![Batch {
-        texture: 0,
+        material: 0,
         lightmap: 0,
         first_index: 0,
         index_count: mesh.indices.len() as u32,
@@ -692,7 +777,7 @@ mod tests {
         };
         let mesh = MeshData::from_sections([&section], &[5, 7], &[]);
         assert_eq!(mesh.batches.len(), 2);
-        assert_eq!(mesh.batches[0].texture, 5);
+        assert_eq!(mesh.batches[0].material, 5);
         assert_eq!(&mesh.indices[..3], &[1, 2, 3]);
     }
 

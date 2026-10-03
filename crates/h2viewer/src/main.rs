@@ -510,7 +510,14 @@ impl App {
         }
         let view_model_proj = camera::projection(aspect, 1.0, 0.005, 10.0) * self.camera.view();
         let hud = self.build_hud(w, h);
+        let sky_view =
+            glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.camera.forward(), Vec3::Z);
         let frame = Frame {
+            sky: self.scene.sky.map(|mesh| DrawCall {
+                mesh,
+                model: Mat4::IDENTITY,
+            }),
+            sky_proj: camera::projection(aspect, magnification, 1.0, 10000.0) * sky_view,
             view_proj,
             camera: self.camera.position,
             world: &world,

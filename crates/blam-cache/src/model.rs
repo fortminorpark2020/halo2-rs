@@ -118,6 +118,16 @@ pub fn object_render_model(set: &mut MapSet, object: DatumIndex) -> Result<Datum
     Ok(mode)
 }
 
+/// The render model of a `sky ` tag.
+pub fn sky_render_model(set: &mut MapSet, sky: DatumIndex) -> Result<DatumIndex> {
+    let (_, _, data) = set.tag_data(sky)?;
+    let mode = DatumIndex(u32_at(&data, 4));
+    if mode == DatumIndex::NONE {
+        return Err(Error::Corrupt("sky has no render model".into()));
+    }
+    Ok(mode)
+}
+
 pub fn read_render_model(set: &mut MapSet, mode: DatumIndex) -> Result<RenderModel> {
     let (src, _, data) = set.tag_data(mode)?;
     let file = set.get(src);

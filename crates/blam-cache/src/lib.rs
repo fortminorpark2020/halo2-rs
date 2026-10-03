@@ -500,6 +500,26 @@ impl<R: Read + Seek> CacheFile<R> {
             .collect())
     }
 
+    /// The scenario's skies (`sky ` tags), drawn behind the level.
+    pub fn skies(&mut self) -> Result<Vec<DatumIndex>> {
+        const SCNR_SKIES: usize = 0x8;
+        const ENTRY_SIZE: usize = 0x8;
+        let scnr = self
+            .tag(self.scenario)
+            .cloned()
+            .ok_or_else(|| Error::Corrupt("scenario tag missing".into()))?;
+        let meta = self.meta_region();
+        let data = self.read_tag_data(&scnr)?;
+        let entries = self.read_block(meta, &data, SCNR_SKIES, ENTRY_SIZE)?;
+        Ok(entries
+            .as_chunks::<ENTRY_SIZE>()
+            .0
+            .iter()
+            .map(|e| DatumIndex(u32_at(e, 4)))
+            .filter(|d| *d != DatumIndex::NONE)
+            .collect())
+    }
+
     /// Resolve a string id (low 24 bits index, high 8 bits length) to its text.
     pub fn string_id(&self, id: u32) -> Option<&str> {
         if id == 0 {
