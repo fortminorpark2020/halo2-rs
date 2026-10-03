@@ -39,7 +39,7 @@ Double-click `h2viewer.exe` to open Halo 2's menus over Lockout from
 with Halo 2's main menu music. Multiplayer opens the lobby: pick the game
 type (Slayer, Team Slayer, Capture the Flag, King of the Hill, Team King,
 Oddball, Team Oddball, Juggernaut, Territories or Assault), the map (every multiplayer map in the maps
-folder), score to win and number of bots, then Start Game. In team games, T
+folder, with Halo 2's own picture and description from `mainmenu.map`), score to win and number of bots, then Start Game. In team games, T
 (or X on a controller) puts you on the red or blue team; bots fill the smaller
 team. System Link lists games other PCs on the network are hosting.
 Menus work with the arrow keys or WASD, Enter and Esc, the mouse, or a

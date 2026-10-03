@@ -68,6 +68,9 @@ pub struct DrawCall {
     pub colors: Option<[[f32; 3]; 2]>,
 }
 
+/// HUD batches number the menus' own textures from here.
+pub const MENU_TEXTURES: usize = 1 << 16;
+
 pub struct HudBatch {
     pub texture: usize,
     pub vertices: Vec<HudVertex>,
@@ -390,6 +393,9 @@ pub struct Gpu {
     /// One bind group per (texture, lightmap) pair the meshes use.
     materials: Vec<wgpu::BindGroup>,
     hud_textures: Vec<wgpu::BindGroup>,
+    /// Textures the menus keep from map to map (the maps' pictures),
+    /// numbered from [`MENU_TEXTURES`] in HUD batches.
+    menu_textures: Vec<wgpu::BindGroup>,
     effects_texture: wgpu::BindGroup,
     meshes: Vec<GpuMesh>,
     depth: wgpu::TextureView,
@@ -840,6 +846,7 @@ impl Gpu {
             globals,
             materials: Vec::new(),
             hud_textures: Vec::new(),
+            menu_textures: Vec::new(),
             effects_texture,
             meshes: Vec::new(),
             depth,
@@ -949,6 +956,23 @@ impl Gpu {
         self.meshes = meshes;
         self.materials = materials;
         self.hud_textures = hud_textures;
+    }
+
+    pub fn set_menu_textures(&mut self, images: &[Image]) {
+        self.menu_textures = images
+            .iter()
+            .map(|img| {
+                let (device, queue) = (&self.device, &self.queue);
+                upload_texture(device, queue, &self.texture_layout, &self.clamp, img, false)
+            })
+            .collect();
+    }
+
+    fn hud_texture(&self, texture: usize) -> Option<&wgpu::BindGroup> {
+        match texture.checked_sub(MENU_TEXTURES) {
+            Some(k) => self.menu_textures.get(k),
+            None => self.hud_textures.get(texture),
+        }
     }
 
     pub fn size(&self) -> (f32, f32) {
@@ -1098,7 +1122,7 @@ impl Gpu {
         let hud: Vec<(usize, wgpu::Buffer, u32)> = f
             .hud
             .iter()
-            .filter(|b| b.texture < self.hud_textures.len())
+            .filter(|b| self.hud_texture(b.texture).is_some())
             .filter_map(|b| {
                 Some((
                     b.texture,
@@ -1185,7 +1209,7 @@ impl Gpu {
             pass.set_pipeline(&self.hud_pipeline);
             pass.set_bind_group(0, &self.globals, &[offset]);
             for (texture, buf, count) in &hud {
-                pass.set_bind_group(1, &self.hud_textures[*texture], &[]);
+                pass.set_bind_group(1, self.hud_texture(*texture), &[]);
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..*count, 0..1);
             }

@@ -32,6 +32,7 @@ mod hud;
 mod input;
 mod lan;
 mod local;
+mod mapinfo;
 mod menu;
 mod objective;
 mod probe;
@@ -401,6 +402,8 @@ struct App {
     /// The menu is up over a game (paused, or the carnage report).
     menu_open: bool,
     maps: Vec<MapChoice>,
+    /// The maps' pictures, for the lobby.
+    map_pictures: Vec<blam_cache::bitmap::Image>,
     loading: Option<Loading>,
     /// Seconds the menus have been up, for the camera circling the map.
     menu_time: f32,
@@ -1048,7 +1051,10 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         match pollster::block_on(gpu::Gpu::new(window.clone(), &self.scene)) {
-            Ok(g) => self.gpu = Some(g),
+            Ok(mut g) => {
+                g.set_menu_textures(&self.map_pictures);
+                self.gpu = Some(g);
+            }
             Err(e) => {
                 eprintln!("graphics init failed: {e}");
                 event_loop.exit();
@@ -1289,7 +1295,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             game_types: [12, 0, 0, 0],
         })
     });
-    let maps = path.parent().map(menu::find_maps).unwrap_or_default();
+    let mut maps = path.parent().map(menu::find_maps).unwrap_or_default();
+    let map_pictures = path
+        .parent()
+        .map(|dir| mapinfo::describe_maps(dir, &mut maps))
+        .unwrap_or_default();
     // Three computer opponents (H2_BOTS=<n> for another number).
     let bots = env("H2_BOTS")
         .and_then(|v| v.parse().ok())
@@ -1358,6 +1368,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         menu: Menu::new(settings),
         menu_open: false,
         maps,
+        map_pictures,
         loading: None,
         menu_time: 0.0,
         game_over: None,

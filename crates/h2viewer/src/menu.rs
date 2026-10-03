@@ -25,6 +25,10 @@ pub struct MapChoice {
     pub name: String,
     /// The name players know it by.
     pub title: String,
+    /// Halo 2's description of it, when mainmenu.map has one.
+    pub description: String,
+    /// Its picture in the pictures `mapinfo::describe_maps` returned.
+    pub picture: Option<usize>,
 }
 
 /// Halo 2's names for its multiplayer maps' files.
@@ -74,6 +78,8 @@ impl MapChoice {
             path: path.to_path_buf(),
             title: map_title(&name),
             name,
+            description: String::new(),
+            picture: None,
         }
     }
 }
@@ -263,6 +269,11 @@ const ROW_Y: f32 = 128.0;
 const ROW_W: f32 = 300.0;
 const ROW_H: f32 = 26.0;
 const ROW_STEP: f32 = 32.0;
+/// The lobby's right-hand panels (map, players).
+const PANEL_X: f32 = 372.0;
+const PANEL_W: f32 = 228.0;
+/// The map's picture (Halo 2's are 440 by 414).
+const PICTURE: [f32; 2] = [104.0, 98.0];
 const TEXT: [f32; 4] = [0.72, 0.84, 1.0, 1.0];
 const BRIGHT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const DIM: [f32; 4] = [0.5, 0.62, 0.8, 0.9];
@@ -681,7 +692,8 @@ impl Menu {
             }
         }
         if self.screen == Screen::Lobby {
-            self.draw_players(hb, font, white, &f, ctx);
+            let top = self.draw_map(hb, font, &f, ctx, white);
+            self.draw_players(hb, font, white, &f, ctx, top);
         }
         if self.screen == Screen::SystemLink {
             let y = ROW_Y - 22.0;
@@ -698,6 +710,55 @@ impl Menu {
         hb.text_left(font, f.at(ROW_X, 440.0), 8.0 * s, hint, DIM);
     }
 
+    /// The chosen map's picture and description over the player list.
+    /// Returns where the player list goes.
+    fn draw_map(
+        &self,
+        hb: &mut HudBuilder,
+        font: usize,
+        f: &Frame,
+        ctx: &Context,
+        white: usize,
+    ) -> f32 {
+        let Some(map) = ctx.maps.get(self.settings.map) else {
+            return ROW_Y;
+        };
+        if map.picture.is_none() && map.description.is_empty() {
+            return ROW_Y;
+        }
+        let s = f.s;
+        let (x, y) = (PANEL_X, ROW_Y);
+        let text_x = if map.picture.is_some() {
+            x + PICTURE[0] + 10.0
+        } else {
+            x
+        };
+        let per_line = ((PANEL_X + PANEL_W - text_x) / (7.0 * crate::font::ASPECT)) as usize;
+        let lines = wrap(&map.description.to_uppercase(), per_line);
+        let mut height = 18.0 + 10.0 * lines.len() as f32;
+        if map.picture.is_some() {
+            height = height.max(PICTURE[1]);
+        }
+        let back = f.rect([x - 8.0, y - 8.0, x + PANEL_W + 8.0, y + height + 8.0]);
+        hb.quad(white, back, [0.0; 4], PANEL, hud_mode::PLAIN, 0.0);
+        if let Some(p) = map.picture {
+            hb.quad(
+                crate::gpu::MENU_TEXTURES + p,
+                f.rect([x, y, x + PICTURE[0], y + PICTURE[1]]),
+                [0.0, 0.0, 1.0, 1.0],
+                [1.0; 4],
+                hud_mode::PLAIN,
+                0.0,
+            );
+        }
+        hb.text_left(font, f.at(text_x, y), 11.0 * s, &map.title, BRIGHT);
+        for (k, line) in lines.iter().enumerate() {
+            let at = f.at(text_x, y + 18.0 + 10.0 * k as f32);
+            hb.text_left(font, at, 7.0 * s, line, TEXT);
+        }
+        y + height + 20.0
+    }
+
     fn draw_players(
         &self,
         hb: &mut HudBuilder,
@@ -705,9 +766,10 @@ impl Menu {
         white: usize,
         f: &Frame,
         ctx: &Context,
+        top: f32,
     ) {
         let s = f.s;
-        let (x, mut y) = (372.0, ROW_Y);
+        let (x, mut y) = (PANEL_X, top);
         let teams = self.settings.game_type().teams();
         let lines = ctx.seats.len() + (self.settings.bots > 0) as usize;
         let invite = ctx.seats.len() < crate::MAX_LOCAL;
@@ -715,7 +777,7 @@ impl Menu {
         let height = 34.0 + 16.0 * lines as f32 + 6.0 + 11.0 * hints as f32;
         hb.quad(
             white,
-            f.rect([x - 8.0, y - 8.0, x + 236.0, y + height]),
+            f.rect([x - 8.0, y - 8.0, x + PANEL_W + 8.0, y + height]),
             [0.0; 4],
             PANEL,
             hud_mode::PLAIN,
@@ -771,6 +833,21 @@ impl Menu {
             );
         }
     }
+}
+
+/// Break `text` into lines of at most `width` characters, at spaces.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if line.len() + 1 + word.len() <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
 }
 
 /// Most lines the scoreboard shows: 16 players and two team totals.
