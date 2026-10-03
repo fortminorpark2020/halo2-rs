@@ -493,6 +493,10 @@ impl Game {
     pub fn step(&mut self, world: &World, commands: &[Command]) {
         let dt = TICK;
         self.time += dt as f64;
+        // Once someone has won, everything stands still.
+        if self.winner.is_some() {
+            return;
+        }
         for i in 0..self.players.len() {
             let cmd = commands.get(i).copied().unwrap_or_default();
             self.step_player(world, i, cmd, dt);
@@ -1219,6 +1223,26 @@ pub(crate) mod tests {
         // Dying ends the spree.
         g.damage(0, Some(1), 500.0, false);
         assert_eq!(g.players[0].spree, 0);
+    }
+
+    #[test]
+    fn the_game_stands_still_once_won() {
+        let world = floor();
+        let mut g = game();
+        g.rules.score_to_win = 1;
+        duel(&mut g);
+        g.damage(1, Some(0), 500.0, false);
+        assert_eq!(g.winner, Some(0));
+        let before = g.players[0].body.position;
+        let run = Command {
+            movement: glam::Vec2::X,
+            ..Command::default()
+        };
+        for _ in 0..30 {
+            g.step(&world, &[run, Command::default()]);
+        }
+        assert_eq!(g.players[0].body.position, before);
+        assert!(!g.players[1].alive, "no respawning after the end");
     }
 
     #[test]

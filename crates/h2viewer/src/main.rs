@@ -1,32 +1,38 @@
-//! h2viewer: play a Halo 2 multiplayer map, alone against bots or with
-//! friends in splitscreen.
+//! h2viewer: Halo 2 multiplayer on Halo 2's own maps: menus, a lobby,
+//! bots, splitscreen and LAN games.
 //!
 //! Usage: h2viewer [path\to\level.map]
-//! With no argument it looks for lockout.map in the usual install folders.
+//! With no argument it looks for the maps in the usual install folders.
 //!
-//! Keyboard and mouse: click to capture the mouse, WASD move, Space jump,
-//! Ctrl/C crouch, left mouse fire, right mouse / Z zoom, R reload, F melee,
-//! G / middle mouse throw a grenade, X switch grenades, E pick up (hold to
-//! swap weapons), Q / mouse wheel switch weapon, B add a bot, 1-9 take any
-//! weapon (testing), Tab toggles walking / flying (fly: Space/C up/down, Shift
-//! fast), Esc releases the mouse (Esc again quits).
+//! Menus: arrows / WASD or the d-pad move, Enter or A chooses, Esc or B goes
+//! back; the mouse works too.
+//!
+//! In a game, keyboard and mouse: click to capture the mouse, WASD move,
+//! Space jump, Ctrl/C crouch, left mouse fire, right mouse / Z zoom, R
+//! reload, F melee, G / middle mouse throw a grenade, X switch grenades, E
+//! pick up (hold to swap weapons), Q / mouse wheel switch weapon, hold Tab
+//! for the scoreboard, B add a bot, 1-9 take any weapon (testing), ` toggles
+//! walking / flying (fly: Space/C up/down, Shift fast), Esc the pause menu.
 //!
 //! Controllers (Halo 2's layout, see `input`): A takes over player one,
-//! Start joins as another splitscreen player, Back leaves.
+//! Start joins as another splitscreen player (in a game: the pause menu),
+//! hold Back for the scoreboard.
 //!
-//! LAN: every game is open to other PCs on the network; J joins a game
-//! another PC is hosting (see `lan`).
+//! LAN: every game is open to other PCs on the network; System Link lists
+//! the games other PCs host (see `lan`).
 
 mod audio;
 mod body;
 mod camera;
 mod effects;
+mod flow;
 mod font;
 mod gpu;
 mod hud;
 mod input;
 mod lan;
 mod local;
+mod menu;
 mod probe;
 mod rig;
 mod scene;
@@ -39,26 +45,32 @@ use camera::FlyCamera;
 use effects::Effects;
 use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
-use gpu::{DrawCall, Frame};
+use gpu::{hud_mode, DrawCall, Frame, HudBatch};
 use h2sim::game::{Event, GrenadeKind, HeldWeapon, TICK};
 use h2sim::{Bot, Command, Game, ItemKind, ItemSpawn, NavGraph, Rules, WeaponState, World};
+use hud::HudBuilder;
 use input::{PadPress, Pads};
 use lan::Net;
 use local::{armor_colors, display_name, kill_message, Keyboard, LocalPlayer, Taps};
+use menu::{MapChoice, Menu, Screen, Settings};
 use scene::Scene;
 use std::collections::HashSet;
 use std::f32::consts::FRAC_PI_2;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
+use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// Most people sharing one screen.
 pub(crate) const MAX_LOCAL: usize = 4;
+/// Seconds between someone winning and the carnage report.
+const GAME_OVER_DELAY: f32 = 4.0;
+const MUSIC_VOLUME: f32 = 0.5;
 
 const DEFAULT_MAP_DIRS: &[&str] = &[
     r"C:\Games\Halo 2 Project Cartographer\maps",
@@ -141,6 +153,100 @@ fn weapon_def(w: &scene::WeaponAssets) -> h2sim::WeaponDef {
     def
 }
 
+/// Where players spawn: the map's spawn points, or the middle of the level.
+fn level_spawns(scene: &Scene) -> Vec<(Vec3, f32)> {
+    let mut spawns: Vec<(Vec3, f32)> = scene
+        .spawns
+        .iter()
+        .map(|s| (Vec3::from(s.position), s.facing))
+        .collect();
+    if spawns.is_empty() {
+        spawns.push((level_focus(&scene.collision).0, 0.0));
+    }
+    spawns
+}
+
+/// A game on the scene's level, with no one in it yet.
+fn new_game(scene: &Scene, score_to_win: u32) -> Game {
+    let items = scene
+        .items
+        .iter()
+        .map(|i| ItemSpawn {
+            kind: i.kind,
+            position: i.position,
+            respawn: i.respawn_seconds,
+        })
+        .collect();
+    let rules = Rules {
+        score_to_win,
+        ..rules(scene)
+    };
+    Game::new(
+        rules,
+        scene.weapons.iter().map(weapon_def).collect(),
+        level_spawns(scene),
+        items,
+        scene.movement,
+        scene.biped,
+    )
+}
+
+/// A map's level, ready to play.
+struct Level {
+    scene: Scene,
+    world: World,
+    nav: NavGraph,
+    path: PathBuf,
+}
+
+/// Read a map and work out what bots need to find their way around it
+/// (slow enough to run on another thread).
+fn load_level(path: &Path) -> Result<Level, String> {
+    let scene = Scene::load(path).map_err(|e| e.to_string())?;
+    println!(
+        "{} triangles, {} textures, {} weapons, {} items",
+        scene.triangle_count(),
+        scene.textures.len() - 1,
+        scene.weapons.len(),
+        scene.items.len()
+    );
+    let world = World::new(&scene.collision.positions, &scene.collision.indices);
+    let mut nav_points: Vec<Vec3> = level_spawns(&scene).iter().map(|s| s.0).collect();
+    nav_points.extend(scene.items.iter().map(|i| i.position));
+    let nav = NavGraph::build(&world, &nav_points);
+    println!(
+        "bot routes: {} points, {} links",
+        nav.points.len(),
+        nav.links.iter().map(Vec::len).sum::<usize>()
+    );
+    Ok(Level {
+        scene,
+        world,
+        nav,
+        path: path.to_path_buf(),
+    })
+}
+
+/// A map loading in the background, behind the loading screen.
+struct Loading {
+    title: String,
+    level: Receiver<Result<Level, String>>,
+    then: Then,
+}
+
+/// What to do once a map has loaded.
+enum Then {
+    Play,
+    Join(h2net::LanGame),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mode {
+    /// The menus, over the map seen from a circling camera.
+    Menu,
+    Playing,
+}
+
 /// A Spartan's body posed for this frame.
 struct BodyPose {
     vertices: Vec<scene::Vertex>,
@@ -155,16 +261,22 @@ struct App {
     /// Computer players and the player each one drives.
     bots: Vec<(usize, Bot)>,
     nav: NavGraph,
+    /// The middle of the level and its size, for the menu camera.
+    focus: (Vec3, f32),
     /// The people playing at this computer, one view each.
     locals: Vec<LocalPlayer>,
+    /// The people at this computer between games: player one (keyboard and
+    /// maybe a controller) and the controllers of the others.
+    seats: Vec<Option<GamepadId>>,
     pads: Pads,
-    title: String,
     window: Option<Arc<Window>>,
     gpu: Option<gpu::Gpu>,
     keys: HashSet<KeyCode>,
     captured: bool,
     fire_held: bool,
     zoom_held: bool,
+    /// The mouse pointer, in window pixels.
+    mouse: [f32; 2],
     last_frame: Instant,
     /// Time not yet simulated, less than a tick.
     pending: f32,
@@ -186,9 +298,27 @@ struct App {
     frame_events: Vec<Event>,
     /// Players a host gave us, until its game includes them.
     welcome: Option<Vec<usize>>,
-    /// Start again on another map to join a LAN game there.
-    relaunch: Option<lan::Relaunch>,
     sound: soundscape::Soundscape,
+    mode: Mode,
+    menu: Menu,
+    /// The menu is up over a game (paused, or the carnage report).
+    menu_open: bool,
+    maps: Vec<MapChoice>,
+    loading: Option<Loading>,
+    /// Seconds the menus have been up, for the camera circling the map.
+    menu_time: f32,
+    /// Seconds since someone won.
+    game_over: Option<f32>,
+    music: Option<scene::Music>,
+    music_loading: Option<Receiver<Option<scene::Music>>>,
+    music_voice: Option<u64>,
+    quit: bool,
+    /// Someone has used the keyboard or mouse (so player one plays with them).
+    keyboard_used: bool,
+    /// For testing: where player one starts (H2_POS) and a weapon to hold
+    /// (H2_WEAPON).
+    start_pos: Option<PlayerSpawn>,
+    start_weapon: Option<usize>,
 }
 
 impl App {
@@ -273,6 +403,13 @@ impl App {
     }
 
     fn pad_pressed(&mut self, id: GamepadId, press: PadPress) {
+        if self.loading.is_some() {
+            return;
+        }
+        if self.in_menu() {
+            self.menu_pad(id, press);
+            return;
+        }
         let owner = self.locals.iter().position(|l| l.pad == Some(id));
         match (owner, press) {
             (None, PadPress::Claim) => {
@@ -286,21 +423,7 @@ impl App {
                 }
             }
             (None, PadPress::Join) => self.add_local(Some(id)),
-            (Some(k), PadPress::Leave) => {
-                if self.locals[k].keyboard {
-                    self.locals[k].pad = None;
-                } else {
-                    // Their Spartan plays on as a bot (the host's, when joined).
-                    let l = self.locals.remove(k);
-                    if self.joined() {
-                        self.release_local(l.player);
-                    } else {
-                        self.bots
-                            .push((l.player, Bot::new(l.player as u32 * 7919 + 13)));
-                    }
-                    self.announce(&format!("PLAYER {} LEFT", l.player + 1));
-                }
-            }
+            (Some(_), PadPress::Join) => self.open_menu(Screen::Pause),
             (Some(k), p) => {
                 let t = &mut self.locals[k].taps;
                 match p {
@@ -319,10 +442,21 @@ impl App {
     }
 
     fn update(&mut self, dt: f32) {
+        self.poll_loading();
+        self.update_music();
         for (id, press) in self.pads.presses() {
             self.pad_pressed(id, press);
         }
+        self.lan_games = self.browser.poll().to_vec();
+        self.menu_time += dt;
+        if self.mode == Mode::Menu || self.loading.is_some() {
+            self.effects.update(dt);
+            return;
+        }
         for l in &mut self.locals {
+            if self.menu_open {
+                break;
+            }
             if let Some(state) = l.pad.and_then(|id| self.pads.state(id)) {
                 let scale = 1.0 / l.magnification(&self.scene, &self.game);
                 l.camera.look_stick(state.right, dt, scale);
@@ -331,7 +465,7 @@ impl App {
                 l.camera.update(&self.keys, dt);
             }
         }
-        self.lan_games = self.browser.poll().to_vec();
+        self.check_game_over(dt);
         if self.joined() {
             self.update_joined(dt);
         } else {
@@ -367,8 +501,13 @@ impl App {
                 zoom_held: self.zoom_held,
             };
             for l in &self.locals {
-                let pad = l.pad.and_then(|id| self.pads.state(id));
-                commands[l.player] = l.command(l.keyboard.then_some(&keyboard), pad);
+                commands[l.player] = if self.menu_open {
+                    // Standing still while the menu is up.
+                    l.command(None, None)
+                } else {
+                    let pad = l.pad.and_then(|id| self.pads.state(id));
+                    l.command(l.keyboard.then_some(&keyboard), pad)
+                };
             }
             for (i, bot) in &mut self.bots {
                 commands[*i] = bot.think(&self.game, &self.world, &self.nav, *i);
@@ -628,7 +767,20 @@ impl App {
     fn render(&mut self) {
         let Some(g) = &self.gpu else { return };
         let (w, h) = g.size();
-        let ports = local::viewports(self.locals.len(), w as u32, h as u32);
+        let overlay = self.overlay(w, h);
+        if self.loading.is_some() {
+            let frame = Frame::overlay([0, 0, w as u32, h as u32], &overlay);
+            if let Some(g) = &mut self.gpu {
+                g.render(&[frame]);
+            }
+            return;
+        }
+        let in_game = self.mode == Mode::Playing;
+        let ports = if in_game {
+            local::viewports(self.locals.len(), w as u32, h as u32)
+        } else {
+            vec![[0, 0, w as u32, h as u32]]
+        };
         let shared = self.world_draws();
         // Posed bodies go up once, with the first view.
         let mut body_meshes = Vec::new();
@@ -651,7 +803,29 @@ impl App {
             view_model_proj: Mat4,
         }
         let mut views = Vec::new();
-        for (k, l) in self.locals.iter().enumerate() {
+        if !in_game {
+            // The level behind the menus.
+            let camera = self.menu_camera();
+            let (_, r, u) = camera.basis();
+            let viewport = ports[0];
+            views.push(View {
+                viewport,
+                aspect: viewport[2] as f32 / viewport[3].max(1) as f32,
+                magnification: 1.0,
+                camera,
+                world: shared.clone(),
+                sprites: self.effects.sprites(r, u),
+                draws: local::ViewDraws {
+                    view_models: Vec::new(),
+                    view_sprites: Vec::new(),
+                    posed: Vec::new(),
+                },
+                hud: Vec::new(),
+                view_model_proj: Mat4::IDENTITY,
+            });
+        }
+        let scores = self.score_lines();
+        for (k, l) in self.locals.iter().enumerate().filter(|_| in_game) {
             let Some(&viewport) = ports.get(k) else {
                 break;
             };
@@ -668,6 +842,24 @@ impl App {
             if k == 0 {
                 draws.posed.splice(0..0, std::mem::take(&mut body_meshes));
             }
+            let (vw, vh) = (viewport[2] as f32, viewport[3] as f32);
+            // The menu replaces the HUD while it's up.
+            let mut hud = if self.menu_open {
+                Vec::new()
+            } else {
+                l.build_hud(&self.scene, &self.game, vw, vh)
+            };
+            // The scoreboard while Tab or Back is held.
+            let held = (l.keyboard && self.keys.contains(&KeyCode::Tab))
+                || l.pad
+                    .and_then(|id| self.pads.state(id))
+                    .is_some_and(|p| p.scores);
+            if held && !self.menu_open {
+                let mut hb = HudBuilder::new(vw, vh);
+                let (font, white) = (self.scene.hud_font, self.scene.hud_white);
+                menu::draw_scoreboard(&mut hb, font, white, vw, vh, &scores);
+                hud.extend(hb.finish());
+            }
             views.push(View {
                 viewport,
                 aspect,
@@ -680,16 +872,11 @@ impl App {
                 world,
                 sprites: self.effects.sprites(r, u),
                 draws,
-                hud: l.build_hud(
-                    &self.scene,
-                    &self.game,
-                    viewport[2] as f32,
-                    viewport[3] as f32,
-                ),
+                hud,
                 view_model_proj: l.view_model_proj(aspect),
             });
         }
-        let frames: Vec<Frame> = views
+        let mut frames: Vec<Frame> = views
             .iter()
             .map(|v| {
                 let sky_view =
@@ -716,6 +903,9 @@ impl App {
                 }
             })
             .collect();
+        if !overlay.is_empty() {
+            frames.push(Frame::overlay([0, 0, w as u32, h as u32], &overlay));
+        }
         if let Some(g) = &mut self.gpu {
             g.render(&frames);
         }
@@ -728,7 +918,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title(&self.title)
+            .with_title("Halo 2 Rust")
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         match pollster::block_on(gpu::Gpu::new(window.clone(), &self.scene)) {
@@ -749,6 +939,32 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(g) = &mut self.gpu {
                     g.resize(size.width, size.height);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse = [position.x as f32, position.y as f32];
+                if self.in_menu() && self.loading.is_none() {
+                    self.menu_hover();
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. }
+                if self.in_menu() || self.loading.is_some() =>
+            {
+                if state == ElementState::Pressed
+                    && button == MouseButton::Left
+                    && self.loading.is_none()
+                {
+                    self.keyboard_used = true;
+                    self.menu_click();
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } if self.in_menu() => {
+                let up = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y > 0.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
+                };
+                if self.loading.is_none() {
+                    self.menu_wheel(up);
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -794,7 +1010,7 @@ impl ApplicationHandler for App {
                 match event.state {
                     ElementState::Pressed => {
                         if !event.repeat {
-                            self.key_pressed(code, event_loop);
+                            self.key_pressed(code);
                         }
                         self.keys.insert(code);
                     }
@@ -835,22 +1051,8 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(r) = self.relaunch.take() {
-            // The LAN game is on another map: start again there.
-            println!("lan: switching to {}", r.map.display());
-            let started = std::env::current_exe().and_then(|exe| {
-                std::process::Command::new(exe)
-                    .arg(&r.map)
-                    .env("H2_JOIN", &r.join)
-                    .spawn()
-            });
-            match started {
-                Ok(_) => event_loop.exit(),
-                Err(e) => {
-                    println!("lan: couldn't start again: {e}");
-                    self.announce("COULDN'T SWITCH MAPS");
-                }
-            }
+        if self.quit {
+            event_loop.exit();
             return;
         }
         if let Some(w) = &self.window {
@@ -860,21 +1062,32 @@ impl ApplicationHandler for App {
 }
 
 impl App {
-    fn key_pressed(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+    fn key_pressed(&mut self, code: KeyCode) {
+        self.keyboard_used = true;
+        if self.loading.is_some() {
+            return;
+        }
+        if self.in_menu() {
+            let input = match code {
+                KeyCode::ArrowUp | KeyCode::KeyW => menu::Input::Up,
+                KeyCode::ArrowDown | KeyCode::KeyS => menu::Input::Down,
+                KeyCode::ArrowLeft | KeyCode::KeyA => menu::Input::Left,
+                KeyCode::ArrowRight | KeyCode::KeyD => menu::Input::Right,
+                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space | KeyCode::KeyE => {
+                    menu::Input::Select
+                }
+                KeyCode::Escape | KeyCode::Backspace => menu::Input::Back,
+                _ => return,
+            };
+            self.menu_input(input);
+            return;
+        }
         if code == KeyCode::Escape {
-            if self.captured {
-                self.set_capture(false);
-            } else {
-                event_loop.exit();
-            }
+            self.open_menu(Screen::Pause);
             return;
         }
         if code == KeyCode::KeyB {
             self.add_bot();
-            return;
-        }
-        if code == KeyCode::KeyJ {
-            self.relaunch = self.join_lan_game();
             return;
         }
         let joined = self.joined();
@@ -884,7 +1097,7 @@ impl App {
         let player = self.locals[k].player;
         let l = &mut self.locals[k];
         match code {
-            KeyCode::Tab => {
+            KeyCode::Backquote => {
                 l.flying = !l.flying;
                 if !l.flying && !joined {
                     // Drop in where the fly camera is.
@@ -931,16 +1144,10 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let path = find_map()?;
     println!("loading {}", path.display());
-    let scene = Scene::load(&path)?;
-    println!(
-        "{} triangles, {} textures, {} weapons, {} items",
-        scene.triangle_count(),
-        scene.textures.len() - 1,
-        scene.weapons.len(),
-        scene.items.len()
-    );
+    let level = load_level(&path)?;
+    let env = |name: &str| std::env::var(name).ok();
     // H2_POS="x y z yaw_degrees" starts somewhere else (for testing).
-    let start = std::env::var("H2_POS").ok().and_then(|v| {
+    let start_pos = env("H2_POS").and_then(|v| {
         let n: Vec<f32> = v
             .split_whitespace()
             .filter_map(|x| x.parse().ok())
@@ -950,85 +1157,44 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             facing: n[3].to_radians(),
         })
     });
-    let name = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-
-    let world = World::new(&scene.collision.positions, &scene.collision.indices);
-    let walking = start.is_some() || !scene.spawns.is_empty();
-    let (focus, radius) = level_focus(&scene.collision);
-    let mut spawns: Vec<(Vec3, f32)> = scene
-        .spawns
-        .iter()
-        .map(|s| (Vec3::from(s.position), s.facing))
-        .collect();
-    if spawns.is_empty() {
-        spawns.push((focus, 0.0));
-    }
-    let items = scene
-        .items
-        .iter()
-        .map(|i| ItemSpawn {
-            kind: i.kind,
-            position: i.position,
-            respawn: i.respawn_seconds,
-        })
-        .collect();
-    let mut game = Game::new(
-        rules(&scene),
-        scene.weapons.iter().map(weapon_def).collect(),
-        spawns,
-        items,
-        scene.movement,
-        scene.biped,
-    );
-    let me = game.add_player();
-    if let Some(s) = start {
-        let p = &mut game.players[me];
-        p.body.position = Vec3::from(s.position) + Vec3::Z * 0.05;
-        p.yaw = s.facing;
-    }
-    game.events.clear();
-    let mut player_one = LocalPlayer::new(me, &game);
-    player_one.keyboard = true;
-    if !walking {
-        // No spawn points: look over the level from above.
-        player_one.flying = true;
-        player_one.camera = FlyCamera::looking_at(
-            focus + glam::vec3(radius * 0.6, -radius * 0.6, radius * 0.4),
-            focus,
-        );
-    }
-    let mut nav_points: Vec<Vec3> = game.spawns.iter().map(|s| s.0).collect();
-    nav_points.extend(game.item_spawns.iter().map(|i| i.position));
-    let nav = NavGraph::build(&world, &nav_points);
-    println!(
-        "bot routes: {} points, {} links",
-        nav.points.len(),
-        nav.links.iter().map(Vec::len).sum::<usize>()
-    );
+    let maps = path.parent().map(menu::find_maps).unwrap_or_default();
+    // Three computer opponents (H2_BOTS=<n> for another number).
+    let bots = env("H2_BOTS")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+        .min(menu::MAX_BOTS);
+    let settings = Settings {
+        map: 0,
+        score: menu::SCORES.iter().position(|&s| s == 25).unwrap_or(0),
+        bots,
+    };
+    // The menu music is read in the background.
+    let (tx, music) = mpsc::channel();
+    let music_map = path;
+    std::thread::spawn(move || {
+        let _ = tx.send(scene::load_music(&music_map));
+    });
 
     let session = h2net::session_id();
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
-        scene,
-        world,
-        game,
+        game: new_game(&level.scene, 0),
+        scene: level.scene,
+        world: level.world,
         bots: Vec::new(),
-        nav,
-        locals: vec![player_one],
+        nav: level.nav,
+        focus: (Vec3::ZERO, 1.0),
+        locals: Vec::new(),
+        seats: vec![None],
         pads: Pads::new(),
-        title: format!(
-            "Halo 2 Rust: {name} (click to play, WASD move, mouse fire/zoom, G grenade, E pick up, F melee, R reload, Q switch weapon, B add bot, J join LAN game, controller Start joins, Esc release)"
-        ),
         window: None,
         gpu: None,
         keys: HashSet::new(),
         captured: false,
         fire_held: false,
         zoom_held: false,
+        mouse: [0.0; 2],
         last_frame: Instant::now(),
         pending: 0.0,
         effects: Effects::new(),
@@ -1039,40 +1205,40 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         browser: h2net::Browser::new(session),
         lan_games: Vec::new(),
         session,
-        map_path: path.clone(),
-        map_name: name.to_lowercase(),
+        map_path: level.path,
+        map_name: String::new(),
         frame_events: Vec::new(),
         welcome: None,
-        relaunch: None,
         sound: soundscape::Soundscape::new(),
+        mode: Mode::Menu,
+        menu: Menu::new(settings),
+        menu_open: false,
+        maps,
+        loading: None,
+        menu_time: 0.0,
+        game_over: None,
+        music: None,
+        music_loading: Some(music),
+        music_voice: None,
+        quit: false,
+        keyboard_used: false,
+        start_pos,
+        start_weapon: env("H2_WEAPON").and_then(|v| v.parse().ok()),
     };
+    app.level_changed();
     // H2_SPLIT=<n> starts with n people in splitscreen (for testing).
-    let split = std::env::var("H2_SPLIT")
-        .ok()
+    let split = env("H2_SPLIT")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1);
-    for _ in 1..split {
-        app.add_local(None);
+    for _ in 1..split.min(MAX_LOCAL) {
+        app.seats.push(None);
     }
-    // H2_JOIN=<address:port> joins a LAN game at once (used when switching
-    // to the map a LAN game is on).
-    match std::env::var("H2_JOIN") {
-        Ok(address) => app.join_address(&address),
-        Err(_) => {
-            app.start_hosting();
-            // Three computer opponents (H2_BOTS=<n> for another number).
-            let bots = std::env::var("H2_BOTS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(3);
-            for _ in 0..bots {
-                app.add_bot();
-            }
-        }
-    }
-    // H2_WEAPON=<n> starts with another weapon in hand (for testing).
-    if let Some(n) = std::env::var("H2_WEAPON").ok().and_then(|v| v.parse().ok()) {
-        app.give_weapon(me, n);
+    // H2_JOIN=<address:port> joins a LAN game at once, and H2_PLAY=1 starts
+    // a game at once (for testing).
+    if let Some(address) = env("H2_JOIN") {
+        app.join_address(&address);
+    } else if env("H2_PLAY").is_some() {
+        app.start_game();
     }
     event_loop.run_app(&mut app)?;
     Ok(())

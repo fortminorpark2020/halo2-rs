@@ -1,7 +1,9 @@
 //! Controllers, laid out like Halo 2 on the Xbox: left stick moves, right
 //! stick looks, right trigger fires, left trigger throws a grenade, A jumps,
 //! B melees, X reloads (hold to pick up), Y switches weapons, clicking the
-//! sticks crouches and zooms, the bumpers switch grenades.
+//! sticks crouches and zooms, the bumpers switch grenades, Start pauses and
+//! Back shows the scoreboard. In menus the d-pad or left stick moves, A
+//! chooses and B goes back.
 
 use gilrs::{Axis, Button, EventType, GamepadId, Gilrs};
 use glam::Vec2;
@@ -20,6 +22,8 @@ pub struct PadState {
     pub crouch: bool,
     pub zoom: bool,
     pub action: bool,
+    /// Back held: the scoreboard.
+    pub scores: bool,
 }
 
 /// A button press, as the game sees it.
@@ -32,17 +36,28 @@ pub enum PadPress {
     Grenade,
     SwitchGrenade,
     Zoom,
-    /// Start: join the game as another splitscreen player.
+    /// Start: join as another splitscreen player, or pause.
     Join,
-    /// Back: leave splitscreen.
+    /// Back: leave splitscreen (in the lobby).
     Leave,
     /// A, to take over player one with this controller.
     Claim,
+    /// The d-pad, or the left stick pushed one way (menus).
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 pub struct Pads {
     gilrs: Option<Gilrs>,
+    /// Which way each controller's left stick last pointed (x, y), for
+    /// menu presses.
+    sticks: Vec<(GamepadId, [i8; 2])>,
 }
+
+/// The stick counts as pushed past this, and let go under the second.
+const STICK_PUSH: (f32, f32) = (0.6, 0.35);
 
 fn dead_zone(v: Vec2) -> Vec2 {
     let len = v.length();
@@ -62,7 +77,10 @@ impl Pads {
                 None
             }
         };
-        Pads { gilrs }
+        Pads {
+            gilrs,
+            sticks: Vec::new(),
+        }
     }
 
     /// Presses since the last call.
@@ -72,6 +90,31 @@ impl Pads {
             return out;
         };
         while let Some(ev) = g.next_event() {
+            if let EventType::AxisChanged(axis @ (Axis::LeftStickX | Axis::LeftStickY), v, _) =
+                ev.event
+            {
+                let k = match self.sticks.iter().position(|s| s.0 == ev.id) {
+                    Some(k) => k,
+                    None => {
+                        self.sticks.push((ev.id, [0, 0]));
+                        self.sticks.len() - 1
+                    }
+                };
+                let a = (axis == Axis::LeftStickY) as usize;
+                let dir = &mut self.sticks[k].1[a];
+                if v.abs() < STICK_PUSH.1 {
+                    *dir = 0;
+                } else if v.abs() > STICK_PUSH.0 && *dir != v.signum() as i8 {
+                    *dir = v.signum() as i8;
+                    let press = match (a, *dir > 0) {
+                        (0, false) => PadPress::Left,
+                        (0, true) => PadPress::Right,
+                        (_, false) => PadPress::Down,
+                        (_, true) => PadPress::Up,
+                    };
+                    out.push((ev.id, press));
+                }
+            }
             if let EventType::ButtonPressed(b, _) = ev.event {
                 let press = match b {
                     Button::RightTrigger2 => Some(PadPress::Fire),
@@ -84,6 +127,10 @@ impl Pads {
                     Button::Start => Some(PadPress::Join),
                     Button::Select => Some(PadPress::Leave),
                     Button::South => Some(PadPress::Claim),
+                    Button::DPadUp => Some(PadPress::Up),
+                    Button::DPadDown => Some(PadPress::Down),
+                    Button::DPadLeft => Some(PadPress::Left),
+                    Button::DPadRight => Some(PadPress::Right),
                     _ => None,
                 };
                 if let Some(p) = press {
@@ -110,6 +157,7 @@ impl Pads {
             crouch: pad.is_pressed(Button::LeftThumb),
             zoom: pad.is_pressed(Button::RightThumb),
             action: pad.is_pressed(Button::West),
+            scores: pad.is_pressed(Button::Select),
         })
     }
 }

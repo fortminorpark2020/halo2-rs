@@ -282,6 +282,59 @@ pub struct GameSounds {
     pub respawn_tick: Option<usize>,
     pub respawn: Option<usize>,
     pub announcer: Announcer,
+    pub ui: UiSounds,
+}
+
+/// The menus' sounds, in `Scene::sounds`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct UiSounds {
+    /// Moving between items.
+    pub cursor: Option<usize>,
+    /// Choosing an item.
+    pub forward: Option<usize>,
+    pub back: Option<usize>,
+    /// Starting a game.
+    pub advance: Option<usize>,
+}
+
+/// Halo 2's main menu music: an opening, then loops picked at random.
+pub struct Music {
+    pub intro: Arc<Clip>,
+    pub loops: Vec<Arc<Clip>>,
+}
+
+/// Read the menu music through a map (it lives in shared.map).
+pub fn load_music(path: &Path) -> Option<Music> {
+    let mut set = MapSet::open(path).ok()?;
+    let mut reader = sound::SoundReader::new();
+    let mut clips = |name: &str| -> Option<Vec<Arc<Clip>>> {
+        let group = GroupTag::parse("snd!")?;
+        let datum = set
+            .map
+            .tags
+            .iter()
+            .find(|t| t.group == group && t.name == name)?
+            .datum;
+        let s = reader.read(&mut set, datum).ok()?;
+        let (channels, rate) = (s.channels, s.sample_rate);
+        Some(
+            s.permutations
+                .into_iter()
+                .map(|samples| {
+                    Arc::new(Clip {
+                        samples,
+                        channels,
+                        rate,
+                    })
+                })
+                .collect(),
+        )
+    };
+    let intro = clips("sound\\ui\\main_menu_music\\menu_music\\in")?
+        .into_iter()
+        .next()?;
+    let loops = clips("sound\\ui\\main_menu_music\\menu_music\\loop").unwrap_or_default();
+    Some(Music { intro, loops })
 }
 
 /// The announcer's lines, in `Scene::sounds`.
@@ -1076,6 +1129,12 @@ impl Scene {
                 "sound\\game_sfx\\multiplayer\\countdown_for_respawn",
             ),
             respawn: named(&mut loader, "sound\\game_sfx\\multiplayer\\player_respawn"),
+            ui: UiSounds {
+                cursor: named(&mut loader, "sound\\ui\\cursor1"),
+                forward: named(&mut loader, "sound\\ui\\forward1"),
+                back: named(&mut loader, "sound\\ui\\back1"),
+                advance: named(&mut loader, "sound\\ui\\advance"),
+            },
             announcer: {
                 let mut line =
                     |name: &str| loader.sound_named(&format!("sound\\dialog\\multiplayer\\{name}"));

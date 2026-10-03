@@ -1,12 +1,12 @@
 //! LAN play in the game: every game is open for other PCs on the network to
-//! join, and lists games other PCs host (press J to join the first one).
+//! join (System Link in the menus lists the games other PCs host).
 
+use crate::flow::bot_for;
 use crate::local::{Keyboard, LocalPlayer};
 use crate::{scene, App};
 use gilrs::GamepadId;
 use h2net::{Client, ClientEvent, Host, HostEvent, LanGame};
-use h2sim::{Bot, Command};
-use std::path::PathBuf;
+use h2sim::Command;
 
 pub enum Net {
     /// Can't host (no network); playing alone.
@@ -23,16 +23,6 @@ pub enum Net {
         /// Controllers waiting for the host to add their player.
         waiting_pads: Vec<Option<GamepadId>>,
     },
-}
-
-/// Start the game again on another map, joining a LAN game there.
-pub struct Relaunch {
-    pub map: PathBuf,
-    pub join: String,
-}
-
-fn bot_for(player: usize) -> (usize, Bot) {
-    (player, Bot::new(player as u32 * 7919 + 13))
 }
 
 impl App {
@@ -120,14 +110,12 @@ impl App {
                 }
                 ClientEvent::Added(player) => self.seat_added(player),
                 ClientEvent::Refused(why) => {
-                    self.announce(&format!("COULDN'T JOIN: {why}"));
-                    self.leave_lan_game();
+                    self.drop_out(format!("COULDN'T JOIN: {why}"));
                     return;
                 }
                 ClientEvent::Lost(why) => {
                     println!("lan: lost the host: {why}");
-                    self.announce("LOST CONNECTION TO THE HOST");
-                    self.leave_lan_game();
+                    self.drop_out("LOST CONNECTION TO THE HOST".into());
                     return;
                 }
             }
@@ -164,6 +152,9 @@ impl App {
             .locals
             .iter()
             .map(|l| {
+                if self.menu_open {
+                    return (l.player, l.command(None, None));
+                }
                 let pad = l.pad.and_then(|id| self.pads.state(id));
                 (l.player, l.command(l.keyboard.then_some(&keyboard), pad))
             })
@@ -234,69 +225,17 @@ impl App {
         }
     }
 
-    /// Joined: a splitscreen player here stops playing.
-    pub(crate) fn release_local(&mut self, player: usize) {
-        if let Net::Joined { client, .. } = &mut self.net {
-            client.remove_local(player);
-        }
-    }
-
-    /// Back to playing alone, keeping the game as it was: everyone else's
-    /// Spartans become bots.
-    fn leave_lan_game(&mut self) {
-        let mine: Vec<usize> = self.locals.iter().map(|l| l.player).collect();
-        if let Net::Joined { seated: true, .. } = self.net {
-            self.bots = (0..self.game.players.len())
-                .filter(|p| !mine.contains(p))
-                .map(bot_for)
-                .collect();
-        }
-        self.welcome = None;
-        self.start_hosting();
-    }
-
-    /// Join the first game found on the network. Returns where to start the
-    /// game again when that game is on another map.
-    pub(crate) fn join_lan_game(&mut self) -> Option<Relaunch> {
-        if self.joined() {
-            return None;
-        }
-        let Some(game) = self.lan_games.first().cloned() else {
-            self.announce("NO LAN GAMES FOUND");
-            return None;
-        };
-        if let Net::Hosting(host) = &self.net {
-            if host.joined() > 0 {
-                self.announce("OTHERS HAVE JOINED YOUR GAME");
-                return None;
-            }
-        }
-        if !game.map.eq_ignore_ascii_case(&self.map_name) {
-            let map = self.map_path.with_file_name(format!("{}.map", game.map));
-            if !map.exists() {
-                self.announce(&format!("YOU DON'T HAVE {}", game.map.to_uppercase()));
-                return None;
-            }
-            return Some(Relaunch {
-                map,
-                join: game.address.to_string(),
-            });
-        }
-        self.connect(&game);
-        None
-    }
-
-    /// Join a game at a known address (H2_JOIN, or after switching maps).
+    /// Join a game at a known address on the loaded map (H2_JOIN).
     pub(crate) fn join_address(&mut self, address: &str) {
         let Ok(address) = address.parse() else {
             println!("lan: bad address {address}");
             return;
         };
         let game = LanGame::at(address, &self.map_name);
-        self.connect(&game);
+        self.begin_join(&game);
     }
 
-    fn connect(&mut self, game: &LanGame) {
+    pub(crate) fn connect(&mut self, game: &LanGame) {
         // Stop hosting first so no one joins us meanwhile.
         self.net = Net::Offline;
         match Client::connect(game.address, &self.game, &self.map_name, self.locals.len()) {
@@ -311,8 +250,7 @@ impl App {
             }
             Err(e) => {
                 println!("lan: couldn't reach {}: {e}", game.address);
-                self.announce(&format!("COULDN'T REACH {}", game.computer.to_uppercase()));
-                self.start_hosting();
+                self.drop_out(format!("COULDN'T REACH {}", game.computer.to_uppercase()));
             }
         }
     }
@@ -325,15 +263,7 @@ impl App {
                 computer,
                 ..
             } => Some(format!("JOINING {}...", computer.to_uppercase())),
-            Net::Joined { .. } => None,
-            Net::Hosting(host) if host.joined() > 0 => None,
-            _ => self.lan_games.first().map(|g| {
-                format!(
-                    "{} IS HOSTING {} ON THE NETWORK: PRESS J TO JOIN",
-                    g.computer.to_uppercase(),
-                    g.map.to_uppercase()
-                )
-            }),
+            _ => None,
         }
     }
 }

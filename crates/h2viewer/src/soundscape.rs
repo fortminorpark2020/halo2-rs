@@ -29,6 +29,8 @@ const ANNOUNCER_QUEUE: usize = 4;
 /// Pause between announcer lines, seconds.
 const ANNOUNCER_GAP: f32 = 0.15;
 /// The announcer speaks up over the fighting.
+/// Menu sounds, over the music.
+const UI_VOLUME: f32 = 1.6;
 const ANNOUNCER_VOLUME: f32 = 1.4;
 /// The respawn countdown ticks over its last seconds.
 const RESPAWN_TICKS: u32 = 3;
@@ -97,6 +99,31 @@ impl Soundscape {
             announced_winner: false,
             respawn_ticks: Vec::new(),
         }
+    }
+
+    /// Silence everything and start afresh (a new game, or the menus).
+    pub fn reset(&mut self) {
+        self.audio.stop_all();
+        self.players.clear();
+        self.shields.clear();
+        self.announcer.clear();
+        self.speaking = 0.0;
+        self.announced_start = false;
+        self.announced_winner = false;
+        self.respawn_ticks.clear();
+    }
+
+    /// A menu sound.
+    pub fn play_ui(&mut self, scene: &Scene, sound: crate::menu::Sound) {
+        use crate::menu::Sound;
+        let ui = scene.game_sounds.ui;
+        let s = match sound {
+            Sound::Cursor => ui.cursor,
+            Sound::Forward => ui.forward,
+            Sound::Back => ui.back,
+            Sound::Advance => ui.advance,
+        };
+        self.play_flat(scene, s, UI_VOLUME);
     }
 
     /// A sound with no place in the world (interface, announcer).

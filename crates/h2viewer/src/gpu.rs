@@ -92,6 +92,26 @@ pub struct Frame<'a> {
     pub hud: &'a [HudBatch],
 }
 
+impl<'a> Frame<'a> {
+    /// Only 2D drawing (menus, the loading screen) over the whole viewport.
+    pub fn overlay(viewport: [u32; 4], hud: &'a [HudBatch]) -> Frame<'a> {
+        Frame {
+            viewport,
+            posed: &[],
+            sky: None,
+            sky_proj: Mat4::IDENTITY,
+            view_proj: Mat4::IDENTITY,
+            camera: Vec3::ZERO,
+            world: &[],
+            sprites: &[],
+            view_model_proj: Mat4::IDENTITY,
+            view_models: &[],
+            view_sprites: &[],
+            hud,
+        }
+    }
+}
+
 /// How a mesh is lit (the uniform's `params.w`).
 const OBJECT: f32 = 0.0;
 const BAKED: f32 = 1.0;
@@ -361,6 +381,10 @@ pub struct Gpu {
     additive_pipeline: wgpu::RenderPipeline,
     sprite_pipeline: wgpu::RenderPipeline,
     hud_pipeline: wgpu::RenderPipeline,
+    material_layout: wgpu::BindGroupLayout,
+    texture_layout: wgpu::BindGroupLayout,
+    repeat: wgpu::Sampler,
+    clamp: wgpu::Sampler,
     uniforms: wgpu::Buffer,
     globals: wgpu::BindGroup,
     /// One bind group per (texture, lightmap) pair the meshes use.
@@ -522,6 +546,7 @@ fn blended(format: wgpu::TextureFormat) -> [Option<wgpu::ColorTargetState>; 1] {
 }
 
 impl Gpu {
+    /// Set up the device and pipelines, then upload `scene`.
     pub async fn new(
         window: Arc<Window>,
         scene: &Scene,
@@ -554,43 +579,6 @@ impl Gpu {
             .ok_or("surface not supported by this GPU")?;
         surface.configure(&device, &config);
 
-        let mut material_index = std::collections::HashMap::new();
-        let mut material_keys: Vec<(usize, usize)> = Vec::new();
-        let meshes: Vec<GpuMesh> = scene
-            .meshes
-            .iter()
-            .map(|m| GpuMesh {
-                vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("vertices"),
-                    contents: bytemuck::cast_slice(&m.vertices),
-                    // Skinned meshes are re-posed every frame.
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                }),
-                indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("indices"),
-                    contents: bytemuck::cast_slice(&m.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                }),
-                batches: m
-                    .batches
-                    .iter()
-                    .map(|b| {
-                        let key = (b.material, b.lightmap);
-                        let next = material_keys.len();
-                        let index = *material_index.entry(key).or_insert(next);
-                        if index == next {
-                            material_keys.push(key);
-                        }
-                        let blend = scene
-                            .materials
-                            .get(b.material)
-                            .map_or(Blend::Opaque, |m| m.blend);
-                        (index, b.first_index..b.first_index + b.index_count, blend)
-                    })
-                    .collect(),
-                shading: if m.baked_lighting { BAKED } else { OBJECT },
-            })
-            .collect();
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("draw uniforms"),
             size: SLOT * MAX_DRAWS,
@@ -683,59 +671,6 @@ impl Gpu {
                 },
             ],
         });
-        let views: Vec<wgpu::TextureView> = scene
-            .textures
-            .iter()
-            .map(|img| upload_view(&device, &queue, img, true))
-            .collect();
-        let materials = material_keys
-            .iter()
-            .map(|&(material, l)| {
-                let view = |i: usize| views.get(i).unwrap_or(&views[0]);
-                let mat = scene.materials.get(material).cloned().unwrap_or_default();
-                let params = MaterialParams::new(&mat);
-                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: bytemuck::bytes_of(&params),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    layout: &material_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(view(mat.texture)),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&repeat),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(view(l)),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::Sampler(&clamp),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::TextureView(view(mat.aux)),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 5,
-                            resource: buffer.as_entire_binding(),
-                        },
-                    ],
-                })
-            })
-            .collect();
-        let hud_textures = scene
-            .hud_textures
-            .iter()
-            .map(|img| upload_texture(&device, &queue, &texture_layout, &clamp, img, false))
-            .collect();
         let effects_texture = upload_texture(
             &device,
             &queue,
@@ -885,7 +820,7 @@ impl Gpu {
         });
 
         let depth = depth_view(&device, config.width, config.height);
-        Ok(Gpu {
+        let mut gpu = Gpu {
             surface,
             device,
             queue,
@@ -897,16 +832,123 @@ impl Gpu {
             additive_pipeline,
             sprite_pipeline,
             hud_pipeline,
+            material_layout,
+            texture_layout,
+            repeat,
+            clamp,
             uniforms,
             globals,
-            materials,
-            hud_textures,
+            materials: Vec::new(),
+            hud_textures: Vec::new(),
             effects_texture,
-            meshes,
+            meshes: Vec::new(),
             depth,
             staging: Vec::new(),
             view_size: (1.0, 1.0),
-        })
+        };
+        gpu.load_scene(scene);
+        Ok(gpu)
+    }
+
+    /// Upload a scene's meshes, materials and HUD art, replacing the last.
+    pub fn load_scene(&mut self, scene: &Scene) {
+        let device = &self.device;
+        let queue = &self.queue;
+        let (repeat, clamp) = (&self.repeat, &self.clamp);
+        let material_layout = &self.material_layout;
+        let mut material_index = std::collections::HashMap::new();
+        let mut material_keys: Vec<(usize, usize)> = Vec::new();
+        let meshes: Vec<GpuMesh> = scene
+            .meshes
+            .iter()
+            .map(|m| GpuMesh {
+                vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("vertices"),
+                    contents: bytemuck::cast_slice(&m.vertices),
+                    // Skinned meshes are re-posed every frame.
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                }),
+                indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("indices"),
+                    contents: bytemuck::cast_slice(&m.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                }),
+                batches: m
+                    .batches
+                    .iter()
+                    .map(|b| {
+                        let key = (b.material, b.lightmap);
+                        let next = material_keys.len();
+                        let index = *material_index.entry(key).or_insert(next);
+                        if index == next {
+                            material_keys.push(key);
+                        }
+                        let blend = scene
+                            .materials
+                            .get(b.material)
+                            .map_or(Blend::Opaque, |m| m.blend);
+                        (index, b.first_index..b.first_index + b.index_count, blend)
+                    })
+                    .collect(),
+                shading: if m.baked_lighting { BAKED } else { OBJECT },
+            })
+            .collect();
+        let views: Vec<wgpu::TextureView> = scene
+            .textures
+            .iter()
+            .map(|img| upload_view(device, queue, img, true))
+            .collect();
+        let materials = material_keys
+            .iter()
+            .map(|&(material, l)| {
+                let view = |i: usize| views.get(i).unwrap_or(&views[0]);
+                let mat = scene.materials.get(material).cloned().unwrap_or_default();
+                let params = MaterialParams::new(&mat);
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::bytes_of(&params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: material_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(view(mat.texture)),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(repeat),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(view(l)),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(clamp),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(view(mat.aux)),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: buffer.as_entire_binding(),
+                        },
+                    ],
+                })
+            })
+            .collect();
+        let hud_textures = scene
+            .hud_textures
+            .iter()
+            .map(|img| upload_texture(device, queue, &self.texture_layout, clamp, img, false))
+            .collect();
+        self.meshes = meshes;
+        self.materials = materials;
+        self.hud_textures = hud_textures;
     }
 
     pub fn size(&self) -> (f32, f32) {

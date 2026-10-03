@@ -21,16 +21,26 @@ install. No game files are included in this repository.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
-- `h2viewer`: the game: Halo 2's maps with their lighting, Spartans, weapons, HUD
-  and sounds, bots, splitscreen for up to four with controllers, and LAN play.
+- `h2viewer`: the game: Halo 2 style menus and lobby, Halo 2's maps with their
+  lighting, Spartans, weapons, HUD and sounds, bots, splitscreen for up to four
+  with controllers, and LAN play.
 
 ### h2viewer
 
-Double-click `h2viewer.exe` to open Lockout from `C:\Games\Halo 2 Project Cartographer\maps`
-(or drag any `.map` file onto it). You start on foot at a player spawn.
-Click in the window to look around with the mouse, WASD to move, Space to jump,
-Ctrl or C to crouch, Tab to switch between walking and flying (flying: Space / C up / down,
-Shift fast), Esc to release the mouse, Esc again to quit.
+Double-click `h2viewer.exe` to open Halo 2's menus over Lockout from
+`C:\Games\Halo 2 Project Cartographer\maps` (or drag any `.map` file onto it),
+with Halo 2's main menu music. Multiplayer opens the lobby: pick the map
+(every multiplayer map in the maps folder), score to win and number of bots,
+then Start Game. System Link lists games other PCs on the network are hosting.
+Menus work with the arrow keys or WASD, Enter and Esc, the mouse, or a
+controller (d-pad or stick, A, B).
+
+In a game, click in the window to look around with the mouse, WASD to move,
+Space to jump, Ctrl or C to crouch, hold Tab for the scoreboard, Esc for the
+pause menu (resume, end the game, quit). ` (backquote) switches between walking
+and flying (flying: Space / C up / down, Shift fast). When someone reaches the
+score to win, the game stops and the carnage report shows everyone's kills and
+deaths; Continue goes back to the lobby.
 
 Weapons: left mouse fires, right mouse or Z zooms, R reloads, F melees, Q or the
 mouse wheel switches weapon, G throws a grenade, X switches grenade type, E picks
@@ -41,21 +51,23 @@ stats, held by Master Chief's arms with the game's own first person animations
 
 Controllers use Halo 2's layout (left stick move, right stick look, RT fire,
 LT grenade, A jump, B melee, X reload / hold to pick up, Y switch weapon, click
-sticks to crouch and zoom). A on a new controller takes over player one; Start
-on another controller adds a splitscreen player (up to four); Back leaves.
+sticks to crouch and zoom, Start pauses, hold Back for the scoreboard). A on a
+new controller takes over player one; in the lobby, Start on another
+controller adds a splitscreen player (up to four) and Back takes them out
+again. Start on a new controller during a game drops them straight in.
 
 LAN: every game is open to other PCs on the same network (allow h2viewer through
-Windows Firewall when asked). When another PC is hosting, the screen says so;
-press J to join it. If that game is on another map, h2viewer restarts on that
-map and joins. The host runs the game and its bots; if the host quits, the
-joined PC carries on alone with bots.
+Windows Firewall when asked); System Link lists them and joins the one you
+pick, loading its map first if it's another one. The host runs the game and its
+bots; if the host leaves, the joined PCs go back to System Link.
 
 Sound: weapons, reloads, grenades, footsteps, landings, shield recharge and the
 low shield alarm play from the game's own sound files, placed left or right and
 fading with distance (each splitscreen player hears through their own view).
 The announcer calls the game type, multi-kills (Double Kill to Killimanjaro),
 killing sprees, taking, losing and tying the lead, suicides and game over, as
-Halo 2's multiplayer globals pair them.
+Halo 2's multiplayer globals pair them. The menus have Halo 2's own music and
+menu sounds.
 `H2_MUTE=1` turns sound off; `H2_AUDIO_WAV=out.wav` records the mix to a file
 instead of the speakers.
 
@@ -88,7 +100,8 @@ Multiplayer maps only store the tags unique to them; the rest live in
 1. Map file reader (done)
 2. Fly-camera level viewer (done, with lightmaps, scenery and skies)
 3. Spartan movement, collision, weapons with first person animations (done)
-4. Splitscreen and LAN multiplayer (done)
+4. Splitscreen and LAN multiplayer (done), menus and lobby (done), more game
+   types (next)
 5. Matchmaking, 1-50 ranks, parties
 6. Campaign and AI
 

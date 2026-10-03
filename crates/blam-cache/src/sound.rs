@@ -187,7 +187,8 @@ impl SoundReader {
             for (pointer, size) in chunks {
                 data.extend(set.read_resource(src, pointer, size)?);
             }
-            if codec == Codec::Wma {
+            // Music marked as ADPCM can still be WMA: the data says which.
+            if codec == Codec::Wma || data.starts_with(&MEDIATYPE_AUDIO) {
                 // The stream says how many channels it has (the tag may not).
                 match decode_wma(&data) {
                     Ok((samples, ch, rate)) => {

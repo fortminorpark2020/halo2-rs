@@ -43,12 +43,18 @@ struct Voice {
     step: f64,
     gain: [f32; 2],
     looping: bool,
+    /// Clips to go on with when this one ends, one picked at random each
+    /// time (music).
+    next: Vec<Arc<Clip>>,
+    /// Gain change per output frame; fading out ends the voice.
+    fade: f32,
 }
 
 #[derive(Default)]
 struct Mixer {
     voices: Vec<Voice>,
     rate: u32,
+    rng: u32,
 }
 
 impl Mixer {
@@ -56,19 +62,34 @@ impl Mixer {
     fn mix(&mut self, out: &mut [f32], channels: usize) {
         out.fill(0.0);
         let frames = out.len() / channels.max(1);
+        let rng = &mut self.rng;
         self.voices.retain_mut(|v| {
-            let total = v.clip.frames();
-            if total < 2 {
-                return false;
-            }
             for f in 0..frames {
+                let mut total = v.clip.frames();
+                if total < 2 {
+                    return false;
+                }
                 let mut i = v.position as usize;
                 if i + 1 >= total {
-                    if !v.looping {
+                    v.position -= (total - 1) as f64;
+                    if !v.next.is_empty() {
+                        *rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                        let k = (*rng >> 16) as usize % v.next.len();
+                        v.clip = v.next[k].clone();
+                        total = v.clip.frames();
+                    } else if !v.looping {
                         return false;
                     }
-                    v.position -= (total - 1) as f64;
                     i = v.position as usize;
+                    if i + 1 >= total {
+                        return false;
+                    }
+                }
+                if v.fade != 0.0 {
+                    v.gain = v.gain.map(|g| (g + v.fade).max(0.0));
+                    if v.fade < 0.0 && v.gain[0].max(v.gain[1]) <= 0.0 {
+                        return false;
+                    }
                 }
                 let t = (v.position - i as f64) as f32;
                 let left = v.clip.at(i, 0) + (v.clip.at(i + 1, 0) - v.clip.at(i, 0)) * t;
@@ -268,8 +289,40 @@ impl Audio {
             step: clip.rate as f64 / rate * pitch as f64,
             gain,
             looping,
+            next: Vec::new(),
+            fade: 0.0,
         });
         id
+    }
+
+    /// Music: `first`, then one of `then` after another for as long as it
+    /// plays (all at the same sample rate).
+    pub fn play_music(&mut self, first: &Arc<Clip>, then: &[Arc<Clip>], gain: f32) -> u64 {
+        let id = self.play(first, [gain, gain], 1.0, false);
+        if let Ok(mut m) = self.mixer.lock() {
+            if let Some(v) = m.voices.iter_mut().find(|v| v.id == id) {
+                v.next = then.to_vec();
+            }
+        }
+        id
+    }
+
+    /// Fade a voice out over `seconds`, then stop it.
+    pub fn fade_out(&mut self, id: u64, seconds: f32) {
+        if let Ok(mut m) = self.mixer.lock() {
+            let rate = m.rate.max(1) as f32;
+            if let Some(v) = m.voices.iter_mut().find(|v| v.id == id) {
+                let level = v.gain[0].max(v.gain[1]);
+                v.fade = -level / (seconds.max(0.01) * rate);
+            }
+        }
+    }
+
+    /// Stop everything playing.
+    pub fn stop_all(&mut self) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.voices.clear();
+        }
     }
 
     pub fn stop(&mut self, id: u64) {
@@ -292,6 +345,7 @@ mod tests {
         let mut m = Mixer {
             voices: Vec::new(),
             rate: 44100,
+            rng: 1,
         };
         let clip = Arc::new(Clip {
             samples: vec![16384; 100],
@@ -305,6 +359,8 @@ mod tests {
             step: 0.5,
             gain: [1.0, 0.5],
             looping: false,
+            next: Vec::new(),
+            fade: 0.0,
         });
         let mut out = vec![0.0; 2 * 150];
         m.mix(&mut out, 2);
@@ -314,5 +370,41 @@ mod tests {
         assert_eq!(m.voices.len(), 1);
         m.mix(&mut out, 2);
         assert!(m.voices.is_empty());
+    }
+
+    #[test]
+    fn music_goes_on_to_the_next_clip_and_fades_out() {
+        let mut m = Mixer {
+            voices: Vec::new(),
+            rate: 100,
+            rng: 1,
+        };
+        let clip = |v: i16| {
+            Arc::new(Clip {
+                samples: vec![v; 10],
+                channels: 1,
+                rate: 100,
+            })
+        };
+        m.voices.push(Voice {
+            id: 1,
+            clip: clip(8192),
+            position: 0.0,
+            step: 1.0,
+            gain: [1.0, 1.0],
+            looping: false,
+            next: vec![clip(16384)],
+            fade: 0.0,
+        });
+        let mut out = vec![0.0; 2 * 30];
+        m.mix(&mut out, 2);
+        // The first clip, then the next one without a gap.
+        assert!((out[0] - 0.25 * MASTER).abs() < 1e-4);
+        assert!((out[2 * 20] - 0.5 * MASTER).abs() < 1e-4);
+        assert_eq!(m.voices.len(), 1);
+        m.voices[0].fade = -0.1;
+        m.mix(&mut out, 2);
+        assert!(m.voices.is_empty());
+        assert_eq!(out[2 * 29], 0.0);
     }
 }
