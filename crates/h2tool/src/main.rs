@@ -46,6 +46,7 @@ fn main() -> ExitCode {
         Some("shader") if args.len() >= 3 => shader_dump(&args[1], &args[2]),
         Some("lightmap") if args.len() >= 2 => lightmap_dump(&args[1]),
         Some("objects") if args.len() >= 2 => objects(&args[1]),
+        Some("bitmap") if args.len() >= 4 => bitmap_png(&args[1], &args[2], &args[3]),
         Some("hex") if args.len() >= 3 => hex(&args[1], &args[2], args.get(3).map(String::as_str)),
         Some("model") if args.len() >= 3 => {
             model(&args[1], &args[2], args.get(3).map(String::as_str))
@@ -193,6 +194,27 @@ fn level_mesh(path: &str) -> Result<blam_cache::geometry::Mesh, Box<dyn std::err
 
 fn obj(path: &str, out: &str) -> Res {
     std::fs::write(out, level_mesh(path)?.to_obj())?;
+    Ok(())
+}
+
+/// Write a bitmap's first image as PNGs: colour, then each channel alone.
+fn bitmap_png(path: &str, name: &str, out: &str) -> Res {
+    use blam_cache::{bitmap, MapSet};
+    let mut set = MapSet::open(path)?;
+    let tag = find_tag(&set, "bitm", name).ok_or("no bitmap with that name")?;
+    let img = bitmap::read_bitmap(&mut set, tag.datum)?;
+    let (w, h) = (img.width as usize, img.height as usize);
+    let rgb: Vec<u8> = img
+        .rgba
+        .chunks(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    render::write_png(&format!("{out}.png"), &rgb, w, h)?;
+    for (c, label) in ["r", "g", "b", "a"].iter().enumerate() {
+        let ch: Vec<u8> = img.rgba.chunks(4).flat_map(|p| [p[c]; 3]).collect();
+        render::write_png(&format!("{out}_{label}.png"), &ch, w, h)?;
+    }
+    println!("{} {w}x{h} -> {out}.png and {out}_[rgba].png", tag.name);
     Ok(())
 }
 
@@ -559,6 +581,21 @@ fn jmad(path: &str, name: &str) -> Res {
     let g = animation::read_animation_graph(&mut set, tag.datum)?;
     for (i, n) in g.nodes.iter().enumerate() {
         println!("  node {i:>2} {:<20} parent {:>3}", n.name, n.parent);
+    }
+    // H2_TRACK=<anim index> prints node 0's translation and rotation per frame.
+    if let Some(k) = std::env::var("H2_TRACK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        if let Some(a) = g.animations.get(k) {
+            println!("{} ({} frames)", a.name, a.frame_count);
+            for f in 0..a.frame_count {
+                let t = a.translations[0].as_ref().map(|t| t.sample(f as f32));
+                let r = a.rotations[0].as_ref().map(|t| t.sample(f as f32));
+                println!("  frame {f:>3} pelvis t {t:.3?} r {r:.3?}");
+            }
+        }
+        return Ok(());
     }
     for (i, a) in g.animations.iter().enumerate() {
         if std::env::var("H2_NODES").is_ok() {

@@ -27,6 +27,7 @@ const MATERIAL_SIZE: usize = 0x20;
 /// fields; the model reference sits at the same place in all of them.
 const OBJECT_MODEL: usize = 0x34;
 const HLMT_RENDER_MODEL: usize = 0x0;
+const HLMT_ANIMATIONS: usize = 0x10;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
@@ -103,19 +104,33 @@ impl Bounds {
     }
 }
 
-/// The render model of an object tag, via its `hlmt`.
-pub fn object_render_model(set: &mut MapSet, object: DatumIndex) -> Result<DatumIndex> {
+/// A tag reference in an object's `hlmt` (render model, animations...).
+fn object_model_ref(set: &mut MapSet, object: DatumIndex, field: usize) -> Result<DatumIndex> {
     let (_, _, obj) = set.tag_data(object)?;
     let hlmt = DatumIndex(u32_at(&obj, OBJECT_MODEL + 4));
     if hlmt == DatumIndex::NONE {
         return Err(Error::Corrupt("object has no model".into()));
     }
     let (_, _, model) = set.tag_data(hlmt)?;
-    let mode = DatumIndex(u32_at(&model, HLMT_RENDER_MODEL + 4));
+    Ok(DatumIndex(u32_at(&model, field + 4)))
+}
+
+/// The render model of an object tag, via its `hlmt`.
+pub fn object_render_model(set: &mut MapSet, object: DatumIndex) -> Result<DatumIndex> {
+    let mode = object_model_ref(set, object, HLMT_RENDER_MODEL)?;
     if mode == DatumIndex::NONE {
         return Err(Error::Corrupt("model has no render model".into()));
     }
     Ok(mode)
+}
+
+/// The animation graph (`jmad`) of an object tag, via its `hlmt`.
+pub fn object_animations(set: &mut MapSet, object: DatumIndex) -> Result<DatumIndex> {
+    let jmad = object_model_ref(set, object, HLMT_ANIMATIONS)?;
+    if jmad == DatumIndex::NONE {
+        return Err(Error::Corrupt("model has no animations".into()));
+    }
+    Ok(jmad)
 }
 
 /// The render model of a `sky ` tag.

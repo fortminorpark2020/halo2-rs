@@ -20,6 +20,8 @@ struct DrawUniforms {
     params: [f32; 4],
     /// Objects: the level's baked light where they stand; w = 1 when set.
     light: [f32; 4],
+    /// Armour colours (primary, secondary) for change-colour surfaces.
+    colors: [[f32; 4]; 2],
 }
 
 const SLOT: u64 = 256;
@@ -61,6 +63,8 @@ pub struct DrawCall {
     pub model: Mat4,
     /// Baked level light for an object (see `probe::LevelLight::at`).
     pub light: Option<[f32; 3]>,
+    /// A player's primary and secondary armour colours.
+    pub colors: Option<[[f32; 3]; 2]>,
 }
 
 pub struct HudBatch {
@@ -109,6 +113,7 @@ impl MaterialParams {
             AuxKind::None => 0.0,
             AuxKind::Illum => 1.0,
             AuxKind::Mask => 2.0,
+            AuxKind::ChangeColor => 3.0,
         };
         let [r, g, b] = m.illum_color;
         let [tr, tg, tb] = m.tint;
@@ -135,6 +140,8 @@ struct U {
     camera: vec4<f32>,
     params: vec4<f32>,
     light: vec4<f32>,
+    primary: vec4<f32>,
+    secondary: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(1) @binding(0) var tex: texture_2d<f32>;
@@ -178,7 +185,8 @@ struct M {
     illum: vec4<f32>,
     tint: vec4<f32>,
     // x: 0 opaque, 1 alpha tested, 2 alpha blended, 3 additive.
-    // y: aux texture is 0 unused, 1 a glow map, 2 an opacity mask.
+    // y: aux texture is 0 unused, 1 a glow map, 2 an opacity mask,
+    //    3 a change-colour map.
     mode: vec4<f32>,
 };
 @group(1) @binding(4) var aux: texture_2d<f32>;
@@ -198,7 +206,13 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         discard;
     }
     // Tag colours are in gamma space.
-    let albedo = c.rgb * pow(m.tint.rgb, vec3<f32>(2.2));
+    var albedo = c.rgb * pow(m.tint.rgb, vec3<f32>(2.2));
+    if (m.mode.y > 2.5 && u.primary.a > 0.5) {
+        // Armour colours where the change-colour map says.
+        let p = pow(u.primary.rgb, vec3<f32>(2.2));
+        let s = pow(u.secondary.rgb, vec3<f32>(2.2));
+        albedo *= mix(vec3<f32>(1.0), p, a.r) * mix(vec3<f32>(1.0), s, a.g);
+    }
     var light: vec3<f32>;
     if (u.params.w > 1.5 || m.mode.x > 2.5) {
         // Skies and additive glows carry their own light.
@@ -905,16 +919,18 @@ impl Gpu {
         self.depth = depth_view(&self.device, w, h);
     }
 
-    /// Queue a uniform slot; returns its dynamic offset.
+    /// Queue a uniform slot; returns its dynamic offset. `object` supplies
+    /// an object's light and armour colours.
     fn slot(
         &mut self,
         proj: Mat4,
         model: Mat4,
         camera: Vec3,
-        fog: f32,
-        shading: f32,
-        light: Option<[f32; 3]>,
+        [fog, shading]: [f32; 2],
+        object: Option<&DrawCall>,
     ) -> Option<u32> {
+        let light = object.and_then(|d| d.light);
+        let colors = object.and_then(|d| d.colors);
         let offset = self.staging.len() as u64;
         if offset / SLOT >= MAX_DRAWS {
             return None;
@@ -926,6 +942,7 @@ impl Gpu {
             camera: camera.extend(1.0).into(),
             params: [fog, w, h, shading],
             light: light.map_or([0.0; 4], |[r, g, b]| [r, g, b, 1.0]),
+            colors: colors.map_or([[0.0; 4]; 2], |c| c.map(|[r, g, b]| [r, g, b, 1.0])),
         };
         self.staging.extend_from_slice(bytemuck::bytes_of(&u));
         self.staging.resize((offset + SLOT) as usize, 0);
@@ -968,26 +985,26 @@ impl Gpu {
         let sky = f.sky.as_ref().and_then(|d| {
             Some((
                 d.mesh,
-                self.slot(f.sky_proj, d.model, cam, 0.0, UNLIT, None)?,
+                self.slot(f.sky_proj, d.model, cam, [0.0, UNLIT], None)?,
             ))
         });
         let mut world = Vec::new();
         for d in f.world {
             let shading = self.meshes.get(d.mesh).map_or(OBJECT, |m| m.shading);
-            if let Some(o) = self.slot(f.view_proj, d.model, cam, 1.0, shading, d.light) {
+            if let Some(o) = self.slot(f.view_proj, d.model, cam, [1.0, shading], Some(d)) {
                 world.push((d.mesh, o));
             }
         }
-        let sprites_slot = self.slot(f.view_proj, Mat4::IDENTITY, cam, 0.0, OBJECT, None);
+        let sprites_slot = self.slot(f.view_proj, Mat4::IDENTITY, cam, [0.0, OBJECT], None);
         let mut views = Vec::new();
         for d in f.view_models {
-            if let Some(o) = self.slot(f.view_model_proj, d.model, cam, 0.0, OBJECT, d.light) {
+            if let Some(o) = self.slot(f.view_model_proj, d.model, cam, [0.0, OBJECT], Some(d)) {
                 views.push((d.mesh, o));
             }
         }
         let view_sprites_slot =
-            self.slot(f.view_model_proj, Mat4::IDENTITY, cam, 0.0, OBJECT, None);
-        let hud_slot = self.slot(Mat4::IDENTITY, Mat4::IDENTITY, cam, 0.0, OBJECT, None);
+            self.slot(f.view_model_proj, Mat4::IDENTITY, cam, [0.0, OBJECT], None);
+        let hud_slot = self.slot(Mat4::IDENTITY, Mat4::IDENTITY, cam, [0.0, OBJECT], None);
         self.queue.write_buffer(&self.uniforms, 0, &self.staging);
 
         let sprites = self.vertex_buffer(f.sprites);

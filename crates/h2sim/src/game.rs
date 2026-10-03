@@ -980,11 +980,11 @@ impl Game {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use blam_cache::weapon::TriggerBehavior;
 
-    fn floor() -> World {
+    pub(crate) fn floor() -> World {
         let s = 50.0;
         World::new(
             &[[-s, -s, 0.0], [s, -s, 0.0], [s, s, 0.0], [-s, s, 0.0]],
@@ -1021,7 +1021,7 @@ mod tests {
         }
     }
 
-    fn game() -> Game {
+    pub(crate) fn game() -> Game {
         let rules = Rules {
             starting_weapons: vec![0],
             headshot_weapons: vec![0],

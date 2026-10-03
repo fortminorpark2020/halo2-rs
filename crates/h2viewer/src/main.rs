@@ -10,6 +10,7 @@
 //! walking / flying (fly: Space/C up/down, Shift fast), Esc releases the
 //! mouse (Esc again quits).
 
+mod body;
 mod camera;
 mod effects;
 mod font;
@@ -21,12 +22,13 @@ mod scene;
 
 use blam_cache::geometry::Mesh;
 use blam_cache::PlayerSpawn;
+use body::{BodyAnimator, BodyInput};
 use camera::FlyCamera;
 use effects::Effects;
 use glam::{Mat4, Vec3};
 use gpu::{hud_mode, DrawCall, Frame};
 use h2sim::game::{Event, GrenadeKind, HeldWeapon, Spartan, TICK};
-use h2sim::{Command, Game, ItemKind, ItemSpawn, Rules, WeaponState, World};
+use h2sim::{Bot, Command, Game, ItemKind, ItemSpawn, NavGraph, Rules, WeaponState, World};
 use hud::HudBuilder;
 use scene::{Scene, WeaponAssets};
 use std::collections::HashSet;
@@ -122,6 +124,28 @@ fn smoothstep(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
+/// Free-for-all armour colours, in player order: Halo 2's red, blue, green,
+/// orange, purple, gold, brown, pink, white and black.
+const ARMOR_COLORS: [[f32; 3]; 10] = [
+    [0.62, 0.10, 0.10],
+    [0.15, 0.27, 0.65],
+    [0.22, 0.45, 0.16],
+    [0.88, 0.45, 0.12],
+    [0.40, 0.20, 0.58],
+    [0.82, 0.64, 0.16],
+    [0.40, 0.27, 0.15],
+    [0.92, 0.52, 0.64],
+    [0.85, 0.85, 0.85],
+    [0.13, 0.13, 0.14],
+];
+
+/// A player's primary and secondary armour colours.
+fn armor_colors(player: usize) -> [[f32; 3]; 2] {
+    let primary = ARMOR_COLORS[player % ARMOR_COLORS.len()];
+    let secondary = ARMOR_COLORS[(player + 8) % ARMOR_COLORS.len()];
+    [primary, secondary]
+}
+
 /// "battle_rifle" -> "BATTLE RIFLE".
 fn display_name(name: &str) -> String {
     name.replace('_', " ").to_uppercase()
@@ -207,6 +231,9 @@ struct App {
     game: Game,
     /// The player at this keyboard and mouse.
     me: usize,
+    /// Computer players and the player each one drives.
+    bots: Vec<(usize, Bot)>,
+    nav: NavGraph,
     walking: bool,
     title: String,
     window: Option<Arc<Window>>,
@@ -232,6 +259,19 @@ struct App {
     shots_fired: usize,
     /// Kill feed and pickups, newest last, with seconds left on screen.
     messages: Vec<(String, f32)>,
+    /// Third person animation of each player.
+    bodies: Vec<BodyAnimator>,
+    /// Actions players started this frame (reload, melee...), for their bodies.
+    body_actions: Vec<(usize, &'static str)>,
+    /// Each player's posed body to draw: skinning matrices and the object
+    /// matrix, and where their weapon goes.
+    body_poses: Vec<Option<BodyPose>>,
+}
+
+struct BodyPose {
+    skin: Vec<Mat4>,
+    object: Mat4,
+    weapon: Mat4,
 }
 
 impl App {
@@ -284,6 +324,15 @@ impl App {
         println!("weapon: {}", def.name);
     }
 
+    fn add_bot(&mut self) {
+        if self.game.players.len() >= scene::MAX_BODIES {
+            return;
+        }
+        let i = self.game.add_player();
+        self.bots.push((i, Bot::new(i as u32 * 7919 + 13)));
+        self.message(format!("{} JOINED", player_name(self.me, i)));
+    }
+
     /// This tick's controls from the keyboard and mouse.
     fn command(&self) -> Command {
         let held = |k: KeyCode| self.keys.contains(&k);
@@ -326,6 +375,9 @@ impl App {
             self.pending -= TICK;
             let mut commands = vec![Command::default(); self.game.players.len()];
             commands[self.me] = self.command();
+            for (i, bot) in &mut self.bots {
+                commands[*i] = bot.think(&self.game, &self.world, &self.nav, *i);
+            }
             self.game.step(&self.world, &commands);
             if !ticked {
                 self.taps = Taps::default();
@@ -349,8 +401,8 @@ impl App {
                 let back = -self.camera.forward();
                 let dist = self
                     .world
-                    .raycast(centre, back, 2.0)
-                    .map_or(2.0, |t| (t - 0.1).max(0.2));
+                    .raycast(centre, back, 2.5)
+                    .map_or(2.5, |t| (t - 0.2).max(0.2));
                 self.camera.position = centre + back * dist;
             }
         }
@@ -358,6 +410,7 @@ impl App {
             m.1 -= dt;
         }
         self.messages.retain(|m| m.1 > 0.0);
+        self.animate_bodies(dt);
         self.animate_view_model(dt, view);
         self.effects.update(dt);
     }
@@ -373,6 +426,7 @@ impl App {
                     ..
                 } => {
                     view.fired |= player == me;
+                    self.body_actions.push((player, "fire_1"));
                     match (hit, hit_player) {
                         (Some((p, _)), Some(j)) => {
                             let shielded = self.game.players[j].shield > 0.0;
@@ -382,16 +436,34 @@ impl App {
                         _ => {}
                     }
                 }
-                Event::Reloaded { player, empty } if player == me => view.reload = Some(empty),
-                Event::Switched { player } if player == me => view.switched = true,
-                Event::Melee { player, .. } if player == me => view.melee = true,
-                Event::Thrown { player } if player == me => view.thrown = true,
+                Event::Reloaded { player, empty } => {
+                    self.body_actions.push((player, "reload_1"));
+                    if player == me {
+                        view.reload = Some(empty);
+                    }
+                }
+                Event::Switched { player } => {
+                    self.body_actions.push((player, "ready"));
+                    view.switched |= player == me;
+                }
+                Event::Melee { player, .. } => {
+                    self.body_actions.push((player, "melee_strike_1"));
+                    view.melee |= player == me;
+                }
+                Event::Thrown { player } => {
+                    self.body_actions.push((player, "throw_grenade"));
+                    view.thrown |= player == me;
+                }
                 Event::Exploded { kind, position } => {
                     self.effects
                         .explosion(position, kind == GrenadeKind::Plasma);
                 }
                 Event::Killed { killer, victim, .. } => {
                     self.message(kill_message(me, killer, victim));
+                    if victim == me {
+                        // The death camera starts behind and above the body.
+                        self.camera.pitch = -0.6;
+                    }
                 }
                 Event::Spawned { player } if player == me => {
                     let p = &self.game.players[me];
@@ -415,6 +487,50 @@ impl App {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Pose every Spartan seen in third person: everyone but you, unless
+    /// you are flying around or dead.
+    fn animate_bodies(&mut self, dt: f32) {
+        let actions = std::mem::take(&mut self.body_actions);
+        let Some(body) = &self.scene.body else {
+            return;
+        };
+        let rig = &body.rig;
+        let n = self.game.players.len();
+        self.bodies.resize_with(n, BodyAnimator::default);
+        self.body_poses.resize_with(n, || None);
+        for (i, p) in self.game.players.iter().enumerate() {
+            let style = p
+                .held()
+                .and_then(|h| self.scene.weapons.get(h.weapon))
+                .map_or(("rifle", "any"), |w| body::weapon_style(&w.def.name));
+            let (s, c) = p.yaw.sin_cos();
+            let v = p.body.velocity.truncate();
+            let input = BodyInput {
+                velocity: glam::vec2(v.x * c + v.y * s, v.y * c - v.x * s),
+                grounded: p.body.grounded,
+                crouching: p.body.crouch > 0.5,
+                alive: p.alive,
+                style,
+            };
+            for &(_, what) in actions.iter().filter(|a| a.0 == i) {
+                // Shots are overlays, not drawn yet.
+                if what != "fire_1" {
+                    self.bodies[i].act(rig, &input, what);
+                }
+            }
+            let pose = self.bodies[i].update(rig, &input, dt);
+            let first_person = i == self.me && self.walking && p.alive;
+            self.body_poses[i] = (!first_person && i < scene::MAX_BODIES).then(|| {
+                let world = rig.world(&pose);
+                BodyPose {
+                    skin: rig.skin_matrices(&world),
+                    object: Mat4::from_translation(p.body.position) * Mat4::from_rotation_z(p.yaw),
+                    weapon: rig.weapon_frame(&world),
+                }
+            });
         }
     }
 
@@ -589,14 +705,27 @@ impl App {
                 color,
             );
         }
-        let score = format!("{}", me.kills);
+        // Your score, and the best of everyone else's under it.
+        let best_other = (0..self.game.players.len())
+            .filter(|&i| i != self.me)
+            .map(|i| self.game.players[i].kills)
+            .max();
         hb.text(
             font,
-            [w - 40.0 * s, h - 40.0 * s],
-            16.0 * s,
-            &score,
+            [w - 40.0 * s, h - 52.0 * s],
+            14.0 * s,
+            &me.kills.to_string(),
             hud::BLUE,
         );
+        if let Some(k) = best_other {
+            hb.text(
+                font,
+                [w - 40.0 * s, h - 34.0 * s],
+                10.0 * s,
+                &k.to_string(),
+                hud::DIM_BLUE,
+            );
+        }
         if let Some(winner) = self.game.winner {
             let text = if winner == self.me {
                 "YOU WIN".to_string()
@@ -695,12 +824,14 @@ impl App {
             mesh: 0,
             model: Mat4::IDENTITY,
             light: None,
+            colors: None,
         }];
         for o in &scene.objects {
             world.push(DrawCall {
                 mesh: o.mesh,
                 model: o.transform,
                 light: o.light,
+                colors: None,
             });
         }
         for (item, timer) in scene.items.iter().zip(&self.game.item_timers) {
@@ -709,6 +840,7 @@ impl App {
                     mesh,
                     model: item.transform,
                     light: item.light,
+                    colors: None,
                 });
             }
         }
@@ -718,6 +850,7 @@ impl App {
                     mesh,
                     model: scene::placement_matrix(d.position.into(), [d.yaw, 0.0, FRAC_PI_2], 1.0),
                     light: light_at(d.position),
+                    colors: None,
                 });
             }
         }
@@ -734,6 +867,7 @@ impl App {
                     mesh,
                     model: Mat4::from_translation(g.position) * Mat4::from_rotation_y(spin),
                     light: light_at(g.position),
+                    colors: None,
                 });
             }
         }
@@ -747,7 +881,37 @@ impl App {
         let magnification = self.magnification();
         let view_proj = self.camera.view_proj(aspect, magnification);
         let (_, r, u) = self.camera.basis();
-        let world = self.world_draws();
+        let mut world = self.world_draws();
+        let mut posed = Vec::new();
+        if let Some(body) = &self.scene.body {
+            for (i, pose) in self.body_poses.iter().enumerate() {
+                let Some(pose) = pose else { continue };
+                let p = &self.game.players[i];
+                let light = self
+                    .scene
+                    .level_light
+                    .at(&self.scene.textures, p.body.position + Vec3::Z * 0.2);
+                posed.push((body.meshes[i], body.rig.skin.pose(&pose.skin)));
+                world.push(DrawCall {
+                    mesh: body.meshes[i],
+                    model: pose.object,
+                    light,
+                    colors: Some(armor_colors(i)),
+                });
+                let weapon = p.held().filter(|_| p.alive);
+                if let Some(mesh) = weapon
+                    .and_then(|h| self.scene.weapons.get(h.weapon))
+                    .and_then(|w| w.world_mesh)
+                {
+                    world.push(DrawCall {
+                        mesh,
+                        model: pose.object * pose.weapon,
+                        light,
+                        colors: None,
+                    });
+                }
+            }
+        }
         // The first person gun and arms take the light where the player stands.
         let held_light = self
             .scene
@@ -756,7 +920,6 @@ impl App {
         let sprites = self.effects.sprites(r, u);
         let mut view_models = Vec::new();
         let mut view_sprites = Vec::new();
-        let mut posed = Vec::new();
         let alive = self.me().alive;
         if let Some((weapon, state)) = self.current().filter(|_| alive) {
             if let (Some(mesh), 0) = (weapon.view_mesh, state.zoom) {
@@ -777,6 +940,7 @@ impl App {
                             mesh: arms.mesh,
                             model: frame,
                             light: held_light,
+                            colors: Some(armor_colors(self.me)),
                         });
                         let muzzle = rig
                             .gun_node_world(&world, weapon.muzzle_node)
@@ -797,6 +961,7 @@ impl App {
                     mesh,
                     model,
                     light: held_light,
+                    colors: None,
                 });
                 if state.since_shot < 0.05 {
                     let muzzle = muzzle_frame.transform_point3(Vec3::from(weapon.muzzle));
@@ -820,6 +985,7 @@ impl App {
                 mesh,
                 model: Mat4::IDENTITY,
                 light: None,
+                colors: None,
             }),
             sky_proj: camera::projection(aspect, magnification, 1.0, 10000.0) * sky_view,
             view_proj,
@@ -966,6 +1132,7 @@ impl App {
             KeyCode::KeyR => self.taps.reload = true,
             KeyCode::KeyG => self.taps.throw_grenade = true,
             KeyCode::KeyX => self.taps.switch_grenade = true,
+            KeyCode::KeyB => self.add_bot(),
             KeyCode::Digit1
             | KeyCode::Digit2
             | KeyCode::Digit3
@@ -1063,6 +1230,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
     let eyes = (p.eye(), p.eye());
+    let mut nav_points: Vec<Vec3> = game.spawns.iter().map(|s| s.0).collect();
+    nav_points.extend(game.item_spawns.iter().map(|i| i.position));
+    let nav = NavGraph::build(&world, &nav_points);
+    println!(
+        "bot routes: {} points, {} links",
+        nav.points.len(),
+        nav.links.iter().map(Vec::len).sum::<usize>()
+    );
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -1071,6 +1246,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         world,
         game,
         me,
+        bots: Vec::new(),
+        nav,
         walking,
         title: format!(
             "Halo 2 Rust: {name} (click to play, WASD move, mouse fire/zoom, G grenade, E pick up, F melee, R reload, Q switch weapon, Esc release)"
@@ -1092,7 +1269,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         shown_weapon: None,
         shots_fired: 0,
         messages: Vec::new(),
+        bodies: Vec::new(),
+        body_actions: Vec::new(),
+        body_poses: Vec::new(),
     };
+    // Three computer opponents (H2_BOTS=<n> for another number).
+    let bots = std::env::var("H2_BOTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    for _ in 0..bots {
+        app.add_bot();
+    }
     // H2_WEAPON=<n> starts with another weapon in hand (for testing).
     if let Some(n) = std::env::var("H2_WEAPON").ok().and_then(|v| v.parse().ok()) {
         app.give_weapon(n);

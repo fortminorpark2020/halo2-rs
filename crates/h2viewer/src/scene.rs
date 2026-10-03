@@ -1,6 +1,7 @@
 //! CPU-side scene: meshes (level, weapons), their textures, HUD bitmaps and
 //! the gameplay data read from the map's tags.
 
+use crate::body::BodyRig;
 use crate::probe::LevelLight;
 use crate::rig::{FirstPersonRig, Skeleton, SkinnedMesh};
 use blam_cache::animation;
@@ -54,6 +55,8 @@ pub enum AuxKind {
     Illum,
     /// Opacity.
     Mask,
+    /// Where the player's armour colours go (red: primary, green: secondary).
+    ChangeColor,
 }
 
 /// How a surface is drawn: its textures and how it blends.
@@ -80,6 +83,7 @@ impl Material {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Batch {
     pub material: usize,
     /// Lightmap page texture (texture 0 when unused).
@@ -101,7 +105,7 @@ pub enum SectionLight {
 /// Light given to level geometry that has no baked lighting.
 const UNLIT: [f32; 4] = [0.5, 0.5, 0.5, 0.0];
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MeshData {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
@@ -265,6 +269,17 @@ pub struct GrenadeAssets {
     pub speed: Option<f32>,
 }
 
+/// How many Spartans can be on screen at once (each gets its own copy of the
+/// body mesh to pose).
+pub const MAX_BODIES: usize = 16;
+
+/// The multiplayer Spartan seen in third person.
+pub struct Body {
+    pub rig: BodyRig,
+    /// One copy of the mesh per Spartan on screen.
+    pub meshes: Vec<usize>,
+}
+
 /// Master Chief's first person arms.
 pub struct Arms {
     pub mesh: usize,
@@ -290,6 +305,7 @@ pub struct Scene {
     /// Weapons the player can switch between; the Battle Rifle first.
     pub weapons: Vec<WeaponAssets>,
     pub arms: Option<Arms>,
+    pub body: Option<Body>,
     /// The sky's model, drawn around the camera behind everything.
     pub sky: Option<usize>,
     /// Frag and plasma grenades: their models, and throw speed from the
@@ -387,6 +403,9 @@ impl Loader {
                 } else if let Some(b) = info.mask {
                     m.aux = self.bitmap_texture(b);
                     m.aux_kind = AuxKind::Mask;
+                } else if let Some(b) = info.change_color {
+                    m.aux = self.bitmap_texture(b);
+                    m.aux_kind = AuxKind::ChangeColor;
                 }
                 m
             }
@@ -627,6 +646,38 @@ impl Loader {
         }
     }
 
+    fn body(&mut self, meshes: &mut Vec<MeshData>) -> Option<Body> {
+        let bipd = self.find("bipd", "objects\\characters\\masterchief\\masterchief_mp")?;
+        let loaded = model::object_render_model(&mut self.set, bipd)
+            .and_then(|mode| model::read_render_model(&mut self.set, mode))
+            .and_then(|m| {
+                let jmad = model::object_animations(&mut self.set, bipd)?;
+                Ok((m, animation::read_animation_graph(&mut self.set, jmad)?))
+            });
+        let (m, graph) = match loaded {
+            Ok(x) => x,
+            Err(e) => {
+                println!("warning: Spartan model: {e}");
+                return None;
+            }
+        };
+        let mesh = self.model_mesh(&m);
+        let skin = SkinnedMesh::new(&mesh);
+        let first = meshes.len();
+        for _ in 0..MAX_BODIES {
+            meshes.push(mesh.clone());
+        }
+        Some(Body {
+            rig: BodyRig::new(
+                graph,
+                Skeleton::new(&m.nodes),
+                skin,
+                m.marker("right_hand").copied(),
+            ),
+            meshes: (first..first + MAX_BODIES).collect(),
+        })
+    }
+
     fn arms(&mut self, meshes: &mut Vec<MeshData>) -> Option<Arms> {
         let mode = self.find("mode", "objects\\characters\\masterchief\\fp\\fp")?;
         let m = match model::read_render_model(&mut self.set, mode) {
@@ -717,6 +768,7 @@ impl Scene {
         let mut meshes = vec![level];
         let sky = loader.sky(&mut meshes);
         let arms = loader.arms(&mut meshes);
+        let body = loader.body(&mut meshes);
         let weapons = WEAPONS
             .iter()
             .filter_map(|name| loader.weapon(name, arms.as_ref().map(|a| &a.skeleton), &mut meshes))
@@ -818,6 +870,7 @@ impl Scene {
             biped,
             weapons,
             arms,
+            body,
             sky,
             grenades,
             objects,

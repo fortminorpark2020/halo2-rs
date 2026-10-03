@@ -46,6 +46,9 @@ pub struct ShaderInfo {
     pub illum: Option<(DatumIndex, [f32; 3])>,
     /// Opacity map, for templates whose colour map carries no alpha.
     pub mask: Option<DatumIndex>,
+    /// Change-colour map: where a player's primary (red channel) and
+    /// secondary (green) armour colours tint the surface.
+    pub change_color: Option<DatumIndex>,
     /// Colour multiplied into the base colour.
     pub tint: [f32; 3],
     /// Multiplies alpha-blended surfaces' opacity.
@@ -134,6 +137,10 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
             info.tint = [0.0; 3];
         }
         "opaque\\overlay" => info.blend = Blend::Alpha,
+        _ if t.starts_with("opaque\\") && t.ends_with("change_color") => {
+            info.diffuse = own(2).or(info.diffuse);
+            info.change_color = own(4);
+        }
         "transparent\\one_alpha_env"
         | "transparent\\one_alpha_env_illum"
         | "transparent\\sky_one_alpha_env"
