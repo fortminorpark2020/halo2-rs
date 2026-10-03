@@ -6,7 +6,7 @@
 use crate::audio::Audio;
 use crate::scene::Scene;
 use glam::Vec3;
-use h2sim::game::{Event, FlagEvent, GrenadeKind, LeadChange, Medal};
+use h2sim::game::{Event, FlagEvent, GrenadeKind, HillEvent, LeadChange, Medal};
 use h2sim::{Game, GameType, ItemKind};
 use std::collections::VecDeque;
 
@@ -251,6 +251,24 @@ impl Soundscape {
             Event::Spawned { player, .. } if local(player) => {
                 self.play_flat(scene, g.respawn, 1.0);
             }
+            Event::Flag { what, .. } if game.rules.game_type.oddball() => match what {
+                FlagEvent::Taken => self.announce(a.ball_taken),
+                FlagEvent::Returned => self.announce(a.play_ball),
+                _ => {}
+            },
+            Event::Flag { player, what, .. } if game.rules.game_type == GameType::Assault => {
+                match what {
+                    FlagEvent::Taken if player.is_some_and(local) => {
+                        self.play_flat(scene, a.flag_grabbed, 1.0);
+                    }
+                    FlagEvent::Taken => self.announce(a.bomb_taken),
+                    FlagEvent::Dropped => self.announce(a.bomb_dropped),
+                    FlagEvent::Returned => self.announce(a.bomb_returned),
+                    FlagEvent::Armed => self.announce(a.bomb_armed),
+                    FlagEvent::Defused => self.announce(a.bomb_defused),
+                    _ => {}
+                }
+            }
             Event::Flag { player, what, .. } => match what {
                 FlagEvent::Taken if player.is_some_and(local) => {
                     self.play_flat(scene, a.flag_grabbed, 1.0);
@@ -263,6 +281,35 @@ impl Soundscape {
                 }
                 _ => {}
             },
+            Event::Hill { player, what } => match what {
+                HillEvent::Moved => self.announce(a.hill_moved),
+                HillEvent::Contested => self.announce(a.hill_contested),
+                // Those taking the hill hear it.
+                HillEvent::Controlled
+                    if player
+                        .is_some_and(|p| listeners.iter().any(|l| !game.is_enemy(l.player, p))) =>
+                {
+                    self.announce(a.hill_controlled)
+                }
+                _ => {}
+            },
+            Event::Territory { team, from, .. } => {
+                let on = |t: u8| {
+                    listeners
+                        .iter()
+                        .any(|l| game.players.get(l.player).is_some_and(|p| p.team == t))
+                };
+                if on(team) {
+                    self.announce(if game.holds_every_territory(team) {
+                        a.land_grab
+                    } else {
+                        a.territory_taken
+                    });
+                } else if from.is_some_and(on) {
+                    self.announce(a.territory_lost);
+                }
+            }
+            Event::Juggernaut { .. } => self.announce(a.new_juggernaut),
             Event::Shot {
                 player,
                 origin,
@@ -393,10 +440,11 @@ impl Soundscape {
         let a = g.announcer;
         if !self.announced_start {
             self.announced_start = true;
-            self.announce(match game.rules.game_type {
-                GameType::Ctf => a.capture_the_flag,
-                _ => a.slayer,
-            });
+            let kind = GameType::ALL
+                .iter()
+                .position(|&t| t == game.rules.game_type)
+                .unwrap_or(0);
+            self.announce(a.game_names[kind]);
         }
         if game.winner.is_some() != self.announced_winner {
             self.announced_winner = game.winner.is_some();

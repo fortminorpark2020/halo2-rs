@@ -11,9 +11,12 @@ use blam_cache::physics::{BipedPhysics, PlayerMovement};
 use glam::{Vec2, Vec3};
 
 mod ctf;
+mod juggernaut;
 mod sync;
-pub use ctf::{Flag, FlagEvent};
+mod zones;
+pub use ctf::{Flag, FlagEvent, NEUTRAL};
 pub use sync::{Malformed, Reader, Writer};
+pub use zones::{Hill, HillControl, HillEvent, Territory};
 
 /// Simulation step: the game advances in fixed ticks so every machine in a
 /// networked game computes the same thing.
@@ -52,16 +55,75 @@ pub enum GameType {
     TeamSlayer,
     /// Red against blue; bring the other team's flag to your base.
     Ctf,
+    /// Everyone for themselves; stand alone in the hill to score.
+    KingOfTheHill,
+    /// Red against blue; hold the hill with no enemy in it to score.
+    TeamKing,
+    /// Everyone for themselves; hold the ball to score.
+    Oddball,
+    /// Red against blue; a teammate holding the ball scores.
+    TeamOddball,
+    /// Kill the Juggernaut to become it; only the Juggernaut's kills (and
+    /// killing the Juggernaut) score.
+    Juggernaut,
+    /// Red against blue; take territories and hold them to score.
+    Territories,
+    /// Red against blue; carry your bomb into the enemy base and arm it.
+    Assault,
 }
 
 impl GameType {
+    /// Every game type, in the order they're numbered over the network.
+    pub const ALL: [GameType; 10] = [
+        GameType::Slayer,
+        GameType::TeamSlayer,
+        GameType::Ctf,
+        GameType::KingOfTheHill,
+        GameType::TeamKing,
+        GameType::Oddball,
+        GameType::TeamOddball,
+        GameType::Juggernaut,
+        GameType::Territories,
+        GameType::Assault,
+    ];
+
     pub fn teams(self) -> bool {
-        matches!(self, GameType::TeamSlayer | GameType::Ctf)
+        matches!(
+            self,
+            GameType::TeamSlayer
+                | GameType::Ctf
+                | GameType::TeamKing
+                | GameType::TeamOddball
+                | GameType::Territories
+                | GameType::Assault
+        )
     }
 
     /// Kills score points (and suicides and betrayals cost them).
     pub fn kills_score(self) -> bool {
         matches!(self, GameType::Slayer | GameType::TeamSlayer)
+    }
+
+    /// Points are seconds: holding the hill, the ball or territories.
+    pub fn timed(self) -> bool {
+        matches!(
+            self,
+            GameType::KingOfTheHill
+                | GameType::TeamKing
+                | GameType::Oddball
+                | GameType::TeamOddball
+                | GameType::Territories
+        )
+    }
+
+    /// Played over hills.
+    pub fn king(self) -> bool {
+        matches!(self, GameType::KingOfTheHill | GameType::TeamKing)
+    }
+
+    /// Played with a ball.
+    pub fn oddball(self) -> bool {
+        matches!(self, GameType::Oddball | GameType::TeamOddball)
     }
 }
 
@@ -97,15 +159,37 @@ pub struct Rules {
     /// Points to win (in Slayer a kill is one, a suicide or betrayal takes
     /// one away; in CTF a capture is one); 0 plays forever.
     pub score_to_win: u32,
-    /// The flag, as a weapon carried in hand (index into the weapon list).
+    /// The flag, the ball and the bomb, as weapons carried in hand
+    /// (indexes into the weapon list).
     pub flag_weapon: Option<usize>,
+    pub ball_weapon: Option<usize>,
+    pub bomb_weapon: Option<usize>,
     /// Seconds a dropped flag lies before going home by itself.
     pub flag_reset_time: f32,
     /// A team only scores while its own flag is at home.
     pub flag_at_home_to_score: bool,
     /// Touching your own dropped flag sends it home.
     pub flag_touch_return: bool,
+    /// Seconds a bomb carrier stands at the enemy base to arm it, and
+    /// seconds from then until it goes off.
+    pub bomb_arm_time: f32,
+    pub bomb_fuse: f32,
+    /// Seconds before the hill moves to the next one (0: it stays).
+    pub hill_move_time: f32,
+    /// Seconds a team stands in a territory alone to take it.
+    pub territory_capture_time: f32,
     pub falling: FallingDamage,
+}
+
+impl Rules {
+    /// What this game type's carried objects are held as in hand.
+    pub fn carried_weapon(&self) -> Option<usize> {
+        match self.game_type {
+            GameType::Oddball | GameType::TeamOddball => self.ball_weapon,
+            GameType::Assault => self.bomb_weapon,
+            _ => self.flag_weapon,
+        }
+    }
 }
 
 /// How hard landings hurt.
@@ -179,9 +263,15 @@ impl Default for Rules {
             lunge_weapons: Vec::new(),
             score_to_win: 25,
             flag_weapon: None,
+            ball_weapon: None,
+            bomb_weapon: None,
             flag_reset_time: 30.0,
             flag_at_home_to_score: false,
             flag_touch_return: false,
+            bomb_arm_time: 3.0,
+            bomb_fuse: 4.0,
+            hill_move_time: 60.0,
+            territory_capture_time: 6.0,
             // Halo 2's globals.
             falling: FallingDamage {
                 harmful: (6.0, 10.0),
@@ -273,6 +363,8 @@ pub struct Spartan {
     pub last_kill: f64,
     /// Seconds left bringing the weapon in hand up.
     pub readying: f32,
+    /// Time held toward the next point in timed games.
+    hold: f32,
     melee_cooldown: f32,
     grenade_cooldown: f32,
     action_held: f32,
@@ -395,6 +487,21 @@ pub enum Event {
         player: Option<usize>,
         what: FlagEvent,
     },
+    /// The hill moved, or someone took it or contested it.
+    Hill {
+        player: Option<usize>,
+        what: HillEvent,
+    },
+    /// A team took a territory (from `from`, if another team held it).
+    Territory {
+        index: usize,
+        team: u8,
+        from: Option<u8>,
+    },
+    /// A new Juggernaut.
+    Juggernaut {
+        player: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,6 +536,16 @@ pub struct Game {
     pub flag_bases: Vec<(u8, Vec3)>,
     /// Places that kill whoever enters them.
     pub kill_zones: Vec<KillZone>,
+    /// King of the Hill: the map's hills, which one is in play and how long
+    /// until it moves, and who holds it.
+    pub hills: Vec<Hill>,
+    pub hill: usize,
+    pub hill_moves_in: f32,
+    pub hill_control: HillControl,
+    /// Territories: the map's territories and who holds them.
+    pub territories: Vec<Territory>,
+    /// Juggernaut: who it is.
+    pub juggernaut: Option<usize>,
     pub movement: PlayerMovement,
     pub biped: BipedPhysics,
     pub time: f64,
@@ -494,6 +611,12 @@ impl Game {
             flags: Vec::new(),
             flag_bases: Vec::new(),
             kill_zones: Vec::new(),
+            hills: Vec::new(),
+            hill: 0,
+            hill_moves_in: 0.0,
+            hill_control: HillControl::Empty,
+            territories: Vec::new(),
+            juggernaut: None,
             movement,
             biped,
             time: 0.0,
@@ -502,6 +625,11 @@ impl Game {
             winning_team: None,
             rng: 0x2545_F491,
         }
+    }
+
+    /// Start the game's randomness (spawn choices) from another seed.
+    pub fn reseed(&mut self, seed: u32) {
+        self.rng = 0x2545_F491 ^ seed.wrapping_mul(0x9E37_79B9) | 1;
     }
 
     fn random(&mut self) -> f32 {
@@ -594,6 +722,7 @@ impl Game {
             multi_kill: 0,
             last_kill: f64::NEG_INFINITY,
             readying: 0.0,
+            hold: 0.0,
             melee_cooldown: 0.0,
             grenade_cooldown: 0.0,
             action_held: 0.0,
@@ -665,6 +794,8 @@ impl Game {
         self.step_grenades(world, dt);
         self.step_items(dt);
         self.step_flags(world, dt);
+        self.step_hills(dt);
+        self.step_territories(dt);
     }
 
     fn step_player(&mut self, world: &World, i: usize, cmd: Command, dt: f32) {
@@ -733,7 +864,7 @@ impl Game {
             };
         }
         self.pick_up(i, cmd.action, dt);
-        self.touch_flags(i, cmd.action);
+        self.touch_flags(i, cmd.action, dt);
 
         let lunges = self.players[i]
             .held()
@@ -1034,6 +1165,7 @@ impl Game {
         if teammate && !self.rules.friendly_fire {
             return;
         }
+        let amount = self.juggernaut_damage(victim, amount);
         let p = &mut self.players[victim];
         if !p.alive || amount <= 0.0 {
             return;
@@ -1118,6 +1250,9 @@ impl Game {
                     });
                 }
             }
+        }
+        if self.rules.game_type == GameType::Juggernaut {
+            self.juggernaut_kill(victim, killer);
         }
         self.lead_changes(&leaders);
         if let Some(k) = killer.filter(|&k| kills_score && self.is_enemy(k, victim)) {

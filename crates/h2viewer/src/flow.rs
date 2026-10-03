@@ -214,6 +214,7 @@ impl App {
             ScoreLine {
                 name: format!("PLAYER {}", i + 1),
                 score: p.score,
+                timed: game.rules.game_type.timed(),
                 kills: p.kills,
                 deaths: p.deaths,
                 color: player_colors(game, i)[0],
@@ -238,6 +239,7 @@ impl App {
             lines.push(ScoreLine {
                 name: format!("{} TEAM", TEAM_NAMES[t as usize]),
                 score: game.team_score(t),
+                timed: game.rules.game_type.timed(),
                 kills: members().map(|p| p.kills).sum(),
                 deaths: members().map(|p| p.deaths).sum(),
                 color: TEAM_COLORS[t as usize],

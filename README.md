@@ -16,12 +16,15 @@ install. No game files are included in this repository.
 - `h2sim`: game simulation (no rendering): level collision, Spartan movement
   using the speeds, jump velocity and size from the game's own globals and biped tags,
   weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
-  Slayer, Team Slayer and Capture the Flag rules (shields, health, grenades,
-  pickups, respawns, friendly fire and betrayals, multi-kill and spree medals,
-  the lead, flags taken, dropped, returned and captured), falling damage and
-  the map's kill zones from the game's own tags, and bots that run flags,
-  escort carriers and defend, finding their way over a walking graph sampled
-  from each level's floors.
+  the rules of every Halo 2 game type: Slayer, Capture the Flag, King of the
+  Hill, Oddball, Juggernaut, Territories and Assault, with team versions of
+  Slayer, King and Oddball (shields, health, grenades, pickups, respawns,
+  friendly fire and betrayals, multi-kill and spree medals, the lead, flags,
+  balls and bombs taken, dropped, returned, captured, armed and defused, hills
+  that move, territories taken), falling damage and the map's kill zones from
+  the game's own tags, and bots that play each objective, escort carriers and
+  defend, finding their way over a walking graph sampled from each level's
+  floors.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
@@ -34,7 +37,8 @@ install. No game files are included in this repository.
 Double-click `h2viewer.exe` to open Halo 2's menus over Lockout from
 `C:\Games\Halo 2 Project Cartographer\maps` (or drag any `.map` file onto it),
 with Halo 2's main menu music. Multiplayer opens the lobby: pick the game
-type (Slayer, Team Slayer or Capture the Flag), the map (every multiplayer map in the maps
+type (Slayer, Team Slayer, Capture the Flag, King of the Hill, Team King,
+Oddball, Team Oddball, Juggernaut, Territories or Assault), the map (every multiplayer map in the maps
 folder), score to win and number of bots, then Start Game. In team games, T
 (or X on a controller) puts you on the red or blue team; bots fill the smaller
 team. System Link lists games other PCs on the network are hosting.
@@ -54,6 +58,17 @@ take it, then carry it to your own flag's stand while yours is home to score; Q
 seconds. Arrows over the flags (and over home while carrying) show where to go,
 and the announcer calls every take, drop, return and capture. Long falls hurt
 or kill, and so do the map's death pits.
+
+The other game types use each map's own hills, ball spawns, territories and
+bomb spots. King of the Hill: stand in the hill (its outline glows in the
+holder's colour) to score a point a second; it moves every minute. Oddball:
+take the ball (E) and hold on to it to score a point a second. Juggernaut: the
+first kill makes you the Juggernaut, tough and fast; only the Juggernaut's
+kills score, and killing the Juggernaut takes over. Territories: stand alone in
+a territory for six seconds to take it; each one your team holds scores a point
+a second. Assault: carry your bomb into the enemy base and stand there to arm
+it; it goes off four seconds later unless a defender holds E on it to defuse
+it. Timed scores read as minutes and seconds.
 
 Weapons: left mouse fires, right mouse or Z zooms, R reloads, F melees, Q or the
 mouse wheel switches weapon, G throws a grenade, X switches grenade type, E picks
@@ -83,9 +98,12 @@ game over, as
 Halo 2's multiplayer globals pair them. The menus have Halo 2's own music and
 menu sounds.
 `H2_MUTE=1` turns sound off; `H2_AUDIO_WAV=out.wav` records the mix to a file
-instead of the speakers. For testing, `H2_GAME=team` or `ctf` and `H2_BOTS=<n>`
-start a game straight away, and `H2_SIM=<seconds>` plays the bots against each
-other without a window, printing kills, flag events and the score.
+instead of the speakers. For testing, `H2_GAME=<type>` (`slayer`, `team`, `ctf`, `king`,
+`teamking`, `oddball`, `teamoddball`, `juggernaut`, `territories` or `assault`)
+and `H2_BOTS=<n>` start a game straight away, and `H2_SIM=<seconds>` plays the
+bots against each other without a window, printing kills, objective events and
+the score (`H2_SEED=<n>` varies the run, `H2_SIM_WHERE=1` also prints where
+every bot is and what it is doing every 20 seconds).
 
 ```
 h2tool scan  "C:\Games\Halo 2 Project Cartographer\maps"
@@ -118,9 +136,9 @@ Multiplayer maps only store the tags unique to them; the rest live in
 1. Map file reader (done)
 2. Fly-camera level viewer (done, with lightmaps, scenery and skies)
 3. Spartan movement, collision, weapons with first person animations (done)
-4. Splitscreen and LAN multiplayer (done), menus and lobby (done), Team Slayer
-   and Capture the Flag (done), Oddball, King of the Hill, Juggernaut,
-   Territories and Assault (next)
+4. Splitscreen and LAN multiplayer, menus and lobby, and every game type:
+   Slayer, Capture the Flag, King of the Hill, Oddball, Juggernaut,
+   Territories and Assault (done)
 5. Matchmaking, 1-50 ranks, parties
 6. Campaign and AI
 

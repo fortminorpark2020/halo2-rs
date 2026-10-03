@@ -1,13 +1,20 @@
-//! Capture the Flag: each team's flag sits at its base. Take the other
-//! team's flag (the action key), carry it to your own base to score; a
-//! carrier can only melee, and drops the flag on dying or switching weapons.
-//! A dropped flag goes home by itself after a while.
+//! Things carried in hand: Capture the Flag's flags, Oddball's ball and
+//! Assault's bombs. A carrier can only melee, and drops what they carry on
+//! dying or switching weapons; dropped, it goes home by itself after a
+//! while.
+//!
+//! Capture the Flag: take the other team's flag (the action key) and carry
+//! it to your own base. Oddball: whoever holds the ball scores a point a
+//! second. Assault: carry your own bomb into the enemy base and stand there
+//! to arm it; it goes off a few seconds later unless an enemy defuses it.
 
-use super::{Event, Game, HeldWeapon};
+use super::{Event, Game, GameType, GrenadeKind, HeldWeapon};
 use crate::collision::World;
 use crate::weapon::WeaponState;
 use glam::{Vec2, Vec3};
 
+/// The team of something no team owns (the ball), as Halo 2 numbers it.
+pub const NEUTRAL: u8 = 8;
 /// How close (across the floor) a player has to be to take a flag.
 const FLAG_REACH: f32 = 0.7;
 /// How close a carrier has to get to their base to score.
@@ -18,6 +25,9 @@ const REACH_HEIGHT: f32 = 1.0;
 const REGRAB_DELAY: f32 = 1.0;
 /// Seconds between "can't score" warnings while standing in the base.
 const FAILURE_REPEAT: f64 = 3.0;
+/// A bomb going off kills everyone this close.
+const BOMB_RADIUS: f32 = 4.0;
+const BOMB_DAMAGE: f32 = 500.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlagEvent {
@@ -28,11 +38,31 @@ pub enum FlagEvent {
     Captured,
     /// Reached the base, but the team's own flag isn't home.
     CaptureFailed,
+    /// A bomb set down and armed at the enemy base.
+    Armed,
+    /// The bomb went off (and scored).
+    Detonated,
+    /// An enemy disarmed the bomb (and it went home).
+    Defused,
 }
 
-/// A team's flag.
+impl FlagEvent {
+    pub const ALL: [FlagEvent; 8] = [
+        FlagEvent::Taken,
+        FlagEvent::Dropped,
+        FlagEvent::Returned,
+        FlagEvent::Captured,
+        FlagEvent::CaptureFailed,
+        FlagEvent::Armed,
+        FlagEvent::Detonated,
+        FlagEvent::Defused,
+    ];
+}
+
+/// A team's flag (or bomb), or the ball.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Flag {
+    /// The team it belongs to ([`NEUTRAL`] for the ball).
     pub team: u8,
     /// Where it stands at its base.
     pub home: Vec3,
@@ -42,6 +72,11 @@ pub struct Flag {
     pub reset_in: f32,
     /// The player who dropped it, and how long before they can take it again.
     pub dropped_by: Option<(usize, f32)>,
+    /// Seconds spent arming (carried, at the enemy base) or defusing (armed).
+    pub arming: f32,
+    /// An armed bomb: seconds until it goes off, and who set it.
+    pub armed: Option<f32>,
+    pub planter: Option<usize>,
     pub(super) failed_at: f64,
 }
 
@@ -54,12 +89,15 @@ impl Flag {
             carrier: None,
             reset_in: 0.0,
             dropped_by: None,
+            arming: 0.0,
+            armed: None,
+            planter: None,
             failed_at: f64::NEG_INFINITY,
         }
     }
 
     pub fn at_home(&self) -> bool {
-        self.carrier.is_none() && self.position == self.home
+        self.carrier.is_none() && self.armed.is_none() && self.position == self.home
     }
 }
 
@@ -68,23 +106,27 @@ fn within(a: Vec3, b: Vec3, radius: f32) -> bool {
 }
 
 impl Game {
-    /// Put each team's flag at its base (`homes`), and set where teams bring
-    /// the enemy flag to score (`bases`; a team without one scores at its
-    /// own flag).
+    /// Put each team's flag (or bomb, or the ball) at its base (`homes`),
+    /// and set where teams bring them to score (`bases`: in Capture the
+    /// Flag a team's own; in Assault, the enemy's; a team without one uses
+    /// its flag's home).
     pub fn set_flags(&mut self, homes: &[(u8, Vec3)], bases: &[(u8, Vec3)]) {
         self.flags = homes.iter().map(|&(t, p)| Flag::new(t, p)).collect();
         self.flag_bases = bases.to_vec();
         for f in &self.flags {
-            if !self.flag_bases.iter().any(|b| b.0 == f.team) {
+            if f.team != NEUTRAL && !self.flag_bases.iter().any(|b| b.0 == f.team) {
                 self.flag_bases.push((f.team, f.home));
             }
         }
     }
 
-    /// This game uses flags: Capture the Flag on a map with a flag for
-    /// each team.
+    /// This game is played with flags, bombs or a ball, and the map has them.
     pub fn has_flags(&self) -> bool {
-        self.rules.game_type == super::GameType::Ctf && self.flags.len() >= 2
+        match self.rules.game_type {
+            GameType::Ctf | GameType::Assault => self.flags.len() >= 2,
+            GameType::Oddball | GameType::TeamOddball => !self.flags.is_empty(),
+            _ => false,
+        }
     }
 
     /// The flag a player is carrying.
@@ -97,8 +139,32 @@ impl Game {
         self.flag_bases.iter().find(|b| b.0 == team).map(|b| b.1)
     }
 
-    /// Take, return or score with flags the player is touching.
-    pub(super) fn touch_flags(&mut self, i: usize, action: bool) {
+    /// Where a team's bomb is armed: the enemy bases nearest to `from`.
+    pub fn bomb_target(&self, team: u8, from: Vec3) -> Option<Vec3> {
+        self.flag_bases
+            .iter()
+            .filter(|b| b.0 != team)
+            .map(|b| b.1)
+            .min_by(|a, b| a.distance(from).total_cmp(&b.distance(from)))
+    }
+
+    /// Whether `player` can pick up flag `f` (lying there, not armed): the
+    /// enemy's flag, their own team's bomb, or the ball.
+    pub fn can_take(&self, player: usize, f: usize) -> bool {
+        let flag = &self.flags[f];
+        if flag.carrier.is_some() || flag.armed.is_some() {
+            return false;
+        }
+        let team = self.players[player].team;
+        match self.rules.game_type {
+            GameType::Ctf => flag.team != team,
+            GameType::Assault => flag.team == team,
+            _ => true,
+        }
+    }
+
+    /// Take, return, score with, arm or defuse flags the player is touching.
+    pub(super) fn touch_flags(&mut self, i: usize, action: bool, dt: f32) {
         if !self.has_flags() {
             return;
         }
@@ -109,7 +175,13 @@ impl Game {
             if flag.carrier.is_some() || !within(me, flag.position, FLAG_REACH) {
                 continue;
             }
-            if flag.team == team {
+            if flag.armed.is_some() {
+                if flag.team != team {
+                    self.defuse(f, i, action, dt);
+                }
+                continue;
+            }
+            if !self.can_take(i, f) {
                 if self.rules.flag_touch_return && !flag.at_home() {
                     self.return_flag(f, Some(i));
                 }
@@ -120,10 +192,19 @@ impl Game {
                 self.take_flag(f, i);
             }
         }
-        // Scoring: the enemy flag in hand, at the team's own base.
         let Some(f) = self.carried_flag(i) else {
             return;
         };
+        match self.rules.game_type {
+            GameType::Ctf => self.try_capture(f, i),
+            GameType::Assault => self.arm_bomb(f, i, dt),
+            _ => {}
+        }
+    }
+
+    /// Scoring: the enemy flag in hand, at the team's own base.
+    fn try_capture(&mut self, f: usize, i: usize) {
+        let (me, team) = (self.players[i].body.position, self.players[i].team);
         let Some(base) = self.flag_base(team) else {
             return;
         };
@@ -145,8 +226,91 @@ impl Game {
         self.capture(f, i);
     }
 
+    /// A bomb carrier standing at an enemy base arms the bomb there.
+    fn arm_bomb(&mut self, f: usize, i: usize, dt: f32) {
+        let (me, team) = (self.players[i].body.position, self.players[i].team);
+        let post = self
+            .flag_bases
+            .iter()
+            .find(|b| b.0 != team && within(me, b.1, CAPTURE_RADIUS))
+            .map(|b| b.1);
+        let Some(post) = post else {
+            self.flags[f].arming = 0.0;
+            return;
+        };
+        self.flags[f].arming += dt;
+        if self.flags[f].arming < self.rules.bomb_arm_time {
+            return;
+        }
+        let p = &mut self.players[i];
+        p.objective = None;
+        p.readying = super::ready_time(&self.weapons, p);
+        self.events.push(Event::Switched { player: i });
+        let fuse = self.rules.bomb_fuse;
+        let flag = &mut self.flags[f];
+        flag.carrier = None;
+        flag.position = post;
+        flag.arming = 0.0;
+        flag.armed = Some(fuse);
+        flag.planter = Some(i);
+        flag.dropped_by = None;
+        self.flag_event(f, Some(i), FlagEvent::Armed);
+    }
+
+    /// An enemy holding the action key at an armed bomb disarms it.
+    fn defuse(&mut self, f: usize, i: usize, action: bool, dt: f32) {
+        let flag = &mut self.flags[f];
+        if !action {
+            flag.arming = 0.0;
+            return;
+        }
+        flag.arming += dt;
+        if flag.arming < self.rules.bomb_arm_time {
+            return;
+        }
+        flag.armed = None;
+        flag.planter = None;
+        flag.arming = 0.0;
+        flag.position = flag.home;
+        flag.dropped_by = None;
+        self.flag_event(f, Some(i), FlagEvent::Defused);
+    }
+
+    /// The bomb goes off: everyone near it dies, and its team scores.
+    fn detonate(&mut self, f: usize) {
+        let flag = self.flags[f];
+        let at = flag.position;
+        let planter = flag.planter.filter(|&p| p < self.players.len());
+        for j in 0..self.players.len() {
+            let p = &self.players[j];
+            let centre = p.body.position + Vec3::Z * p.body.height() * 0.5;
+            if p.alive && centre.distance(at) < BOMB_RADIUS {
+                self.damage(j, planter, BOMB_DAMAGE, false);
+            }
+        }
+        self.events.push(Event::Exploded {
+            kind: GrenadeKind::Frag,
+            position: at,
+        });
+        let flag = &mut self.flags[f];
+        flag.armed = None;
+        flag.planter = None;
+        flag.arming = 0.0;
+        flag.position = flag.home;
+        flag.dropped_by = None;
+        if let Some(p) = planter {
+            let leaders = self.leaders();
+            self.players[p].score += 1;
+            self.flag_event(f, Some(p), FlagEvent::Detonated);
+            self.lead_changes(&leaders);
+            self.check_win(p);
+        } else {
+            self.flag_event(f, None, FlagEvent::Detonated);
+        }
+    }
+
     fn take_flag(&mut self, f: usize, i: usize) {
-        let Some(w) = self.rules.flag_weapon else {
+        let Some(w) = self.rules.carried_weapon() else {
             return;
         };
         let Some(def) = self.weapons.get(w) else {
@@ -166,6 +330,7 @@ impl Game {
         let flag = &mut self.flags[f];
         flag.carrier = Some(i);
         flag.dropped_by = None;
+        flag.arming = 0.0;
         self.events.push(Event::Switched { player: i });
         self.flag_event(f, Some(i), FlagEvent::Taken);
     }
@@ -189,6 +354,7 @@ impl Game {
         flag.carrier = None;
         flag.position = at;
         flag.reset_in = reset;
+        flag.arming = 0.0;
         flag.dropped_by = Some((i, REGRAB_DELAY));
         self.flag_event(f, Some(i), FlagEvent::Dropped);
     }
@@ -224,12 +390,13 @@ impl Game {
         });
     }
 
-    /// Carried flags follow their carriers; dropped ones fall to the floor
-    /// and eventually go home.
+    /// Carried flags follow their carriers (a held ball scores); armed
+    /// bombs tick; dropped flags fall to the floor and eventually go home.
     pub(super) fn step_flags(&mut self, world: &World, dt: f32) {
         if !self.has_flags() {
             return;
         }
+        let ball = self.rules.game_type.oddball();
         for f in 0..self.flags.len() {
             let flag = &mut self.flags[f];
             if let Some((_, t)) = &mut flag.dropped_by {
@@ -240,6 +407,16 @@ impl Game {
             }
             if let Some(c) = flag.carrier {
                 flag.position = self.players[c].body.position;
+                if ball {
+                    self.hold_point(c, dt);
+                }
+                continue;
+            }
+            if let Some(t) = &mut flag.armed {
+                *t -= dt;
+                if *t <= 0.0 {
+                    self.detonate(f);
+                }
                 continue;
             }
             if flag.at_home() {
@@ -492,5 +669,133 @@ mod tests {
             run(&mut g, &world, &[Command::default(), Command::default()], 1);
         }
         assert_eq!(g.winning_team, Some(0));
+    }
+
+    /// A game played with one carried thing per team (or a ball), carried
+    /// like the flag.
+    fn carried(kind: GameType, homes: &[(u8, Vec3)]) -> Game {
+        let mut g = game();
+        g.rules.game_type = kind;
+        g.rules.score_to_win = 3;
+        let thing = WeaponDef {
+            name: "carried".into(),
+            ..g.weapons[0].clone()
+        };
+        g.weapons.push(thing);
+        let w = Some(g.weapons.len() - 1);
+        (
+            g.rules.flag_weapon,
+            g.rules.ball_weapon,
+            g.rules.bomb_weapon,
+        ) = (w, w, w);
+        g.set_flags(homes, &[]);
+        g.add_player_on(0);
+        g.add_player_on(1);
+        g
+    }
+
+    fn bombs() -> Game {
+        carried(
+            GameType::Assault,
+            &[
+                (0, Vec3::new(-10.0, 0.0, 0.0)),
+                (1, Vec3::new(10.0, 0.0, 0.0)),
+            ],
+        )
+    }
+
+    #[test]
+    fn holding_the_ball_scores() {
+        let world = floor();
+        let mut g = carried(GameType::Oddball, &[(NEUTRAL, Vec3::ZERO)]);
+        assert!(g.has_flags());
+        g.players[0].body.position = Vec3::new(0.2, 0.0, 0.0);
+        g.players[1].body.position = Vec3::new(20.0, 0.0, 0.0);
+        run(&mut g, &world, &[act(), Command::default()], 1);
+        assert_eq!(g.flags[0].carrier, Some(0));
+        run(&mut g, &world, &[Command::default(); 2], 60 * 4);
+        assert_eq!(g.players[0].score, 3);
+        assert_eq!(g.players[1].score, 0);
+        assert_eq!(g.winner, Some(0));
+    }
+
+    #[test]
+    fn bombs_are_armed_in_the_enemy_base_and_go_off() {
+        let world = floor();
+        let mut g = bombs();
+        // Blue can't take red's bomb; red takes its own.
+        g.players[1].body.position = Vec3::new(-10.0, 0.3, 0.0);
+        g.players[0].body.position = Vec3::new(-10.0, 0.0, 0.0);
+        run(&mut g, &world, &[Command::default(), act()], 1);
+        assert_eq!(g.flags[0].carrier, None);
+        run(&mut g, &world, &[act(), Command::default()], 1);
+        assert_eq!(g.flags[0].carrier, Some(0));
+        // At blue's base for the arming time.
+        g.players[1].body.position = Vec3::new(0.0, 30.0, 0.0);
+        let ticks = (g.rules.bomb_arm_time / crate::game::TICK) as usize + 2;
+        for _ in 0..ticks {
+            g.players[0].body.position = Vec3::new(10.0, 0.3, 0.0);
+            run(&mut g, &world, &[Command::default(); 2], 1);
+        }
+        assert!(g.flags[0].armed.is_some());
+        assert!(g.players[0].objective.is_none());
+        assert!(g.events.iter().any(|e| matches!(
+            e,
+            Event::Flag {
+                what: FlagEvent::Armed,
+                ..
+            }
+        )));
+        // Away from the blast until it goes off.
+        g.players[0].body.position = Vec3::new(0.0, -30.0, 0.0);
+        let ticks = (g.rules.bomb_fuse / crate::game::TICK) as usize + 2;
+        run(&mut g, &world, &[Command::default(); 2], ticks);
+        assert_eq!(g.team_score(0), 1);
+        assert!(g.flags[0].at_home());
+        assert!(g.players.iter().all(|p| p.alive));
+    }
+
+    #[test]
+    fn defenders_defuse_armed_bombs() {
+        let world = floor();
+        let mut g = bombs();
+        g.players[0].body.position = Vec3::new(-10.0, 0.0, 0.0);
+        run(&mut g, &world, &[act(), Command::default()], 1);
+        let ticks = (g.rules.bomb_arm_time / crate::game::TICK) as usize + 2;
+        for _ in 0..ticks {
+            g.players[0].body.position = Vec3::new(10.0, 0.3, 0.0);
+            run(&mut g, &world, &[Command::default(); 2], 1);
+        }
+        assert!(g.flags[0].armed.is_some());
+        g.players[0].body.position = Vec3::new(0.0, -30.0, 0.0);
+        for _ in 0..ticks {
+            g.players[1].body.position = Vec3::new(10.0, -0.3, 0.0);
+            run(&mut g, &world, &[Command::default(), act()], 1);
+        }
+        assert!(g.flags[0].at_home());
+        assert_eq!(g.team_score(0), 0);
+        assert!(g.events.iter().any(|e| matches!(
+            e,
+            Event::Flag {
+                what: FlagEvent::Defused,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn balls_and_bombs_go_over_the_network() {
+        let world = floor();
+        let mut host = carried(GameType::Oddball, &[(NEUTRAL, Vec3::ZERO)]);
+        run(&mut host, &world, &[act(), Command::default()], 1);
+        let mut w = crate::game::Writer::default();
+        host.write_state(&mut w);
+        let mut joined = carried(GameType::Slayer, &[]);
+        joined
+            .read_state(&mut crate::game::Reader::new(&w.0))
+            .unwrap();
+        assert_eq!(joined.rules.game_type, GameType::Oddball);
+        assert_eq!(joined.flags[0].team, NEUTRAL);
+        assert_eq!(joined.flags[0].carrier, Some(0));
     }
 }

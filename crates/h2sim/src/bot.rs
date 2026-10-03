@@ -4,7 +4,7 @@
 //! Bots produce the same `Command`s as people.
 
 use crate::collision::World;
-use crate::game::{Command, Game};
+use crate::game::{Command, Game, GameType};
 use crate::nav::NavGraph;
 use blam_cache::weapon::TriggerBehavior;
 use glam::{Vec2, Vec3};
@@ -59,6 +59,8 @@ pub struct Bot {
     no_progress: f32,
     /// Route points this bot tried and couldn't get to.
     blocked: Vec<usize>,
+    /// The walking graph has no way to the objective: roam instead.
+    no_way: bool,
 }
 
 fn wrap(a: f32) -> f32 {
@@ -87,7 +89,20 @@ impl Bot {
             closest: 0.0,
             no_progress: 0.0,
             blocked: Vec::new(),
+            no_way: false,
         }
+    }
+
+    /// What the bot is up to, for testing.
+    pub fn describe(&self) -> String {
+        format!(
+            "route {} heading {:?} target {:?} stuck {:.1} blocked {}",
+            self.route.len(),
+            self.heading_for,
+            self.target,
+            self.stuck_for,
+            self.blocked.len()
+        )
     }
 
     fn random(&mut self) -> f32 {
@@ -121,14 +136,67 @@ impl Bot {
     /// Where the game sends this bot while no one is in sight, and whether
     /// it should stay around there (guarding) rather than go right up to it.
     fn objective(game: &Game, me: usize) -> Option<(Vec3, bool)> {
+        let feet = game.players[me].body.position;
+        let team = game.players[me].team;
+        if let Some(hill) = game.current_hill() {
+            return Some((hill.centre(), false));
+        }
+        match game.rules.game_type {
+            GameType::Juggernaut => {
+                return game
+                    .juggernaut
+                    .filter(|&j| j != me && game.players[j].alive)
+                    .map(|j| (game.players[j].body.position, false));
+            }
+            GameType::Territories => {
+                // Spread out over the territories the team doesn't hold.
+                let open: Vec<Vec3> = game
+                    .territories
+                    .iter()
+                    .filter(|t| t.owner != Some(team))
+                    .map(|t| t.centre())
+                    .collect();
+                if open.is_empty() {
+                    let held = game.territories.get(me % game.territories.len().max(1));
+                    return held.map(|t| (t.centre(), true));
+                }
+                return Some((open[me % open.len()], false));
+            }
+            _ => {}
+        }
         if !game.has_flags() {
             return None;
         }
-        let team = game.players[me].team;
+        if game.rules.game_type.oddball() {
+            let ball = game.flags.first()?;
+            return match ball.carrier {
+                // Holding it: keep moving, away from trouble.
+                Some(c) if c == me => None,
+                Some(c) if !game.is_enemy(me, c) => Some((ball.position, true)),
+                _ => Some((ball.position, false)),
+            };
+        }
+        let assault = game.rules.game_type == GameType::Assault;
         if game.carried_flag(me).is_some() {
-            return game.flag_base(team).map(|b| (b, false));
+            return if assault {
+                game.bomb_target(team, feet).map(|b| (b, false))
+            } else {
+                game.flag_base(team).map(|b| (b, false))
+            };
         }
         let own = game.flags.iter().find(|f| f.team == team)?;
+        let enemy = game.flags.iter().find(|f| f.team != team)?;
+        if assault {
+            // An enemy bomb ticking in the base: defuse it.
+            if enemy.armed.is_some() {
+                return Some((enemy.position, false));
+            }
+            if me.is_multiple_of(3) {
+                return game.flag_base(team).map(|b| (b, true));
+            }
+            // Take the team's bomb, or go along with whoever has it.
+            return Some((own.position, own.carrier.is_some() || own.armed.is_some()));
+        }
         if !own.at_home() {
             return Some((own.position, false));
         }
@@ -136,7 +204,6 @@ impl Bot {
         if me.is_multiple_of(3) {
             return Some((own.home, true));
         }
-        let enemy = game.flags.iter().find(|f| f.team != team)?;
         // A teammate has it: go along with them.
         if enemy.carrier.is_some() {
             return Some((enemy.position, true));
@@ -167,6 +234,7 @@ impl Bot {
         if moved {
             self.heading_for = Some(goal);
             self.route.clear();
+            self.no_way = false;
             if let (Some(a), Some(b)) = (nav.nearest(world, feet), nav.nearest(world, goal)) {
                 // Places given up on may be the only way: forget them.
                 let route = nav.path_avoiding(a, b, &self.blocked).or_else(|| {
@@ -174,7 +242,19 @@ impl Bot {
                     nav.path(a, b)
                 });
                 self.route = route.map(|r| nav.smooth(world, &r)).unwrap_or_default();
+                // Somewhere the graph doesn't reach (up on a ledge, say):
+                // walking straight at it would only find walls.
+                let close = (goal - feet).length() < 2.0;
+                let lands_near = nav.points[b].distance(goal) < 2.0;
+                self.no_way = !close && (self.route.is_empty() || !lands_near);
+                if self.no_way {
+                    // Roam (a new route) until the objective moves.
+                    self.route.clear();
+                }
             }
+        }
+        if self.no_way {
+            return None;
         }
         if self.route.is_empty() {
             return Some(goal);
@@ -366,12 +446,14 @@ impl Bot {
             let dir = to.normalize_or_zero();
             cmd.movement = Vec2::new(dir.x * s - dir.y * c, dir.x * c + dir.y * s);
         }
-        // Take the enemy flag on reaching it, fighting or not.
+        // Take a flag (or the ball, or the team's bomb) on reaching it,
+        // fighting or not, and defuse enemy bombs.
         let team = p.team;
-        cmd.action = game
-            .flags
-            .iter()
-            .any(|f| f.team != team && f.carrier.is_none() && f.position.distance(feet) < 1.5);
+        cmd.action = (0..game.flags.len()).any(|f| {
+            let flag = &game.flags[f];
+            let takes = game.can_take(me, f) || (flag.armed.is_some() && flag.team != team);
+            takes && flag.position.distance(feet) < 1.5
+        }) && p.objective.is_none();
         if !on_route {
             let drift = game.players[me].body.velocity.truncate();
             cmd.movement = self.keep_off_ledges(world, feet, drift, cmd.movement);

@@ -186,6 +186,8 @@ fn new_game(scene: &Scene, game_type: GameType, score_to_win: u32) -> Game {
         game_type,
         score_to_win,
         flag_weapon: scene.flag.as_ref().map(|f| f.weapon),
+        ball_weapon: scene.ball,
+        bomb_weapon: scene.bomb,
         ..rules(scene)
     };
     let mut game = Game::new(
@@ -196,9 +198,12 @@ fn new_game(scene: &Scene, game_type: GameType, score_to_win: u32) -> Game {
         scene.movement,
         scene.biped,
     );
-    // Flags are only in play in CTF, but a joined game may switch to it.
-    let (homes, bases) = objective::flag_spots(scene);
+    // Flags, balls and bombs for this game type (a joined game takes the
+    // host's); hills and territories always, so a joined game has them.
+    let (homes, bases) = objective::carried_spots(scene, game_type);
     game.set_flags(&homes, &bases);
+    game.hills = objective::hills(scene);
+    game.territories = objective::territories(scene);
     game.kill_zones = kill_zones(scene);
     game
 }
@@ -243,8 +248,7 @@ fn load_level(path: &Path) -> Result<Level, String> {
     let world = World::new(&scene.collision.positions, &scene.collision.indices);
     let mut spots: Vec<Vec3> = level_spawns(&scene).iter().map(|s| s.0).collect();
     spots.extend(scene.items.iter().map(|i| i.position));
-    let (homes, bases) = objective::flag_spots(&scene);
-    spots.extend(homes.iter().chain(&bases).map(|f| f.1));
+    spots.extend(objective::objective_points(&scene));
     let started = Instant::now();
     let nav = NavGraph::for_level(&world, &spots, &kill_zones(&scene));
     println!(
@@ -265,8 +269,17 @@ fn load_level(path: &Path) -> Result<Level, String> {
 /// moves and score.
 fn simulate(level: &Level, settings: &Settings, seconds: f32) {
     let mut game = new_game(&level.scene, settings.game_type(), settings.score_to_win());
+    // H2_SEED=<n> plays a different game.
+    let seed: u32 = std::env::var("H2_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    game.reseed(seed);
     let mut bots: Vec<(usize, Bot)> = (0..settings.bots.max(2))
-        .map(|_| flow::bot_for(game.add_player()))
+        .map(|_| {
+            let i = game.add_player();
+            (i, Bot::new(i as u32 * 7919 + 13 + seed * 104_729))
+        })
         .collect();
     for tick in 0..(seconds / TICK) as usize {
         let commands: Vec<Command> = bots
@@ -284,12 +297,27 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
                 Event::Flag { team, player, what } => {
                     println!("{t:6.1} flag {team} {what:?} by {player:?}");
                 }
+                Event::Hill { .. } | Event::Territory { .. } | Event::Juggernaut { .. } => {
+                    println!("{t:6.1} {e:?}");
+                }
                 _ => {}
             }
         }
         if game.winner.is_some() {
             println!("{t:6.1} game over");
             break;
+        }
+        // H2_SIM_WHERE=1: where everyone is every 20 seconds.
+        if std::env::var_os("H2_SIM_WHERE").is_some() && tick % (20 * 60) == 0 {
+            let at: Vec<String> = game
+                .players
+                .iter()
+                .map(|p| format!("{:.0?}{}", p.body.position, if p.alive { "" } else { "x" }))
+                .collect();
+            println!("{t:6.1} at {}", at.join(" "));
+            for (i, bot) in &bots {
+                println!("   {i}: {}", bot.describe());
+            }
         }
     }
     let scores: Vec<i32> = game.players.iter().map(|p| p.score).collect();
@@ -702,14 +730,13 @@ impl App {
                         l.message(format!("PICKED UP {what}"));
                     }
                 }
-                Event::Flag { team, player, what } => {
-                    let name = local::TEAM_NAMES[team as usize % 2];
-                    println!("{name} flag: {what:?} by {player:?}");
+                Event::Flag { .. }
+                | Event::Hill { .. }
+                | Event::Territory { .. }
+                | Event::Juggernaut { .. } => {
+                    println!("{e:?}");
                     for l in &mut self.locals {
-                        let my_team = self.game.players[l.player].team;
-                        if let Some(m) =
-                            objective::flag_message(l.player, my_team, team, player, what)
-                        {
+                        if let Some(m) = objective::event_message(l.player, &self.game, &e) {
                             l.message(m);
                         }
                     }
@@ -881,7 +908,8 @@ impl App {
                 }
             }
         }
-        if let (Some(flag), true) = (&self.scene.flag, self.game.has_flags()) {
+        let ctf = self.game.rules.game_type == GameType::Ctf;
+        if let (Some(flag), true) = (&self.scene.flag, ctf && self.game.has_flags()) {
             let cloth = objective::cloth_vertices(flag, self.game.time as f32);
             body_meshes.push((flag.cloth, cloth));
         }
@@ -964,7 +992,11 @@ impl App {
                     pitch: l.camera.pitch,
                 },
                 world,
-                sprites: self.effects.sprites(r, u),
+                sprites: {
+                    let mut sprites = self.effects.sprites(r, u);
+                    sprites.extend(self.objective_sprites(r, u));
+                    sprites
+                },
                 draws,
                 hud,
                 view_model_proj: l.view_model_proj(aspect),
@@ -1263,12 +1295,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3)
         .min(menu::MAX_BOTS);
-    // H2_GAME=team or ctf plays Team Slayer or Capture the Flag (for testing).
-    let game_type = match env("H2_GAME").as_deref() {
-        Some("team") => 1,
-        Some("ctf") => 2,
-        _ => 0,
-    };
+    // H2_GAME=team, ctf, king, teamking, oddball, teamoddball, juggernaut,
+    // territories or assault starts that game type (for testing).
+    let game_type = env("H2_GAME")
+        .and_then(|g| menu::GAME_TYPES.iter().position(|t| t.2 == g))
+        .unwrap_or(0);
     let settings = Settings {
         game_type,
         map: 0,

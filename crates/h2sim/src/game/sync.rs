@@ -4,7 +4,8 @@
 
 use super::{
     DroppedWeapon, Event, Flag, FlagEvent, Game, GameType, Grenade, GrenadeKind, HeldWeapon,
-    ItemKind, LeadChange, Medal, Spartan, DROPPED_WEAPON_LIFETIME, TEAMS,
+    HillControl, HillEvent, ItemKind, LeadChange, Medal, Spartan, DROPPED_WEAPON_LIFETIME, NEUTRAL,
+    TEAMS,
 };
 use crate::game::Command;
 use crate::weapon::WeaponState;
@@ -233,6 +234,26 @@ fn read_kind(r: &mut Reader, weapons: usize) -> Result<ItemKind, Malformed> {
     })
 }
 
+fn team(t: u8) -> Result<u8, Malformed> {
+    if t < TEAMS {
+        Ok(t)
+    } else {
+        Err(Malformed)
+    }
+}
+
+/// A flag's team: a team's, or no one's (the ball).
+fn flag_team(t: u8) -> Result<u8, Malformed> {
+    if t == NEUTRAL {
+        Ok(t)
+    } else {
+        team(t)
+    }
+}
+
+/// Most flags, bombs and balls in a game.
+const MAX_FLAGS: usize = 4;
+
 fn grenade_kind(v: u8) -> Result<GrenadeKind, Malformed> {
     match v {
         0 => Ok(GrenadeKind::Frag),
@@ -335,6 +356,21 @@ impl Event {
                 w.index(player);
                 w.u8(what as u8);
             }
+            Event::Hill { player, what } => {
+                w.u8(14);
+                w.index(player);
+                w.u8(what as u8);
+            }
+            Event::Territory { index, team, from } => {
+                w.u8(15);
+                w.index(Some(index));
+                w.u8(team);
+                w.u8(from.unwrap_or(u8::MAX));
+            }
+            Event::Juggernaut { player } => {
+                w.u8(16);
+                w.index(Some(player));
+            }
         }
     }
 
@@ -420,19 +456,29 @@ impl Event {
                 },
             },
             13 => Event::Flag {
-                team: match r.u8()? {
-                    t if t < TEAMS => t,
-                    _ => return Err(Malformed),
-                },
+                team: flag_team(r.u8()?)?,
+                player: opt_player(r)?,
+                what: *FlagEvent::ALL.get(r.u8()? as usize).ok_or(Malformed)?,
+            },
+            14 => Event::Hill {
                 player: opt_player(r)?,
                 what: match r.u8()? {
-                    0 => FlagEvent::Taken,
-                    1 => FlagEvent::Dropped,
-                    2 => FlagEvent::Returned,
-                    3 => FlagEvent::Captured,
-                    4 => FlagEvent::CaptureFailed,
+                    0 => HillEvent::Moved,
+                    1 => HillEvent::Controlled,
+                    2 => HillEvent::Contested,
                     _ => return Err(Malformed),
                 },
+            },
+            15 => Event::Territory {
+                index: r.index()?.ok_or(Malformed)?,
+                team: team(r.u8()?)?,
+                from: match r.u8()? {
+                    u8::MAX => None,
+                    t => Some(team(t)?),
+                },
+            },
+            16 => Event::Juggernaut {
+                player: r.index_below(players)?,
             },
             _ => return Err(Malformed),
         })
@@ -501,14 +547,35 @@ impl Game {
             w.opt_f32(g.fuse);
             w.index(g.stuck);
         }
-        w.u8(self.flags.len().min(TEAMS as usize) as u8);
-        for f in self.flags.iter().take(TEAMS as usize) {
+        w.u8(self.flags.len().min(MAX_FLAGS) as u8);
+        for f in self.flags.iter().take(MAX_FLAGS) {
             w.u8(f.team);
             w.vec3(f.home);
             w.vec3(f.position);
             w.index(f.carrier);
             w.f32(f.reset_in);
+            w.f32(f.arming);
+            w.opt_f32(f.armed);
         }
+        // Hills and territories come from the map; only who holds them is sent.
+        w.u8(self.hill.min(255) as u8);
+        w.f32(self.hill_moves_in);
+        match self.hill_control {
+            HillControl::Empty => w.u8(0),
+            HillControl::Held(p) => {
+                w.u8(1);
+                w.index(Some(p));
+            }
+            HillControl::Contested => w.u8(2),
+        }
+        w.u8(self.territories.len().min(255) as u8);
+        for t in self.territories.iter().take(255) {
+            w.u8(t.owner.unwrap_or(u8::MAX));
+            let (team, so_far) = t.taking.unwrap_or((u8::MAX, 0.0));
+            w.u8(team);
+            w.f32(so_far);
+        }
+        w.index(self.juggernaut);
     }
 
     /// Take on the state another PC sent. Players are added as needed; on
@@ -517,12 +584,7 @@ impl Game {
         let weapons = self.weapons.len();
         self.time = r.f64()?;
         let winner = r.index()?;
-        self.rules.game_type = match r.u8()? {
-            0 => GameType::Slayer,
-            1 => GameType::TeamSlayer,
-            2 => GameType::Ctf,
-            _ => return Err(Malformed),
-        };
+        self.rules.game_type = *GameType::ALL.get(r.u8()? as usize).ok_or(Malformed)?;
         self.rules.score_to_win = r.u32()?;
         self.winning_team = match r.u8()? {
             u8::MAX => None,
@@ -585,10 +647,7 @@ impl Game {
             p.frags = r.u8()?;
             p.plasmas = r.u8()?;
             p.grenade = grenade_kind(r.u8()?)?;
-            p.team = r.u8()?;
-            if p.team >= TEAMS {
-                return Err(Malformed);
-            }
+            p.team = team(r.u8()?)?;
             p.score = r.u32()? as i32;
             p.kills = r.u32()?;
             p.deaths = r.u32()?;
@@ -633,29 +692,57 @@ impl Game {
         }
         self.grenades = grenades;
         let n = r.u8()? as usize;
-        if n > TEAMS as usize {
+        if n > MAX_FLAGS {
             return Err(Malformed);
         }
         let mut flags = Vec::with_capacity(n);
         for _ in 0..n {
-            let team = r.u8()?;
-            if team >= TEAMS {
-                return Err(Malformed);
-            }
-            let mut f = Flag::new(team, r.vec3()?);
+            let mut f = Flag::new(flag_team(r.u8()?)?, r.vec3()?);
             f.position = r.vec3()?;
             f.carrier = match r.index()? {
                 Some(i) if i >= count => return Err(Malformed),
                 v => v,
             };
             f.reset_in = r.f32()?;
+            f.arming = r.f32()?;
+            f.armed = r.opt_f32()?;
             flags.push(f);
         }
         self.flags = flags;
+        self.hill = r.u8()? as usize;
+        if self.hill > 0 && self.hill >= self.hills.len() {
+            return Err(Malformed);
+        }
+        self.hill_moves_in = r.f32()?;
+        self.hill_control = match r.u8()? {
+            0 => HillControl::Empty,
+            1 => HillControl::Held(r.index_below(count)?),
+            2 => HillControl::Contested,
+            _ => return Err(Malformed),
+        };
+        let n = r.u8()? as usize;
+        if n != self.territories.len() {
+            return Err(Malformed);
+        }
+        for t in &mut self.territories {
+            t.owner = match r.u8()? {
+                u8::MAX => None,
+                v => Some(team(v)?),
+            };
+            let (who, so_far) = (r.u8()?, r.f32()?);
+            t.taking = match who {
+                u8::MAX => None,
+                v => Some((team(v)?, so_far)),
+            };
+        }
+        self.juggernaut = match r.index()? {
+            Some(i) if i >= count => return Err(Malformed),
+            v => v,
+        };
         // Carriers hold the flag in hand.
         for (i, p) in self.players.iter_mut().enumerate() {
             let carrying = self.flags.iter().any(|f| f.carrier == Some(i));
-            p.objective = match (carrying, self.rules.flag_weapon) {
+            p.objective = match (carrying, self.rules.carried_weapon()) {
                 (true, Some(w)) if w < weapons => match p.objective.take() {
                     Some(h) if h.weapon == w => Some(h),
                     _ => Some(HeldWeapon {
@@ -724,6 +811,21 @@ mod tests {
                 player: None,
                 what: FlagEvent::Returned,
             },
+            Event::Flag {
+                team: NEUTRAL,
+                player: Some(1),
+                what: FlagEvent::Defused,
+            },
+            Event::Hill {
+                player: Some(1),
+                what: HillEvent::Controlled,
+            },
+            Event::Territory {
+                index: 3,
+                team: 1,
+                from: Some(0),
+            },
+            Event::Juggernaut { player: 0 },
         ];
         let mut w = Writer::default();
         for e in &events {

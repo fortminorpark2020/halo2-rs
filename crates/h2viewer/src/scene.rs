@@ -341,8 +341,22 @@ pub fn load_music(path: &Path) -> Option<Music> {
 /// The announcer's lines, in `Scene::sounds`.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Announcer {
-    pub slayer: Option<usize>,
-    pub capture_the_flag: Option<usize>,
+    /// Each game type's name, in `GameType::ALL` order.
+    pub game_names: [Option<usize>; 10],
+    pub hill_moved: Option<usize>,
+    pub hill_controlled: Option<usize>,
+    pub hill_contested: Option<usize>,
+    pub ball_taken: Option<usize>,
+    pub play_ball: Option<usize>,
+    pub new_juggernaut: Option<usize>,
+    pub territory_taken: Option<usize>,
+    pub territory_lost: Option<usize>,
+    pub land_grab: Option<usize>,
+    pub bomb_taken: Option<usize>,
+    pub bomb_dropped: Option<usize>,
+    pub bomb_returned: Option<usize>,
+    pub bomb_armed: Option<usize>,
+    pub bomb_defused: Option<usize>,
     pub flag_taken: Option<usize>,
     pub flag_returned: Option<usize>,
     pub flag_captured: Option<usize>,
@@ -472,11 +486,16 @@ pub struct Scene {
     pub game_sounds: GameSounds,
     /// Capture the Flag's flag (also in `weapons`).
     pub flag: Option<FlagAssets>,
+    /// Oddball's ball and Assault's bomb, in `weapons`.
+    pub ball: Option<usize>,
+    pub bomb: Option<usize>,
     /// Where the multiplayer game types' flags, bases and hills are.
     pub netgame_flags: Vec<scenario::NetgameFlag>,
     /// HUD: the arrow over objectives, and the flag icon.
     pub waypoint: Option<usize>,
     pub flag_icon: Option<usize>,
+    pub ball_icon: Option<usize>,
+    pub bomb_icon: Option<usize>,
     /// Pits and drops that kill.
     pub kill_volumes: Vec<scenario::KillVolume>,
     pub falling: Option<FallingDamage>,
@@ -501,6 +520,8 @@ pub struct FlagAssets {
 }
 
 const FLAG: &str = "objects\\weapons\\multiplayer\\flag\\flag";
+const BALL: &str = "objects\\weapons\\multiplayer\\ball\\ball";
+const BOMB: &str = "objects\\weapons\\multiplayer\\assault_bomb\\assault_bomb";
 const FLAG_STAND: &str = "objects\\multi\\flag_base\\flag_base";
 
 /// Multiplayer weapons, in switching order.
@@ -1184,6 +1205,12 @@ impl Scene {
             .collect();
         let mut weapons: Vec<WeaponAssets> = weapons;
         let flag = loader.flag(arms.as_ref(), &mut weapons, &mut meshes);
+        let mut carried = |name: &str| {
+            let w = loader.weapon(name, arms.as_ref().map(|a| &a.skeleton), &mut meshes)?;
+            weapons.push(w);
+            Some(weapons.len() - 1)
+        };
+        let (ball, bomb) = (carried(BALL), carried(BOMB));
         let netgame_flags = scenario::netgame_flags(&mut loader.set).unwrap_or_default();
         let kill_volumes = scenario::kill_volumes(&mut loader.set).unwrap_or_default();
         let falling = loader.falling();
@@ -1312,8 +1339,43 @@ impl Scene {
                 let mut line =
                     |name: &str| loader.sound_named(&format!("sound\\dialog\\multiplayer\\{name}"));
                 Announcer {
-                    slayer: line("games\\names\\slayer"),
-                    capture_the_flag: line("games\\names\\capture_the_flag"),
+                    game_names: [
+                        "slayer",
+                        "team_slayer",
+                        "capture_the_flag",
+                        "king_of_the_hill",
+                        "team_king",
+                        "oddball",
+                        "team_oddball",
+                        "juggernaut",
+                        "territories",
+                        "assault",
+                    ]
+                    .map(|n| {
+                        // Team variants fall back to the plain name.
+                        let plain = n.strip_prefix("team_").unwrap_or(n);
+                        let plain = if plain == "king" {
+                            "king_of_the_hill"
+                        } else {
+                            plain
+                        };
+                        line(&format!("games\\names\\{n}"))
+                            .or_else(|| line(&format!("games\\names\\{plain}")))
+                    }),
+                    hill_moved: line("games\\king\\hill_moved"),
+                    hill_controlled: line("games\\king\\hill_controlled"),
+                    hill_contested: line("games\\king\\hill_contested"),
+                    ball_taken: line("games\\oddball\\ball_taken"),
+                    play_ball: line("games\\oddball\\play_ball"),
+                    new_juggernaut: line("games\\juggernaut\\new_juggernaut"),
+                    territory_taken: line("games\\territories\\territory_controlled"),
+                    territory_lost: line("games\\territories\\territory_lost"),
+                    land_grab: line("games\\territories\\land_grab"),
+                    bomb_taken: line("games\\invasion\\bomb_taken"),
+                    bomb_dropped: line("games\\invasion\\bomb_dropped"),
+                    bomb_returned: line("games\\invasion\\bomb_returned"),
+                    bomb_armed: line("games\\invasion\\bomb_armed"),
+                    bomb_defused: line("games\\invasion\\bomb_defused"),
                     flag_taken: line("games\\ctf\\flag_taken"),
                     flag_returned: line("games\\ctf\\flag_returned"),
                     flag_captured: line("games\\ctf\\flag_captured"),
@@ -1345,6 +1407,8 @@ impl Scene {
         let hud_white = loader.hud_textures.len() - 1;
         let waypoint = loader.hud_bitmap("ui\\hud\\bitmaps\\new_hud\\hud_waypoints");
         let flag_icon = loader.hud_bitmap("ui\\hud\\bitmaps\\new_hud\\reset_flag");
+        let ball_icon = loader.hud_bitmap("ui\\hud\\bitmaps\\new_hud\\reset_ball");
+        let bomb_icon = loader.hud_bitmap("ui\\hud\\bitmaps\\new_hud\\reset_bomb");
         if loader.failures > 0 {
             println!("warning: {} textures couldn't be decoded", loader.failures);
         }
@@ -1371,9 +1435,13 @@ impl Scene {
             sounds: loader.sounds,
             game_sounds,
             flag,
+            ball,
+            bomb,
             netgame_flags,
             waypoint,
             flag_icon,
+            ball_icon,
+            bomb_icon,
             kill_volumes,
             falling,
         })

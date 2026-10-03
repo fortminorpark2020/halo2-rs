@@ -105,6 +105,17 @@ pub fn player_colors(game: &Game, player: usize) -> [[f32; 3]; 2] {
     }
 }
 
+/// A score as shown: points, or in timed games minutes and seconds.
+pub fn score_text(score: i32, timed: bool) -> String {
+    if timed {
+        let sign = if score < 0 { "-" } else { "" };
+        let t = score.unsigned_abs();
+        format!("{sign}{}:{:02}", t / 60, t % 60)
+    } else {
+        score.to_string()
+    }
+}
+
 /// "battle_rifle" -> "BATTLE RIFLE".
 pub fn display_name(name: &str) -> String {
     name.replace('_', " ").to_uppercase()
@@ -462,7 +473,11 @@ impl LocalPlayer {
                     .gun_node_world(&world, weapon.muzzle_node)
                     .map_or(frame, |m| frame * m);
                 // The flag's cloth hangs from the top of the pole.
-                let carried = game.flags.iter().find(|f| f.carrier == Some(self.player));
+                let carried = game
+                    .flags
+                    .iter()
+                    .find(|f| f.carrier == Some(self.player))
+                    .filter(|_| game.rules.game_type == h2sim::GameType::Ctf);
                 if let (Some(flag), Some(f)) = (&scene.flag, carried) {
                     let (node, at) = flag.view_attach;
                     let pole = rig
@@ -505,32 +520,6 @@ impl LocalPlayer {
             );
         }
         out
-    }
-
-    /// How to take the enemy flag when standing at it, or drop the one in hand.
-    fn flag_prompt(&self, game: &Game) -> Option<String> {
-        let me = self.me(game);
-        if !me.alive || !game.has_flags() {
-            return None;
-        }
-        let (take, drop) = if self.keyboard {
-            ("E", "Q")
-        } else {
-            ("X", "Y")
-        };
-        if game.carried_flag(self.player).is_some() {
-            return Some(format!("TAKE THE FLAG HOME  {drop}: DROP IT"));
-        }
-        let feet = me.body.position;
-        game.flags
-            .iter()
-            .any(|f| {
-                f.team != me.team
-                    && f.carrier.is_none()
-                    && (f.position - feet).truncate().length() < 1.0
-                    && (f.position.z - feet.z).abs() < 1.0
-            })
-            .then(|| format!("{take} TO TAKE THE FLAG"))
     }
 
     /// Projection for the first person weapon, which ignores zoom.
@@ -618,11 +607,12 @@ impl LocalPlayer {
                 .max();
             (me.score, best, [hud::BLUE, hud::DIM_BLUE])
         };
+        let timed = game.rules.game_type.timed();
         hb.text(
             font,
             [w - 40.0 * s, h - 52.0 * s],
             14.0 * s,
-            &mine.to_string(),
+            &score_text(mine, timed),
             colors[0],
         );
         if let Some(k) = best_other {
@@ -630,12 +620,12 @@ impl LocalPlayer {
                 font,
                 [w - 40.0 * s, h - 34.0 * s],
                 10.0 * s,
-                &k.to_string(),
+                &score_text(k, timed),
                 colors[1],
             );
         }
-        self.flag_waypoints(&mut hb, scene, game, (w, h));
-        if let Some(text) = self.flag_prompt(game) {
+        self.objective_waypoints(&mut hb, scene, game, (w, h));
+        if let Some(text) = self.objective_prompt(game) {
             hb.text(
                 font,
                 [w * 0.5, h * 0.5 + 64.0 * s],
@@ -769,6 +759,13 @@ mod tests {
         assert_eq!(hud_role("5x", 5.0), HudRole::Zoomed);
         assert_eq!(hud_role("10x", 5.0), HudRole::Hidden);
         assert_eq!(hud_role("crosshair_friendly", 1.0), HudRole::Hidden);
+    }
+
+    #[test]
+    fn timed_scores_read_as_minutes() {
+        assert_eq!(score_text(75, true), "1:15");
+        assert_eq!(score_text(5, true), "0:05");
+        assert_eq!(score_text(75, false), "75");
     }
 
     #[test]

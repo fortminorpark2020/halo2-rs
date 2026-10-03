@@ -4,6 +4,9 @@ use glam::Vec3;
 use std::collections::HashMap;
 
 const CELL: f32 = 1.0;
+/// Triangles spanning more grid cells than this (a map's far boundary
+/// walls) are kept in a list of their own and tested by every query.
+const LARGE: u64 = 4096;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Triangle {
@@ -54,6 +57,7 @@ impl KillZone {
 pub struct World {
     triangles: Vec<Triangle>,
     grid: HashMap<(i32, i32, i32), Vec<u32>>,
+    large: Vec<u32>,
     pub min: Vec3,
     pub max: Vec3,
 }
@@ -70,6 +74,7 @@ impl World {
     pub fn new(positions: &[[f32; 3]], indices: &[u32]) -> World {
         let mut triangles = Vec::with_capacity(indices.len() / 3);
         let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+        let mut large = Vec::new();
         let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for t in indices.as_chunks::<3>().0 {
             let [a, b, c] = t.map(|i| Vec3::from(positions[i as usize]));
@@ -89,6 +94,14 @@ impl World {
             min = min.min(lo);
             max = max.max(hi);
             let (l, h) = (cell_of(lo), cell_of(hi));
+            let cells = [h.0 - l.0, h.1 - l.1, h.2 - l.2]
+                .iter()
+                .map(|&n| n as u64 + 1)
+                .product::<u64>();
+            if cells > LARGE {
+                large.push(id);
+                continue;
+            }
             for x in l.0..=h.0 {
                 for y in l.1..=h.1 {
                     for z in l.2..=h.2 {
@@ -100,6 +113,7 @@ impl World {
         World {
             triangles,
             grid,
+            large,
             min,
             max,
         }
@@ -130,6 +144,10 @@ impl World {
                 }
             }
         }
+        out.extend(self.large.iter().filter(|&&id| {
+            let t = &self.triangles[id as usize];
+            t.a.min(t.b).min(t.c).cmple(hi).all() && t.a.max(t.b).max(t.c).cmpge(lo).all()
+        }));
         out.sort_unstable();
         out.dedup();
     }
@@ -175,11 +193,7 @@ impl World {
     /// Like [`World::raycast`], also returning the surface normal facing the ray.
     pub fn raycast_hit(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<(f32, Vec3)> {
         let mut best: Option<(f32, Vec3)> = None;
-        let mut ids = Vec::new();
-        // March cell by cell is overkill for short rays; gather along the ray's box.
-        let end = origin + dir * max;
-        self.candidates(origin.min(end), origin.max(end), &mut ids);
-        for id in ids {
+        let test = |id: u32, best: &mut Option<(f32, Vec3)>| {
             let t = &self.triangles[id as usize];
             if let Some(d) = ray_triangle(origin, dir, t) {
                 if d <= max && best.is_none_or(|b| d < b.0) {
@@ -188,11 +202,60 @@ impl World {
                     } else {
                         t.normal
                     };
-                    best = Some((d, n));
+                    *best = Some((d, n));
                 }
+            }
+        };
+        for &id in &self.large {
+            test(id, &mut best);
+        }
+        // Walk the grid cells the ray passes through, nearest first
+        // (Amanatides and Woo), until a hit comes before the next cell.
+        let mut cell = cell_of(origin);
+        let axis = |o: f32, d: f32, c: i32| -> (i32, f32, f32) {
+            if d > 0.0 {
+                (1, ((c + 1) as f32 * CELL - o) / d, CELL / d)
+            } else if d < 0.0 {
+                (-1, (c as f32 * CELL - o) / d, -CELL / d)
+            } else {
+                (0, f32::INFINITY, f32::INFINITY)
+            }
+        };
+        let (sx, mut tx, dx) = axis(origin.x, dir.x, cell.0);
+        let (sy, mut ty, dy) = axis(origin.y, dir.y, cell.1);
+        let (sz, mut tz, dz) = axis(origin.z, dir.z, cell.2);
+        loop {
+            if let Some(ids) = self.grid.get(&cell) {
+                for &id in ids {
+                    test(id, &mut best);
+                }
+            }
+            let exit = tx.min(ty).min(tz);
+            if exit > max || best.is_some_and(|b| b.0 <= exit) {
+                break;
+            }
+            if tx <= ty && tx <= tz {
+                cell.0 += sx;
+                tx += dx;
+            } else if ty <= tz {
+                cell.1 += sy;
+                ty += dy;
+            } else {
+                cell.2 += sz;
+                tz += dz;
             }
         }
         best
+    }
+
+    /// The same, testing every triangle (to check the fast way against).
+    #[cfg(test)]
+    fn raycast_every_triangle(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<f32> {
+        self.triangles
+            .iter()
+            .filter_map(|t| ray_triangle(origin, dir, t))
+            .filter(|&d| d <= max)
+            .min_by(f32::total_cmp)
     }
 }
 
@@ -362,6 +425,23 @@ mod tests {
     }
 
     #[test]
+    fn capsules_touch_huge_triangles() {
+        let w = World::new(
+            &[[-500., -500., 0.], [500., -500., 0.], [0., 500., 0.]],
+            &[0, 1, 2],
+        );
+        assert_eq!(w.large.len(), 1);
+        let mut out = Vec::new();
+        let p = Vec3::new(3.0, 4.0, 0.3);
+        w.capsule_contacts(p, p + Vec3::Z, 0.4, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].normal.z > 0.99);
+        let p = Vec3::new(3.0, 4.0, 1.0);
+        w.capsule_contacts(p, p + Vec3::Z, 0.4, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
     fn capsule_above_floor_has_no_contacts() {
         let w = floor();
         let mut c = Vec::new();
@@ -400,5 +480,44 @@ mod tests {
         assert!(!k.contains(Vec3::new(0.5, 1.5, 0.5)));
         assert!(!k.contains(Vec3::new(-0.5, 2.5, 0.5)));
         assert!(!k.contains(Vec3::new(-0.5, 1.5, 1.5)));
+    }
+
+    #[test]
+    fn raycasts_find_the_nearest_triangle() {
+        // A scatter of triangles, and rays every which way through them.
+        let mut rng = 12345u32;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            (rng >> 8) as f32 / (1u32 << 24) as f32 * 20.0 - 10.0
+        };
+        let mut positions = Vec::new();
+        for _ in 0..300 {
+            let c = Vec3::new(next(), next(), next() * 0.3);
+            for _ in 0..3 {
+                let p = c + Vec3::new(next(), next(), next()) * 0.15;
+                positions.push(p.into());
+            }
+        }
+        // And a few huge slanted ones, kept out of the grid.
+        for k in 0..3 {
+            let z = k as f32 - 1.0;
+            positions.extend([[-60., -60., z - 3.], [60., -50., z], [0., 60., z + 3.]]);
+        }
+        let indices: Vec<u32> = (0..positions.len() as u32).collect();
+        let w = World::new(&positions, &indices);
+        assert_eq!(w.large.len(), 3);
+        for _ in 0..500 {
+            let o = Vec3::new(next(), next(), next() * 0.3);
+            let d = Vec3::new(next(), next(), next() * 0.5).normalize();
+            let max = 5.0 + next().abs() * 2.0;
+            let fast = w.raycast(o, d, max);
+            let slow = w.raycast_every_triangle(o, d, max);
+            match (fast, slow) {
+                (Some(a), Some(b)) => assert!((a - b).abs() < 1e-4, "{a} vs {b}"),
+                (a, b) => assert_eq!(a, b),
+            }
+        }
     }
 }

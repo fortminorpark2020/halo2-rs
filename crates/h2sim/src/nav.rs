@@ -235,8 +235,10 @@ impl NavGraph {
         NavGraph { points, links }.keep_reachable(first_spot)
     }
 
-    /// Only the points that can be reached from the spots (points from
-    /// `first_spot` on) and that lead back to them.
+    /// Only the points the spots lead to (points from `first_spot` on)
+    /// that can get back to the level's main area (its largest group of
+    /// points that all reach each other), so that from anywhere in the
+    /// graph a bot can find its way around.
     fn keep_reachable(self, first_spot: usize) -> NavGraph {
         let n = self.points.len();
         let mut back = vec![Vec::new(); n];
@@ -245,9 +247,9 @@ impl NavGraph {
                 back[j].push(i);
             }
         }
-        let flood = |links: &[Vec<usize>]| {
+        let flood = |links: &[Vec<usize>], starts: Vec<usize>| {
             let mut seen = vec![false; n];
-            let mut stack: Vec<usize> = (first_spot..n).collect();
+            let mut stack = starts;
             while let Some(i) = stack.pop() {
                 if !std::mem::replace(&mut seen[i], true) {
                     stack.extend(links[i].iter().copied().filter(|&j| !seen[j]));
@@ -255,11 +257,12 @@ impl NavGraph {
             }
             seen
         };
-        let (forward, backward) = (flood(&self.links), flood(&back));
+        let forward = flood(&self.links, (first_spot..n).collect());
+        let returns = flood(&back, self.main_area(&back));
         let mut index = vec![usize::MAX; n];
         let mut points = Vec::new();
         for i in 0..n {
-            if forward[i] && backward[i] {
+            if forward[i] && returns[i] {
                 index[i] = points.len();
                 points.push(self.points[i]);
             }
@@ -275,6 +278,56 @@ impl NavGraph {
             })
             .collect();
         NavGraph { points, links }
+    }
+
+    /// The largest group of points that can all reach each other (strongly
+    /// connected; Kosaraju's method), given the links reversed.
+    fn main_area(&self, back: &[Vec<usize>]) -> Vec<usize> {
+        let n = self.points.len();
+        // Points in the order their searches finish.
+        let mut seen = vec![false; n];
+        let mut order = Vec::with_capacity(n);
+        for start in 0..n {
+            if std::mem::replace(&mut seen[start], true) {
+                continue;
+            }
+            let mut stack = vec![(start, 0usize)];
+            while let Some(top) = stack.last_mut() {
+                let (i, k) = *top;
+                if let Some(&j) = self.links[i].get(k) {
+                    top.1 += 1;
+                    if !std::mem::replace(&mut seen[j], true) {
+                        stack.push((j, 0));
+                    }
+                } else {
+                    order.push(i);
+                    stack.pop();
+                }
+            }
+        }
+        // Groups along the reversed links, latest finished first.
+        let mut group = vec![usize::MAX; n];
+        let mut sizes = Vec::new();
+        for &start in order.iter().rev() {
+            if group[start] != usize::MAX {
+                continue;
+            }
+            let g = sizes.len();
+            group[start] = g;
+            let (mut stack, mut size) = (vec![start], 0);
+            while let Some(i) = stack.pop() {
+                size += 1;
+                for &j in &back[i] {
+                    if group[j] == usize::MAX {
+                        group[j] = g;
+                        stack.push(j);
+                    }
+                }
+            }
+            sizes.push(size);
+        }
+        let biggest = (0..sizes.len()).max_by_key(|&g| sizes[g]);
+        (0..n).filter(|&i| Some(group[i]) == biggest).collect()
     }
 
     /// Cut corners off a route where the way is clear: from each point, on

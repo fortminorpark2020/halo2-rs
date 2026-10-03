@@ -103,20 +103,35 @@ pub fn find_maps(dir: &Path) -> Vec<MapChoice> {
 
 /// Kills to win the lobby offers; 0 plays on without end.
 pub const SCORES: [u32; 6] = [5, 10, 15, 25, 50, 0];
-/// Captures to win Capture the Flag.
+/// Captures (or bombs) to win Capture the Flag and Assault.
 pub const CAPTURES: [u32; 5] = [1, 3, 5, 10, 0];
+/// Seconds to win the timed game types.
+pub const TIMES: [u32; 6] = [60, 120, 180, 300, 600, 0];
+/// Points to win Juggernaut.
+pub const JUGGERNAUT_POINTS: [u32; 5] = [5, 10, 15, 25, 0];
 pub const MAX_BOTS: usize = 15;
-/// The game types the lobby offers, with their names.
-pub const GAME_TYPES: [(GameType, &str); 3] = [
-    (GameType::Slayer, "SLAYER"),
-    (GameType::TeamSlayer, "TEAM SLAYER"),
-    (GameType::Ctf, "CAPTURE THE FLAG"),
+/// The game types the lobby offers, with their names (and the names
+/// H2_GAME takes).
+pub const GAME_TYPES: [(GameType, &str, &str); 10] = [
+    (GameType::Slayer, "SLAYER", "slayer"),
+    (GameType::TeamSlayer, "TEAM SLAYER", "team"),
+    (GameType::Ctf, "CAPTURE THE FLAG", "ctf"),
+    (GameType::KingOfTheHill, "KING OF THE HILL", "king"),
+    (GameType::TeamKing, "TEAM KING", "teamking"),
+    (GameType::Oddball, "ODDBALL", "oddball"),
+    (GameType::TeamOddball, "TEAM ODDBALL", "teamoddball"),
+    (GameType::Juggernaut, "JUGGERNAUT", "juggernaut"),
+    (GameType::Territories, "TERRITORIES", "territories"),
+    (GameType::Assault, "ASSAULT", "assault"),
 ];
 
 /// The scores to win a game type offers, and the one it starts on.
 pub fn scores(game_type: GameType) -> (&'static [u32], usize) {
     match game_type {
-        GameType::Ctf => (&CAPTURES, 1),
+        GameType::Ctf | GameType::Assault => (&CAPTURES, 1),
+        GameType::Territories => (&TIMES, 3),
+        t if t.timed() => (&TIMES, 1),
+        GameType::Juggernaut => (&JUGGERNAUT_POINTS, 1),
         _ => (&SCORES, 3),
     }
 }
@@ -149,6 +164,8 @@ impl Settings {
 pub struct ScoreLine {
     pub name: String,
     pub score: i32,
+    /// The score is seconds (shown as minutes and seconds).
+    pub timed: bool,
     pub kills: u32,
     pub deaths: u32,
     pub color: [f32; 3],
@@ -361,7 +378,7 @@ impl Menu {
                 "SCORE TO WIN".into(),
                 Some(match s.score_to_win() {
                     0 => "NO LIMIT".into(),
-                    n => n.to_string(),
+                    n => crate::local::score_text(n as i32, s.game_type().timed()),
                 }),
             ),
             Row::Bots => ("BOTS".into(), Some(s.bots.to_string())),
@@ -826,7 +843,7 @@ fn draw_scores(
         }
         let values = [
             line.name.clone(),
-            line.score.to_string(),
+            crate::local::score_text(line.score, line.timed),
             line.kills.to_string(),
             line.deaths.to_string(),
         ];
