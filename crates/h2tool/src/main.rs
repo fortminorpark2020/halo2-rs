@@ -40,6 +40,7 @@ fn main() -> ExitCode {
         Some("jmad") if args.len() >= 3 => jmad(&args[1], &args[2]),
         Some("jmadscan") if args.len() >= 2 => jmadscan(&args[1]),
         Some("shader") if args.len() >= 3 => shader_dump(&args[1], &args[2]),
+        Some("lightmap") if args.len() >= 2 => lightmap_dump(&args[1]),
         Some("model") if args.len() >= 3 => {
             model(&args[1], &args[2], args.get(3).map(String::as_str))
         }
@@ -566,6 +567,123 @@ fn shader_dump(path: &str, name: &str) -> Res {
     }
     for l in pp_lines {
         println!("{l}");
+    }
+    Ok(())
+}
+
+/// Raw view of each BSP's lightmap groups.
+fn lightmap_dump(path: &str) -> Res {
+    use blam_cache::{i16_at, i32_at, u32_at, DatumIndex, MapSet};
+    let mut set = MapSet::open(path)?;
+    let bsps = set.map.structure_bsps()?;
+    for bsp in bsps {
+        let (src, tag, data) = set.tag_data(bsp.lightmap)?;
+        println!("{} ({} bytes)", tag.name, data.len());
+        let file = set.get(src);
+        let region = file.meta_region();
+        let groups = file.read_block(region, &data, 0x80, 0x68)?;
+        let mut bitmaps = Vec::new();
+        for (gi, g) in groups.chunks(0x68).enumerate() {
+            let palettes = i32_at(g, 0x8);
+            let writable = i32_at(g, 0x10);
+            let bitmap = DatumIndex(u32_at(g, 0x1C));
+            let clusters = i32_at(g, 0x20);
+            let info = file.read_block(region, g, 0x28, 4)?;
+            let buckets = i32_at(g, 0x40);
+            println!(
+                "  group {gi}: palettes {palettes} writable {writable} bitmap {:08x} clusters {clusters} render info {} buckets {buckets} instances {} ",
+                bitmap.0,
+                info.len() / 4,
+                i32_at(g, 0x48),
+            );
+            for (i, r) in info.chunks(4).take(12).enumerate() {
+                println!(
+                    "    cluster {i}: bitmap {} palette {}",
+                    i16_at(r, 0),
+                    r[2] as i8
+                );
+            }
+            let inst = file.read_block(region, g, 0x48, 4)?;
+            let list: Vec<String> = inst
+                .chunks(4)
+                .map(|r| format!("{}/{}", i16_at(r, 0), r[2] as i8))
+                .collect();
+            println!("    instances (bitmap/palette): {}", list.join(" "));
+            let refs = file.read_block(region, g, 0x50, 0xC)?;
+            for (i, r) in refs.chunks(0xC).enumerate() {
+                let offsets = file.read_block(region, r, 0x4, 2)?;
+                let o: Vec<i16> = offsets.chunks(2).map(|c| i16_at(c, 0)).collect();
+                println!(
+                    "    bucket ref {i}: flags {:04x} bucket {} offsets {o:?}",
+                    i16_at(r, 0),
+                    i16_at(r, 2)
+                );
+            }
+            let buckets = file.read_block(region, g, 0x40, 0x38)?;
+            for (i, b) in buckets.chunks(0x38).enumerate() {
+                let res = file.read_block(region, b, 0x1C, 0x10)?;
+                let r: Vec<(i16, i16, i32)> = res
+                    .chunks(0x10)
+                    .map(|c| (i16_at(c, 4), i16_at(c, 6), i32_at(c, 8)))
+                    .collect();
+                println!(
+                    "    bucket {i}: flags {:04x} block {:08x} size {} section {} res {} {r:?}",
+                    i16_at(b, 0),
+                    u32_at(b, 0xC),
+                    i32_at(b, 0x10),
+                    i32_at(b, 0x14),
+                    i32_at(b, 0x18)
+                );
+            }
+            bitmaps.push(bitmap);
+        }
+        for b in bitmaps {
+            let (bsrc, btag, bdata) = set.tag_data(b)?;
+            println!("  bitmap {}", btag.name);
+            let file = set.get(bsrc);
+            let region = file.meta_region();
+            let entries = file.read_block(region, &bdata, 68, 116)?;
+            for (i, e) in entries.chunks(116).enumerate().take(8) {
+                println!(
+                    "    image {i}: {}x{} format {} flags {:04x} mips {} data {:08x} size {}",
+                    i16_at(e, 4),
+                    i16_at(e, 6),
+                    i16_at(e, 12),
+                    i16_at(e, 14),
+                    i16_at(e, 20),
+                    u32_at(e, 28),
+                    i32_at(e, 52)
+                );
+            }
+            println!("    {} images", entries.len() / 116);
+            if let Ok(dir) = std::env::var("H2_DUMP") {
+                for i in 0..4 {
+                    let img = blam_cache::bitmap::read_bitmap_at(&mut set, b, i)?;
+                    let rgb: Vec<u8> = img
+                        .rgba
+                        .chunks(4)
+                        .flat_map(|p| [p[0], p[1], p[2]])
+                        .collect();
+                    render::write_png(
+                        &format!("{dir}/lm_{i}.png"),
+                        &rgb,
+                        img.width as usize,
+                        img.height as usize,
+                    )?;
+                    let a: Vec<u8> = img
+                        .rgba
+                        .chunks(4)
+                        .flat_map(|p| [p[3], p[3], p[3]])
+                        .collect();
+                    render::write_png(
+                        &format!("{dir}/lm_{i}_alpha.png"),
+                        &a,
+                        img.width as usize,
+                        img.height as usize,
+                    )?;
+                }
+            }
+        }
     }
     Ok(())
 }

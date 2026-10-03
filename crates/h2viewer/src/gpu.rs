@@ -93,32 +93,57 @@ struct U {
 @group(0) @binding(0) var<uniform> u: U;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
+@group(1) @binding(2) var lightmap: texture_2d<f32>;
+@group(1) @binding(3) var lsamp: sampler;
 
 struct Out {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) lmuv: vec2<f32>,
+    @location(4) light: vec4<f32>,
 };
 
 @vertex
-fn vs(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>) -> Out {
+fn vs(
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) lmuv: vec2<f32>,
+    @location(4) light: vec4<f32>,
+) -> Out {
     var o: Out;
     o.clip = u.mvp * vec4<f32>(position, 1.0);
     o.world = (u.model * vec4<f32>(position, 1.0)).xyz;
     o.normal = (u.model * vec4<f32>(normal, 0.0)).xyz;
     o.uv = uv;
+    o.lmuv = lmuv;
+    o.light = light;
     return o;
 }
+
+// Baked light is stored at half brightness so it can light surfaces up to 2x.
+// Halo 2 applied that doubling in gamma space; 2^2.2 is the same in linear.
+const LIGHTMAP_SCALE: f32 = 4.59;
 
 @fragment
 fn fs(i: Out) -> @location(0) vec4<f32> {
     let albedo = textureSample(tex, samp, i.uv).rgb;
-    let n = normalize(i.normal);
-    let sun = normalize(vec3<f32>(0.4, -0.3, 0.85));
-    // Sky-from-above / ground-bounce ambient plus a soft sun until lightmaps are in.
-    let ambient = mix(vec3<f32>(0.32, 0.30, 0.28), vec3<f32>(0.55, 0.60, 0.68), n.z * 0.5 + 0.5);
-    let light = ambient + vec3<f32>(0.75, 0.72, 0.65) * max(dot(n, sun), 0.0);
+    let baked = textureSample(lightmap, lsamp, i.lmuv).rgb;
+    var light: vec3<f32>;
+    if (u.params.w > 0.5) {
+        // Level geometry: its lightmap page, or per-vertex colour.
+        // Lightmap pages are decoded as sRGB; vertex colours arrive in gamma space.
+        let colour = pow(i.light.rgb, vec3<f32>(2.2));
+        light = colour * mix(vec3<f32>(1.0), baked, i.light.a) * LIGHTMAP_SCALE;
+    } else {
+        // Objects: sky-from-above / ground-bounce ambient plus a soft sun.
+        let n = normalize(i.normal);
+        let sun = normalize(vec3<f32>(0.4, -0.3, 0.85));
+        let ambient = mix(vec3<f32>(0.32, 0.30, 0.28), vec3<f32>(0.55, 0.60, 0.68), n.z * 0.5 + 0.5);
+        light = ambient + vec3<f32>(0.75, 0.72, 0.65) * max(dot(n, sun), 0.0);
+    }
     let fog = clamp(distance(i.world, u.camera.xyz) / 400.0, 0.0, 1.0) * u.params.x;
     let sky = vec3<f32>(0.62, 0.70, 0.80);
     return vec4<f32>(mix(albedo * light, sky, fog * fog), 1.0);
@@ -212,7 +237,9 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
 pub struct GpuMesh {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
+    /// Material bind group and index range of each batch.
     batches: Vec<(usize, std::ops::Range<u32>)>,
+    baked: bool,
 }
 
 pub struct Gpu {
@@ -225,7 +252,8 @@ pub struct Gpu {
     hud_pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     globals: wgpu::BindGroup,
-    textures: Vec<wgpu::BindGroup>,
+    /// One bind group per (texture, lightmap) pair the meshes use.
+    materials: Vec<wgpu::BindGroup>,
     hud_textures: Vec<wgpu::BindGroup>,
     effects_texture: wgpu::BindGroup,
     meshes: Vec<GpuMesh>,
@@ -260,6 +288,29 @@ fn upload_texture(
     img: &Image,
     srgb_mips: bool,
 ) -> wgpu::BindGroup {
+    let view = upload_view(device, queue, img, srgb_mips);
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+fn upload_view(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    img: &Image,
+    srgb_mips: bool,
+) -> wgpu::TextureView {
     let mips = if srgb_mips {
         mip_chain(img)
     } else {
@@ -304,21 +355,29 @@ fn upload_texture(
             },
         );
     }
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-        ],
-    })
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
 }
 
 /// A soft white disc: alpha falls off from the centre.
@@ -382,7 +441,9 @@ impl Gpu {
             .ok_or("surface not supported by this GPU")?;
         surface.configure(&device, &config);
 
-        let meshes = scene
+        let mut material_index = std::collections::HashMap::new();
+        let mut material_keys: Vec<(usize, usize)> = Vec::new();
+        let meshes: Vec<GpuMesh> = scene
             .meshes
             .iter()
             .map(|m| GpuMesh {
@@ -400,8 +461,17 @@ impl Gpu {
                 batches: m
                     .batches
                     .iter()
-                    .map(|b| (b.texture, b.first_index..b.first_index + b.index_count))
+                    .map(|b| {
+                        let key = (b.texture, b.lightmap);
+                        let next = material_keys.len();
+                        let index = *material_index.entry(key).or_insert(next);
+                        if index == next {
+                            material_keys.push(key);
+                        }
+                        (index, b.first_index..b.first_index + b.index_count)
+                    })
                     .collect(),
+                baked: m.baked_lighting,
             })
             .collect();
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
@@ -476,10 +546,47 @@ impl Gpu {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let textures = scene
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mesh material"),
+            entries: &[
+                texture_entry(0),
+                sampler_entry(1),
+                texture_entry(2),
+                sampler_entry(3),
+            ],
+        });
+        let views: Vec<wgpu::TextureView> = scene
             .textures
             .iter()
-            .map(|img| upload_texture(&device, &queue, &texture_layout, &repeat, img, true))
+            .map(|img| upload_view(&device, &queue, img, true))
+            .collect();
+        let materials = material_keys
+            .iter()
+            .map(|&(t, l)| {
+                let view = |i: usize| views.get(i).unwrap_or(&views[0]);
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &material_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(view(t)),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&repeat),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(view(l)),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&clamp),
+                        },
+                    ],
+                })
+            })
             .collect();
         let hud_textures = scene
             .hud_textures
@@ -500,6 +607,11 @@ impl Gpu {
             bind_group_layouts: &[Some(&globals_layout), Some(&texture_layout)],
             immediate_size: 0,
         });
+        let mesh_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mesh"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&material_layout)],
+            immediate_size: 0,
+        });
         let module = |label, src: &str| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
@@ -512,7 +624,7 @@ impl Gpu {
 
         let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mesh"),
-            layout: Some(&layout),
+            layout: Some(&mesh_layout),
             vertex: wgpu::VertexState {
                 module: &mesh_shader,
                 entry_point: Some("vs"),
@@ -520,7 +632,13 @@ impl Gpu {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x3,
+                        1 => Float32x3,
+                        2 => Float32x2,
+                        3 => Float32x2,
+                        4 => Float32x4
+                    ],
                 })],
             },
             primitive: wgpu::PrimitiveState {
@@ -612,7 +730,7 @@ impl Gpu {
             hud_pipeline,
             uniforms,
             globals,
-            textures,
+            materials,
             hud_textures,
             effects_texture,
             meshes,
@@ -640,7 +758,14 @@ impl Gpu {
     }
 
     /// Queue a uniform slot; returns its dynamic offset.
-    fn slot(&mut self, proj: Mat4, model: Mat4, camera: Vec3, fog: f32) -> Option<u32> {
+    fn slot(
+        &mut self,
+        proj: Mat4,
+        model: Mat4,
+        camera: Vec3,
+        fog: f32,
+        baked: bool,
+    ) -> Option<u32> {
         let offset = self.staging.len() as u64;
         if offset / SLOT >= MAX_DRAWS {
             return None;
@@ -650,7 +775,7 @@ impl Gpu {
             mvp: (proj * model).to_cols_array_2d(),
             model: model.to_cols_array_2d(),
             camera: camera.extend(1.0).into(),
-            params: [fog, w, h, 0.0],
+            params: [fog, w, h, if baked { 1.0 } else { 0.0 }],
         };
         self.staging.extend_from_slice(bytemuck::bytes_of(&u));
         self.staging.resize((offset + SLOT) as usize, 0);
@@ -692,19 +817,20 @@ impl Gpu {
         let cam = f.camera;
         let mut world = Vec::new();
         for d in f.world {
-            if let Some(o) = self.slot(f.view_proj, d.model, cam, 1.0) {
+            let baked = self.meshes.get(d.mesh).is_some_and(|m| m.baked);
+            if let Some(o) = self.slot(f.view_proj, d.model, cam, 1.0, baked) {
                 world.push((d.mesh, o));
             }
         }
-        let sprites_slot = self.slot(f.view_proj, Mat4::IDENTITY, cam, 0.0);
+        let sprites_slot = self.slot(f.view_proj, Mat4::IDENTITY, cam, 0.0, false);
         let mut views = Vec::new();
         for d in f.view_models {
-            if let Some(o) = self.slot(f.view_model_proj, d.model, cam, 0.0) {
+            if let Some(o) = self.slot(f.view_model_proj, d.model, cam, 0.0, false) {
                 views.push((d.mesh, o));
             }
         }
-        let view_sprites_slot = self.slot(f.view_model_proj, Mat4::IDENTITY, cam, 0.0);
-        let hud_slot = self.slot(Mat4::IDENTITY, Mat4::IDENTITY, cam, 0.0);
+        let view_sprites_slot = self.slot(f.view_model_proj, Mat4::IDENTITY, cam, 0.0, false);
+        let hud_slot = self.slot(Mat4::IDENTITY, Mat4::IDENTITY, cam, 0.0, false);
         self.queue.write_buffer(&self.uniforms, 0, &self.staging);
 
         let sprites = self.vertex_buffer(f.sprites);
@@ -803,8 +929,8 @@ impl Gpu {
         pass.set_bind_group(0, &self.globals, &[offset]);
         pass.set_vertex_buffer(0, m.vertices.slice(..));
         pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
-        for (texture, range) in &m.batches {
-            pass.set_bind_group(1, &self.textures[*texture], &[]);
+        for (material, range) in &m.batches {
+            pass.set_bind_group(1, &self.materials[*material], &[]);
             pass.draw_indexed(range.clone(), 0, 0..1);
         }
     }

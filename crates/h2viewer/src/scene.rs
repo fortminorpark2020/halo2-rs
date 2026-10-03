@@ -6,10 +6,11 @@ use blam_cache::animation;
 use blam_cache::bitmap::{self, Image};
 use blam_cache::geometry::Mesh;
 use blam_cache::hud::{self, Anchor};
+use blam_cache::lightmap::{self, InstanceLighting};
 use blam_cache::model::{self, RenderModel};
 use blam_cache::physics::{self, BipedPhysics, PlayerMovement};
-use blam_cache::render::Section;
-use blam_cache::{render, shader, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn};
+use blam_cache::render::{LevelGeometry, Section, SectionOwner};
+use blam_cache::{render, shader, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp};
 use h2sim::WeaponDef;
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,13 +21,45 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    /// Level geometry: where the vertex samples its lightmap page.
+    pub lightmap_uv: [f32; 2],
+    /// Level geometry: baked light colour; alpha 1 multiplies it by the
+    /// lightmap page.
+    pub light: [f32; 4],
+}
+
+impl Vertex {
+    pub fn new(position: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> Vertex {
+        Vertex {
+            position,
+            normal,
+            uv,
+            lightmap_uv: [0.0; 2],
+            light: [1.0, 1.0, 1.0, 0.0],
+        }
+    }
 }
 
 pub struct Batch {
     pub texture: usize,
+    /// Lightmap page texture (texture 0 when unused).
+    pub lightmap: usize,
     pub first_index: u32,
     pub index_count: u32,
 }
+
+/// How one section of level geometry is lit.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SectionLight {
+    /// Texture index of its lightmap page.
+    Page(usize),
+    /// One colour per vertex.
+    Colors(Vec<[f32; 3]>),
+    Unlit,
+}
+
+/// Light given to level geometry that has no baked lighting.
+const UNLIT: [f32; 4] = [0.5, 0.5, 0.5, 0.0];
 
 #[derive(Default)]
 pub struct MeshData {
@@ -36,6 +69,8 @@ pub struct MeshData {
     /// Model meshes only: per vertex, the nodes it follows and their weights.
     pub bones: Vec<[u8; 4]>,
     pub weights: Vec<[f32; 4]>,
+    /// Lit by its vertices' baked light rather than the object lighting.
+    pub baked_lighting: bool,
 }
 
 impl MeshData {
@@ -43,21 +78,43 @@ impl MeshData {
         self.indices.len() / 3
     }
 
-    /// Build from sections whose parts index `material_texture`.
+    /// Build from sections whose parts index `material_texture`. Level
+    /// geometry passes each section's baked lighting in `lights`.
     fn from_sections<'a>(
         sections: impl IntoIterator<Item = &'a Section>,
         material_texture: &[usize],
+        lights: &[SectionLight],
     ) -> MeshData {
-        let mut mesh = MeshData::default();
-        let mut by_texture: HashMap<usize, Vec<u32>> = HashMap::new();
-        for section in sections {
+        let mut mesh = MeshData {
+            baked_lighting: !lights.is_empty(),
+            ..MeshData::default()
+        };
+        let mut by_material: HashMap<(usize, usize), Vec<u32>> = HashMap::new();
+        for (s, section) in sections.into_iter().enumerate() {
             let base = mesh.vertices.len() as u32;
-            for i in 0..section.positions.len() {
-                mesh.vertices.push(Vertex {
-                    position: section.positions[i],
-                    normal: section.normals[i],
-                    uv: section.uvs[i],
-                });
+            let count = section.positions.len();
+            let mut light = lights.get(s).cloned();
+            if matches!(light, Some(SectionLight::Page(_))) && section.lightmap_uvs.len() < count {
+                light = Some(SectionLight::Unlit);
+            }
+            let page = match light {
+                Some(SectionLight::Page(t)) => t,
+                _ => 0,
+            };
+            for i in 0..count {
+                let mut v = Vertex::new(section.positions[i], section.normals[i], section.uvs[i]);
+                match &light {
+                    Some(SectionLight::Page(_)) => {
+                        v.lightmap_uv = section.lightmap_uvs[i];
+                        v.light = [1.0; 4];
+                    }
+                    Some(SectionLight::Colors(c)) => {
+                        v.light = c.get(i).map_or(UNLIT, |c| [c[0], c[1], c[2], 0.0]);
+                    }
+                    Some(SectionLight::Unlit) => v.light = UNLIT,
+                    None => {}
+                }
+                mesh.vertices.push(v);
                 mesh.bones
                     .push(section.bones.get(i).copied().unwrap_or_default());
                 mesh.weights.push(
@@ -74,18 +131,19 @@ impl MeshData {
                     .and_then(|m| material_texture.get(m))
                     .copied()
                     .unwrap_or(0);
-                by_texture
-                    .entry(tex)
+                by_material
+                    .entry((tex, page))
                     .or_default()
                     .extend(part.indices.iter().map(|i| i + base));
             }
         }
-        let mut keys: Vec<usize> = by_texture.keys().copied().collect();
+        let mut keys: Vec<(usize, usize)> = by_material.keys().copied().collect();
         keys.sort_unstable();
         for k in keys {
-            let idx = &by_texture[&k];
+            let idx = &by_material[&k];
             mesh.batches.push(Batch {
-                texture: k,
+                texture: k.0,
+                lightmap: k.1,
                 first_index: mesh.indices.len() as u32,
                 index_count: idx.len() as u32,
             });
@@ -186,6 +244,7 @@ struct Loader {
     textures: Vec<Image>,
     texture_of_bitmap: HashMap<DatumIndex, usize>,
     texture_of_shader: HashMap<DatumIndex, usize>,
+    lightmap_pages: HashMap<(DatumIndex, usize), usize>,
     hud_textures: Vec<Image>,
     hud_of_bitmap: HashMap<(DatumIndex, i8), usize>,
     failures: usize,
@@ -221,13 +280,68 @@ impl Loader {
         t
     }
 
+    /// Lighting for each section of a BSP's render geometry, loading the
+    /// lightmap pages it uses.
+    fn level_lights(&mut self, bsp: &StructureBsp, geo: &LevelGeometry) -> Vec<SectionLight> {
+        let lighting =
+            match lightmap::read_level_lighting(&mut self.set, bsp, &geo.instance_vertices) {
+                Ok(l) => l,
+                Err(e) => {
+                    println!("warning: lightmap unavailable ({e}); the level will look flat");
+                    return vec![SectionLight::Unlit; geo.sections.len()];
+                }
+            };
+        geo.owners
+            .iter()
+            .map(|owner| {
+                let page = match owner {
+                    SectionOwner::Cluster(c) => lighting.clusters.get(*c).copied().flatten(),
+                    SectionOwner::Instance(i) => match lighting.instances.get(*i) {
+                        Some(InstanceLighting::Lightmap(p)) => Some(*p),
+                        Some(InstanceLighting::VertexColors(c)) => {
+                            return SectionLight::Colors(c.clone())
+                        }
+                        _ => None,
+                    },
+                };
+                match (page, lighting.bitmap) {
+                    (Some(p), Some(b)) => match self.lightmap_page(b, p) {
+                        Some(t) => SectionLight::Page(t),
+                        None => SectionLight::Unlit,
+                    },
+                    _ => SectionLight::Unlit,
+                }
+            })
+            .collect()
+    }
+
+    fn lightmap_page(&mut self, bitmap: DatumIndex, page: usize) -> Option<usize> {
+        if let Some(&t) = self.lightmap_pages.get(&(bitmap, page)) {
+            return Some(t);
+        }
+        let t = match bitmap::read_bitmap_at(&mut self.set, bitmap, page) {
+            Ok(img) => {
+                self.textures.push(img);
+                Some(self.textures.len() - 1)
+            }
+            Err(_) => {
+                self.failures += 1;
+                None
+            }
+        };
+        if let Some(t) = t {
+            self.lightmap_pages.insert((bitmap, page), t);
+        }
+        t
+    }
+
     fn model_mesh(&mut self, model: &RenderModel) -> MeshData {
         let material_texture: Vec<usize> = model
             .shaders
             .iter()
             .map(|&s| self.shader_texture(s))
             .collect();
-        MeshData::from_sections(&model.sections, &material_texture)
+        MeshData::from_sections(&model.sections, &material_texture, &[])
     }
 
     fn hud_widgets(&mut self, nhdt: DatumIndex) -> Vec<HudWidget> {
@@ -404,35 +518,34 @@ impl Scene {
             textures: vec![fallback_texture()],
             texture_of_bitmap: HashMap::new(),
             texture_of_shader: HashMap::new(),
+            lightmap_pages: HashMap::new(),
             hud_textures: Vec::new(),
             hud_of_bitmap: HashMap::new(),
             failures: 0,
         };
 
-        // The level: render geometry grouped by texture.
-        let mut level_sections = Vec::new();
-        let mut level_textures = Vec::new();
+        // The level: render geometry grouped by texture and lightmap page.
+        let mut level = MeshData {
+            baked_lighting: true,
+            ..MeshData::default()
+        };
         for bsp in &bsps {
-            match render::bsp_render_geometry(&mut loader.set, bsp) {
-                Ok(geo) => {
-                    let mats: Vec<usize> = geo
-                        .shaders
-                        .iter()
-                        .map(|&s| loader.shader_texture(s))
-                        .collect();
-                    level_sections.push(geo.sections);
-                    level_textures.push(mats);
-                }
+            let geo = match render::bsp_render_geometry(&mut loader.set, bsp) {
+                Ok(geo) => geo,
                 Err(e) => {
                     println!(
                         "warning: render geometry unavailable ({e}); showing collision geometry"
                     );
+                    continue;
                 }
-            }
-        }
-        let mut level = MeshData::default();
-        for (sections, mats) in level_sections.iter().zip(&level_textures) {
-            let part = MeshData::from_sections(sections, mats);
+            };
+            let mats: Vec<usize> = geo
+                .shaders
+                .iter()
+                .map(|&s| loader.shader_texture(s))
+                .collect();
+            let lights = loader.level_lights(bsp, &geo);
+            let part = MeshData::from_sections(&geo.sections, &mats, &lights);
             let base = level.vertices.len() as u32;
             let first = level.indices.len() as u32;
             level.vertices.extend_from_slice(&part.vertices);
@@ -498,15 +611,13 @@ fn collision_mesh(collision: &Mesh) -> MeshData {
         let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or(glam::Vec3::Z);
         for v in p {
             mesh.indices.push(mesh.vertices.len() as u32);
-            mesh.vertices.push(Vertex {
-                position: v.into(),
-                normal: n.into(),
-                uv: [0.0; 2],
-            });
+            mesh.vertices
+                .push(Vertex::new(v.into(), n.into(), [0.0; 2]));
         }
     }
     mesh.batches = vec![Batch {
         texture: 0,
+        lightmap: 0,
         first_index: 0,
         index_count: mesh.indices.len() as u32,
     }];
@@ -577,10 +688,46 @@ mod tests {
             ],
             bones: Vec::new(),
             weights: Vec::new(),
+            lightmap_uvs: Vec::new(),
         };
-        let mesh = MeshData::from_sections([&section], &[5, 7]);
+        let mesh = MeshData::from_sections([&section], &[5, 7], &[]);
         assert_eq!(mesh.batches.len(), 2);
         assert_eq!(mesh.batches[0].texture, 5);
         assert_eq!(&mesh.indices[..3], &[1, 2, 3]);
+    }
+
+    #[test]
+    fn level_sections_carry_their_lighting() {
+        let section = |lightmap_uvs: Vec<[f32; 2]>| Section {
+            positions: vec![[0.0; 3]; 3],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: vec![[0.0; 2]; 3],
+            parts: vec![render::Part {
+                material: 0,
+                indices: vec![0, 1, 2],
+            }],
+            bones: Vec::new(),
+            weights: Vec::new(),
+            lightmap_uvs,
+        };
+        let paged = section(vec![[0.25, 0.5]; 3]);
+        let coloured = section(Vec::new());
+        let missing_uvs = section(Vec::new());
+        let mesh = MeshData::from_sections(
+            [&paged, &coloured, &missing_uvs],
+            &[4],
+            &[
+                SectionLight::Page(9),
+                SectionLight::Colors(vec![[0.1, 0.2, 0.3]; 3]),
+                SectionLight::Page(9),
+            ],
+        );
+        assert!(mesh.baked_lighting);
+        assert_eq!(mesh.vertices[0].light, [1.0; 4]);
+        assert_eq!(mesh.vertices[0].lightmap_uv, [0.25, 0.5]);
+        assert_eq!(mesh.vertices[3].light, [0.1, 0.2, 0.3, 0.0]);
+        assert_eq!(mesh.vertices[6].light, UNLIT);
+        let pages: Vec<usize> = mesh.batches.iter().map(|b| b.lightmap).collect();
+        assert_eq!(pages, vec![0, 9]);
     }
 }

@@ -582,6 +582,7 @@ pub mod animation;
 pub mod bitmap;
 pub mod geometry;
 pub mod hud;
+pub mod lightmap;
 pub mod mapset;
 pub mod model;
 pub mod physics;

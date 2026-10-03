@@ -139,7 +139,7 @@ impl SkinnedMesh {
                         .transform_vector3(Vec3::from(v.normal))
                         .normalize_or(Vec3::Z)
                         .into(),
-                    uv: v.uv,
+                    ..*v
                 }
             })
             .collect()
@@ -357,11 +357,7 @@ mod tests {
     #[test]
     fn skinning_blends_by_weight() {
         let mesh = SkinnedMesh {
-            rest: vec![Vertex {
-                position: [0.0; 3],
-                normal: [0.0, 0.0, 1.0],
-                uv: [0.0; 2],
-            }],
+            rest: vec![Vertex::new([0.0; 3], [0.0, 0.0, 1.0], [0.0; 2])],
             bones: vec![[0, 1, 0, 0]],
             weights: vec![[0.5, 0.5, 0.0, 0.0]],
         };

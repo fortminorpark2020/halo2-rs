@@ -89,6 +89,9 @@ pub struct Section {
     /// how much it follows each, strongest first; weights add up to 1.
     pub bones: Vec<[u8; 4]>,
     pub weights: Vec<[f32; 4]>,
+    /// Level geometry only: where each vertex falls on its lightmap page
+    /// (empty when the section has no lightmap).
+    pub lightmap_uvs: Vec<[f32; 2]>,
 }
 
 impl Section {
@@ -130,14 +133,26 @@ impl Section {
             parts: self.parts.clone(),
             bones: self.bones.clone(),
             weights: self.weights.clone(),
+            lightmap_uvs: self.lightmap_uvs.clone(),
         }
     }
+}
+
+/// What a level section is: a BSP cluster or a placed instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionOwner {
+    Cluster(usize),
+    Instance(usize),
 }
 
 /// Level render geometry plus the shader each material slot uses.
 #[derive(Debug, Clone, Default)]
 pub struct LevelGeometry {
     pub sections: Vec<Section>,
+    /// For each section, the cluster or instance it came from.
+    pub owners: Vec<SectionOwner>,
+    /// Vertex count of every instance (0 where its geometry is missing).
+    pub instance_vertices: Vec<usize>,
     pub shaders: Vec<DatumIndex>,
 }
 
@@ -303,6 +318,15 @@ pub fn read_section(
         }
         None => vec![[0.0; 2]; vertex_count],
     };
+    let lightmap_uvs = match find(RES_VERTEX_BUFFERS, Some(3)) {
+        Some(r) if !layout.model && r.size >= vertex_count * 8 => {
+            let b = slice(&data, base + r.offset, vertex_count * 8)?;
+            (0..vertex_count)
+                .map(|i| [f32_at(b, i * 8), f32_at(b, i * 8 + 4)])
+                .collect()
+        }
+        _ => Vec::new(),
+    };
     let normals = match find(RES_VERTEX_BUFFERS, Some(2)) {
         // normal, binormal, tangent: 3 x float3 per vertex
         Some(r) if r.size >= vertex_count * 36 => {
@@ -356,6 +380,7 @@ pub fn read_section(
         parts,
         bones,
         weights,
+        lightmap_uvs,
     }))
 }
 
@@ -384,9 +409,11 @@ pub fn bsp_render_geometry(set: &mut MapSet, bsp: &StructureBsp) -> Result<Level
         .collect();
 
     let mut sections = Vec::new();
-    for c in clusters.as_chunks::<CLUSTER_SIZE>().0 {
+    let mut owners = Vec::new();
+    for (i, c) in clusters.as_chunks::<CLUSTER_SIZE>().0.iter().enumerate() {
         if let Some(s) = read_section(set, Source::Map, region, SectionLayout::BSP, c)? {
             sections.push(s);
+            owners.push(SectionOwner::Cluster(i));
         }
     }
     let mut def_sections = Vec::new();
@@ -399,17 +426,26 @@ pub fn bsp_render_geometry(set: &mut MapSet, bsp: &StructureBsp) -> Result<Level
             d,
         )?);
     }
-    for inst in instances.as_chunks::<INSTANCE_SIZE>().0 {
+    let mut instance_vertices = Vec::new();
+    for (i, inst) in instances.as_chunks::<INSTANCE_SIZE>().0.iter().enumerate() {
         let Some(Some(def)) = usize::try_from(i16_at(inst, 0x34))
             .ok()
             .and_then(|d| def_sections.get(d))
         else {
+            instance_vertices.push(0);
             continue;
         };
+        instance_vertices.push(def.positions.len());
         let v = |o| [f32_at(inst, o), f32_at(inst, o + 4), f32_at(inst, o + 8)];
         sections.push(def.transformed(f32_at(inst, 0), v(0x4), v(0x10), v(0x1C), v(0x28)));
+        owners.push(SectionOwner::Instance(i));
     }
-    Ok(LevelGeometry { sections, shaders })
+    Ok(LevelGeometry {
+        sections,
+        owners,
+        instance_vertices,
+        shaders,
+    })
 }
 
 #[cfg(test)]
