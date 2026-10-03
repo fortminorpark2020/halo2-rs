@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/blam-cache", "crates/h2tool"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"

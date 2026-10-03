@@ -1,0 +1,132 @@
+//! h2tool: inspect Halo 2 PC map files.
+//!
+//! Usage:
+//!   h2tool info  <file.map>              header summary
+//!   h2tool tags  <file.map> [group]      list tags, optionally only one group (e.g. sbsp)
+//!   h2tool groups <file.map>             tag group counts
+//!   h2tool check <file.map>              read every tag stored in the map to verify it
+//!   h2tool scan  <maps folder>           summary line for every .map in a folder
+
+use blam_cache::{CacheFile, GroupTag};
+use std::collections::BTreeMap;
+use std::io::{self, Write};
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match args.first().map(String::as_str) {
+        Some("info") if args.len() >= 2 => info(&args[1]),
+        Some("tags") if args.len() >= 2 => tags(&args[1], args.get(2).map(String::as_str)),
+        Some("groups") if args.len() >= 2 => groups(&args[1]),
+        Some("check") if args.len() >= 2 => check(&args[1]),
+        Some("scan") if args.len() >= 2 => scan(&args[1]),
+        _ => {
+            eprintln!("usage: h2tool <info|tags|groups|check|scan> <path> [group]");
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        // Output piped into something like `head` that closed early.
+        Err(e)
+            if e.downcast_ref::<io::Error>()
+                .is_some_and(|e| e.kind() == io::ErrorKind::BrokenPipe) =>
+        {
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+type Res = Result<(), Box<dyn std::error::Error>>;
+
+fn info(path: &str) -> Res {
+    let map = CacheFile::open(path)?;
+    let h = &map.header;
+    println!("name:      {}", h.internal_name);
+    println!("scenario:  {}", h.scenario_name);
+    println!("type:      {:?}", h.map_type);
+    println!("build:     {}", h.build);
+    println!("size:      {} bytes", h.file_size);
+    println!("tags:      {}", map.tags.len());
+    println!("groups:    {}", map.groups.len());
+    println!("strings:   {}", map.strings().len());
+    if let Some(t) = map.tag(map.scenario) {
+        println!("scnr tag:  {}", t.name);
+    }
+    Ok(())
+}
+
+fn tags(path: &str, group: Option<&str>) -> Res {
+    let map = CacheFile::open(path)?;
+    let filter = group.and_then(GroupTag::parse);
+    let mut out = io::stdout().lock();
+    for t in &map.tags {
+        if filter.is_some_and(|g| g != t.group) || t.group.is_none() {
+            continue;
+        }
+        writeln!(
+            out,
+            "{:08x}  {}  {:>8}  {}",
+            t.datum.0, t.group, t.size, t.name
+        )?;
+    }
+    Ok(())
+}
+
+fn groups(path: &str) -> Res {
+    let map = CacheFile::open(path)?;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for t in map.tags.iter().filter(|t| !t.group.is_none()) {
+        *counts.entry(t.group.to_string()).or_default() += 1;
+    }
+    let mut out = io::stdout().lock();
+    for (g, n) in counts {
+        writeln!(out, "{g}  {n}")?;
+    }
+    Ok(())
+}
+
+fn check(path: &str) -> Res {
+    let mut map = CacheFile::open(path)?;
+    let stored: Vec<_> = map.tags.iter().filter(|t| t.has_data()).cloned().collect();
+    let mut bad = 0;
+    for t in &stored {
+        if let Err(e) = map.read_tag_data(t) {
+            bad += 1;
+            eprintln!("  {} {}: {e}", t.group, t.name);
+        }
+    }
+    println!(
+        "{} tags total, {} stored in this map, {} readable, {} failed",
+        map.tags.len(),
+        stored.len(),
+        stored.len() - bad,
+        bad
+    );
+    Ok(())
+}
+
+fn scan(dir: &str) -> Res {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("map")))
+        .collect();
+    entries.sort();
+    for p in entries {
+        let name = p.file_name().unwrap().to_string_lossy();
+        match CacheFile::open(&p) {
+            Ok(m) => println!(
+                "OK    {name:<28} {:<16?} {:>5} tags  {}",
+                m.header.map_type,
+                m.tags.len(),
+                m.header.scenario_name
+            ),
+            Err(e) => println!("FAIL  {name:<28} {e}"),
+        }
+    }
+    Ok(())
+}
