@@ -56,7 +56,7 @@ impl Mesh {
         for p in &self.positions {
             s.push_str(&format!("v {} {} {}\n", p[0], p[1], p[2]));
         }
-        for t in self.indices.chunks_exact(3) {
+        for t in self.indices.as_chunks::<3>().0 {
             s.push_str(&format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1));
         }
         s
@@ -109,7 +109,7 @@ impl<R: Read + Seek> CacheFile<R> {
         }
 
         let instances = self.read_block(region, &sbsp, SBSP_INSTANCES, INSTANCE_SIZE)?;
-        for inst in instances.chunks_exact(INSTANCE_SIZE) {
+        for inst in instances.as_chunks::<INSTANCE_SIZE>().0 {
             let def = i16_at(inst, 0x34);
             let Some(local) = usize::try_from(def).ok().and_then(|d| def_meshes.get(d)) else {
                 continue;
@@ -135,7 +135,9 @@ fn collision_to_mesh(c: &CollisionBsp) -> Mesh {
     let mut mesh = Mesh {
         positions: c
             .vertices
-            .chunks_exact(0x10)
+            .as_chunks::<0x10>()
+            .0
+            .iter()
             .map(|v| [f32_at(v, 0), f32_at(v, 4), f32_at(v, 8)])
             .collect(),
         indices: Vec::new(),
@@ -143,7 +145,7 @@ fn collision_to_mesh(c: &CollisionBsp) -> Mesh {
     let edge_count = c.edges.len() / 0xC;
     let vert_count = mesh.positions.len();
 
-    for (si, s) in c.surfaces.chunks_exact(0x8).enumerate() {
+    for (si, s) in c.surfaces.as_chunks::<0x8>().0.iter().enumerate() {
         if s[4] & SURFACE_INVISIBLE != 0 {
             continue;
         }

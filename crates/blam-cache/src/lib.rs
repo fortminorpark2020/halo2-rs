@@ -285,7 +285,9 @@ impl<R: Read + Seek> CacheFile<R> {
 
         let gb = read_at(&mut reader, meta + group_table, group_count * 0xC)?;
         let groups = gb
-            .chunks_exact(0xC)
+            .as_chunks::<0xC>()
+            .0
+            .iter()
             .map(|c| TagGroup {
                 tag: GroupTag(u32_at(c, 0)),
                 parent: GroupTag(u32_at(c, 4)),
@@ -295,7 +297,9 @@ impl<R: Read + Seek> CacheFile<R> {
 
         let tb = read_at(&mut reader, meta + tag_table, tag_count * 0x10)?;
         let tags = tb
-            .chunks_exact(0x10)
+            .as_chunks::<0x10>()
+            .0
+            .iter()
             .enumerate()
             .map(|(i, c)| Tag {
                 group: GroupTag(u32_at(c, 0)),
@@ -381,7 +385,7 @@ impl<R: Read + Seek> CacheFile<R> {
         }
         let entries = self.read_block(meta, &scnr_data, SCNR_BSP_BLOCK, ENTRY_SIZE)?;
         let mut out = Vec::new();
-        for e in entries.chunks_exact(ENTRY_SIZE) {
+        for e in entries.as_chunks::<ENTRY_SIZE>().0 {
             let sbsp = DatumIndex(u32_at(e, 0x14));
             let lightmap = DatumIndex(u32_at(e, 0x1C));
             let offset = u32_at(e, 0x0);
@@ -469,7 +473,9 @@ impl<R: Read + Seek> CacheFile<R> {
         let data = self.read_tag_data(&scnr)?;
         let entries = self.read_block(meta, &data, SCNR_SPAWNS, ENTRY_SIZE)?;
         Ok(entries
-            .chunks_exact(ENTRY_SIZE)
+            .as_chunks::<ENTRY_SIZE>()
+            .0
+            .iter()
             .map(|e| PlayerSpawn {
                 position: [f32_at(e, 0), f32_at(e, 4), f32_at(e, 8)],
                 facing: f32_at(e, 0xC),
@@ -508,7 +514,9 @@ fn read_string_table<R: Read + Seek>(
     let index = read_at(r, index_offset as u64, count as usize * 4)?;
     let data = read_at(r, data_offset as u64, data_size as usize)?;
     Ok(index
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| {
             let start = i32_at(c, 0);
             if start < 0 || start as usize >= data.len() {

@@ -83,7 +83,7 @@ pub struct Gpu {
 
 fn flat_vertices(mesh: &Mesh) -> Vec<Vertex> {
     let mut out = Vec::with_capacity(mesh.indices.len());
-    for t in mesh.indices.chunks_exact(3) {
+    for t in mesh.indices.as_chunks::<3>().0 {
         let p = [t[0], t[1], t[2]].map(|i| Vec3::from(mesh.positions[i as usize]));
         let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or(Vec3::Z);
         for v in p {

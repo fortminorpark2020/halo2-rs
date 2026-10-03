@@ -26,12 +26,18 @@ fn norm(a: V3) -> V3 {
 /// Returns RGB pixels. `clip_z` drops geometry below a height (kill floors).
 pub fn render(mesh: &Mesh, w: usize, h: usize, clip_z: Option<f32>) -> Vec<u8> {
     let mut rgb = vec![0u8; w * h * 3];
-    for px in rgb.chunks_exact_mut(3) {
+    for px in rgb.as_chunks_mut::<3>().0 {
         px.copy_from_slice(&[24, 28, 36]);
     }
     let keep =
         |t: &[u32]| clip_z.is_none_or(|z| t.iter().all(|&i| mesh.positions[i as usize][2] >= z));
-    let tris: Vec<&[u32]> = mesh.indices.chunks_exact(3).filter(|t| keep(t)).collect();
+    let tris: Vec<&[u32; 3]> = mesh
+        .indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|t| keep(&t[..]))
+        .collect();
     if tris.is_empty() {
         return rgb;
     }
