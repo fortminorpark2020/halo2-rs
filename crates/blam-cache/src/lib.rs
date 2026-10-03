@@ -217,6 +217,14 @@ pub struct StructureBsp {
     pub lightmap_address: u32,
 }
 
+/// A player starting location from the scenario.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerSpawn {
+    pub position: [f32; 3],
+    /// Facing angle in radians around +z (0 = +x).
+    pub facing: f32,
+}
+
 pub struct CacheFile<R> {
     reader: R,
     pub header: Header,
@@ -447,6 +455,26 @@ impl<R: Read + Seek> CacheFile<R> {
             .pointer_to_offset(address)
             .ok_or_else(|| Error::Corrupt(format!("address {address:#x} outside meta")))?;
         read_at(&mut self.reader, off, len)
+    }
+
+    /// The scenario's player starting locations.
+    pub fn player_spawns(&mut self) -> Result<Vec<PlayerSpawn>> {
+        const SCNR_SPAWNS: usize = 0x100;
+        const ENTRY_SIZE: usize = 0x34;
+        let scnr = self
+            .tag(self.scenario)
+            .cloned()
+            .ok_or_else(|| Error::Corrupt("scenario tag missing".into()))?;
+        let meta = self.meta_region();
+        let data = self.read_tag_data(&scnr)?;
+        let entries = self.read_block(meta, &data, SCNR_SPAWNS, ENTRY_SIZE)?;
+        Ok(entries
+            .chunks_exact(ENTRY_SIZE)
+            .map(|e| PlayerSpawn {
+                position: [f32_at(e, 0), f32_at(e, 4), f32_at(e, 8)],
+                facing: f32_at(e, 0xC),
+            })
+            .collect())
     }
 
     /// Resolve a string id (low 24 bits index, high 8 bits length) to its text.

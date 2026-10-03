@@ -207,7 +207,11 @@ mod tests {
         le16(&mut surfaces, 0);
         surfaces.extend_from_slice(&[0, 0, 0, 0]);
 
-        let mesh = collision_to_mesh(&CollisionBsp { surfaces, edges, vertices });
+        let mesh = collision_to_mesh(&CollisionBsp {
+            surfaces,
+            edges,
+            vertices,
+        });
         assert_eq!(mesh.positions.len(), 4);
         assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
     }

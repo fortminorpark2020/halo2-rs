@@ -50,7 +50,7 @@ fn main() -> ExitCode {
 type Res = Result<(), Box<dyn std::error::Error>>;
 
 fn info(path: &str) -> Res {
-    let map = CacheFile::open(path)?;
+    let mut map = CacheFile::open(path)?;
     let h = &map.header;
     println!("name:      {}", h.internal_name);
     println!("scenario:  {}", h.scenario_name);
@@ -62,6 +62,15 @@ fn info(path: &str) -> Res {
     println!("strings:   {}", map.strings().len());
     if let Some(t) = map.tag(map.scenario) {
         println!("scnr tag:  {}", t.name);
+    }
+    let spawns = map.player_spawns()?;
+    println!("spawns:    {}", spawns.len());
+    if let Some(s) = spawns.first() {
+        println!(
+            "spawn 0:   {:?} facing {:.0} deg",
+            s.position,
+            s.facing.to_degrees()
+        );
     }
     Ok(())
 }
