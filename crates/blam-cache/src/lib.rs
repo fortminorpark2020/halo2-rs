@@ -453,6 +453,17 @@ impl<R: Read + Seek> CacheFile<R> {
         read_at(&mut self.reader, off, tag.size as usize)
     }
 
+    /// Read `len` bytes at an absolute file offset.
+    pub fn read_raw(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        read_at(&mut self.reader, offset, len)
+    }
+
+    /// A reader positioned at `offset`, for streaming decoders.
+    pub fn reader_at(&mut self, offset: u64) -> Result<&mut R> {
+        self.reader.seek(SeekFrom::Start(offset))?;
+        Ok(&mut self.reader)
+    }
+
     /// Read `len` bytes at a meta memory address (e.g. the target of a tag block pointer).
     pub fn read_pointer(&mut self, address: u32, len: usize) -> Result<Vec<u8>> {
         let off = self
@@ -561,7 +572,13 @@ fn cstr(b: &[u8]) -> String {
     String::from_utf8_lossy(&b[..end]).into_owned()
 }
 
+pub mod bitmap;
 pub mod geometry;
+pub mod mapset;
+pub mod render;
+pub mod shader;
+
+pub use mapset::MapSet;
 
 #[cfg(test)]
 mod tests;

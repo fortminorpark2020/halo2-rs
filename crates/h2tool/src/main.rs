@@ -7,6 +7,7 @@
 //!   h2tool check <file.map>              read every tag stored in the map to verify it
 //!   h2tool obj   <file.map> <out.obj>    export level collision geometry
 //!   h2tool render <file.map> <out.png>   software-rendered preview of the level
+//!   h2tool level <file.map> [png dir]    render geometry + shader/texture summary (optionally dump textures)
 //!   h2tool scan  <maps folder>           summary line for every .map in a folder
 
 mod render;
@@ -24,10 +25,13 @@ fn main() -> ExitCode {
         Some("groups") if args.len() >= 2 => groups(&args[1]),
         Some("check") if args.len() >= 2 => check(&args[1]),
         Some("scan") if args.len() >= 2 => scan(&args[1]),
+        Some("level") if args.len() >= 2 => level(&args[1], args.get(2).map(String::as_str)),
         Some("obj") if args.len() >= 3 => obj(&args[1], &args[2]),
         Some("render") if args.len() >= 3 => render_png(&args[1], &args[2]),
         _ => {
-            eprintln!("usage: h2tool <info|tags|groups|check|obj|render|scan> <path> [group]");
+            eprintln!(
+                "usage: h2tool <info|tags|groups|check|obj|render|level|scan> <path> [group]"
+            );
             return ExitCode::from(2);
         }
     };
@@ -177,5 +181,44 @@ fn render_png(path: &str, out: &str) -> Res {
     let clip = mesh.bounds().map(|(lo, _)| lo[2] + 1.0);
     render::write_png(out, &render::render(&mesh, w, h, clip), w, h)?;
     println!("wrote {out}");
+    Ok(())
+}
+
+fn level(path: &str, dump: Option<&str>) -> Res {
+    use blam_cache::{bitmap, shader, MapSet};
+    let mut set = MapSet::open(path)?;
+    println!("shared.map loaded: {}", set.shared.is_some());
+    for bsp in set.map.structure_bsps()? {
+        let geo = blam_cache::render::bsp_render_geometry(&mut set, &bsp)?;
+        let tris: usize = geo.sections.iter().map(|s| s.triangle_count()).sum();
+        println!(
+            "bsp {:08x}: {} sections, {tris} triangles, {} materials",
+            bsp.sbsp.0,
+            geo.sections.len(),
+            geo.shaders.len()
+        );
+        for (i, &sh) in geo.shaders.iter().enumerate() {
+            let name = set.map.tag(sh).map(|t| t.name.clone()).unwrap_or_default();
+            let info = shader::read_shader(&mut set, sh);
+            let tex = match &info {
+                Ok(shader::ShaderInfo { diffuse: Some(b) }) => {
+                    let bname = set.map.tag(*b).map(|t| t.name.clone()).unwrap_or_default();
+                    match bitmap::read_bitmap(&mut set, *b) {
+                        Ok(img) => {
+                            if let Some(dir) = dump {
+                                let file = format!("{dir}/{i:02}.png");
+                                render::write_rgba_png(&file, &img.rgba, img.width, img.height)?;
+                            }
+                            format!("{bname} {}x{}", img.width, img.height)
+                        }
+                        Err(e) => format!("{bname} ERROR {e}"),
+                    }
+                }
+                Ok(_) => "no diffuse".into(),
+                Err(e) => format!("shader ERROR {e}"),
+            };
+            println!("  {i:2} {name}\n     -> {tex}");
+        }
+    }
     Ok(())
 }

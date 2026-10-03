@@ -7,9 +7,10 @@ install. No game files are included in this repository.
 ## Crates
 
 - `blam-cache`: reads Halo 2 PC (Vista) `.map` files: header, string ids, tag
-  names, tag groups and tag data.
+  names, tag groups, tag data, shared-map lookups, level collision and render
+  geometry, shaders and bitmaps (DXT and uncompressed formats decoded to RGBA).
 - `h2tool`: command-line inspector.
-- `h2viewer`: fly around a level (currently its collision geometry, flat shaded).
+- `h2viewer`: fly around a level with its real geometry and textures (simple lighting; lightmaps not yet).
 
 ### h2viewer
 
@@ -25,6 +26,7 @@ h2tool tags  lockout.map sbsp
 h2tool check lockout.map
 h2tool obj    lockout.map lockout.obj   # export level collision geometry
 h2tool render lockout.map lockout.png   # software-rendered preview, no GPU needed
+h2tool level  lockout.map [texdir]      # render geometry, shaders, textures (optionally dumped as PNGs)
 ```
 
 Multiplayer maps only store the tags unique to them; the rest live in
@@ -33,7 +35,7 @@ Multiplayer maps only store the tags unique to them; the rest live in
 ## Roadmap
 
 1. Map file reader (done)
-2. Fly-camera level viewer (in progress: collision geometry done; textured render geometry next)
+2. Fly-camera level viewer (textured geometry done; lightmaps, scenery and skybox next)
 3. Spartan movement, collision, weapons
 4. Splitscreen and LAN multiplayer
 5. Matchmaking, 1-50 ranks, parties

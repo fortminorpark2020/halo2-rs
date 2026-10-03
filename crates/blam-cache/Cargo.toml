@@ -7,3 +7,4 @@ description = "Reader for Halo 2 PC (Vista) .map cache files"
 
 [dependencies]
 thiserror = "1"
+flate2 = "1"

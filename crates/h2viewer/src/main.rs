@@ -8,9 +8,11 @@
 
 mod camera;
 mod gpu;
+mod scene;
 
-use blam_cache::{geometry::Mesh, CacheFile, PlayerSpawn};
+use blam_cache::geometry::Mesh;
 use camera::FlyCamera;
+use scene::Scene;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,19 +46,6 @@ fn find_map() -> Result<PathBuf, String> {
 /// Spartan eye height above a spawn point, in world units (1 unit = 10 ft).
 const EYE_HEIGHT: f32 = 0.62;
 
-fn load_level(path: &PathBuf) -> Result<(Mesh, Option<PlayerSpawn>), Box<dyn std::error::Error>> {
-    let mut map = CacheFile::open(path)?;
-    let mut mesh = Mesh::default();
-    for bsp in map.structure_bsps()? {
-        mesh.append(&map.bsp_collision_mesh(&bsp)?);
-    }
-    if mesh.indices.is_empty() {
-        return Err("map has no level geometry".into());
-    }
-    let spawn = map.player_spawns().ok().and_then(|s| s.first().copied());
-    Ok((mesh, spawn))
-}
-
 /// Center of the densest part of the level, used as the spawn point.
 fn level_focus(mesh: &Mesh) -> (glam::Vec3, f32) {
     let mut lo = [0f32; 3];
@@ -73,7 +62,7 @@ fn level_focus(mesh: &Mesh) -> (glam::Vec3, f32) {
 }
 
 struct App {
-    mesh: Mesh,
+    scene: Scene,
     title: String,
     window: Option<Arc<Window>>,
     gpu: Option<gpu::Gpu>,
@@ -110,7 +99,7 @@ impl ApplicationHandler for App {
             .with_title(&self.title)
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        match pollster::block_on(gpu::Gpu::new(window.clone(), &self.mesh)) {
+        match pollster::block_on(gpu::Gpu::new(window.clone(), &self.scene)) {
             Ok(g) => self.gpu = Some(g),
             Err(e) => {
                 eprintln!("graphics init failed: {e}");
@@ -207,15 +196,19 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let path = find_map()?;
     println!("loading {}", path.display());
-    let (mesh, spawn) = load_level(&path)?;
-    println!("{} triangles", mesh.triangle_count());
-    let camera = match spawn {
+    let scene = Scene::load(&path)?;
+    println!(
+        "{} triangles, {} textures",
+        scene.triangle_count(),
+        scene.textures.len() - 1
+    );
+    let camera = match scene.spawn {
         Some(s) => {
             let eye = glam::Vec3::from(s.position) + glam::Vec3::Z * EYE_HEIGHT;
             FlyCamera::looking_at(eye, eye + glam::vec3(s.facing.cos(), s.facing.sin(), 0.0))
         }
         None => {
-            let (focus, radius) = level_focus(&mesh);
+            let (focus, radius) = level_focus(&scene.collision);
             FlyCamera::looking_at(
                 focus + glam::vec3(radius * 0.6, -radius * 0.6, radius * 0.4),
                 focus,
@@ -230,7 +223,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
-        mesh,
+        scene,
         title: format!("Halo 2 Rust: {name} (click to look, WASD to fly, Esc to release)"),
         window: None,
         gpu: None,
