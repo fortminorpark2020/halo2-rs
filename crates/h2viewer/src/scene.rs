@@ -1,6 +1,7 @@
 //! CPU-side scene: meshes (level, weapons), their textures, HUD bitmaps and
 //! the gameplay data read from the map's tags.
 
+use crate::audio::Clip;
 use crate::body::BodyRig;
 use crate::probe::LevelLight;
 use crate::rig::{FirstPersonRig, Skeleton, SkinnedMesh};
@@ -14,12 +15,13 @@ use blam_cache::physics::{self, BipedPhysics, PlayerMovement};
 use blam_cache::render::{LevelGeometry, Section, SectionOwner};
 use blam_cache::shader::{self, Blend};
 use blam_cache::{
-    render, scenario, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp,
+    render, scenario, sound, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp,
 };
 use glam::{Mat4, Vec3};
 use h2sim::{ItemKind, WeaponDef};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -231,6 +233,51 @@ pub struct WeaponAssets {
     /// First person animations (arms and gun), when the map has them.
     pub rig: Option<FirstPersonRig>,
     pub hud: Vec<HudWidget>,
+    pub sounds: WeaponSounds,
+}
+
+/// A sound ready to play: its variations and how far it carries.
+pub struct SoundAsset {
+    pub clips: Vec<Arc<Clip>>,
+    /// Full volume within the first distance, silent beyond the second
+    /// (world units).
+    pub distance: (f32, f32),
+    /// Linear gain.
+    pub gain: f32,
+}
+
+/// A weapon's sounds, in `Scene::sounds`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct WeaponSounds {
+    pub fire: Option<usize>,
+    /// Pulling the trigger with nothing loaded.
+    pub empty: Option<usize>,
+    pub ready: Option<usize>,
+    pub reload: Option<usize>,
+    pub melee: Option<usize>,
+    pub pickup: Option<usize>,
+    pub zoom_in: Option<usize>,
+    pub zoom_out: Option<usize>,
+}
+
+/// Sounds of the game itself, in `Scene::sounds`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct GameSounds {
+    /// Frag, plasma.
+    pub explosion: [Option<usize>; 2],
+    pub throw: Option<usize>,
+    pub grenade_pickup: [Option<usize>; 2],
+    pub footstep: Option<usize>,
+    pub jump: Option<usize>,
+    pub land: Option<usize>,
+    /// A bullet hitting the level.
+    pub impact: Option<usize>,
+    /// A bullet hitting someone without shields.
+    pub hit_body: Option<usize>,
+    /// Your shields taking a hit, recharging, and down.
+    pub shield_hit: Option<usize>,
+    pub shield_charge: Option<usize>,
+    pub shield_low: Option<usize>,
 }
 
 /// An object placed in the level, drawn with the level's light where it stands.
@@ -320,6 +367,8 @@ pub struct Scene {
     /// HUD textures for text and solid fills.
     pub hud_font: usize,
     pub hud_white: usize,
+    pub sounds: Vec<SoundAsset>,
+    pub game_sounds: GameSounds,
 }
 
 /// Multiplayer weapons, in switching order.
@@ -361,9 +410,78 @@ struct Loader {
     hud_textures: Vec<Image>,
     hud_of_bitmap: HashMap<(DatumIndex, i8), usize>,
     failures: usize,
+    sound_reader: sound::SoundReader,
+    sounds: Vec<SoundAsset>,
+    sound_of_tag: HashMap<DatumIndex, Option<usize>>,
+}
+
+/// How far sounds carry when their tag leaves it to the sound class.
+fn class_distance(class: u8) -> (f32, f32) {
+    match class {
+        // projectile impact, detonation
+        0 => (0.5, 20.0),
+        1 => (8.0, 80.0),
+        // weapon fire
+        4 => (3.0, 70.0),
+        // weapon ready, reload, empty, charge, overheat, idle, melee, animation
+        5..=0xC => (0.5, 12.0),
+        // footsteps
+        0x12 => (0.4, 10.0),
+        _ => (1.0, 30.0),
+    }
 }
 
 impl Loader {
+    /// A sound tag, decoded once. `None` for sounds that can't be played.
+    fn sound(&mut self, snd: DatumIndex) -> Option<usize> {
+        if let Some(&s) = self.sound_of_tag.get(&snd) {
+            return s;
+        }
+        let loaded = match self.sound_reader.read(&mut self.set, snd) {
+            Ok(s) if !s.permutations.is_empty() => {
+                let distance = if s.distance.1 > 0.0 {
+                    s.distance
+                } else {
+                    class_distance(s.class)
+                };
+                self.sounds.push(SoundAsset {
+                    clips: s
+                        .permutations
+                        .into_iter()
+                        .map(|samples| {
+                            Arc::new(Clip {
+                                samples,
+                                channels: s.channels,
+                                rate: s.sample_rate,
+                            })
+                        })
+                        .collect(),
+                    distance,
+                    gain: 10f32.powf(s.gain_db / 20.0),
+                });
+                Some(self.sounds.len() - 1)
+            }
+            Ok(_) => None,
+            Err(e) => {
+                println!("warning: sound {:08x}: {e}", snd.0);
+                None
+            }
+        };
+        self.sound_of_tag.insert(snd, loaded);
+        loaded
+    }
+
+    fn sound_named(&mut self, name: &str) -> Option<usize> {
+        let snd = self.find("snd!", name)?;
+        self.sound(snd)
+    }
+
+    /// The first sound an effect plays.
+    fn effect_sound(&mut self, effect: Option<DatumIndex>) -> Option<usize> {
+        let sounds = sound::effect_sounds(&mut self.set, effect?).ok()?;
+        sounds.into_iter().find_map(|d| self.sound(d))
+    }
+
     /// The texture of a bitmap tag's first image (0 if it can't be read).
     fn bitmap_texture(&mut self, b: DatumIndex) -> usize {
         if let Some(&t) = self.texture_of_bitmap.get(&b) {
@@ -583,10 +701,24 @@ impl Loader {
                 Err(e) => println!("warning: first person model for {name}: {e}"),
             }
         }
+        let mut anim_sounds = (None, None, None);
         let rig = match (w.first_person_animations, arms) {
             (Some(jmad), Some(arms)) if view_mesh.is_some() => {
                 match animation::read_animation_graph(&mut self.set, jmad) {
-                    Ok(g) => Some(FirstPersonRig::new(g, arms, &skeleton)),
+                    Ok(g) => {
+                        // Sounds the first person animations start.
+                        for (what, slot) in [
+                            ("first_person:ready", &mut anim_sounds.0),
+                            ("first_person:reload_full", &mut anim_sounds.1),
+                            ("first_person:melee_strike_1", &mut anim_sounds.2),
+                        ] {
+                            *slot = g
+                                .find(what)
+                                .and_then(|a| a.sound_events.first())
+                                .and_then(|&(_, i)| g.sounds.get(i).copied().flatten());
+                        }
+                        Some(FirstPersonRig::new(g, arms, &skeleton))
+                    }
                     Err(e) => {
                         println!("warning: first person animations for {name}: {e}");
                         None
@@ -597,6 +729,23 @@ impl Loader {
         };
         let hud = w.hud.map(|h| self.hud_widgets(h)).unwrap_or_default();
         let world_mesh = self.object_mesh(datum, meshes);
+        let fx = weapon::read_weapon_effects(&mut self.set, datum).unwrap_or_default();
+        let sounds = WeaponSounds {
+            fire: self.effect_sound(fx.fire),
+            empty: self.effect_sound(fx.empty),
+            ready: anim_sounds
+                .0
+                .and_then(|d| self.sound(d))
+                .or_else(|| self.effect_sound(fx.ready)),
+            reload: anim_sounds
+                .1
+                .and_then(|d| self.sound(d))
+                .or_else(|| self.effect_sound(fx.reload)),
+            melee: anim_sounds.2.and_then(|d| self.sound(d)),
+            pickup: self.effect_sound(fx.pickup),
+            zoom_in: self.effect_sound(fx.zoom_in),
+            zoom_out: self.effect_sound(fx.zoom_out),
+        };
         Some(WeaponAssets {
             tag: datum,
             world_mesh,
@@ -609,6 +758,7 @@ impl Loader {
             grip,
             rig,
             hud,
+            sounds,
         })
     }
 
@@ -726,6 +876,9 @@ impl Scene {
             hud_textures: Vec::new(),
             hud_of_bitmap: HashMap::new(),
             failures: 0,
+            sound_reader: sound::SoundReader::new(),
+            sounds: Vec::new(),
+            sound_of_tag: HashMap::new(),
         };
 
         // The level: render geometry grouped by texture and lightmap page.
@@ -844,6 +997,44 @@ impl Scene {
                     .filter(|v| *v > 0.0),
             }
         });
+        let named = |loader: &mut Loader, name: &str| loader.sound_named(name);
+        let game_sounds = GameSounds {
+            explosion: [
+                named(&mut loader, "sound\\weapons\\frag_grenade\\frag_expl"),
+                named(&mut loader, "sound\\weapons\\plasma_grenade\\plasma_expl"),
+            ],
+            throw: named(&mut loader, "sound\\weapons\\frag_grenade\\frag_throw"),
+            grenade_pickup: [
+                named(&mut loader, "sound\\weapons\\frag_grenade\\frag_ammo"),
+                named(
+                    &mut loader,
+                    "sound\\weapons\\plasma_grenade\\grenade_plas_ammo",
+                ),
+            ],
+            footstep: named(
+                &mut loader,
+                "sound\\characters\\footsteps\\chief\\grtcement\\run",
+            ),
+            jump: named(
+                &mut loader,
+                "sound\\characters\\footsteps\\chief\\grtcement\\jump",
+            ),
+            land: named(
+                &mut loader,
+                "sound\\characters\\footsteps\\chief\\grtcement\\land",
+            ),
+            impact: named(
+                &mut loader,
+                "sound\\weapons\\impacts_riccs\\bullet_impact_stone",
+            ),
+            hit_body: named(
+                &mut loader,
+                "sound\\weapons\\impacts_riccs\\bullet_impact_flesh_dry",
+            ),
+            shield_hit: named(&mut loader, "sound\\ui\\shield_hit"),
+            shield_charge: named(&mut loader, "sound\\ui\\shield_charge\\charge\\loop"),
+            shield_low: named(&mut loader, "sound\\ui\\shield_low\\low\\loop"),
+        };
         let player_hud = match loader.find("nhdt", "ui\\hud\\masterchief") {
             Some(h) => loader.hud_widgets(h),
             None => Vec::new(),
@@ -879,6 +1070,8 @@ impl Scene {
             player_hud,
             hud_font,
             hud_white,
+            sounds: loader.sounds,
+            game_sounds,
         })
     }
 

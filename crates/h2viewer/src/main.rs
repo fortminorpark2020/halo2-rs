@@ -17,6 +17,7 @@
 //! LAN: every game is open to other PCs on the network; J joins a game
 //! another PC is hosting (see `lan`).
 
+mod audio;
 mod body;
 mod camera;
 mod effects;
@@ -29,6 +30,7 @@ mod local;
 mod probe;
 mod rig;
 mod scene;
+mod soundscape;
 
 use blam_cache::geometry::Mesh;
 use blam_cache::PlayerSpawn;
@@ -186,6 +188,7 @@ struct App {
     welcome: Option<Vec<usize>>,
     /// Start again on another map to join a LAN game there.
     relaunch: Option<lan::Relaunch>,
+    sound: soundscape::Soundscape,
 }
 
 impl App {
@@ -344,6 +347,8 @@ impl App {
             l.animate_view_model(&self.scene, &self.game, dt);
         }
         self.effects.update(dt);
+        let listeners = self.listeners();
+        self.sound.update(&self.scene, &self.game, &listeners, dt);
     }
 
     /// Run the game here: fixed ticks with everyone's controls (people at
@@ -386,8 +391,23 @@ impl App {
         self.send_to_joined(ticked);
     }
 
+    /// Where each view hears from.
+    fn listeners(&self) -> Vec<soundscape::Listener> {
+        self.locals
+            .iter()
+            .map(|l| soundscape::Listener {
+                position: l.camera.position,
+                right: l.camera.basis().1,
+                player: l.player,
+                first_person: l.first_person(&self.game),
+            })
+            .collect()
+    }
+
     fn handle_events(&mut self) {
+        let listeners = self.listeners();
         for e in std::mem::take(&mut self.game.events) {
+            self.sound.event(&self.scene, &self.game, &listeners, &e);
             match e {
                 Event::Shot {
                     player,
@@ -1024,6 +1044,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         frame_events: Vec::new(),
         welcome: None,
         relaunch: None,
+        sound: soundscape::Soundscape::new(),
     };
     // H2_SPLIT=<n> starts with n people in splitscreen (for testing).
     let split = std::env::var("H2_SPLIT")

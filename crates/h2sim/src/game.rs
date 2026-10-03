@@ -278,6 +278,10 @@ pub enum Event {
         player: usize,
         kind: ItemKind,
     },
+    /// Pulled the trigger with no ammo left at all.
+    DryFire {
+        player: usize,
+    },
 }
 
 pub struct Game {
@@ -534,6 +538,13 @@ impl Game {
             let p = &mut self.players[i];
             let held = &mut p.weapons[p.current];
             let was = (held.state.reloading.is_some(), held.state.loaded == 0);
+            let dry = def.uses_ammo()
+                && held.state.loaded < def.rounds_per_shot
+                && held.state.reserve == 0
+                && held.state.reloading.is_none();
+            if dry && ready && !lunges && pressed(cmd.fire, last.fire) {
+                self.events.push(Event::DryFire { player: i });
+            }
             let input = WeaponInput {
                 fire: cmd.fire && ready && !lunges,
                 reload: cmd.reload,

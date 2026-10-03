@@ -1,0 +1,341 @@
+//! What the game sounds like: weapons, grenades, footsteps and shields,
+//! placed around whoever is listening (each splitscreen view hears through
+//! its own camera; the nearest one wins).
+
+use crate::audio::Audio;
+use crate::scene::Scene;
+use glam::Vec3;
+use h2sim::game::{Event, GrenadeKind};
+use h2sim::{Game, ItemKind};
+
+/// One view's ears.
+pub struct Listener {
+    pub position: Vec3,
+    /// The camera's right.
+    pub right: Vec3,
+    pub player: usize,
+    /// Looking through the player's eyes: their own sounds play unplaced.
+    pub first_person: bool,
+}
+
+/// Distance travelled between footsteps, world units.
+const STRIDE: f32 = 0.8;
+/// Shots closer together than this are one burst (one burst sound).
+const BURST_GAP: f64 = 0.15;
+
+#[derive(Default, Clone)]
+struct PlayerSounds {
+    last_shot: f64,
+    stride: f32,
+    grounded: bool,
+    falling: f32,
+}
+
+#[derive(Default)]
+struct ShieldSounds {
+    charge: Option<u64>,
+    low: Option<u64>,
+    last_shield: f32,
+    /// The weapon in hand and its zoom level, for zoom sounds.
+    zoom: Option<(usize, u32)>,
+}
+
+pub struct Soundscape {
+    pub audio: Audio,
+    players: Vec<PlayerSounds>,
+    /// Per local view, by player.
+    shields: Vec<(usize, ShieldSounds)>,
+    rng: u32,
+}
+
+/// Volume at distance `d` for a sound carrying over `range`.
+fn falloff(d: f32, (near, far): (f32, f32)) -> f32 {
+    if d <= near.max(0.01) {
+        return 1.0;
+    }
+    if d >= far {
+        return 0.0;
+    }
+    let fade = ((far - d) / (far * 0.25)).min(1.0);
+    near.max(0.01) / d * fade
+}
+
+/// Left/right gains for a sound to one side (-1 left .. 1 right).
+fn pan_gains(gain: f32, pan: f32) -> [f32; 2] {
+    let a = (pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
+    let s = std::f32::consts::SQRT_2;
+    [gain * (a.cos() * s).min(1.0), gain * (a.sin() * s).min(1.0)]
+}
+
+impl Soundscape {
+    pub fn new() -> Soundscape {
+        Soundscape {
+            audio: Audio::new(),
+            players: Vec::new(),
+            shields: Vec::new(),
+            rng: 0x1234_5678,
+        }
+    }
+
+    fn pick(&mut self, n: usize) -> usize {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        self.rng as usize % n.max(1)
+    }
+
+    /// Play a sound made at `at` (by `owner`, heard unplaced in their own
+    /// first person view).
+    fn play(
+        &mut self,
+        scene: &Scene,
+        sound: Option<usize>,
+        at: Vec3,
+        owner: Option<usize>,
+        listeners: &[Listener],
+        volume: f32,
+    ) {
+        let Some(asset) = sound.and_then(|s| scene.sounds.get(s)) else {
+            return;
+        };
+        let mut best = [0.0f32; 2];
+        for l in listeners {
+            let gains = if l.first_person && owner == Some(l.player) {
+                [1.0, 1.0]
+            } else {
+                let to = at - l.position;
+                let d = to.length();
+                let g = falloff(d, asset.distance);
+                let pan = if d > 1e-3 { to.dot(l.right) / d } else { 0.0 };
+                pan_gains(g, pan * 0.8)
+            };
+            if gains[0] + gains[1] > best[0] + best[1] {
+                best = gains;
+            }
+        }
+        let gain = asset.gain * volume;
+        let clip = asset.clips[self.pick(asset.clips.len())].clone();
+        self.audio
+            .play(&clip, [best[0] * gain, best[1] * gain], 1.0, false);
+    }
+
+    /// The sound of something that just happened in the game.
+    pub fn event(&mut self, scene: &Scene, game: &Game, listeners: &[Listener], e: &Event) {
+        let weapon_sounds = |player: usize| {
+            game.players
+                .get(player)
+                .and_then(|p| p.held())
+                .and_then(|h| scene.weapons.get(h.weapon))
+                .map(|w| (w.sounds, w.def.shots_per_fire > 1))
+        };
+        let body = |player: usize| {
+            game.players
+                .get(player)
+                .map_or(Vec3::ZERO, |p| p.body.position + Vec3::Z * 0.5)
+        };
+        let g = scene.game_sounds;
+        match *e {
+            Event::Shot {
+                player,
+                origin,
+                hit,
+                hit_player,
+                ..
+            } => {
+                if player >= self.players.len() {
+                    self.players.resize(player + 1, PlayerSounds::default());
+                }
+                if let Some((sounds, burst)) = weapon_sounds(player) {
+                    let last = self.players[player].last_shot;
+                    self.players[player].last_shot = game.time;
+                    if !burst || game.time - last > BURST_GAP {
+                        self.play(scene, sounds.fire, origin, Some(player), listeners, 1.0);
+                    }
+                }
+                match (hit, hit_player) {
+                    (Some((p, _)), Some(j)) => {
+                        let shielded = game.players.get(j).is_some_and(|v| v.shield > 0.0);
+                        if !shielded {
+                            self.play(scene, g.hit_body, p, None, listeners, 0.8);
+                        }
+                    }
+                    (Some((p, _)), None) => self.play(scene, g.impact, p, None, listeners, 0.5),
+                    _ => {}
+                }
+            }
+            Event::Reloaded { player, .. } => {
+                let s = weapon_sounds(player).and_then(|w| w.0.reload);
+                self.play(scene, s, body(player), Some(player), listeners, 1.0);
+            }
+            Event::Switched { player } => {
+                let s = weapon_sounds(player).and_then(|w| w.0.ready);
+                self.play(scene, s, body(player), Some(player), listeners, 1.0);
+            }
+            Event::Melee { player, .. } => {
+                let s = weapon_sounds(player).and_then(|w| w.0.melee);
+                self.play(scene, s, body(player), Some(player), listeners, 1.0);
+            }
+            Event::Thrown { player } => {
+                self.play(scene, g.throw, body(player), Some(player), listeners, 1.0);
+            }
+            Event::Exploded { kind, position } => {
+                let s = g.explosion[(kind == GrenadeKind::Plasma) as usize];
+                self.play(scene, s, position, None, listeners, 1.0);
+            }
+            Event::Damaged { player, .. } => {
+                // Your own shields taking the hit.
+                let shielded = game.players.get(player).is_some_and(|p| p.shield > 0.0);
+                if shielded && listeners.iter().any(|l| l.player == player) {
+                    self.play(
+                        scene,
+                        g.shield_hit,
+                        body(player),
+                        Some(player),
+                        listeners,
+                        0.7,
+                    );
+                }
+            }
+            Event::DryFire { player } => {
+                let s = weapon_sounds(player).and_then(|w| w.0.empty);
+                self.play(scene, s, body(player), Some(player), listeners, 1.0);
+            }
+            Event::PickedUp { player, kind } => {
+                if !listeners.iter().any(|l| l.player == player) {
+                    return;
+                }
+                let s = match kind {
+                    ItemKind::Weapon(w) => scene.weapons.get(w).and_then(|w| w.sounds.pickup),
+                    ItemKind::FragGrenades => g.grenade_pickup[0],
+                    ItemKind::PlasmaGrenades => g.grenade_pickup[1],
+                };
+                self.play(scene, s, body(player), Some(player), listeners, 1.0);
+            }
+            _ => {}
+        }
+    }
+
+    /// Ongoing sounds: footsteps, jumps and landings, and the shield
+    /// recharge and alarm for each local player.
+    pub fn update(&mut self, scene: &Scene, game: &Game, listeners: &[Listener], dt: f32) {
+        self.players
+            .resize(game.players.len(), PlayerSounds::default());
+        let g = scene.game_sounds;
+        for (i, p) in game.players.iter().enumerate() {
+            let s = &mut self.players[i];
+            let was = s.grounded;
+            s.grounded = p.body.grounded;
+            let feet = p.body.position;
+            if !p.alive {
+                s.stride = 0.0;
+                continue;
+            }
+            if !p.body.grounded {
+                s.falling = s.falling.max(-p.body.velocity.z);
+            }
+            let mut sound = None;
+            let mut volume = 1.0;
+            if was && !p.body.grounded && p.body.velocity.z > 1.0 {
+                sound = g.jump;
+            } else if !was && p.body.grounded {
+                if s.falling > 1.5 {
+                    sound = g.land;
+                }
+                s.falling = 0.0;
+            } else if p.body.grounded {
+                let speed = p.body.velocity.truncate().length();
+                // Crouch-walking is silent, as in Halo.
+                if speed > 0.6 && p.body.crouch < 0.5 {
+                    s.stride += speed * dt;
+                    if s.stride > STRIDE {
+                        s.stride = 0.0;
+                        sound = g.footstep;
+                        volume = (speed / 2.25).min(1.0) * 0.8;
+                    }
+                }
+            }
+            if sound.is_some() {
+                self.play(scene, sound, feet, Some(i), listeners, volume);
+            }
+        }
+        self.shield_alarms(scene, game, listeners);
+    }
+
+    fn shield_alarms(&mut self, scene: &Scene, game: &Game, listeners: &[Listener]) {
+        let g = scene.game_sounds;
+        self.shields
+            .retain(|(p, _)| listeners.iter().any(|l| l.player == *p));
+        let full = game.rules.shield;
+        for l in listeners {
+            let Some(p) = game.players.get(l.player) else {
+                continue;
+            };
+            if !self.shields.iter().any(|s| s.0 == l.player) {
+                self.shields.push((l.player, ShieldSounds::default()));
+            }
+            let k = self.shields.iter().position(|s| s.0 == l.player).unwrap();
+            // Zooming in and out.
+            let zoom = p.held().map(|h| (h.weapon, h.state.zoom));
+            if let (Some((w, now)), Some((was_w, was))) = (zoom, self.shields[k].1.zoom) {
+                if w == was_w && now != was {
+                    let sounds = scene.weapons.get(w).map(|a| a.sounds);
+                    let s = sounds.and_then(|s| if now > was { s.zoom_in } else { s.zoom_out });
+                    self.play(scene, s, l.position, Some(l.player), listeners, 1.0);
+                }
+            }
+            self.shields[k].1.zoom = zoom;
+            let recharging = p.alive && p.shield > self.shields[k].1.last_shield && p.shield < full;
+            let low = p.alive && p.shield <= 0.0;
+            self.shields[k].1.last_shield = p.shield;
+            let quiet = 0.5 / listeners.len() as f32;
+            let charge = self.shields[k].1.charge;
+            if let Some(id) = self.toggle_loop(scene, charge, recharging, g.shield_charge, quiet) {
+                self.shields[k].1.charge = id;
+            }
+            let alarm = self.shields[k].1.low;
+            if let Some(id) = self.toggle_loop(scene, alarm, low, g.shield_low, quiet) {
+                self.shields[k].1.low = id;
+            }
+        }
+    }
+
+    /// Start or stop a looping UI sound; returns the new voice when it changed.
+    fn toggle_loop(
+        &mut self,
+        scene: &Scene,
+        playing: Option<u64>,
+        on: bool,
+        sound: Option<usize>,
+        volume: f32,
+    ) -> Option<Option<u64>> {
+        match (playing, on) {
+            (None, true) => {
+                let asset = sound.and_then(|s| scene.sounds.get(s))?;
+                let clip = asset.clips[self.pick(asset.clips.len())].clone();
+                let g = asset.gain * volume;
+                Some(Some(self.audio.play(&clip, [g, g], 1.0, true)))
+            }
+            (Some(id), false) => {
+                self.audio.stop(id);
+                Some(None)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sounds_fade_with_distance_and_pan_to_their_side() {
+        assert_eq!(falloff(0.5, (1.0, 10.0)), 1.0);
+        assert!(falloff(5.0, (1.0, 10.0)) < 0.25);
+        assert_eq!(falloff(12.0, (1.0, 10.0)), 0.0);
+        let [l, r] = pan_gains(1.0, 1.0);
+        assert!(l < 0.01 && (r - 1.0).abs() < 1e-5);
+        let [l, r] = pan_gains(1.0, 0.0);
+        assert!((l - 1.0).abs() < 1e-5 && (r - 1.0).abs() < 1e-5);
+    }
+}

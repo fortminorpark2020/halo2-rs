@@ -310,6 +310,10 @@ impl Event {
                 w.index(Some(player));
                 write_kind(w, kind);
             }
+            Event::DryFire { player } => {
+                w.u8(10);
+                w.index(Some(player));
+            }
         }
     }
 
@@ -373,6 +377,9 @@ impl Event {
             9 => Event::PickedUp {
                 player: r.index_below(players)?,
                 kind: read_kind(r, weapons)?,
+            },
+            10 => Event::DryFire {
+                player: r.index_below(players)?,
             },
             _ => return Err(Malformed),
         })

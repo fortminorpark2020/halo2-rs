@@ -19,6 +19,10 @@ const JMAD_NODES: usize = 0xC;
 const NODE_SIZE: usize = 0x20;
 const JMAD_ANIMATIONS: usize = 0x2C;
 const ANIMATION_SIZE: usize = 0x60;
+const JMAD_SOUNDS: usize = 0x14;
+const SOUND_REF_SIZE: usize = 0xC;
+const ANIMATION_FRAME_EVENTS: usize = 0x40;
+const ANIMATION_SOUND_EVENTS: usize = 0x48;
 
 const CODEC_STATIC: u8 = 1;
 const CODEC_FULL_FRAMES: u8 = 3;
@@ -138,6 +142,32 @@ pub struct Animation {
     pub rotations: Vec<Option<Track<[f32; 4]>>>,
     pub translations: Vec<Option<Track<[f32; 3]>>>,
     pub scales: Vec<Option<Track<f32>>>,
+    /// Sounds to start at frames: (frame, index into the graph's `sounds`).
+    pub sound_events: Vec<(u16, usize)>,
+    /// Footfalls and other moments: (frame, event).
+    pub frame_events: Vec<(u16, FrameEvent)>,
+}
+
+/// Moments marked in an animation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameEvent {
+    LeftFoot,
+    RightFoot,
+    BothFeet,
+    BodyImpact,
+    Other(u16),
+}
+
+impl From<u16> for FrameEvent {
+    fn from(v: u16) -> Self {
+        match v {
+            2 => FrameEvent::LeftFoot,
+            3 => FrameEvent::RightFoot,
+            9 => FrameEvent::BothFeet,
+            10 => FrameEvent::BodyImpact,
+            n => FrameEvent::Other(n),
+        }
+    }
 }
 
 impl Animation {
@@ -153,6 +183,8 @@ pub struct AnimationGraph {
     pub parent: Option<DatumIndex>,
     pub nodes: Vec<GraphNode>,
     pub animations: Vec<Animation>,
+    /// Sounds the animations play (`snd!` tags), by sound event index.
+    pub sounds: Vec<Option<DatumIndex>>,
 }
 
 impl AnimationGraph {
@@ -191,6 +223,26 @@ pub fn read_animation_graph(set: &mut MapSet, jmad: DatumIndex) -> Result<Animat
             Vec::new()
         };
         let sizes = DataSizes::read(a);
+        let sound_events = file
+            .read_block(region, a, ANIMATION_SOUND_EVENTS, 8)?
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .filter_map(|e| {
+                let sound = usize::try_from(i16_at(e, 0)).ok()?;
+                Some((i16_at(e, 2).max(0) as u16, sound))
+            })
+            .collect();
+        let frame_events = file
+            .read_block(region, a, ANIMATION_FRAME_EVENTS, 4)?
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|e| {
+                let kind = u16::from_le_bytes([e[0], e[1]]);
+                (i16_at(e, 2).max(0) as u16, FrameEvent::from(kind))
+            })
+            .collect();
         let mut anim = Animation {
             name,
             kind: AnimationKind::from(a[0x10]),
@@ -199,6 +251,8 @@ pub fn read_animation_graph(set: &mut MapSet, jmad: DatumIndex) -> Result<Animat
             rotations: vec![None; nodes.len()],
             translations: vec![None; nodes.len()],
             scales: vec![None; nodes.len()],
+            sound_events,
+            frame_events,
         };
         if decode_animation(&mut anim, &blob, &sizes).is_ok() {
             anim.decoded = true;
@@ -209,10 +263,18 @@ pub fn read_animation_graph(set: &mut MapSet, jmad: DatumIndex) -> Result<Animat
         }
         animations.push(anim);
     }
+    let sounds = file
+        .read_block(region, &data, JMAD_SOUNDS, SOUND_REF_SIZE)?
+        .as_chunks::<SOUND_REF_SIZE>()
+        .0
+        .iter()
+        .map(|r| Some(DatumIndex(u32_at(r, 4))).filter(|d| *d != DatumIndex::NONE))
+        .collect();
     Ok(AnimationGraph {
         parent: (parent != DatumIndex::NONE).then_some(parent),
         nodes,
         animations,
+        sounds,
     })
 }
 

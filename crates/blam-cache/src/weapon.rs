@@ -225,6 +225,57 @@ pub fn read_weapon(set: &mut MapSet, weap: DatumIndex) -> Result<Weapon> {
     })
 }
 
+/// Effects a weapon plays, each an `effe` (which may play sounds) or a
+/// `snd!` tag.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WeaponEffects {
+    pub fire: Option<DatumIndex>,
+    /// Pulling the trigger with nothing loaded.
+    pub empty: Option<DatumIndex>,
+    pub reload: Option<DatumIndex>,
+    pub ready: Option<DatumIndex>,
+    pub pickup: Option<DatumIndex>,
+    pub zoom_in: Option<DatumIndex>,
+    pub zoom_out: Option<DatumIndex>,
+}
+
+const WEAP_READY_EFFECT: usize = 0x140;
+const WEAP_PICKUP_SOUND: usize = 0x264;
+const WEAP_ZOOM_IN_SOUND: usize = 0x26C;
+const WEAP_ZOOM_OUT_SOUND: usize = 0x274;
+const MAGAZINE_RELOAD_EFFECT: usize = 0x34;
+const BARREL_FIRING_EFFECTS: usize = 0xE4;
+const FIRING_EFFECT_SIZE: usize = 0x34;
+
+pub fn read_weapon_effects(set: &mut MapSet, weap: DatumIndex) -> Result<WeaponEffects> {
+    let (src, tag, d) = set.tag_data(weap)?;
+    if d.len() < WEAP_BARRELS + 8 {
+        return Err(Error::Corrupt(format!("weapon tag {} too short", tag.name)));
+    }
+    let file = set.get(src);
+    let region = file.meta_region();
+    let mags = file.read_block(region, &d, WEAP_MAGAZINES, MAGAZINE_SIZE)?;
+    let barrels = file.read_block(region, &d, WEAP_BARRELS, BARREL_SIZE)?;
+    let firing = match barrels.as_chunks::<BARREL_SIZE>().0.first() {
+        Some(b) => file.read_block(region, b, BARREL_FIRING_EFFECTS, FIRING_EFFECT_SIZE)?,
+        None => Vec::new(),
+    };
+    let first_firing = firing.as_chunks::<FIRING_EFFECT_SIZE>().0.first();
+    Ok(WeaponEffects {
+        fire: first_firing.and_then(|f| tag_ref(f, 0x4)),
+        empty: first_firing.and_then(|f| tag_ref(f, 0x14)),
+        reload: mags
+            .as_chunks::<MAGAZINE_SIZE>()
+            .0
+            .first()
+            .and_then(|m| tag_ref(m, MAGAZINE_RELOAD_EFFECT)),
+        ready: tag_ref(&d, WEAP_READY_EFFECT),
+        pickup: tag_ref(&d, WEAP_PICKUP_SOUND),
+        zoom_in: tag_ref(&d, WEAP_ZOOM_IN_SOUND),
+        zoom_out: tag_ref(&d, WEAP_ZOOM_OUT_SOUND),
+    })
+}
+
 pub fn read_projectile(set: &mut MapSet, proj: DatumIndex) -> Result<Projectile> {
     let (_, tag, d) = set.tag_data(proj)?;
     if d.len() < PROJ_FINAL_VELOCITY + 4 {

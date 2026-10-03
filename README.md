@@ -10,15 +10,16 @@ install. No game files are included in this repository.
   names, tag groups, tag data, shared-map lookups, level collision and render
   geometry, shaders and bitmaps (DXT and uncompressed formats decoded to RGBA),
   render models with nodes, markers and skinning weights, animation graphs
-  (keyframe codecs decoded), weapons, projectiles, damage and HUD widgets.
+  (keyframe codecs decoded), weapons, projectiles, damage, HUD widgets, and
+  sounds (Xbox ADPCM decoded; WMA dialog not yet).
 - `h2tool`: command-line inspector.
 - `h2sim`: game simulation (no rendering): level collision, Spartan movement
   using the speeds, jump velocity and size from the game's own globals and biped tags,
   weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
   Slayer rules (shields, health, grenades, pickups, respawns), bots and their walking graph.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
-- `h2viewer`: the game: Halo 2's maps with their lighting, Spartans, weapons and HUD,
-  bots, splitscreen for up to four with controllers, and LAN play.
+- `h2viewer`: the game: Halo 2's maps with their lighting, Spartans, weapons, HUD
+  and sounds, bots, splitscreen for up to four with controllers, and LAN play.
 
 ### h2viewer
 
@@ -46,6 +47,12 @@ press J to join it. If that game is on another map, h2viewer restarts on that
 map and joins. The host runs the game and its bots; if the host quits, the
 joined PC carries on alone with bots.
 
+Sound: weapons, reloads, grenades, footsteps, landings, shield recharge and the
+low shield alarm play from the game's own sound files, placed left or right and
+fading with distance (each splitscreen player hears through their own view).
+`H2_MUTE=1` turns sound off; `H2_AUDIO_WAV=out.wav` records the mix to a file
+instead of the speakers.
+
 ```
 h2tool scan  "C:\Games\Halo 2 Project Cartographer\maps"
 h2tool info  lockout.map
@@ -61,6 +68,8 @@ h2tool hud    lockout.map battle_rifle [dir]  # HUD widgets
 h2tool jmad   lockout.map fp_battle_rifle  # animation graph: skeleton and animations
 h2tool jmadscan lockout.map             # decode every animation (reports failures)
 h2tool shader lockout.map fp_arms       # shader template and bitmaps
+h2tool sound  lockout.map frag_expl out.wav  # decode a sound to WAV
+h2tool soundscan lockout.map            # decode every sound (reports failures)
 ```
 
 Multiplayer maps only store the tags unique to them; the rest live in

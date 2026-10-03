@@ -609,6 +609,7 @@ pub mod physics;
 pub mod render;
 pub mod scenario;
 pub mod shader;
+pub mod sound;
 pub mod weapon;
 
 pub use mapset::MapSet;

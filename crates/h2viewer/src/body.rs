@@ -328,9 +328,12 @@ mod tests {
                 None,
             ],
             scales: vec![None, None],
+            sound_events: Vec::new(),
+            frame_events: Vec::new(),
         };
         let graph = AnimationGraph {
             parent: None,
+            sounds: Vec::new(),
             nodes: vec![
                 GraphNode {
                     name: "pelvis".into(),

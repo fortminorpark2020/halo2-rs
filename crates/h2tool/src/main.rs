@@ -16,6 +16,8 @@
 //!   h2tool jmad  <file.map> <tag>        an animation graph's skeleton and animations
 //!   h2tool jmadscan <file.map>           decode every animation the map can see
 //!   h2tool objects <file.map>            scenery and multiplayer item spawns
+//!   h2tool sound <file.map> <name> [out.wav]  a sound's format (optionally written as WAV)
+//!   h2tool soundscan <file.map>          decode every sound the map can see
 //!   h2tool hex   <file.map> <datum|group:name> [path]
 //!                                        hex dump of a tag, or of a block inside it;
 //!                                        path = `offset:size[@index]/...` (hex), e.g. 8:c/0:10
@@ -46,6 +48,10 @@ fn main() -> ExitCode {
         Some("shader") if args.len() >= 3 => shader_dump(&args[1], &args[2]),
         Some("lightmap") if args.len() >= 2 => lightmap_dump(&args[1]),
         Some("objects") if args.len() >= 2 => objects(&args[1]),
+        Some("sound") if args.len() >= 3 => {
+            sound(&args[1], &args[2], args.get(3).map(String::as_str))
+        }
+        Some("soundscan") if args.len() >= 2 => soundscan(&args[1]),
         Some("bitmap") if args.len() >= 4 => bitmap_png(&args[1], &args[2], &args[3]),
         Some("hex") if args.len() >= 3 => hex(&args[1], &args[2], args.get(3).map(String::as_str)),
         Some("model") if args.len() >= 3 => {
@@ -299,6 +305,25 @@ fn weapon(path: &str, name: &str) -> Res {
             if p.impact_damage != blam_cache::DatumIndex::NONE {
                 println!("{:#?}", weapon::read_damage(&mut set, p.impact_damage)?);
             }
+        }
+        let fx = weapon::read_weapon_effects(&mut set, datum)?;
+        let name_of = |set: &blam_cache::MapSet, d: blam_cache::DatumIndex| {
+            set.locate(d)
+                .map_or("?".to_string(), |(_, t)| format!("{} {}", t.group, t.name))
+        };
+        for (what, e) in [
+            ("fire", fx.fire),
+            ("empty", fx.empty),
+            ("reload", fx.reload),
+            ("ready", fx.ready),
+            ("pickup", fx.pickup),
+            ("zoom in", fx.zoom_in),
+            ("zoom out", fx.zoom_out),
+        ] {
+            let Some(e) = e else { continue };
+            let sounds = blam_cache::sound::effect_sounds(&mut set, e)?;
+            let names: Vec<String> = sounds.iter().map(|&d| name_of(&set, d)).collect();
+            println!("{what}: {} -> {names:?}", name_of(&set, e));
         }
     }
     Ok(())
@@ -582,6 +607,23 @@ fn jmad(path: &str, name: &str) -> Res {
     for (i, n) in g.nodes.iter().enumerate() {
         println!("  node {i:>2} {:<20} parent {:>3}", n.name, n.parent);
     }
+    for (i, snd) in g.sounds.iter().enumerate() {
+        let name = snd
+            .and_then(|d| set.locate(d))
+            .map_or("-".to_string(), |(_, t)| t.name);
+        println!("  sound {i:>2} {name}");
+    }
+    if std::env::var("H2_EVENTS").is_ok() {
+        for a in &g.animations {
+            if !a.sound_events.is_empty() || !a.frame_events.is_empty() {
+                println!(
+                    "  {}: sounds {:?} frames {:?}",
+                    a.name, a.sound_events, a.frame_events
+                );
+            }
+        }
+        return Ok(());
+    }
     // H2_TRACK=<anim index> prints node 0's translation and rotation per frame.
     if let Some(k) = std::env::var("H2_TRACK")
         .ok()
@@ -628,6 +670,109 @@ fn jmad(path: &str, name: &str) -> Res {
 }
 
 /// Decode every animation graph the map can see; report failures.
+fn sound(path: &str, name: &str, out: Option<&str>) -> Res {
+    use blam_cache::{sound::SoundReader, MapSet};
+    let mut set = MapSet::open(path)?;
+    let g = GroupTag::parse("snd!").unwrap();
+    let tag = set
+        .map
+        .tags
+        .iter()
+        .find(|t| t.group == g && (t.name == name || t.name.ends_with(name)))
+        .cloned()
+        .ok_or_else(|| format!("no sound named {name}"))?;
+    let s = SoundReader::new().read(&mut set, tag.datum)?;
+    println!(
+        "{}: class {}, {} Hz, {} channel(s), {:?}, distance {:?}, gain {} dB, {} permutation(s), {:.2} s",
+        s.name,
+        s.class,
+        s.sample_rate,
+        s.channels,
+        s.codec,
+        s.distance,
+        s.gain_db,
+        s.permutations.len(),
+        s.duration()
+    );
+    for (i, p) in s.permutations.iter().enumerate() {
+        let peak = p.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0);
+        let rms =
+            (p.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / p.len().max(1) as f64).sqrt();
+        // Sample-to-sample change, relative to loudness: high for noise.
+        let diff = (p
+            .windows(2)
+            .map(|w| (w[1] as f64 - w[0] as f64).powi(2))
+            .sum::<f64>()
+            / p.len().max(1) as f64)
+            .sqrt();
+        println!(
+            "  permutation {i}: {} samples, peak {peak}, rms {rms:.0}, roughness {:.2}",
+            p.len(),
+            diff / rms.max(1.0)
+        );
+    }
+    if let (Some(out), Some(p)) = (out, s.permutations.first()) {
+        let mut wav = Vec::new();
+        let data_len = (p.len() * 2) as u32;
+        let ch = s.channels as u32;
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&(ch as u16).to_le_bytes());
+        wav.extend_from_slice(&s.sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(s.sample_rate * ch * 2).to_le_bytes());
+        wav.extend_from_slice(&((ch * 2) as u16).to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for v in p {
+            wav.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(out, wav)?;
+        println!("wrote {out}");
+    }
+    Ok(())
+}
+
+fn soundscan(path: &str) -> Res {
+    use blam_cache::{sound::SoundReader, MapSet};
+    let mut set = MapSet::open(path)?;
+    let g = GroupTag::parse("snd!").unwrap();
+    let tags: Vec<_> = set
+        .map
+        .tags
+        .iter()
+        .filter(|t| t.group == g)
+        .cloned()
+        .collect();
+    let mut reader = SoundReader::new();
+    let mut codecs: BTreeMap<String, usize> = BTreeMap::new();
+    let mut failed = 0;
+    for tag in &tags {
+        match reader.read(&mut set, tag.datum) {
+            Ok(s) => {
+                if std::env::var("H2_LIST").is_ok() {
+                    println!("{:?} class {} {}", s.codec, s.class, s.name);
+                }
+                *codecs.entry(format!("{:?}", s.codec)).or_default() += 1
+            }
+            Err(e) => {
+                failed += 1;
+                if failed <= 10 {
+                    println!("{}: {e}", tag.name);
+                }
+            }
+        }
+    }
+    println!("{} sounds, {failed} failed", tags.len());
+    for (c, n) in codecs {
+        println!("  {c}: {n}");
+    }
+    Ok(())
+}
+
 fn jmadscan(path: &str) -> Res {
     use blam_cache::{animation, MapSet};
     let mut set = MapSet::open(path)?;
