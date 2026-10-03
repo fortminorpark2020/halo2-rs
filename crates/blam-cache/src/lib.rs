@@ -229,6 +229,10 @@ pub struct PlayerSpawn {
     pub position: [f32; 3],
     /// Facing angle in radians around +z (0 = +x).
     pub facing: f32,
+    /// 0 red, 1 blue ... 8 neutral.
+    pub team: u16,
+    /// Game types the spawn is for (0 none, 1 CTF, 2 Slayer ... 12 all).
+    pub game_types: [u16; 4],
 }
 
 pub struct CacheFile<R> {
@@ -496,6 +500,8 @@ impl<R: Read + Seek> CacheFile<R> {
             .map(|e| PlayerSpawn {
                 position: [f32_at(e, 0), f32_at(e, 4), f32_at(e, 8)],
                 facing: f32_at(e, 0xC),
+                team: i16_at(e, 0x10) as u16,
+                game_types: [0x14, 0x16, 0x18, 0x1A].map(|o| i16_at(e, o) as u16),
             })
             .collect())
     }

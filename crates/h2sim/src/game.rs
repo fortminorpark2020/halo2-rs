@@ -4,13 +4,15 @@
 //! command per player, so local splitscreen and networked players drive the
 //! game the same way.
 
-use crate::collision::World;
+use crate::collision::{KillZone, World};
 use crate::player::{Input, Player};
 use crate::weapon::{WeaponDef, WeaponInput, WeaponState};
 use blam_cache::physics::{BipedPhysics, PlayerMovement};
 use glam::{Vec2, Vec3};
 
+mod ctf;
 mod sync;
+pub use ctf::{Flag, FlagEvent};
 pub use sync::{Malformed, Reader, Writer};
 
 /// Simulation step: the game advances in fixed ticks so every machine in a
@@ -48,11 +50,18 @@ pub enum GameType {
     Slayer,
     /// Red against blue; the team with the most kills wins.
     TeamSlayer,
+    /// Red against blue; bring the other team's flag to your base.
+    Ctf,
 }
 
 impl GameType {
     pub fn teams(self) -> bool {
-        self == GameType::TeamSlayer
+        matches!(self, GameType::TeamSlayer | GameType::Ctf)
+    }
+
+    /// Kills score points (and suicides and betrayals cost them).
+    pub fn kills_score(self) -> bool {
+        matches!(self, GameType::Slayer | GameType::TeamSlayer)
     }
 }
 
@@ -85,9 +94,43 @@ pub struct Rules {
     pub headshot_weapons: Vec<usize>,
     /// Weapons that lunge and kill with melee (the energy sword).
     pub lunge_weapons: Vec<usize>,
-    /// Points to win (a kill is one, a suicide or betrayal takes one away);
-    /// 0 plays forever.
+    /// Points to win (in Slayer a kill is one, a suicide or betrayal takes
+    /// one away; in CTF a capture is one); 0 plays forever.
     pub score_to_win: u32,
+    /// The flag, as a weapon carried in hand (index into the weapon list).
+    pub flag_weapon: Option<usize>,
+    /// Seconds a dropped flag lies before going home by itself.
+    pub flag_reset_time: f32,
+    /// A team only scores while its own flag is at home.
+    pub flag_at_home_to_score: bool,
+    /// Touching your own dropped flag sends it home.
+    pub flag_touch_return: bool,
+    pub falling: FallingDamage,
+}
+
+/// How hard landings hurt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FallingDamage {
+    /// Falls shorter than the first height are harmless; the damage grows
+    /// to `damage` at the second.
+    pub harmful: (f32, f32),
+    pub damage: f32,
+    /// Falls longer than this kill.
+    pub deadly: f32,
+}
+
+impl FallingDamage {
+    /// The damage of landing from a fall of `height`.
+    pub fn damage_for(&self, height: f32) -> f32 {
+        let (low, high) = self.harmful;
+        if height > self.deadly {
+            return f32::INFINITY;
+        }
+        if height <= low {
+            return 0.0;
+        }
+        self.damage * ((height - low) / (high - low).max(1e-3)).min(1.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -135,6 +178,16 @@ impl Default for Rules {
             headshot_weapons: Vec::new(),
             lunge_weapons: Vec::new(),
             score_to_win: 25,
+            flag_weapon: None,
+            flag_reset_time: 30.0,
+            flag_at_home_to_score: false,
+            flag_touch_return: false,
+            // Halo 2's globals.
+            falling: FallingDamage {
+                harmful: (6.0, 10.0),
+                damage: 125.0,
+                deadly: 14.0,
+            },
         }
     }
 }
@@ -202,6 +255,8 @@ pub struct Spartan {
     /// At most two; `current` is in hand.
     pub weapons: Vec<HeldWeapon>,
     pub current: usize,
+    /// A flag carried in hand in place of the weapons.
+    pub objective: Option<HeldWeapon>,
     pub frags: u8,
     pub plasmas: u8,
     pub grenade: GrenadeKind,
@@ -225,8 +280,9 @@ pub struct Spartan {
 }
 
 impl Spartan {
+    /// What's in hand: a flag being carried, or the current weapon.
     pub fn held(&self) -> Option<&HeldWeapon> {
-        self.weapons.get(self.current)
+        self.objective.as_ref().or(self.weapons.get(self.current))
     }
 
     pub fn eye(&self) -> Vec3 {
@@ -332,6 +388,13 @@ pub enum Event {
         player: usize,
         change: LeadChange,
     },
+    /// Something happened to a team's flag; `player` took, dropped,
+    /// returned or captured it (none: it went home by itself).
+    Flag {
+        team: u8,
+        player: Option<usize>,
+        what: FlagEvent,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +423,12 @@ pub struct Game {
     pub dropped: Vec<DroppedWeapon>,
     pub grenades: Vec<Grenade>,
     pub players: Vec<Spartan>,
+    /// Capture the Flag: each team's flag.
+    pub flags: Vec<Flag>,
+    /// Where each team brings the enemy flag to score.
+    pub flag_bases: Vec<(u8, Vec3)>,
+    /// Places that kill whoever enters them.
+    pub kill_zones: Vec<KillZone>,
     pub movement: PlayerMovement,
     pub biped: BipedPhysics,
     pub time: f64,
@@ -422,6 +491,9 @@ impl Game {
             dropped: Vec::new(),
             grenades: Vec::new(),
             players: Vec::new(),
+            flags: Vec::new(),
+            flag_bases: Vec::new(),
+            kill_zones: Vec::new(),
             movement,
             biped,
             time: 0.0,
@@ -510,6 +582,7 @@ impl Game {
             respawn_in: 0.0,
             weapons,
             current: 0,
+            objective: None,
             frags: self.rules.starting_frags,
             plasmas: self.rules.starting_plasmas,
             grenade: GrenadeKind::Frag,
@@ -528,12 +601,24 @@ impl Game {
         }
     }
 
-    /// Bring a player back at the spawn point farthest from enemies alive.
+    /// Bring a player back at the spawn point farthest from enemies alive
+    /// (in Capture the Flag, on their own side of the map).
     pub fn respawn(&mut self, player: usize) {
         let others: Vec<Vec3> = (0..self.players.len())
             .filter(|&i| self.is_enemy(player, i) && self.players[i].alive)
             .map(|i| self.players[i].body.position)
             .collect();
+        let team = self.players[player].team;
+        let homes = self.has_flags().then(|| {
+            let home = |own: bool| {
+                self.flags
+                    .iter()
+                    .filter(|f| (f.team == team) == own)
+                    .map(|f| f.home)
+                    .next()
+            };
+            (home(true), home(false))
+        });
         let mut best = (f32::MIN, (Vec3::ZERO, 0.0));
         for k in 0..self.spawns.len() {
             let (pos, yaw) = self.spawns[k];
@@ -541,8 +626,14 @@ impl Game {
                 .iter()
                 .map(|o| o.distance(pos))
                 .fold(f32::MAX, f32::min);
+            let side = match homes {
+                Some((Some(own), Some(enemy))) => {
+                    (enemy.distance(pos) - own.distance(pos)).clamp(-30.0, 30.0)
+                }
+                _ => 0.0,
+            };
             // A little randomness so spawns vary when no one is around.
-            let score = nearest.min(50.0) + self.random() * 4.0;
+            let score = nearest.min(50.0) + side + self.random() * 4.0;
             if score > best.0 {
                 best = (score, (pos, yaw));
             }
@@ -573,6 +664,7 @@ impl Game {
         }
         self.step_grenades(world, dt);
         self.step_items(dt);
+        self.step_flags(world, dt);
     }
 
     fn step_player(&mut self, world: &World, i: usize, cmd: Command, dt: f32) {
@@ -610,14 +702,27 @@ impl Game {
             p.melee_cooldown = (p.melee_cooldown - dt).max(0.0);
             p.grenade_cooldown = (p.grenade_cooldown - dt).max(0.0);
         }
-        // Fell out of the level.
-        if self.players[i].body.position.z < world.min.z - 1.0 {
+        // Fell out of the level or into a pit; landed hard.
+        let feet = self.players[i].body.position;
+        if feet.z < world.min.z - 1.0 || self.kill_zones.iter().any(|z| z.contains(feet)) {
             self.kill(i, None, false);
             return;
         }
+        let fell = std::mem::take(&mut self.players[i].body.fell);
+        let hurt = self.rules.falling.damage_for(fell);
+        if hurt > 0.0 {
+            self.damage(i, None, hurt, false);
+            if !self.players[i].alive {
+                return;
+            }
+        }
 
         if pressed(cmd.switch_weapon, last.switch_weapon) {
-            self.switch_weapon(i);
+            if self.players[i].objective.is_some() {
+                self.drop_flag(i);
+            } else {
+                self.switch_weapon(i);
+            }
         }
         if pressed(cmd.switch_grenade, last.switch_grenade) {
             let p = &mut self.players[i];
@@ -628,6 +733,7 @@ impl Game {
             };
         }
         self.pick_up(i, cmd.action, dt);
+        self.touch_flags(i, cmd.action);
 
         let lunges = self.players[i]
             .held()
@@ -644,11 +750,12 @@ impl Game {
         let ready = self.players[i].readying <= 0.0;
         let mut shots = Vec::new();
         let mut reloaded = None;
-        if let Some(def) = self.players[i]
-            .held()
-            .and_then(|h| self.weapons.get(h.weapon))
-            .cloned()
-        {
+        // A flag in hand only melees.
+        let gun = match &self.players[i].objective {
+            Some(_) => None,
+            None => self.players[i].held().map(|h| h.weapon),
+        };
+        if let Some(def) = gun.and_then(|w| self.weapons.get(w)).cloned() {
             let p = &mut self.players[i];
             let held = &mut p.weapons[p.current];
             let was = (held.state.reloading.is_some(), held.state.loaded == 0);
@@ -773,7 +880,12 @@ impl Game {
             let damage = if lunge {
                 self.rules.lunge_damage
             } else {
-                self.rules.melee_damage
+                // Some weapons (the flag) hit harder than the usual strike.
+                self.players[i]
+                    .held()
+                    .and_then(|h| self.weapons.get(h.weapon))
+                    .and_then(|d| d.melee_damage)
+                    .unwrap_or(self.rules.melee_damage)
             };
             self.damage(j, Some(i), damage, false);
         }
@@ -786,7 +898,7 @@ impl Game {
     fn throw_grenade(&mut self, i: usize) {
         let def = self.grenade_def(self.players[i].grenade);
         let p = &mut self.players[i];
-        if p.grenade_cooldown > 0.0 {
+        if p.grenade_cooldown > 0.0 || p.objective.is_some() {
             return;
         }
         let count = match p.grenade {
@@ -944,6 +1056,10 @@ impl Game {
 
     fn kill(&mut self, victim: usize, killer: Option<usize>, headshot: bool) {
         let respawn = self.rules.respawn_time;
+        if self.players[victim].objective.is_some() {
+            self.players[victim].alive = false;
+            self.drop_flag(victim);
+        }
         let p = &mut self.players[victim];
         p.alive = false;
         p.health = 0.0;
@@ -953,7 +1069,7 @@ impl Game {
         p.spree = 0;
         p.multi_kill = 0;
         // Drop the weapon in hand.
-        let drop = p.held().cloned();
+        let drop = p.weapons.get(p.current).cloned();
         let (pos, yaw) = (p.body.position + Vec3::Z * 0.1, p.yaw);
         if let Some(h) = drop {
             self.dropped.push(DroppedWeapon {
@@ -970,17 +1086,20 @@ impl Game {
             headshot,
         });
         let leaders = self.leaders();
+        let kills_score = self.rules.game_type.kills_score();
+        // Outside Slayer, kills don't change the score.
+        let point = i32::from(kills_score);
         match killer {
             // Killed themselves, or by the level: a point off.
-            None => self.players[victim].score -= 1,
-            Some(k) if k == victim => self.players[victim].score -= 1,
+            None => self.players[victim].score -= point,
+            Some(k) if k == victim => self.players[victim].score -= point,
             // Betrayed a teammate: a point off.
-            Some(k) if !self.is_enemy(k, victim) => self.players[k].score -= 1,
+            Some(k) if !self.is_enemy(k, victim) => self.players[k].score -= point,
             Some(k) => {
                 let time = self.time;
                 let p = &mut self.players[k];
                 p.kills += 1;
-                p.score += 1;
+                p.score += point;
                 p.spree += 1;
                 let chained = p.multi_kill > 0 && time - p.last_kill <= MULTI_KILL_WINDOW;
                 p.multi_kill = if chained { p.multi_kill + 1 } else { 1 };
@@ -1001,13 +1120,18 @@ impl Game {
             }
         }
         self.lead_changes(&leaders);
-        if let Some(k) = killer.filter(|&k| self.is_enemy(k, victim)) {
-            let target = self.rules.score_to_win as i32;
-            if target > 0 && self.side_score(k) >= target {
-                self.winner.get_or_insert(k);
-                if self.rules.game_type.teams() {
-                    self.winning_team.get_or_insert(self.players[k].team);
-                }
+        if let Some(k) = killer.filter(|&k| kills_score && self.is_enemy(k, victim)) {
+            self.check_win(k);
+        }
+    }
+
+    /// End the game if `player`'s side has reached the score to win.
+    fn check_win(&mut self, player: usize) {
+        let target = self.rules.score_to_win as i32;
+        if target > 0 && self.side_score(player) >= target {
+            self.winner.get_or_insert(player);
+            if self.rules.game_type.teams() {
+                self.winning_team.get_or_insert(self.players[player].team);
             }
         }
     }
@@ -1027,8 +1151,8 @@ impl Game {
         (0..sides.len()).filter(|&i| sides[i] == top).collect()
     }
 
-    /// Announce how the last kill changed the lead: to each player, or to
-    /// everyone on a team.
+    /// Announce how the last kill or capture changed the lead: to each
+    /// player, or to everyone on a team.
     fn lead_changes(&mut self, before: &[usize]) {
         let after = self.leaders();
         let teams = self.rules.game_type.teams();
@@ -1147,6 +1271,10 @@ impl Game {
             h.state.reserve += take;
             return true;
         }
+        // Hands full with the flag: ammo only.
+        if p.objective.is_some() {
+            return false;
+        }
         if p.weapons.len() < 2 {
             p.weapons.push(HeldWeapon { weapon: w, state });
             p.current = p.weapons.len() - 1;
@@ -1185,7 +1313,7 @@ impl Game {
     /// The weapon on the ground a player could swap for (action key prompt).
     pub fn swap_prompt(&self, i: usize) -> Option<usize> {
         let p = self.players.get(i)?;
-        if !p.alive || p.weapons.len() < 2 {
+        if !p.alive || p.weapons.len() < 2 || p.objective.is_some() {
             return None;
         }
         let feet = p.body.position;
@@ -1512,5 +1640,46 @@ pub(crate) mod tests {
                 || g.players[1].shield < 70.0
                 || !g.players[1].alive
         );
+    }
+
+    /// Player 0 dropped from `height` onto the floor; their health after.
+    fn fall_from(height: f32) -> (bool, f32) {
+        let world = floor();
+        let mut g = game();
+        g.add_player();
+        g.players[0].body.position = Vec3::new(0.0, 0.0, height);
+        for _ in 0..300 {
+            g.step(&world, &[Command::default()]);
+        }
+        (
+            g.players[0].alive,
+            g.players[0].shield + g.players[0].health,
+        )
+    }
+
+    #[test]
+    fn hard_landings_hurt_and_long_falls_kill() {
+        assert_eq!(fall_from(2.0), (true, 115.0));
+        let (alive, left) = fall_from(8.0);
+        assert!(alive && left < 115.0, "{left}");
+        assert!(!fall_from(12.0).0);
+        assert!(!fall_from(20.0).0);
+    }
+
+    #[test]
+    fn kill_zones_kill() {
+        let world = floor();
+        let mut g = game();
+        g.add_player();
+        g.players[0].body.position = Vec3::new(3.0, 3.0, 0.0);
+        g.kill_zones.push(KillZone::new(
+            Vec3::new(2.0, 2.0, -1.0),
+            Vec3::X,
+            Vec3::Z,
+            Vec3::new(2.0, 2.0, 2.0),
+        ));
+        g.step(&world, &[Command::default()]);
+        assert!(!g.players[0].alive);
+        assert_eq!(g.players[0].score, -1);
     }
 }

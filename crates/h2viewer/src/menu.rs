@@ -103,12 +103,23 @@ pub fn find_maps(dir: &Path) -> Vec<MapChoice> {
 
 /// Kills to win the lobby offers; 0 plays on without end.
 pub const SCORES: [u32; 6] = [5, 10, 15, 25, 50, 0];
+/// Captures to win Capture the Flag.
+pub const CAPTURES: [u32; 5] = [1, 3, 5, 10, 0];
 pub const MAX_BOTS: usize = 15;
 /// The game types the lobby offers, with their names.
-pub const GAME_TYPES: [(GameType, &str); 2] = [
+pub const GAME_TYPES: [(GameType, &str); 3] = [
     (GameType::Slayer, "SLAYER"),
     (GameType::TeamSlayer, "TEAM SLAYER"),
+    (GameType::Ctf, "CAPTURE THE FLAG"),
 ];
+
+/// The scores to win a game type offers, and the one it starts on.
+pub fn scores(game_type: GameType) -> (&'static [u32], usize) {
+    match game_type {
+        GameType::Ctf => (&CAPTURES, 1),
+        _ => (&SCORES, 3),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -116,7 +127,7 @@ pub struct Settings {
     pub game_type: usize,
     /// In `Context::maps`.
     pub map: usize,
-    /// In `SCORES`.
+    /// In the game type's `scores`.
     pub score: usize,
     pub bots: usize,
 }
@@ -124,6 +135,11 @@ pub struct Settings {
 impl Settings {
     pub fn game_type(&self) -> GameType {
         GAME_TYPES[self.game_type.min(GAME_TYPES.len() - 1)].0
+    }
+
+    pub fn score_to_win(&self) -> u32 {
+        let (scores, default) = scores(self.game_type());
+        scores.get(self.score).copied().unwrap_or(scores[default])
     }
 }
 
@@ -343,7 +359,7 @@ impl Menu {
             ),
             Row::Score => (
                 "SCORE TO WIN".into(),
-                Some(match SCORES[s.score] {
+                Some(match s.score_to_win() {
                     0 => "NO LIMIT".into(),
                     n => n.to_string(),
                 }),
@@ -431,9 +447,12 @@ impl Menu {
         let s = &mut self.settings;
         match row {
             Row::Map => s.map = cycle(s.map, ctx.maps.len()),
-            Row::Score => s.score = cycle(s.score, SCORES.len()),
+            Row::Score => s.score = cycle(s.score, scores(s.game_type()).0.len()),
             Row::Bots => s.bots = cycle(s.bots, MAX_BOTS + 1),
-            Row::GameType => s.game_type = cycle(s.game_type, GAME_TYPES.len()),
+            Row::GameType => {
+                s.game_type = cycle(s.game_type, GAME_TYPES.len());
+                s.score = scores(s.game_type()).1;
+            }
             _ => return false,
         }
         true
@@ -898,7 +917,7 @@ mod tests {
         assert_eq!(m.settings.map, 0, "wraps around");
         m.input(Input::Down, &c);
         m.input(Input::Left, &c);
-        assert_eq!(SCORES[m.settings.score], 15);
+        assert_eq!(m.settings.score_to_win(), 15);
         m.input(Input::Down, &c);
         m.input(Input::Left, &c);
         assert_eq!(m.settings.bots, 2);

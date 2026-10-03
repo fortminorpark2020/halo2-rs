@@ -427,7 +427,7 @@ impl LocalPlayer {
             view_sprites: Vec::new(),
             posed: Vec::new(),
         };
-        if !self.me(game).alive {
+        if !self.first_person(game) {
             return out;
         }
         let Some((weapon, state)) = self.current(scene, game) else {
@@ -461,6 +461,20 @@ impl LocalPlayer {
                 let muzzle = rig
                     .gun_node_world(&world, weapon.muzzle_node)
                     .map_or(frame, |m| frame * m);
+                // The flag's cloth hangs from the top of the pole.
+                let carried = game.flags.iter().find(|f| f.carrier == Some(self.player));
+                if let (Some(flag), Some(f)) = (&scene.flag, carried) {
+                    let (node, at) = flag.view_attach;
+                    let pole = rig
+                        .gun_node_world(&world, node)
+                        .map_or(frame, |m| frame * m);
+                    out.view_models.push(DrawCall {
+                        mesh: flag.cloth,
+                        model: pole * Mat4::from_translation(at),
+                        light,
+                        colors: Some(crate::objective::flag_colors(f.team)),
+                    });
+                }
                 (frame, muzzle)
             }
             _ => {
@@ -491,6 +505,32 @@ impl LocalPlayer {
             );
         }
         out
+    }
+
+    /// How to take the enemy flag when standing at it, or drop the one in hand.
+    fn flag_prompt(&self, game: &Game) -> Option<String> {
+        let me = self.me(game);
+        if !me.alive || !game.has_flags() {
+            return None;
+        }
+        let (take, drop) = if self.keyboard {
+            ("E", "Q")
+        } else {
+            ("X", "Y")
+        };
+        if game.carried_flag(self.player).is_some() {
+            return Some(format!("TAKE THE FLAG HOME  {drop}: DROP IT"));
+        }
+        let feet = me.body.position;
+        game.flags
+            .iter()
+            .any(|f| {
+                f.team != me.team
+                    && f.carrier.is_none()
+                    && (f.position - feet).truncate().length() < 1.0
+                    && (f.position.z - feet.z).abs() < 1.0
+            })
+            .then(|| format!("{take} TO TAKE THE FLAG"))
     }
 
     /// Projection for the first person weapon, which ignores zoom.
@@ -592,6 +632,16 @@ impl LocalPlayer {
                 10.0 * s,
                 &k.to_string(),
                 colors[1],
+            );
+        }
+        self.flag_waypoints(&mut hb, scene, game, (w, h));
+        if let Some(text) = self.flag_prompt(game) {
+            hb.text(
+                font,
+                [w * 0.5, h * 0.5 + 64.0 * s],
+                9.0 * s,
+                &text,
+                hud::BLUE,
             );
         }
         if let Some(winner) = game.winner {

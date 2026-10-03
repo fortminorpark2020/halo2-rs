@@ -46,6 +46,8 @@ pub struct WeaponDef {
     /// Seconds to bring the weapon up after switching to it (the length of
     /// its first person "ready" animation).
     pub ready_time: f32,
+    /// Melee damage when it differs from the usual strike (the flag's smash).
+    pub melee_damage: Option<f32>,
 }
 
 /// Used when a weapon's ready animation is unknown.
@@ -117,6 +119,7 @@ impl WeaponDef {
                 .unwrap_or((0.0, range)),
             damage_lower_bound: damage.map(|d| d.lower_bound).unwrap_or(0.0),
             ready_time: DEFAULT_READY_TIME,
+            melee_damage: None,
         }
     }
 
@@ -375,6 +378,7 @@ mod tests {
             damage_range: (0.0, 40.0),
             damage_lower_bound: 6.0,
             ready_time: DEFAULT_READY_TIME,
+            melee_damage: None,
         }
     }
 

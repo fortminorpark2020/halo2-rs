@@ -53,6 +53,9 @@ pub fn weapon_style(name: &str) -> (&'static str, &'static str) {
         "brute_shot" => ("support", "bs"),
         "flak_cannon" => ("missile", "fc"),
         "energy_blade" => ("sword", ""),
+        "flag" => ("flag", ""),
+        "ball" => ("ball", ""),
+        "assault_bomb" => ("ball", "bomb"),
         _ => ("rifle", "any"),
     }
 }

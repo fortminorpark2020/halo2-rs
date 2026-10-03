@@ -55,6 +55,15 @@ fn main() -> ExitCode {
         Some("bitmap") if args.len() >= 4 => bitmap_png(&args[1], &args[2], &args[3]),
         Some("refs") if args.len() >= 3 => refs(&args[1], &args[2]),
         Some("events") if args.len() >= 2 => events(&args[1]),
+        Some("netgame") if args.len() >= 2 => netgame(&args[1]),
+        Some("sid") if args.len() >= 3 => {
+            let map = blam_cache::CacheFile::open(&args[1]);
+            map.map_err(Into::into).and_then(|m| {
+                let id = u32::from_str_radix(args[2].trim_start_matches("0x"), 16)?;
+                println!("{:?}", m.string_id(id));
+                Ok(())
+            })
+        }
         Some("hex") if args.len() >= 3 => hex(&args[1], &args[2], args.get(3).map(String::as_str)),
         Some("model") if args.len() >= 3 => {
             model(&args[1], &args[2], args.get(3).map(String::as_str))
@@ -593,6 +602,27 @@ fn hex(path: &str, tag: &str, block_path: Option<&str>) -> Res {
 
 /// The multiplayer announcer events (globals' event blocks): type, event,
 /// fields, display string and English sound.
+/// Multiplayer game type points and the spawns' teams and game types.
+fn netgame(path: &str) -> Res {
+    use blam_cache::{scenario, MapSet};
+    let mut set = MapSet::open(path)?;
+    for f in scenario::netgame_flags(&mut set)? {
+        let [x, y, z] = f.position;
+        println!(
+            "{:?} team {} id {} at ({x:.2}, {y:.2}, {z:.2}) facing {:.2}",
+            f.kind, f.team, f.identifier, f.facing
+        );
+    }
+    for s in set.map.player_spawns()? {
+        let [x, y, z] = s.position;
+        println!(
+            "spawn team {} game types {:?} at ({x:.2}, {y:.2}, {z:.2})",
+            s.team, s.game_types
+        );
+    }
+    Ok(())
+}
+
 fn events(path: &str) -> Res {
     use blam_cache::{i16_at, u32_at, DatumIndex, MapSet};
     let mut set = MapSet::open(path)?;

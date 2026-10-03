@@ -261,3 +261,52 @@ pub fn read_render_model(set: &mut MapSet, mode: DatumIndex) -> Result<RenderMod
         markers,
     })
 }
+
+const CLWD_GRID: usize = 0x10;
+const CLWD_VERTICES: usize = 0x4C;
+const CLOTH_VERTEX_SIZE: usize = 0x14;
+
+/// A cloth (`clwd`): a grid of points hanging from a marker, like the flag.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Cloth {
+    /// Points across and down.
+    pub grid: (usize, usize),
+    /// Rest positions (row by row, from the attached edge) and texture
+    /// coordinates.
+    pub vertices: Vec<([f32; 3], [f32; 2])>,
+}
+
+pub fn read_cloth(set: &mut MapSet, clwd: DatumIndex) -> Result<Cloth> {
+    let (src, tag, d) = set.tag_data(clwd)?;
+    if d.len() < CLWD_VERTICES + 8 {
+        return Err(Error::Corrupt(format!("cloth tag {} too short", tag.name)));
+    }
+    let file = set.get(src);
+    let region = file.meta_region();
+    let raw = file.read_block(region, &d, CLWD_VERTICES, CLOTH_VERTEX_SIZE)?;
+    let grid = (
+        i16_at(&d, CLWD_GRID).max(0) as usize,
+        i16_at(&d, CLWD_GRID + 2).max(0) as usize,
+    );
+    let vertices: Vec<_> = raw
+        .as_chunks::<CLOTH_VERTEX_SIZE>()
+        .0
+        .iter()
+        .map(|v| {
+            (
+                [f32_at(v, 0), f32_at(v, 4), f32_at(v, 8)],
+                [f32_at(v, 0xC), f32_at(v, 0x10)],
+            )
+        })
+        .collect();
+    if grid.0 * grid.1 != vertices.len() || grid.0 < 2 || grid.1 < 2 {
+        return Err(Error::Corrupt(format!(
+            "cloth {} has {} points for a {}x{} grid",
+            tag.name,
+            vertices.len(),
+            grid.0,
+            grid.1
+        )));
+    }
+    Ok(Cloth { grid, vertices })
+}

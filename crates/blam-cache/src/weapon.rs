@@ -11,6 +11,8 @@ const WEAP_AUTOAIM_RANGE: usize = 0x20C;
 const WEAP_MAGNETISM_ANGLE: usize = 0x210;
 const WEAP_MAGNETISM_RANGE: usize = 0x214;
 const WEAP_READY_TIME: usize = 0x13C;
+/// The first hit of a melee combo (the player melee damage field is unused).
+const WEAP_MELEE_DAMAGE: usize = 0x1BC;
 const WEAP_FIRST_PERSON: usize = 0x2A8;
 const WEAP_HUD: usize = 0x2B0;
 const FIRST_PERSON_SIZE: usize = 0x10;
@@ -126,6 +128,8 @@ pub struct Weapon {
     pub autoaim_range: f32,
     pub magnetism_angle: f32,
     pub magnetism_range: f32,
+    /// The player's melee attack with this weapon (`jpt!`).
+    pub melee_damage: Option<DatumIndex>,
     pub magazines: Vec<Magazine>,
     pub triggers: Vec<Trigger>,
     pub barrels: Vec<Barrel>,
@@ -219,6 +223,7 @@ pub fn read_weapon(set: &mut MapSet, weap: DatumIndex) -> Result<Weapon> {
         autoaim_range: f32_at(&d, WEAP_AUTOAIM_RANGE),
         magnetism_angle: f32_at(&d, WEAP_MAGNETISM_ANGLE),
         magnetism_range: f32_at(&d, WEAP_MAGNETISM_RANGE),
+        melee_damage: tag_ref(&d, WEAP_MELEE_DAMAGE),
         magazines,
         triggers,
         barrels,

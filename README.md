@@ -16,9 +16,12 @@ install. No game files are included in this repository.
 - `h2sim`: game simulation (no rendering): level collision, Spartan movement
   using the speeds, jump velocity and size from the game's own globals and biped tags,
   weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
-  Slayer and Team Slayer rules (shields, health, grenades, pickups, respawns,
-  friendly fire and betrayals, multi-kill and spree medals, the lead), bots and
-  their walking graph.
+  Slayer, Team Slayer and Capture the Flag rules (shields, health, grenades,
+  pickups, respawns, friendly fire and betrayals, multi-kill and spree medals,
+  the lead, flags taken, dropped, returned and captured), falling damage and
+  the map's kill zones from the game's own tags, and bots that run flags,
+  escort carriers and defend, finding their way over a walking graph sampled
+  from each level's floors.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
@@ -31,8 +34,8 @@ install. No game files are included in this repository.
 Double-click `h2viewer.exe` to open Halo 2's menus over Lockout from
 `C:\Games\Halo 2 Project Cartographer\maps` (or drag any `.map` file onto it),
 with Halo 2's main menu music. Multiplayer opens the lobby: pick the game
-type (Slayer or Team Slayer), the map (every multiplayer map in the maps
-folder), score to win and number of bots, then Start Game. In Team Slayer, T
+type (Slayer, Team Slayer or Capture the Flag), the map (every multiplayer map in the maps
+folder), score to win and number of bots, then Start Game. In team games, T
 (or X on a controller) puts you on the red or blue team; bots fill the smaller
 team. System Link lists games other PCs on the network are hosting.
 Menus work with the arrow keys or WASD, Enter and Esc, the mouse, or a
@@ -44,6 +47,13 @@ pause menu (resume, end the game, quit). ` (backquote) switches between walking
 and flying (flying: Space / C up / down, Shift fast). When someone reaches the
 score to win, the game stops and the carnage report shows everyone's kills and
 deaths; Continue goes back to the lobby.
+
+Capture the Flag: walk onto the enemy flag and press E (X on a controller) to
+take it, then carry it to your own flag's stand while yours is home to score; Q
+(Y) drops it. Carriers can't pick up weapons. A dropped flag goes home after 30
+seconds. Arrows over the flags (and over home while carrying) show where to go,
+and the announcer calls every take, drop, return and capture. Long falls hurt
+or kill, and so do the map's death pits.
 
 Weapons: left mouse fires, right mouse or Z zooms, R reloads, F melees, Q or the
 mouse wheel switches weapon, G throws a grenade, X switches grenade type, E picks
@@ -73,7 +83,9 @@ game over, as
 Halo 2's multiplayer globals pair them. The menus have Halo 2's own music and
 menu sounds.
 `H2_MUTE=1` turns sound off; `H2_AUDIO_WAV=out.wav` records the mix to a file
-instead of the speakers.
+instead of the speakers. For testing, `H2_GAME=team` or `ctf` and `H2_BOTS=<n>`
+start a game straight away, and `H2_SIM=<seconds>` plays the bots against each
+other without a window, printing kills, flag events and the score.
 
 ```
 h2tool scan  "C:\Games\Halo 2 Project Cartographer\maps"
@@ -94,6 +106,8 @@ h2tool sound  lockout.map frag_expl out.wav  # decode a sound to WAV
 h2tool soundscan lockout.map            # decode every sound (reports failures)
 h2tool events lockout.map               # announcer events from the multiplayer globals
 h2tool refs   lockout.map snd!:double_kill  # which tags refer to a tag
+h2tool netgame lockout.map              # game type points (flags, hills, territories) and spawns
+h2tool sid    lockout.map 0x1234abcd    # look up a string id
 ```
 
 Multiplayer maps only store the tags unique to them; the rest live in
@@ -104,8 +118,9 @@ Multiplayer maps only store the tags unique to them; the rest live in
 1. Map file reader (done)
 2. Fly-camera level viewer (done, with lightmaps, scenery and skies)
 3. Spartan movement, collision, weapons with first person animations (done)
-4. Splitscreen and LAN multiplayer (done), menus and lobby (done), more game
-   types (next)
+4. Splitscreen and LAN multiplayer (done), menus and lobby (done), Team Slayer
+   and Capture the Flag (done), Oddball, King of the Hill, Juggernaut,
+   Territories and Assault (next)
 5. Matchmaking, 1-50 ranks, parties
 6. Campaign and AI
 

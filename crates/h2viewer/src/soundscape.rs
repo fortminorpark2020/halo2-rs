@@ -6,8 +6,8 @@
 use crate::audio::Audio;
 use crate::scene::Scene;
 use glam::Vec3;
-use h2sim::game::{Event, GrenadeKind, LeadChange, Medal};
-use h2sim::{Game, ItemKind};
+use h2sim::game::{Event, FlagEvent, GrenadeKind, LeadChange, Medal};
+use h2sim::{Game, GameType, ItemKind};
 use std::collections::VecDeque;
 
 /// One view's ears.
@@ -251,6 +251,18 @@ impl Soundscape {
             Event::Spawned { player, .. } if local(player) => {
                 self.play_flat(scene, g.respawn, 1.0);
             }
+            Event::Flag { player, what, .. } => match what {
+                FlagEvent::Taken if player.is_some_and(local) => {
+                    self.play_flat(scene, a.flag_grabbed, 1.0);
+                }
+                FlagEvent::Taken => self.announce(a.flag_taken),
+                FlagEvent::Returned => self.announce(a.flag_returned),
+                FlagEvent::Captured => self.announce(a.flag_captured),
+                FlagEvent::CaptureFailed if player.is_some_and(local) => {
+                    self.play_flat(scene, a.flag_failure, 1.0);
+                }
+                _ => {}
+            },
             Event::Shot {
                 player,
                 origin,
@@ -381,7 +393,10 @@ impl Soundscape {
         let a = g.announcer;
         if !self.announced_start {
             self.announced_start = true;
-            self.announce(a.slayer);
+            self.announce(match game.rules.game_type {
+                GameType::Ctf => a.capture_the_flag,
+                _ => a.slayer,
+            });
         }
         if game.winner.is_some() != self.announced_winner {
             self.announced_winner = game.winner.is_some();

@@ -18,6 +18,7 @@ use blam_cache::{
     render, scenario, sound, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp,
 };
 use glam::{Mat4, Vec3};
+use h2sim::game::FallingDamage;
 use h2sim::{ItemKind, WeaponDef};
 use std::collections::HashMap;
 use std::path::Path;
@@ -341,6 +342,13 @@ pub fn load_music(path: &Path) -> Option<Music> {
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Announcer {
     pub slayer: Option<usize>,
+    pub capture_the_flag: Option<usize>,
+    pub flag_taken: Option<usize>,
+    pub flag_returned: Option<usize>,
+    pub flag_captured: Option<usize>,
+    /// Sounds for the player who took the flag, and who can't score yet.
+    pub flag_grabbed: Option<usize>,
+    pub flag_failure: Option<usize>,
     pub game_over: Option<usize>,
     /// Double kill (2 kills) to Killimanjaro (7).
     pub multi_kill: [Option<usize>; 6],
@@ -462,7 +470,38 @@ pub struct Scene {
     pub hud_white: usize,
     pub sounds: Vec<SoundAsset>,
     pub game_sounds: GameSounds,
+    /// Capture the Flag's flag (also in `weapons`).
+    pub flag: Option<FlagAssets>,
+    /// Where the multiplayer game types' flags, bases and hills are.
+    pub netgame_flags: Vec<scenario::NetgameFlag>,
+    /// HUD: the arrow over objectives, and the flag icon.
+    pub waypoint: Option<usize>,
+    pub flag_icon: Option<usize>,
+    /// Pits and drops that kill.
+    pub kill_volumes: Vec<scenario::KillVolume>,
+    pub falling: Option<FallingDamage>,
 }
+
+/// Capture the Flag's flag: carried in hand like a weapon, with a cloth
+/// waving from the top of its pole.
+pub struct FlagAssets {
+    /// Index into `Scene::weapons`.
+    pub weapon: usize,
+    /// The cloth's mesh (front and back faces), re-posed as it waves.
+    pub cloth: usize,
+    /// Cloth points at rest: x along the flag, z down from the pole.
+    pub rest: Vec<Vec3>,
+    pub uvs: Vec<[f32; 2]>,
+    /// Where the cloth hangs from on the pole's world model.
+    pub attach: Vec3,
+    /// And on the first person pole: the node, and the offset in it.
+    pub view_attach: (usize, Vec3),
+    /// The stand a flag sits in at its base.
+    pub stand: Option<usize>,
+}
+
+const FLAG: &str = "objects\\weapons\\multiplayer\\flag\\flag";
+const FLAG_STAND: &str = "objects\\multi\\flag_base\\flag_base";
 
 /// Multiplayer weapons, in switching order.
 const WEAPONS: &[&str] = &[
@@ -764,7 +803,12 @@ impl Loader {
         let damage = projectile
             .as_ref()
             .and_then(|p| weapon::read_damage(&mut self.set, p.impact_damage).ok());
-        let def = WeaponDef::from_tags(&w, projectile.as_ref(), damage.as_ref());
+        let mut def = WeaponDef::from_tags(&w, projectile.as_ref(), damage.as_ref());
+        def.melee_damage = w
+            .melee_damage
+            .and_then(|d| weapon::read_damage(&mut self.set, d).ok())
+            .map(|d| d.upper_bound.0.max(d.upper_bound.1))
+            .filter(|d| *d > 0.0);
 
         let mut view_mesh = None;
         let mut muzzle = [0.2, 0.0, 0.04];
@@ -852,6 +896,125 @@ impl Loader {
             rig,
             hud,
             sounds,
+        })
+    }
+
+    /// A HUD bitmap's first image, by tag name.
+    /// How hard landings hurt, from the globals.
+    fn falling(&mut self) -> Option<FallingDamage> {
+        let f = physics::falling_damage(&mut self.set).ok().flatten()?;
+        let hurt = weapon::read_damage(&mut self.set, f.falling).ok()?;
+        Some(FallingDamage {
+            harmful: f.harmful_distance,
+            damage: hurt.upper_bound.0.max(hurt.upper_bound.1),
+            deadly: f.maximum_distance,
+        })
+    }
+
+    fn hud_bitmap(&mut self, name: &str) -> Option<usize> {
+        let datum = self.find("bitm", name)?;
+        let img = bitmap::read_bitmap_at(&mut self.set, datum, 0).ok()?;
+        self.hud_textures.push(img);
+        Some(self.hud_textures.len() - 1)
+    }
+
+    /// The flag: its pole as a weapon (added to `weapons`), its cloth and
+    /// its stand.
+    fn flag(
+        &mut self,
+        arms: Option<&Arms>,
+        weapons: &mut Vec<WeaponAssets>,
+        meshes: &mut Vec<MeshData>,
+    ) -> Option<FlagAssets> {
+        let assets = self.weapon(FLAG, arms.map(|a| &a.skeleton), meshes)?;
+        let datum = assets.tag;
+        let cloth = self
+            .find("clwd", FLAG)
+            .and_then(|c| model::read_cloth(&mut self.set, c).ok())?;
+        // Where the cloth hangs on the world and first person poles.
+        let marker_at = |set: &mut MapSet, mode: DatumIndex| -> Option<(usize, Vec3, Vec3)> {
+            let m = model::read_render_model(set, mode).ok()?;
+            let mk = m.marker("flag_attach")?;
+            let node = mk.node as usize;
+            let bind = Skeleton::new(&m.nodes)
+                .inverse_bind
+                .get(node)
+                .map_or(Mat4::IDENTITY, Mat4::inverse);
+            let local = Vec3::from(mk.translation);
+            Some((node, local, bind.transform_point3(local)))
+        };
+        let world_model = model::object_render_model(&mut self.set, datum).ok();
+        let attach = world_model
+            .and_then(|m| marker_at(&mut self.set, m))
+            .map_or(Vec3::Z * 0.8, |(_, _, at)| at);
+        let fp = weapon::read_weapon(&mut self.set, datum)
+            .ok()
+            .and_then(|w| w.first_person_model);
+        let view_attach = fp
+            .and_then(|m| marker_at(&mut self.set, m))
+            .map_or((0, Vec3::ZERO), |(node, local, _)| (node, local));
+        // A plain cloth that takes the team's colour.
+        self.textures.push(Image {
+            width: 1,
+            height: 1,
+            rgba: vec![255; 4],
+        });
+        let white = self.textures.len() - 1;
+        self.materials.push(Material {
+            texture: white,
+            aux: white,
+            aux_kind: AuxKind::ChangeColor,
+            tint: [1.0; 3],
+            opacity: 1.0,
+            ..Material::default()
+        });
+        let material = self.materials.len() - 1;
+        let (cols, rows) = cloth.grid;
+        let n = cols * rows;
+        let rest: Vec<Vec3> = cloth.vertices.iter().map(|v| Vec3::from(v.0)).collect();
+        let uvs: Vec<[f32; 2]> = cloth.vertices.iter().map(|v| v.1).collect();
+        let mut mesh = MeshData::default();
+        for side in 0..2 {
+            for k in 0..n {
+                let normal = if side == 0 {
+                    [0.0, -1.0, 0.0]
+                } else {
+                    [0.0, 1.0, 0.0]
+                };
+                mesh.vertices
+                    .push(Vertex::new(rest[k].into(), normal, uvs[k]));
+            }
+        }
+        for r in 0..rows - 1 {
+            for c in 0..cols - 1 {
+                let a = (r * cols + c) as u32;
+                let (b, d, e) = (a + 1, a + cols as u32, a + cols as u32 + 1);
+                mesh.indices.extend([a, d, b, b, d, e]);
+                let o = n as u32;
+                mesh.indices
+                    .extend([a + o, b + o, d + o, b + o, e + o, d + o]);
+            }
+        }
+        mesh.batches = vec![Batch {
+            material,
+            lightmap: 0,
+            first_index: 0,
+            index_count: mesh.indices.len() as u32,
+        }];
+        meshes.push(mesh);
+        let cloth_mesh = meshes.len() - 1;
+        let stand = self
+            .find("scen", FLAG_STAND)
+            .and_then(|s| self.object_mesh(s, meshes));
+        weapons.push(assets);
+        Some(FlagAssets {
+            weapon: weapons.len() - 1,
+            cloth: cloth_mesh,
+            rest,
+            uvs,
+            attach,
+            view_attach,
+            stand,
         })
     }
 
@@ -1019,7 +1182,11 @@ impl Scene {
             .iter()
             .filter_map(|name| loader.weapon(name, arms.as_ref().map(|a| &a.skeleton), &mut meshes))
             .collect();
-        let weapons: Vec<WeaponAssets> = weapons;
+        let mut weapons: Vec<WeaponAssets> = weapons;
+        let flag = loader.flag(arms.as_ref(), &mut weapons, &mut meshes);
+        let netgame_flags = scenario::netgame_flags(&mut loader.set).unwrap_or_default();
+        let kill_volumes = scenario::kill_volumes(&mut loader.set).unwrap_or_default();
+        let falling = loader.falling();
         let level_light = LevelLight::new(&meshes[0]);
         let mut objects = Vec::new();
         for p in scenario::scenery(&mut loader.set).unwrap_or_default() {
@@ -1139,10 +1306,19 @@ impl Scene {
                 advance: named(&mut loader, "sound\\ui\\advance"),
             },
             announcer: {
+                let flag_grabbed =
+                    loader.sound_named("sound\\game_sfx\\multiplayer\\target_point_collected");
+                let flag_failure = loader.sound_named("sound\\game_sfx\\multiplayer\\flag_failure");
                 let mut line =
                     |name: &str| loader.sound_named(&format!("sound\\dialog\\multiplayer\\{name}"));
                 Announcer {
                     slayer: line("games\\names\\slayer"),
+                    capture_the_flag: line("games\\names\\capture_the_flag"),
+                    flag_taken: line("games\\ctf\\flag_taken"),
+                    flag_returned: line("games\\ctf\\flag_returned"),
+                    flag_captured: line("games\\ctf\\flag_captured"),
+                    flag_grabbed,
+                    flag_failure,
                     game_over: line("general\\misc\\game_over"),
                     multi_kill: MULTI_KILLS.map(|n| line(&format!("flavor\\{n}"))),
                     spree: SPREES.map(|n| line(&format!("flavor\\{n}"))),
@@ -1167,6 +1343,8 @@ impl Scene {
             rgba: vec![255; 4],
         });
         let hud_white = loader.hud_textures.len() - 1;
+        let waypoint = loader.hud_bitmap("ui\\hud\\bitmaps\\new_hud\\hud_waypoints");
+        let flag_icon = loader.hud_bitmap("ui\\hud\\bitmaps\\new_hud\\reset_flag");
         if loader.failures > 0 {
             println!("warning: {} textures couldn't be decoded", loader.failures);
         }
@@ -1192,6 +1370,12 @@ impl Scene {
             hud_white,
             sounds: loader.sounds,
             game_sounds,
+            flag,
+            netgame_flags,
+            waypoint,
+            flag_icon,
+            kill_volumes,
+            falling,
         })
     }
 

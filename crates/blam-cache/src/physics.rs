@@ -1,7 +1,7 @@
 //! Movement tuning read from the game's own tags, so the remake moves like Halo 2.
 
 use crate::mapset::MapSet;
-use crate::{f32_at, DatumIndex, GroupTag, Result};
+use crate::{f32_at, u32_at, DatumIndex, GroupTag, Result};
 
 /// `matg` "Player Information": movement speeds in world units per second.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -70,6 +70,8 @@ impl Default for BipedPhysics {
 const MATG_PLAYER_CONTROL: usize = 0xF0;
 const PLAYER_CONTROL_SIZE: usize = 0x80;
 const MATG_PLAYER_INFORMATION: usize = 0x130;
+const MATG_FALLING_DAMAGE: usize = 0x140;
+const FALLING_DAMAGE_SIZE: usize = 0x68;
 const PLAYER_INFORMATION_SIZE: usize = 0x11C;
 
 pub fn player_movement(set: &mut MapSet) -> Result<PlayerMovement> {
@@ -109,6 +111,37 @@ pub fn player_movement(set: &mut MapSet) -> Result<PlayerMovement> {
             1.0
         },
     })
+}
+
+/// `matg` "Falling Damage": how far a fall hurts and how far kills.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FallingDamage {
+    /// Falls shorter than the first distance don't hurt; the damage grows
+    /// to full at the second.
+    pub harmful_distance: (f32, f32),
+    /// The full damage of a harmful fall (`jpt!`).
+    pub falling: DatumIndex,
+    /// Falls longer than this kill outright, with the `distance` damage.
+    pub maximum_distance: f32,
+    pub distance: DatumIndex,
+}
+
+pub fn falling_damage(set: &mut MapSet) -> Result<Option<FallingDamage>> {
+    let matg = set.map.globals;
+    let (src, _, data) = set.tag_data(matg)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let block = file.read_block(region, &data, MATG_FALLING_DAMAGE, FALLING_DAMAGE_SIZE)?;
+    if block.len() < FALLING_DAMAGE_SIZE {
+        return Ok(None);
+    }
+    let datum = |at: usize| DatumIndex(u32_at(&block, at));
+    Ok(Some(FallingDamage {
+        harmful_distance: (f32_at(&block, 0x8), f32_at(&block, 0xC)),
+        falling: datum(0x14),
+        maximum_distance: f32_at(&block, 0x20),
+        distance: datum(0x28),
+    }))
 }
 
 /// Physics of the multiplayer Spartan (falls back to the campaign Master Chief).

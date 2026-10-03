@@ -360,11 +360,7 @@ impl App {
     /// A game with no one in it yet, under the lobby's settings.
     fn fresh_game(&self) -> Game {
         let settings = &self.menu.settings;
-        new_game(
-            &self.scene,
-            settings.game_type(),
-            menu::SCORES[settings.score],
-        )
+        new_game(&self.scene, settings.game_type(), settings.score_to_win())
     }
 
     /// Clear away the last game: its players, effects and sounds.

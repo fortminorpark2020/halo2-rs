@@ -34,6 +34,9 @@ pub struct Player {
     pub crouch: f32,
     pub movement: PlayerMovement,
     pub biped: BipedPhysics,
+    /// Height of the fall just landed from (for falling damage; whoever
+    /// reads it clears it).
+    pub fell: f32,
     jump_held: bool,
     accumulator: f32,
     contacts: Vec<Contact>,
@@ -48,6 +51,7 @@ impl Player {
             crouch: 0.0,
             movement,
             biped,
+            fell: 0.0,
             jump_held: false,
             accumulator: 0.0,
             contacts: Vec::new(),
@@ -137,10 +141,16 @@ impl Player {
         }
         self.jump_held = input.jump;
 
-        self.velocity.z -= GRAVITY * m.gravity_scale * dt;
+        let gravity = GRAVITY * m.gravity_scale;
+        self.velocity.z -= gravity * dt;
         let was_grounded = self.grounded;
+        let falling = (-self.velocity.z).max(0.0);
         self.position += self.velocity * dt;
         self.grounded = self.resolve(world);
+        if self.grounded && !was_grounded {
+            // How far a fall would have to be to land this fast.
+            self.fell = self.fell.max(falling * falling / (2.0 * gravity));
+        }
 
         // Stick to the ground when walking down slopes or small steps.
         if was_grounded && !self.grounded && self.velocity.z <= 0.0 {

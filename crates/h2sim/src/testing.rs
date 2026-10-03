@@ -43,6 +43,7 @@ fn rifle() -> WeaponDef {
         damage_range: (0.0, 100.0),
         damage_lower_bound: 20.0,
         ready_time: crate::weapon::DEFAULT_READY_TIME,
+        melee_damage: None,
     }
 }
 

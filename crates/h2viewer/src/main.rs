@@ -33,6 +33,7 @@ mod input;
 mod lan;
 mod local;
 mod menu;
+mod objective;
 mod probe;
 mod rig;
 mod scene;
@@ -48,7 +49,8 @@ use glam::{Mat4, Vec3};
 use gpu::{hud_mode, DrawCall, Frame, HudBatch};
 use h2sim::game::{Event, GrenadeKind, HeldWeapon, TICK};
 use h2sim::{
-    Bot, Command, Game, GameType, ItemKind, ItemSpawn, NavGraph, Rules, WeaponState, World,
+    Bot, Command, Game, GameType, ItemKind, ItemSpawn, KillZone, NavGraph, Rules, WeaponState,
+    World,
 };
 use hud::HudBuilder;
 use input::{PadPress, Pads};
@@ -138,6 +140,7 @@ fn rules(scene: &Scene) -> Rules {
         lunge_weapons: index(&["energy_blade"]),
         frag,
         plasma,
+        falling: scene.falling.unwrap_or(defaults.falling),
         ..defaults
     }
 }
@@ -182,16 +185,38 @@ fn new_game(scene: &Scene, game_type: GameType, score_to_win: u32) -> Game {
     let rules = Rules {
         game_type,
         score_to_win,
+        flag_weapon: scene.flag.as_ref().map(|f| f.weapon),
         ..rules(scene)
     };
-    Game::new(
+    let mut game = Game::new(
         rules,
         scene.weapons.iter().map(weapon_def).collect(),
         level_spawns(scene),
         items,
         scene.movement,
         scene.biped,
-    )
+    );
+    // Flags are only in play in CTF, but a joined game may switch to it.
+    let (homes, bases) = objective::flag_spots(scene);
+    game.set_flags(&homes, &bases);
+    game.kill_zones = kill_zones(scene);
+    game
+}
+
+/// The places on the level that kill.
+fn kill_zones(scene: &Scene) -> Vec<KillZone> {
+    scene
+        .kill_volumes
+        .iter()
+        .map(|k| {
+            KillZone::new(
+                k.position.into(),
+                k.forward.into(),
+                k.up.into(),
+                k.extents.into(),
+            )
+        })
+        .collect()
 }
 
 /// A map's level, ready to play.
@@ -207,20 +232,26 @@ struct Level {
 fn load_level(path: &Path) -> Result<Level, String> {
     let scene = Scene::load(path).map_err(|e| e.to_string())?;
     println!(
-        "{} triangles, {} textures, {} weapons, {} items",
+        "{} triangles, {} textures, {} weapons, {} items, {} game type points, {} kill zones",
         scene.triangle_count(),
         scene.textures.len() - 1,
         scene.weapons.len(),
-        scene.items.len()
+        scene.items.len(),
+        scene.netgame_flags.len(),
+        scene.kill_volumes.len(),
     );
     let world = World::new(&scene.collision.positions, &scene.collision.indices);
-    let mut nav_points: Vec<Vec3> = level_spawns(&scene).iter().map(|s| s.0).collect();
-    nav_points.extend(scene.items.iter().map(|i| i.position));
-    let nav = NavGraph::build(&world, &nav_points);
+    let mut spots: Vec<Vec3> = level_spawns(&scene).iter().map(|s| s.0).collect();
+    spots.extend(scene.items.iter().map(|i| i.position));
+    let (homes, bases) = objective::flag_spots(&scene);
+    spots.extend(homes.iter().chain(&bases).map(|f| f.1));
+    let started = Instant::now();
+    let nav = NavGraph::for_level(&world, &spots, &kill_zones(&scene));
     println!(
-        "bot routes: {} points, {} links",
+        "bot routes: {} points, {} links ({:.1?})",
         nav.points.len(),
-        nav.links.iter().map(Vec::len).sum::<usize>()
+        nav.links.iter().map(Vec::len).sum::<usize>(),
+        started.elapsed()
     );
     Ok(Level {
         scene,
@@ -228,6 +259,41 @@ fn load_level(path: &Path) -> Result<Level, String> {
         nav,
         path: path.to_path_buf(),
     })
+}
+
+/// Bots only, no window: play `seconds` of a game and print the kills, flag
+/// moves and score.
+fn simulate(level: &Level, settings: &Settings, seconds: f32) {
+    let mut game = new_game(&level.scene, settings.game_type(), settings.score_to_win());
+    let mut bots: Vec<(usize, Bot)> = (0..settings.bots.max(2))
+        .map(|_| flow::bot_for(game.add_player()))
+        .collect();
+    for tick in 0..(seconds / TICK) as usize {
+        let commands: Vec<Command> = bots
+            .iter_mut()
+            .map(|(i, bot)| bot.think(&game, &level.world, &level.nav, *i))
+            .collect();
+        game.step(&level.world, &commands);
+        let t = tick as f32 * TICK;
+        for e in std::mem::take(&mut game.events) {
+            match e {
+                Event::Killed { killer, victim, .. } => {
+                    let at = game.players[victim].body.position;
+                    println!("{t:6.1} {killer:?} killed {victim} at {at:.1}");
+                }
+                Event::Flag { team, player, what } => {
+                    println!("{t:6.1} flag {team} {what:?} by {player:?}");
+                }
+                _ => {}
+            }
+        }
+        if game.winner.is_some() {
+            println!("{t:6.1} game over");
+            break;
+        }
+    }
+    let scores: Vec<i32> = game.players.iter().map(|p| p.score).collect();
+    println!("scores {scores:?}");
 }
 
 /// A map loading in the background, behind the loading screen.
@@ -636,6 +702,18 @@ impl App {
                         l.message(format!("PICKED UP {what}"));
                     }
                 }
+                Event::Flag { team, player, what } => {
+                    let name = local::TEAM_NAMES[team as usize % 2];
+                    println!("{name} flag: {what:?} by {player:?}");
+                    for l in &mut self.locals {
+                        let my_team = self.game.players[l.player].team;
+                        if let Some(m) =
+                            objective::flag_message(l.player, my_team, team, player, what)
+                        {
+                            l.message(m);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -735,6 +813,7 @@ impl App {
                 });
             }
         }
+        world.extend(self.flag_draws());
         world
     }
 
@@ -766,6 +845,12 @@ impl App {
                 colors: None,
             });
         }
+        if p.alive {
+            let pole = pose.object * pose.weapon;
+            if let Some(cloth) = objective::carried_cloth(&self.scene, &self.game, player, pole) {
+                out.push(DrawCall { light, ..cloth });
+            }
+        }
         out
     }
 
@@ -795,6 +880,10 @@ impl App {
                     body_meshes.push((body.meshes[i], pose.vertices.clone()));
                 }
             }
+        }
+        if let (Some(flag), true) = (&self.scene.flag, self.game.has_flags()) {
+            let cloth = objective::cloth_vertices(flag, self.game.time as f32);
+            body_meshes.push((flag.cloth, cloth));
         }
         struct View {
             viewport: [u32; 4],
@@ -1164,6 +1253,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         (n.len() == 4).then(|| PlayerSpawn {
             position: [n[0], n[1], n[2]],
             facing: n[3].to_radians(),
+            team: 8,
+            game_types: [12, 0, 0, 0],
         })
     });
     let maps = path.parent().map(menu::find_maps).unwrap_or_default();
@@ -1172,17 +1263,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3)
         .min(menu::MAX_BOTS);
-    // H2_GAME=team plays Team Slayer (for testing).
+    // H2_GAME=team or ctf plays Team Slayer or Capture the Flag (for testing).
     let game_type = match env("H2_GAME").as_deref() {
         Some("team") => 1,
+        Some("ctf") => 2,
         _ => 0,
     };
     let settings = Settings {
         game_type,
         map: 0,
-        score: menu::SCORES.iter().position(|&s| s == 25).unwrap_or(0),
+        score: menu::scores(menu::GAME_TYPES[game_type].0).1,
         bots,
     };
+    // H2_SIM=<seconds> plays bots against each other without a window and
+    // prints what happens (for testing).
+    if let Some(seconds) = env("H2_SIM").and_then(|v| v.parse().ok()) {
+        simulate(&level, &settings, seconds);
+        return Ok(());
+    }
     // The menu music is read in the background.
     let (tx, music) = mpsc::channel();
     let music_map = path;

@@ -3,8 +3,8 @@
 //! joined PCs send their players' controls.
 
 use super::{
-    DroppedWeapon, Event, Game, GameType, Grenade, GrenadeKind, HeldWeapon, ItemKind, LeadChange,
-    Medal, Spartan, DROPPED_WEAPON_LIFETIME, TEAMS,
+    DroppedWeapon, Event, Flag, FlagEvent, Game, GameType, Grenade, GrenadeKind, HeldWeapon,
+    ItemKind, LeadChange, Medal, Spartan, DROPPED_WEAPON_LIFETIME, TEAMS,
 };
 use crate::game::Command;
 use crate::weapon::WeaponState;
@@ -329,6 +329,12 @@ impl Event {
                 w.index(Some(player));
                 w.u8(change as u8);
             }
+            Event::Flag { team, player, what } => {
+                w.u8(13);
+                w.u8(team);
+                w.index(player);
+                w.u8(what as u8);
+            }
         }
     }
 
@@ -413,6 +419,21 @@ impl Event {
                     _ => return Err(Malformed),
                 },
             },
+            13 => Event::Flag {
+                team: match r.u8()? {
+                    t if t < TEAMS => t,
+                    _ => return Err(Malformed),
+                },
+                player: opt_player(r)?,
+                what: match r.u8()? {
+                    0 => FlagEvent::Taken,
+                    1 => FlagEvent::Dropped,
+                    2 => FlagEvent::Returned,
+                    3 => FlagEvent::Captured,
+                    4 => FlagEvent::CaptureFailed,
+                    _ => return Err(Malformed),
+                },
+            },
             _ => return Err(Malformed),
         })
     }
@@ -480,6 +501,14 @@ impl Game {
             w.opt_f32(g.fuse);
             w.index(g.stuck);
         }
+        w.u8(self.flags.len().min(TEAMS as usize) as u8);
+        for f in self.flags.iter().take(TEAMS as usize) {
+            w.u8(f.team);
+            w.vec3(f.home);
+            w.vec3(f.position);
+            w.index(f.carrier);
+            w.f32(f.reset_in);
+        }
     }
 
     /// Take on the state another PC sent. Players are added as needed; on
@@ -491,6 +520,7 @@ impl Game {
         self.rules.game_type = match r.u8()? {
             0 => GameType::Slayer,
             1 => GameType::TeamSlayer,
+            2 => GameType::Ctf,
             _ => return Err(Malformed),
         };
         self.rules.score_to_win = r.u32()?;
@@ -602,6 +632,40 @@ impl Game {
             });
         }
         self.grenades = grenades;
+        let n = r.u8()? as usize;
+        if n > TEAMS as usize {
+            return Err(Malformed);
+        }
+        let mut flags = Vec::with_capacity(n);
+        for _ in 0..n {
+            let team = r.u8()?;
+            if team >= TEAMS {
+                return Err(Malformed);
+            }
+            let mut f = Flag::new(team, r.vec3()?);
+            f.position = r.vec3()?;
+            f.carrier = match r.index()? {
+                Some(i) if i >= count => return Err(Malformed),
+                v => v,
+            };
+            f.reset_in = r.f32()?;
+            flags.push(f);
+        }
+        self.flags = flags;
+        // Carriers hold the flag in hand.
+        for (i, p) in self.players.iter_mut().enumerate() {
+            let carrying = self.flags.iter().any(|f| f.carrier == Some(i));
+            p.objective = match (carrying, self.rules.flag_weapon) {
+                (true, Some(w)) if w < weapons => match p.objective.take() {
+                    Some(h) if h.weapon == w => Some(h),
+                    _ => Some(HeldWeapon {
+                        weapon: w,
+                        state: WeaponState::new(&self.weapons[w]),
+                    }),
+                },
+                _ => None,
+            };
+        }
         Ok(())
     }
 
@@ -649,6 +713,16 @@ mod tests {
             Event::Lead {
                 player: 1,
                 change: LeadChange::Tied,
+            },
+            Event::Flag {
+                team: 1,
+                player: Some(0),
+                what: FlagEvent::Captured,
+            },
+            Event::Flag {
+                team: 0,
+                player: None,
+                what: FlagEvent::Returned,
             },
         ];
         let mut w = Writer::default();

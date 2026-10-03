@@ -6,7 +6,11 @@ use crate::{f32_at, i16_at, u32_at, DatumIndex, Error, Result};
 
 const SCNR_SCENERY: usize = 0x50;
 const SCNR_SCENERY_PALETTE: usize = 0x58;
+const SCNR_TRIGGER_VOLUMES: usize = 0x108;
+const SCNR_NETGAME_FLAGS: usize = 0x118;
 const SCNR_NETGAME_EQUIPMENT: usize = 0x120;
+const NETGAME_FLAG_SIZE: usize = 0x20;
+const TRIGGER_VOLUME_SIZE: usize = 0x44;
 const PLACEMENT_SIZE: usize = 0x5C;
 const PALETTE_SIZE: usize = 0x28;
 const NETGAME_EQUIPMENT_SIZE: usize = 0x90;
@@ -34,6 +38,49 @@ pub struct NetgameItem {
     pub rotation: [f32; 3],
     /// Seconds before the item comes back once taken (0: the game default).
     pub respawn_seconds: u16,
+}
+
+/// What a netgame flag marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetgameFlagKind {
+    CtfFlagSpawn,
+    /// Where a team brings the enemy flag to score.
+    CtfFlagReturn,
+    AssaultBombSpawn,
+    AssaultBombReturn,
+    OddballSpawn,
+    RaceCheckpoint,
+    TeleporterSource,
+    TeleporterDestination,
+    HeadhunterBin,
+    TerritoriesFlag,
+    /// King of the Hill: the hill's index (0-7).
+    KingHill(u8),
+    Other(u16),
+}
+
+/// A point the multiplayer game types use: flags, bomb sites, hills.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NetgameFlag {
+    pub kind: NetgameFlagKind,
+    pub position: [f32; 3],
+    /// Radians around +z.
+    pub facing: f32,
+    /// 0 red, 1 blue ... 8 neutral.
+    pub team: u16,
+    pub identifier: i16,
+}
+
+/// A box in the level that kills whoever enters it: the pits and drops a
+/// map's designers made deadly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KillVolume {
+    /// The box's corner; it reaches `extents` along `forward`, along the
+    /// left of `forward` (`up` x `forward`), and along `up`.
+    pub position: [f32; 3],
+    pub forward: [f32; 3],
+    pub up: [f32; 3],
+    pub extents: [f32; 3],
 }
 
 fn scenario_data(set: &mut MapSet) -> Result<Vec<u8>> {
@@ -73,6 +120,63 @@ pub fn scenery(set: &mut MapSet) -> Result<Vec<Placement>> {
                     _ => 1.0,
                 },
             })
+        })
+        .collect())
+}
+
+/// The scenario's multiplayer game type points.
+pub fn netgame_flags(set: &mut MapSet) -> Result<Vec<NetgameFlag>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let entries = map.read_block(meta, &data, SCNR_NETGAME_FLAGS, NETGAME_FLAG_SIZE)?;
+    Ok(entries
+        .as_chunks::<NETGAME_FLAG_SIZE>()
+        .0
+        .iter()
+        .map(|e| {
+            let kind = match i16_at(e, 0x10) as u16 {
+                0 => NetgameFlagKind::CtfFlagSpawn,
+                1 => NetgameFlagKind::CtfFlagReturn,
+                2 => NetgameFlagKind::AssaultBombSpawn,
+                3 => NetgameFlagKind::AssaultBombReturn,
+                4 => NetgameFlagKind::OddballSpawn,
+                6 => NetgameFlagKind::RaceCheckpoint,
+                7 => NetgameFlagKind::TeleporterSource,
+                8 => NetgameFlagKind::TeleporterDestination,
+                9 => NetgameFlagKind::HeadhunterBin,
+                10 => NetgameFlagKind::TerritoriesFlag,
+                k @ 11..=18 => NetgameFlagKind::KingHill((k - 11) as u8),
+                k => NetgameFlagKind::Other(k),
+            };
+            NetgameFlag {
+                kind,
+                position: [f32_at(e, 0), f32_at(e, 4), f32_at(e, 8)],
+                facing: f32_at(e, 0xC),
+                team: i16_at(e, 0x12) as u16,
+                identifier: i16_at(e, 0x14),
+            }
+        })
+        .collect())
+}
+
+/// The scenario's trigger volumes that kill (Lockout's pit, Zanzibar's sea).
+pub fn kill_volumes(set: &mut MapSet) -> Result<Vec<KillVolume>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let entries = map.read_block(meta, &data, SCNR_TRIGGER_VOLUMES, TRIGGER_VOLUME_SIZE)?;
+    let v3 = |e: &[u8], at: usize| [f32_at(e, at), f32_at(e, at + 4), f32_at(e, at + 8)];
+    Ok(entries
+        .as_chunks::<TRIGGER_VOLUME_SIZE>()
+        .0
+        .iter()
+        .filter(|e| i16_at(*e, 0x40) >= 0)
+        .map(|e| KillVolume {
+            forward: v3(e, 0xC),
+            up: v3(e, 0x18),
+            position: v3(e, 0x24),
+            extents: v3(e, 0x30),
         })
         .collect())
 }

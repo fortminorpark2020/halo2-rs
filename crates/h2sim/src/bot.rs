@@ -1,6 +1,7 @@
 //! Computer-controlled players. A bot roams the map along the walking graph
-//! until it sees someone, then strafes, shoots, throws grenades and melees
-//! like a (forgiving) player. Bots produce the same `Command`s as people.
+//! (or, in objective games, heads for the flags) until it sees someone, then
+//! strafes, shoots, throws grenades and melees like a (forgiving) player.
+//! Bots produce the same `Command`s as people.
 
 use crate::collision::World;
 use crate::game::{Command, Game};
@@ -18,6 +19,21 @@ const TURN_RATE: f32 = 5.0;
 const FIRE_CONE: f32 = 0.06;
 /// Close enough to a route point to head for the next one.
 const ARRIVED: f32 = 0.5;
+/// Seconds without getting closer to the next route point before a bot
+/// gives up on that stretch and finds another way.
+const GIVE_UP: f32 = 3.0;
+/// Route points a bot remembers it couldn't get to.
+const MAX_BLOCKED: usize = 32;
+/// An objective that moved this far gets a new route.
+const REPLAN_DISTANCE: f32 = 2.0;
+/// Defenders keep within this distance of their flag.
+const GUARD_RADIUS: f32 = 6.0;
+/// How far ahead a bot checks for a floor, and the deepest drop it will
+/// walk off.
+const LEDGE_LOOKAHEAD: f32 = 0.7;
+/// Ground no steeper than this (cosine of the slope) holds a Spartan.
+const STANDABLE: f32 = 0.64;
+const SAFE_DROP: f32 = 3.0;
 
 pub struct Bot {
     rng: u32,
@@ -34,6 +50,15 @@ pub struct Bot {
     stuck_for: f32,
     pulse: bool,
     grenade_wait: f32,
+    /// The objective the current route leads to.
+    heading_for: Option<Vec3>,
+    /// Progress toward the next route point: which, the closest the bot
+    /// has been, and for how long it hasn't got closer.
+    watching: Option<usize>,
+    closest: f32,
+    no_progress: f32,
+    /// Route points this bot tried and couldn't get to.
+    blocked: Vec<usize>,
 }
 
 fn wrap(a: f32) -> f32 {
@@ -57,6 +82,11 @@ impl Bot {
             stuck_for: 0.0,
             pulse: false,
             grenade_wait: 3.0,
+            heading_for: None,
+            watching: None,
+            closest: 0.0,
+            no_progress: 0.0,
+            blocked: Vec::new(),
         }
     }
 
@@ -88,6 +118,89 @@ impl Bot {
             .map(|(j, _, _)| j)
     }
 
+    /// Where the game sends this bot while no one is in sight, and whether
+    /// it should stay around there (guarding) rather than go right up to it.
+    fn objective(game: &Game, me: usize) -> Option<(Vec3, bool)> {
+        if !game.has_flags() {
+            return None;
+        }
+        let team = game.players[me].team;
+        if game.carried_flag(me).is_some() {
+            return game.flag_base(team).map(|b| (b, false));
+        }
+        let own = game.flags.iter().find(|f| f.team == team)?;
+        if !own.at_home() {
+            return Some((own.position, false));
+        }
+        // A third of the team guards the flag; the rest go for the enemy's.
+        if me.is_multiple_of(3) {
+            return Some((own.home, true));
+        }
+        let enemy = game.flags.iter().find(|f| f.team != team)?;
+        // A teammate has it: go along with them.
+        if enemy.carrier.is_some() {
+            return Some((enemy.position, true));
+        }
+        Some((enemy.position, false))
+    }
+
+    /// Head for an objective: along the walking graph, then straight to it.
+    fn walk_to_objective(
+        &mut self,
+        nav: &NavGraph,
+        world: &World,
+        feet: Vec3,
+        (goal, guard): (Vec3, bool),
+    ) -> Option<Vec3> {
+        let near = (goal - feet).truncate().length();
+        if guard && near < GUARD_RADIUS {
+            // Walk around near the flag.
+            if self.route.is_empty() || self.heading_for.is_some() {
+                self.heading_for = None;
+                self.new_route_near(nav, world, feet, goal);
+            }
+            return None;
+        }
+        let moved = self
+            .heading_for
+            .is_none_or(|h| h.distance(goal) > REPLAN_DISTANCE);
+        if moved {
+            self.heading_for = Some(goal);
+            self.route.clear();
+            if let (Some(a), Some(b)) = (nav.nearest(world, feet), nav.nearest(world, goal)) {
+                // Places given up on may be the only way: forget them.
+                let route = nav.path_avoiding(a, b, &self.blocked).or_else(|| {
+                    self.blocked.clear();
+                    nav.path(a, b)
+                });
+                self.route = route.map(|r| nav.smooth(world, &r)).unwrap_or_default();
+            }
+        }
+        if self.route.is_empty() {
+            return Some(goal);
+        }
+        None
+    }
+
+    /// A route to somewhere within the guard radius of `centre`.
+    fn new_route_near(&mut self, nav: &NavGraph, world: &World, from: Vec3, centre: Vec3) {
+        self.route.clear();
+        let Some(start) = nav.nearest(world, from) else {
+            return;
+        };
+        let close: Vec<usize> = (0..nav.points.len())
+            .filter(|&i| nav.points[i].distance(centre) < GUARD_RADIUS)
+            .collect();
+        if close.is_empty() {
+            return;
+        }
+        let goal = close[(self.random() * close.len() as f32) as usize % close.len()];
+        self.route = nav
+            .path_avoiding(start, goal, &self.blocked)
+            .map(|r| nav.smooth(world, &r))
+            .unwrap_or_default();
+    }
+
     /// Pick somewhere to go and plan the way there.
     fn new_route(&mut self, nav: &NavGraph, world: &World, from: Vec3) {
         self.route.clear();
@@ -96,9 +209,10 @@ impl Bot {
         };
         for _ in 0..4 {
             let goal = (self.random() * nav.points.len() as f32) as usize;
-            if let Some(route) = nav.path(start, goal.min(nav.points.len() - 1)) {
+            let goal = goal.min(nav.points.len() - 1);
+            if let Some(route) = nav.path_avoiding(start, goal, &self.blocked) {
                 if route.len() > 1 {
-                    self.route = route;
+                    self.route = nav.smooth(world, &route);
                     return;
                 }
             }
@@ -119,6 +233,9 @@ impl Bot {
         let p = &game.players[me];
         if !p.alive {
             self.route.clear();
+            self.heading_for = None;
+            self.watching = None;
+            self.blocked.clear();
             self.target = None;
             self.yaw = p.yaw;
             self.pitch = 0.0;
@@ -144,9 +261,14 @@ impl Bot {
         if self.stuck_for > 2.0 {
             self.stuck_for = 0.0;
             self.route.clear();
+            self.heading_for = None;
         }
 
-        let target = self.find_target(game, world, me);
+        // A flag carrier runs for home, fighting only those in its way.
+        let carrying = p.objective.is_some();
+        let target = self
+            .find_target(game, world, me)
+            .filter(|&t| !carrying || game.players[t].body.position.distance(feet) < 2.5);
         if target != self.target {
             self.target = target;
             self.seen_for = 0.0;
@@ -161,6 +283,8 @@ impl Bot {
         self.pulse = !self.pulse;
 
         let mut walk_to: Option<Vec3> = None;
+        // Route links were checked for drops when the graph was made.
+        let mut on_route = false;
         if let Some(t) = target {
             self.seen_for += dt;
             self.aim_error *= 1.0 - (2.5 * dt).min(1.0);
@@ -173,9 +297,9 @@ impl Bot {
             self.turn_to(yaw, pitch, dt);
             let off = wrap(yaw - self.yaw).abs() + (pitch - self.pitch).abs();
             let def = p.held().and_then(|h| game.weapons.get(h.weapon));
-            let melee_only = p
-                .held()
-                .is_some_and(|h| game.rules.lunge_weapons.contains(&h.weapon));
+            let melee_only = carrying
+                || p.held()
+                    .is_some_and(|h| game.rules.lunge_weapons.contains(&h.weapon));
             if self.seen_for > REACTION && off < FIRE_CONE && !melee_only {
                 // Semi-automatic weapons need the trigger released between shots.
                 cmd.fire = match def.map(|d| d.behavior) {
@@ -183,7 +307,7 @@ impl Bot {
                     _ => self.pulse,
                 };
             }
-            let reach = if melee_only { 2.0 } else { 0.9 };
+            let reach = if melee_only && !carrying { 2.0 } else { 0.9 };
             if dist < reach && self.seen_for > REACTION {
                 cmd.melee = self.pulse;
             }
@@ -205,7 +329,13 @@ impl Bot {
                 cmd.reload = true;
             }
         } else {
-            if self.route.is_empty() {
+            let objective = Bot::objective(game, me);
+            if let Some(o) = objective {
+                walk_to = self.walk_to_objective(nav, world, feet, o);
+            } else {
+                self.heading_for = None;
+            }
+            if self.route.is_empty() && walk_to.is_none() {
                 self.new_route(nav, world, feet);
             }
             while let Some(&next) = self.route.first() {
@@ -214,11 +344,16 @@ impl Bot {
                     self.route.remove(0);
                 } else {
                     walk_to = Some(point);
+                    on_route = true;
+                    self.watch_progress(next, point.distance(feet), dt);
                     break;
                 }
             }
             if walk_to.is_none() {
                 self.route.clear();
+                if let Some((goal, false)) = objective {
+                    walk_to = Some(goal);
+                }
             }
             // Reload while nothing is around.
             cmd.reload = self.held_partly_empty(game, me);
@@ -231,9 +366,85 @@ impl Bot {
             let dir = to.normalize_or_zero();
             cmd.movement = Vec2::new(dir.x * s - dir.y * c, dir.x * c + dir.y * s);
         }
+        // Take the enemy flag on reaching it, fighting or not.
+        let team = p.team;
+        cmd.action = game
+            .flags
+            .iter()
+            .any(|f| f.team != team && f.carrier.is_none() && f.position.distance(feet) < 1.5);
+        if !on_route {
+            let drift = game.players[me].body.velocity.truncate();
+            cmd.movement = self.keep_off_ledges(world, feet, drift, cmd.movement);
+        }
         cmd.yaw = self.yaw;
         cmd.pitch = self.pitch;
         cmd
+    }
+
+    /// Give up on a route point the bot isn't getting any closer to, and
+    /// remember not to try it again.
+    fn watch_progress(&mut self, next: usize, distance: f32, dt: f32) {
+        if self.watching != Some(next) || distance < self.closest - 0.25 {
+            self.watching = Some(next);
+            self.closest = distance;
+            self.no_progress = 0.0;
+            return;
+        }
+        self.no_progress += dt;
+        if self.no_progress > GIVE_UP {
+            if self.blocked.len() >= MAX_BLOCKED {
+                self.blocked.remove(0);
+            }
+            self.blocked.push(next);
+            self.route.clear();
+            self.heading_for = None;
+            self.watching = None;
+        }
+    }
+
+    /// Don't walk (or strafe) off a drop that would hurt: where the floor a
+    /// step ahead is missing or far below, stop going that way.
+    fn keep_off_ledges(&mut self, world: &World, feet: Vec3, drift: Vec2, movement: Vec2) -> Vec2 {
+        let (s, c) = self.yaw.sin_cos();
+        let (forward, right) = (Vec2::new(c, s), Vec2::new(s, -c));
+        // Height of ground a Spartan can stand on (not a steep slope that
+        // slides it off) at a spot.
+        let floor_at = |at: Vec2| {
+            let top = at.extend(feet.z + 0.5);
+            world
+                .raycast_hit(top, Vec3::NEG_Z, 0.5 + SAFE_DROP)
+                .filter(|(_, n)| n.z >= STANDABLE)
+                .map(|(t, _)| top.z - t)
+        };
+        // Ground just ahead; off a drop, room to land beyond it too.
+        let safe = |dir: Vec2| {
+            let (from, dir) = (feet.truncate(), dir.normalize_or_zero());
+            let mut low = feet.z;
+            for k in [0.5, 1.0] {
+                match floor_at(from + dir * LEDGE_LOOKAHEAD * k) {
+                    Some(z) => low = low.min(z),
+                    None => return false,
+                }
+            }
+            feet.z - low < 0.6 || (2..=5).all(|k| floor_at(from + dir * (k as f32 * 0.5)).is_some())
+        };
+        // Already sliding toward a drop: brake.
+        if drift.length() > 0.5 && !safe(drift) {
+            let back = -drift.normalize();
+            return Vec2::new(back.dot(right), back.dot(forward));
+        }
+        let mut m = movement;
+        if m.y != 0.0 && !safe(forward * m.y) {
+            m.y = 0.0;
+        }
+        if m.x != 0.0 && !safe(right * m.x) {
+            m.x = 0.0;
+            self.strafe = -self.strafe;
+        }
+        if m != Vec2::ZERO && !safe(forward * m.y + right * m.x) {
+            m = Vec2::ZERO;
+        }
+        m
     }
 
     fn held_empty(&self, game: &Game, me: usize) -> bool {
@@ -314,5 +525,75 @@ mod tests {
                 .sum()
         };
         assert!(kills(0) > 0 && kills(1) > 0);
+    }
+
+    #[test]
+    fn bots_capture_flags() {
+        let world = crate::game::tests::floor();
+        let mut game = crate::game::tests::game();
+        game.rules.game_type = crate::GameType::Ctf;
+        game.weapons.push(game.weapons[0].clone());
+        game.rules.flag_weapon = Some(game.weapons.len() - 1);
+        game.set_flags(
+            &[
+                (0, Vec3::new(-12.0, 0.0, 0.0)),
+                (1, Vec3::new(12.0, 0.0, 0.0)),
+            ],
+            &[],
+        );
+        let points: Vec<Vec3> = (-6..=6)
+            .flat_map(|x| (-2..=2).map(move |y| Vec3::new(x as f32 * 2.0, y as f32 * 2.0, 0.0)))
+            .collect();
+        let nav = NavGraph::build(&world, &points);
+        // A red attacker (player 1; player 0 would guard) against no one.
+        game.add_player_on(0);
+        let me = game.add_player_on(0);
+        let mut bot = Bot::new(3);
+        let mut taken = false;
+        for _ in 0..60 * 30 {
+            let mut cmds = vec![Command::default(); game.players.len()];
+            cmds[me] = bot.think(&game, &world, &nav, me);
+            game.step(&world, &cmds);
+            taken |= game.flags[1].carrier == Some(me);
+            if game.team_score(0) > 0 {
+                break;
+            }
+        }
+        assert!(taken, "the bot didn't take the flag");
+        assert_eq!(game.team_score(0), 1, "the bot didn't score");
+    }
+
+    #[test]
+    fn bots_fight_without_falling_off_ledges() {
+        // A 6x6 platform over nothing.
+        let world = World::new(
+            &[[-3., -3., 0.], [3., -3., 0.], [3., 3., 0.], [-3., 3., 0.]],
+            &[0, 1, 2, 0, 2, 3],
+        );
+        let mut game = crate::game::tests::game();
+        game.rules.score_to_win = 0;
+        game.spawns = vec![
+            (Vec3::new(-2.0, 0.0, 0.0), 0.0),
+            (Vec3::new(2.0, 0.0, 0.0), 0.0),
+        ];
+        let nav = NavGraph::for_level(&world, &[Vec3::ZERO], &[]);
+        let mut bots: Vec<(usize, Bot)> = (0..2)
+            .map(|k| (game.add_player(), Bot::new(k * 17 + 3)))
+            .collect();
+        game.players[0].body.position = Vec3::new(-2.0, 0.0, 0.0);
+        game.players[1].body.position = Vec3::new(2.0, 0.0, 0.0);
+        for _ in 0..60 * 30 {
+            let mut cmds = vec![Command::default(); 2];
+            for (i, bot) in &mut bots {
+                cmds[*i] = bot.think(&game, &world, &nav, *i);
+            }
+            game.step(&world, &cmds);
+            for e in &game.events {
+                if let crate::game::Event::Killed { killer: None, .. } = e {
+                    panic!("a bot fell off");
+                }
+            }
+        }
+        assert!(game.players.iter().map(|p| p.kills).sum::<u32>() > 0);
     }
 }

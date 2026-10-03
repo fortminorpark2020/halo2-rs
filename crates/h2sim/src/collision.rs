@@ -21,6 +21,36 @@ pub struct Contact {
     pub depth: f32,
 }
 
+/// A box that kills whoever enters it (a map's pits and sea).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KillZone {
+    corner: Vec3,
+    axes: [Vec3; 3],
+    extents: Vec3,
+}
+
+impl KillZone {
+    /// A box from `corner`, `extents` long along `forward`, its left
+    /// (`up` x `forward`) and `up`.
+    pub fn new(corner: Vec3, forward: Vec3, up: Vec3, extents: Vec3) -> KillZone {
+        let forward = forward.normalize_or(Vec3::X);
+        let up = up.normalize_or(Vec3::Z);
+        KillZone {
+            corner,
+            axes: [forward, up.cross(forward), up],
+            extents,
+        }
+    }
+
+    pub fn contains(&self, p: Vec3) -> bool {
+        let d = p - self.corner;
+        self.axes
+            .iter()
+            .zip(self.extents.to_array())
+            .all(|(axis, extent)| (0.0..=extent).contains(&d.dot(*axis)))
+    }
+}
+
 pub struct World {
     triangles: Vec<Triangle>,
     grid: HashMap<(i32, i32, i32), Vec<u32>>,
@@ -77,6 +107,15 @@ impl World {
 
     pub fn triangle_count(&self) -> usize {
         self.triangles.len()
+    }
+
+    /// The level's floors: triangles facing up at least `min_up` (the
+    /// cosine of the steepest slope that counts).
+    pub fn floors(&self, min_up: f32) -> impl Iterator<Item = [Vec3; 3]> + '_ {
+        self.triangles
+            .iter()
+            .filter(move |t| t.normal.z >= min_up)
+            .map(|t| [t.a, t.b, t.c])
     }
 
     fn candidates(&self, lo: Vec3, hi: Vec3, out: &mut Vec<u32>) {
@@ -351,5 +390,15 @@ mod tests {
             .raycast(Vec3::new(1.0, 2.0, 3.0), Vec3::NEG_Z, 10.0)
             .unwrap();
         assert!((d - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn kill_zones_are_turned_boxes() {
+        // 2 long, 1 wide, 1 high, turned 90 degrees: it runs along +y.
+        let k = KillZone::new(Vec3::ZERO, Vec3::Y, Vec3::Z, Vec3::new(2.0, 1.0, 1.0));
+        assert!(k.contains(Vec3::new(-0.5, 1.5, 0.5)));
+        assert!(!k.contains(Vec3::new(0.5, 1.5, 0.5)));
+        assert!(!k.contains(Vec3::new(-0.5, 2.5, 0.5)));
+        assert!(!k.contains(Vec3::new(-0.5, 1.5, 1.5)));
     }
 }
