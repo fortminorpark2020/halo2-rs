@@ -607,6 +607,7 @@ pub mod mapset;
 pub mod model;
 pub mod physics;
 pub mod render;
+pub mod scenario;
 pub mod shader;
 pub mod weapon;
 

@@ -16,8 +16,10 @@ struct DrawUniforms {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
     camera: [f32; 4],
-    /// x: fog amount, y/z: screen size (HUD).
+    /// x: fog amount, y/z: screen size (HUD), w: shading (OBJECT...).
     params: [f32; 4],
+    /// Objects: the level's baked light where they stand; w = 1 when set.
+    light: [f32; 4],
 }
 
 const SLOT: u64 = 256;
@@ -57,6 +59,8 @@ pub mod hud_mode {
 pub struct DrawCall {
     pub mesh: usize,
     pub model: Mat4,
+    /// Baked level light for an object (see `probe::LevelLight::at`).
+    pub light: Option<[f32; 3]>,
 }
 
 pub struct HudBatch {
@@ -130,6 +134,7 @@ struct U {
     model: mat4x4<f32>,
     camera: vec4<f32>,
     params: vec4<f32>,
+    light: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(1) @binding(0) var tex: texture_2d<f32>;
@@ -203,8 +208,15 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         // Lightmap pages are decoded as sRGB; vertex colours arrive in gamma space.
         let colour = pow(i.light.rgb, vec3<f32>(2.2));
         light = colour * mix(vec3<f32>(1.0), baked, i.light.a) * LIGHTMAP_SCALE;
+    } else if (u.light.a > 0.5) {
+        // Objects: the level's light where they stand, brighter on top.
+        let n = normalize(i.normal);
+        // A little fill stands in for the reflections that keep Halo 2's
+        // objects readable in dim places.
+        let base = pow(u.light.rgb, vec3<f32>(2.2)) * LIGHTMAP_SCALE;
+        light = base * mix(0.7, 1.3, n.z * 0.5 + 0.5) + vec3<f32>(0.15);
     } else {
-        // Objects: sky-from-above / ground-bounce ambient plus a soft sun.
+        // Objects off the level: sky-from-above / ground-bounce ambient plus a soft sun.
         let n = normalize(i.normal);
         let sun = normalize(vec3<f32>(0.4, -0.3, 0.85));
         let ambient = mix(vec3<f32>(0.32, 0.30, 0.28), vec3<f32>(0.55, 0.60, 0.68), n.z * 0.5 + 0.5);
@@ -901,6 +913,7 @@ impl Gpu {
         camera: Vec3,
         fog: f32,
         shading: f32,
+        light: Option<[f32; 3]>,
     ) -> Option<u32> {
         let offset = self.staging.len() as u64;
         if offset / SLOT >= MAX_DRAWS {
@@ -912,6 +925,7 @@ impl Gpu {
             model: model.to_cols_array_2d(),
             camera: camera.extend(1.0).into(),
             params: [fog, w, h, shading],
+            light: light.map_or([0.0; 4], |[r, g, b]| [r, g, b, 1.0]),
         };
         self.staging.extend_from_slice(bytemuck::bytes_of(&u));
         self.staging.resize((offset + SLOT) as usize, 0);
@@ -951,26 +965,29 @@ impl Gpu {
         };
         self.staging.clear();
         let cam = f.camera;
-        let sky = f
-            .sky
-            .as_ref()
-            .and_then(|d| Some((d.mesh, self.slot(f.sky_proj, d.model, cam, 0.0, UNLIT)?)));
+        let sky = f.sky.as_ref().and_then(|d| {
+            Some((
+                d.mesh,
+                self.slot(f.sky_proj, d.model, cam, 0.0, UNLIT, None)?,
+            ))
+        });
         let mut world = Vec::new();
         for d in f.world {
             let shading = self.meshes.get(d.mesh).map_or(OBJECT, |m| m.shading);
-            if let Some(o) = self.slot(f.view_proj, d.model, cam, 1.0, shading) {
+            if let Some(o) = self.slot(f.view_proj, d.model, cam, 1.0, shading, d.light) {
                 world.push((d.mesh, o));
             }
         }
-        let sprites_slot = self.slot(f.view_proj, Mat4::IDENTITY, cam, 0.0, OBJECT);
+        let sprites_slot = self.slot(f.view_proj, Mat4::IDENTITY, cam, 0.0, OBJECT, None);
         let mut views = Vec::new();
         for d in f.view_models {
-            if let Some(o) = self.slot(f.view_model_proj, d.model, cam, 0.0, OBJECT) {
+            if let Some(o) = self.slot(f.view_model_proj, d.model, cam, 0.0, OBJECT, d.light) {
                 views.push((d.mesh, o));
             }
         }
-        let view_sprites_slot = self.slot(f.view_model_proj, Mat4::IDENTITY, cam, 0.0, OBJECT);
-        let hud_slot = self.slot(Mat4::IDENTITY, Mat4::IDENTITY, cam, 0.0, OBJECT);
+        let view_sprites_slot =
+            self.slot(f.view_model_proj, Mat4::IDENTITY, cam, 0.0, OBJECT, None);
+        let hud_slot = self.slot(Mat4::IDENTITY, Mat4::IDENTITY, cam, 0.0, OBJECT, None);
         self.queue.write_buffer(&self.uniforms, 0, &self.staging);
 
         let sprites = self.vertex_buffer(f.sprites);

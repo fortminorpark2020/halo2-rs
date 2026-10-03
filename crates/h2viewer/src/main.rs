@@ -1,35 +1,41 @@
-//! h2viewer: walk around a Halo 2 level and shoot its weapons.
+//! h2viewer: play a Halo 2 multiplayer map.
 //!
 //! Usage: h2viewer [path\to\level.map]
 //! With no argument it looks for lockout.map in the usual install folders.
 //!
 //! Controls: click to capture the mouse, WASD move, Space jump, Ctrl/C crouch,
-//! left mouse fire, right mouse / Z zoom, R reload, F melee, Q / mouse wheel /
-//! 1-9 switch weapon, Tab toggles walking / flying (fly: Space/C up/down, Shift
-//! fast), Esc releases the mouse (Esc again quits).
+//! left mouse fire, right mouse / Z zoom, R reload, F melee, G / middle mouse
+//! throw a grenade, X switch grenades, E pick up (hold to swap weapons), Q /
+//! mouse wheel switch weapon, 1-9 take any weapon (testing), Tab toggles
+//! walking / flying (fly: Space/C up/down, Shift fast), Esc releases the
+//! mouse (Esc again quits).
 
 mod camera;
 mod effects;
 mod font;
 mod gpu;
 mod hud;
+mod probe;
 mod rig;
 mod scene;
 
 use blam_cache::geometry::Mesh;
+use blam_cache::PlayerSpawn;
 use camera::FlyCamera;
 use effects::Effects;
 use glam::{Mat4, Vec3};
 use gpu::{hud_mode, DrawCall, Frame};
-use h2sim::{Input, Player, WeaponInput, WeaponState, World};
+use h2sim::game::{Event, GrenadeKind, HeldWeapon, Spartan, TICK};
+use h2sim::{Command, Game, ItemKind, ItemSpawn, Rules, WeaponState, World};
 use hud::HudBuilder;
 use scene::{Scene, WeaponAssets};
 use std::collections::HashSet;
+use std::f32::consts::FRAC_PI_2;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
@@ -116,12 +122,92 @@ fn smoothstep(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
+/// "battle_rifle" -> "BATTLE RIFLE".
+fn display_name(name: &str) -> String {
+    name.replace('_', " ").to_uppercase()
+}
+
+fn player_name(me: usize, i: usize) -> String {
+    if i == me {
+        "YOU".into()
+    } else {
+        format!("PLAYER {}", i + 1)
+    }
+}
+
+/// A kill feed line, as Halo 2 words it.
+fn kill_message(me: usize, killer: Option<usize>, victim: usize) -> String {
+    let v = player_name(me, victim);
+    match killer {
+        Some(k) if k == victim && k == me => "YOU KILLED YOURSELF".into(),
+        Some(k) if k == victim => format!("{v} COMMITTED SUICIDE"),
+        Some(k) => format!("{} KILLED {v}", player_name(me, k)),
+        None => format!("{v} DIED"),
+    }
+}
+
+/// Slayer on the map's weapons: spawn with a Battle Rifle and an SMG.
+fn rules(scene: &Scene) -> Rules {
+    let index = |names: &[&str]| -> Vec<usize> {
+        names
+            .iter()
+            .filter_map(|n| scene.weapons.iter().position(|w| w.def.name == *n))
+            .collect()
+    };
+    let defaults = Rules::default();
+    let mut frag = defaults.frag;
+    let mut plasma = defaults.plasma;
+    if let Some(v) = scene.grenades[0].speed {
+        frag.speed = v;
+    }
+    if let Some(v) = scene.grenades[1].speed {
+        plasma.speed = v;
+    }
+    Rules {
+        starting_weapons: index(&["battle_rifle", "smg"]),
+        headshot_weapons: index(&[
+            "battle_rifle",
+            "magnum",
+            "covenant_carbine",
+            "sniper_rifle",
+            "beam_rifle",
+        ]),
+        lunge_weapons: index(&["energy_blade"]),
+        frag,
+        plasma,
+        ..defaults
+    }
+}
+
+/// Presses since the last game tick, so a quick click between ticks still counts.
+#[derive(Default)]
+struct Taps {
+    fire: bool,
+    zoom: bool,
+    melee: bool,
+    reload: bool,
+    switch_weapon: bool,
+    throw_grenade: bool,
+    switch_grenade: bool,
+}
+
+/// What the local player's first person view should react to this frame.
+#[derive(Default)]
+struct ViewEvents {
+    fired: bool,
+    melee: bool,
+    thrown: bool,
+    reload: Option<bool>,
+    switched: bool,
+}
+
 struct App {
     scene: Scene,
     world: World,
-    player: Player,
+    game: Game,
+    /// The player at this keyboard and mouse.
+    me: usize,
     walking: bool,
-    spawn_point: Vec3,
     title: String,
     window: Option<Arc<Window>>,
     gpu: Option<gpu::Gpu>,
@@ -131,20 +217,21 @@ struct App {
     last_frame: Instant,
     fire_held: bool,
     zoom_held: bool,
-    /// Presses since the last update, so a quick click between frames still counts.
-    fire_tapped: bool,
-    zoom_tapped: bool,
-    weapon: usize,
-    weapon_states: Vec<WeaponState>,
-    /// Seconds left bringing the current weapon up.
-    readying: f32,
+    taps: Taps,
+    /// Time not yet simulated, less than a tick.
+    pending: f32,
+    /// Eye position after the previous and the latest tick, for smooth
+    /// motion between ticks.
+    eyes: (Vec3, Vec3),
     effects: Effects,
     bob_phase: f32,
     /// First person arms and gun animation.
     animator: rig::Animator,
+    /// The weapon the first person animation belongs to.
+    shown_weapon: Option<usize>,
     shots_fired: usize,
-    melee_tapped: bool,
-    reload_tapped: bool,
+    /// Kill feed and pickups, newest last, with seconds left on screen.
+    messages: Vec<(String, f32)>,
 }
 
 impl App {
@@ -162,34 +249,13 @@ impl App {
         self.captured = on;
     }
 
-    fn current(&self) -> Option<(&WeaponAssets, &WeaponState)> {
-        Some((
-            self.scene.weapons.get(self.weapon)?,
-            self.weapon_states.get(self.weapon)?,
-        ))
+    fn me(&self) -> &Spartan {
+        &self.game.players[self.me]
     }
 
-    fn switch_weapon(&mut self, to: usize) {
-        let n = self.scene.weapons.len();
-        if n == 0 || to % n == self.weapon {
-            return;
-        }
-        if let Some(s) = self.weapon_states.get_mut(self.weapon) {
-            s.zoom = 0;
-            s.reloading = None;
-        }
-        self.weapon = to % n;
-        self.readying = READY_TIME;
-        if let Some(rig) = self.scene.weapons[self.weapon].rig.as_ref() {
-            let ready = rig.find("first_person:ready", 0);
-            if let Some(a) = ready.and_then(|i| rig.graph.animations.get(i)) {
-                self.readying = a.duration();
-            }
-            self.animator.play(ready, false);
-        }
-        if let Some((w, _)) = self.current() {
-            println!("weapon: {}", w.def.name);
-        }
+    fn current(&self) -> Option<(&WeaponAssets, &WeaponState)> {
+        let held = self.me().held()?;
+        Some((self.scene.weapons.get(held.weapon)?, &held.state))
     }
 
     fn magnification(&self) -> f32 {
@@ -198,96 +264,208 @@ impl App {
             .unwrap_or(1.0)
     }
 
+    /// For testing: swap the weapon in hand for any weapon.
+    fn give_weapon(&mut self, w: usize) {
+        let Some(def) = self.scene.weapons.get(w).map(|a| &a.def) else {
+            return;
+        };
+        let p = &mut self.game.players[self.me];
+        if !p.alive || p.weapons.iter().any(|h| h.weapon == w) {
+            return;
+        }
+        let held = HeldWeapon {
+            weapon: w,
+            state: WeaponState::new(def),
+        };
+        match p.weapons.get_mut(p.current) {
+            Some(h) => *h = held,
+            None => p.weapons.push(held),
+        }
+        println!("weapon: {}", def.name);
+    }
+
+    /// This tick's controls from the keyboard and mouse.
+    fn command(&self) -> Command {
+        let held = |k: KeyCode| self.keys.contains(&k);
+        let axis = |pos: KeyCode, neg: KeyCode| held(pos) as i32 as f32 - held(neg) as i32 as f32;
+        let mut cmd = Command {
+            yaw: self.camera.yaw,
+            pitch: self.camera.pitch,
+            ..Command::default()
+        };
+        if !self.walking {
+            return cmd;
+        }
+        let t = &self.taps;
+        cmd.movement = glam::vec2(
+            axis(KeyCode::KeyD, KeyCode::KeyA),
+            axis(KeyCode::KeyW, KeyCode::KeyS),
+        );
+        cmd.jump = held(KeyCode::Space);
+        cmd.crouch = held(KeyCode::ControlLeft) || held(KeyCode::KeyC);
+        cmd.fire = (self.fire_held || t.fire) && self.captured;
+        cmd.zoom = self.zoom_held || t.zoom || held(KeyCode::KeyZ);
+        cmd.reload = held(KeyCode::KeyR) || t.reload;
+        cmd.melee = t.melee;
+        cmd.action = held(KeyCode::KeyE);
+        cmd.switch_weapon = t.switch_weapon;
+        cmd.throw_grenade = t.throw_grenade;
+        cmd.switch_grenade = t.switch_grenade;
+        cmd
+    }
+
     fn update(&mut self, dt: f32) {
-        if self.walking {
-            let held = |k: KeyCode| self.keys.contains(&k);
-            let axis =
-                |pos: KeyCode, neg: KeyCode| held(pos) as i32 as f32 - held(neg) as i32 as f32;
-            let input = Input {
-                movement: glam::vec2(
-                    axis(KeyCode::KeyD, KeyCode::KeyA),
-                    axis(KeyCode::KeyW, KeyCode::KeyS),
-                ),
-                yaw: self.camera.yaw,
-                jump: held(KeyCode::Space),
-                crouch: held(KeyCode::ControlLeft) || held(KeyCode::KeyC),
-            };
-            self.player.update(&self.world, input, dt);
-            // Fell out of the level: back to the spawn.
-            if self.player.position.z < self.world.min.z - 1.0 {
-                self.player.position = self.spawn_point;
-                self.player.velocity = Vec3::ZERO;
-            }
-            self.camera.position = self.player.eye();
-            let speed = self.player.velocity.truncate().length();
-            if self.player.grounded {
-                self.bob_phase += speed * dt * 4.5;
-            }
-        } else {
+        if !self.walking {
             self.camera.update(&self.keys, dt);
         }
-
-        // Weapon.
-        self.readying = (self.readying - dt).max(0.0);
-        let input = WeaponInput {
-            fire: (self.fire_held || self.fire_tapped) && self.captured && self.readying <= 0.0,
-            reload: self.keys.contains(&KeyCode::KeyR) || std::mem::take(&mut self.reload_tapped),
-            zoom: self.zoom_held || self.zoom_tapped || self.keys.contains(&KeyCode::KeyZ),
-        };
-        self.fire_tapped = false;
-        self.zoom_tapped = false;
-        let (eye, (f, r, u)) = (self.camera.position, self.camera.basis());
-        let (mut fired, mut reload) = (false, None);
-        if let (Some(w), Some(state)) = (
-            self.scene.weapons.get(self.weapon),
-            self.weapon_states.get_mut(self.weapon),
-        ) {
-            let (was_reloading, was_empty) = (state.reloading.is_some(), state.loaded == 0);
-            for shot in state.update(&w.def, input, dt) {
-                fired = true;
-                let dir = shot.direction(f, r, u);
-                if let Some((t, n)) = self.world.raycast_hit(eye, dir, w.def.range) {
-                    self.effects.impact(eye + dir * t, n);
-                }
+        // The game advances in fixed ticks.
+        let mut view = ViewEvents::default();
+        self.pending += dt;
+        let mut ticked = false;
+        while self.pending >= TICK {
+            self.pending -= TICK;
+            let mut commands = vec![Command::default(); self.game.players.len()];
+            commands[self.me] = self.command();
+            self.game.step(&self.world, &commands);
+            if !ticked {
+                self.taps = Taps::default();
+                ticked = true;
             }
-            if state.reloading.is_some() && !was_reloading {
-                reload = Some(was_empty);
+            self.eyes = (self.eyes.1, self.me().eye());
+            self.handle_events(&mut view);
+        }
+
+        let me = &self.game.players[self.me];
+        if self.walking {
+            if me.alive {
+                let a = (self.pending / TICK).clamp(0.0, 1.0);
+                self.camera.position = self.eyes.0.lerp(self.eyes.1, a);
+                if me.body.grounded {
+                    self.bob_phase += me.body.velocity.truncate().length() * dt * 4.5;
+                }
+            } else {
+                // Watch your body from behind until you respawn.
+                let centre = me.body.position + Vec3::Z * 0.4;
+                let back = -self.camera.forward();
+                let dist = self
+                    .world
+                    .raycast(centre, back, 2.0)
+                    .map_or(2.0, |t| (t - 0.1).max(0.2));
+                self.camera.position = centre + back * dist;
             }
         }
-        let melee = std::mem::take(&mut self.melee_tapped) && self.captured;
-        self.animate_view_model(dt, fired, melee, reload);
+        for m in &mut self.messages {
+            m.1 -= dt;
+        }
+        self.messages.retain(|m| m.1 > 0.0);
+        self.animate_view_model(dt, view);
         self.effects.update(dt);
     }
 
-    /// Pick and advance the first person animation: fire on a shot, reload,
-    /// otherwise idle once the current one has played out.
-    fn animate_view_model(&mut self, dt: f32, fired: bool, melee: bool, reload: Option<bool>) {
-        let Some(rig) = self
-            .scene
-            .weapons
-            .get(self.weapon)
+    fn handle_events(&mut self, view: &mut ViewEvents) {
+        let me = self.me;
+        for e in std::mem::take(&mut self.game.events) {
+            match e {
+                Event::Shot {
+                    player,
+                    hit,
+                    hit_player,
+                    ..
+                } => {
+                    view.fired |= player == me;
+                    match (hit, hit_player) {
+                        (Some((p, _)), Some(j)) => {
+                            let shielded = self.game.players[j].shield > 0.0;
+                            self.effects.player_hit(p, shielded);
+                        }
+                        (Some((p, n)), None) => self.effects.impact(p, n),
+                        _ => {}
+                    }
+                }
+                Event::Reloaded { player, empty } if player == me => view.reload = Some(empty),
+                Event::Switched { player } if player == me => view.switched = true,
+                Event::Melee { player, .. } if player == me => view.melee = true,
+                Event::Thrown { player } if player == me => view.thrown = true,
+                Event::Exploded { kind, position } => {
+                    self.effects
+                        .explosion(position, kind == GrenadeKind::Plasma);
+                }
+                Event::Killed { killer, victim, .. } => {
+                    self.message(kill_message(me, killer, victim));
+                }
+                Event::Spawned { player } if player == me => {
+                    let p = &self.game.players[me];
+                    self.eyes = (p.eye(), p.eye());
+                    self.camera.yaw = p.yaw;
+                    self.camera.pitch = 0.0;
+                    view.switched = true;
+                }
+                Event::PickedUp { player, kind } if player == me => {
+                    let what = match kind {
+                        ItemKind::Weapon(w) => self
+                            .scene
+                            .weapons
+                            .get(w)
+                            .map(|a| display_name(&a.def.name))
+                            .unwrap_or_default(),
+                        ItemKind::FragGrenades => "FRAG GRENADE".into(),
+                        ItemKind::PlasmaGrenades => "PLASMA GRENADE".into(),
+                    };
+                    self.message(format!("PICKED UP {what}"));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn message(&mut self, text: String) {
+        println!("{}", text.to_lowercase());
+        self.messages.push((text, 5.0));
+        if self.messages.len() > 4 {
+            self.messages.remove(0);
+        }
+    }
+
+    /// Pick and advance the first person animation: bring a new weapon up,
+    /// fire, melee, throw and reload on cue, otherwise idle.
+    fn animate_view_model(&mut self, dt: f32, view: ViewEvents) {
+        let weapon = self.me().held().map(|h| h.weapon);
+        let Some(rig) = weapon
+            .and_then(|w| self.scene.weapons.get(w))
             .and_then(|w| w.rig.as_ref())
         else {
+            self.shown_weapon = weapon;
             return;
         };
-        if fired {
+        if view.switched || weapon != self.shown_weapon {
+            self.shown_weapon = weapon;
+            let ready = rig.find("first_person:ready", 0);
+            if let Some(a) = ready.and_then(|i| rig.graph.animations.get(i)) {
+                self.game.players[self.me].readying = a.duration();
+            }
+            self.animator.play(ready, false);
+        }
+        if view.fired {
             self.shots_fired += 1;
-            // The energy sword has no firing animation; it swings.
-            let anim = rig
-                .find("first_person:fire_1", self.shots_fired)
-                .or_else(|| melee_strike(rig, self.shots_fired));
+            let anim = rig.find("first_person:fire_1", self.shots_fired);
             if anim.is_some() {
                 self.animator.play(anim, false);
             }
         }
-        if melee {
+        if view.melee {
             self.shots_fired += 1;
             let anim = melee_strike(rig, self.shots_fired);
             if anim.is_some() {
                 self.animator.play(anim, false);
             }
         }
-        if let Some(empty) = reload {
+        if view.thrown {
+            let anim = rig.find("first_person:throw_grenade", 0);
+            if anim.is_some() {
+                self.animator.play(anim, false);
+            }
+        }
+        if let Some(empty) = view.reload {
             let name = if empty {
                 "first_person:reload_empty"
             } else {
@@ -308,8 +486,9 @@ impl App {
     /// models), swaying a little while walking.
     fn view_frame(&self) -> Mat4 {
         let (f, r, u) = self.camera.basis();
-        let speed = (self.player.velocity.truncate().length() / 2.25).min(1.0);
-        let bob = if self.walking && self.player.grounded {
+        let body = &self.me().body;
+        let speed = (body.velocity.truncate().length() / 2.25).min(1.0);
+        let bob = if self.walking && body.grounded {
             speed
         } else {
             0.0
@@ -341,7 +520,7 @@ impl App {
             let t = 1.0 - left / def.reload_time.max(0.01);
             dip = smoothstep(t * 4.0).min(smoothstep((1.0 - t) * 4.0));
         }
-        dip = dip.max(self.readying / READY_TIME);
+        dip = dip.max(self.me().readying / READY_TIME);
         offset.z -= dip * 0.05;
         self.view_frame()
             * Mat4::from_translation(offset)
@@ -352,6 +531,12 @@ impl App {
     fn build_hud(&self, w: f32, h: f32) -> Vec<gpu::HudBatch> {
         let mut hb = HudBuilder::new(w, h);
         let scene = &self.scene;
+        let font = scene.hud_font;
+        let me = self.me();
+        let s = hb.scale();
+        let shield = me.shield / self.game.rules.shield.max(1.0);
+        // The shield meter flashes red while the shields are down.
+        let flash = shield < 0.25 && me.alive && (self.game.time * 4.0).fract() < 0.5;
         let mut drew_tracker = false;
         for widget in &scene.player_hud {
             match widget.name.as_str() {
@@ -359,24 +544,88 @@ impl App {
                     drew_tracker = true;
                     hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0);
                 }
-                "shield_meter" => hb.widget(widget, hud::BLUE, hud_mode::METER_GREY, 1.0),
+                "shield_meter" => {
+                    let color = if flash { hud::RED } else { hud::BLUE };
+                    hb.widget(widget, color, hud_mode::METER_GREY, shield);
+                }
                 "shield_mask" => hb.widget(widget, hud::BLUE, hud_mode::PLAIN, 0.0),
                 "frag_grenade_default" => {
                     hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0);
-                    // Plasma grenades in the left box, frags (selected) in the right.
+                    // Plasma grenades in the left box, frags in the right;
+                    // the selected kind is bright.
                     let rect = hb.widget_rect(widget);
                     let th = (rect[3] - rect[1]) * 0.5;
-                    for (at, count) in [(0.18, "0"), (0.69, "2")] {
+                    for (at, count, kind) in [
+                        (0.18, me.plasmas, GrenadeKind::Plasma),
+                        (0.69, me.frags, GrenadeKind::Frag),
+                    ] {
+                        let color = if kind == me.grenade {
+                            hud::BLUE
+                        } else {
+                            hud::DIM_BLUE
+                        };
                         hb.text(
-                            scene.hud_font,
+                            font,
                             [rect[0] + (rect[2] - rect[0]) * at, rect[1] + th * 0.5],
                             th,
-                            count,
-                            hud::BLUE,
+                            &count.to_string(),
+                            color,
                         );
                     }
                 }
                 _ => {}
+            }
+        }
+        // Kill feed above the motion tracker; score bottom right.
+        let line = 11.0 * s;
+        for (i, (text, left)) in self.messages.iter().rev().enumerate() {
+            let mut color = hud::BLUE;
+            color[3] *= left.min(1.0);
+            hb.text_left(
+                font,
+                [24.0 * s, h - 140.0 * s - i as f32 * line],
+                8.0 * s,
+                text,
+                color,
+            );
+        }
+        let score = format!("{}", me.kills);
+        hb.text(
+            font,
+            [w - 40.0 * s, h - 40.0 * s],
+            16.0 * s,
+            &score,
+            hud::BLUE,
+        );
+        if let Some(winner) = self.game.winner {
+            let text = if winner == self.me {
+                "YOU WIN".to_string()
+            } else {
+                format!("{} WINS", player_name(self.me, winner))
+            };
+            hb.text(font, [w * 0.5, h * 0.3], 20.0 * s, &text, hud::BLUE);
+        }
+        if !me.alive {
+            let text = format!("RESPAWN IN {}", me.respawn_in.ceil().max(1.0));
+            hb.text(
+                font,
+                [w * 0.5, h * 0.5 - 6.0 * s],
+                12.0 * s,
+                &text,
+                hud::BLUE,
+            );
+            return hb.finish();
+        }
+        if let Some(weapon) = self.game.swap_prompt(self.me) {
+            if let Some(a) = scene.weapons.get(weapon) {
+                let text = format!("HOLD E TO PICK UP {}", display_name(&a.def.name));
+                hb.text(
+                    font,
+                    [w * 0.5, h * 0.5 + 64.0 * s],
+                    9.0 * s,
+                    &text,
+                    hud::BLUE,
+                );
             }
         }
         let Some((weapon, state)) = self.current() else {
@@ -401,7 +650,7 @@ impl App {
                         let rect = hb.widget_rect(widget);
                         let th = (rect[3] - rect[1]) * 0.5;
                         hb.text(
-                            scene.hud_font,
+                            font,
                             [rect[0] + (rect[2] - rect[0]) * 0.19, rect[1] + th * 0.5],
                             th,
                             &state.reserve.to_string(),
@@ -418,31 +667,77 @@ impl App {
                 _ => {}
             }
         }
-        let s = hb.scale();
         if def.uses_ammo() && state.loaded == 0 && state.reloading.is_none() {
             let msg = if state.reserve == 0 {
                 "NO AMMO"
             } else {
                 "RELOAD"
             };
+            hb.text(font, [w * 0.5, h * 0.5 + 48.0 * s], 12.0 * s, msg, hud::RED);
+        } else if me.readying > 0.0 {
             hb.text(
-                scene.hud_font,
-                [w * 0.5, h * 0.5 + 48.0 * s],
-                12.0 * s,
-                msg,
-                hud::RED,
-            );
-        }
-        if self.readying > 0.0 {
-            hb.text(
-                scene.hud_font,
+                font,
                 [w * 0.5, h * 0.5 + 48.0 * s],
                 10.0 * s,
-                &def.name.replace('_', " "),
+                &display_name(&def.name),
                 hud::BLUE,
             );
         }
         hb.finish()
+    }
+
+    /// Everything in the world besides the level: scenery, items lying on
+    /// the map, dropped weapons and grenades in flight.
+    fn world_draws(&self) -> Vec<DrawCall> {
+        let scene = &self.scene;
+        let light_at = |p: Vec3| scene.level_light.at(&scene.textures, p + Vec3::Z * 0.2);
+        let mut world = vec![DrawCall {
+            mesh: 0,
+            model: Mat4::IDENTITY,
+            light: None,
+        }];
+        for o in &scene.objects {
+            world.push(DrawCall {
+                mesh: o.mesh,
+                model: o.transform,
+                light: o.light,
+            });
+        }
+        for (item, timer) in scene.items.iter().zip(&self.game.item_timers) {
+            if let (Some(mesh), true) = (item.mesh, *timer <= 0.0) {
+                world.push(DrawCall {
+                    mesh,
+                    model: item.transform,
+                    light: item.light,
+                });
+            }
+        }
+        for d in &self.game.dropped {
+            if let Some(mesh) = scene.weapons.get(d.weapon).and_then(|w| w.world_mesh) {
+                world.push(DrawCall {
+                    mesh,
+                    model: scene::placement_matrix(d.position.into(), [d.yaw, 0.0, FRAC_PI_2], 1.0),
+                    light: light_at(d.position),
+                });
+            }
+        }
+        for g in &self.game.grenades {
+            let assets = scene.grenades[(g.kind == GrenadeKind::Plasma) as usize];
+            if let Some(mesh) = assets.mesh {
+                // Tumbling through the air.
+                let spin = if g.velocity.length_squared() > 0.01 {
+                    self.game.time as f32 * 12.0
+                } else {
+                    0.0
+                };
+                world.push(DrawCall {
+                    mesh,
+                    model: Mat4::from_translation(g.position) * Mat4::from_rotation_y(spin),
+                    light: light_at(g.position),
+                });
+            }
+        }
+        world
     }
 
     fn render(&mut self) {
@@ -452,15 +747,18 @@ impl App {
         let magnification = self.magnification();
         let view_proj = self.camera.view_proj(aspect, magnification);
         let (_, r, u) = self.camera.basis();
-        let world = [DrawCall {
-            mesh: 0,
-            model: Mat4::IDENTITY,
-        }];
+        let world = self.world_draws();
+        // The first person gun and arms take the light where the player stands.
+        let held_light = self
+            .scene
+            .level_light
+            .at(&self.scene.textures, self.camera.position);
         let sprites = self.effects.sprites(r, u);
         let mut view_models = Vec::new();
         let mut view_sprites = Vec::new();
         let mut posed = Vec::new();
-        if let Some((weapon, state)) = self.current() {
+        let alive = self.me().alive;
+        if let Some((weapon, state)) = self.current().filter(|_| alive) {
             if let (Some(mesh), 0) = (weapon.view_mesh, state.zoom) {
                 let (model, muzzle_frame) = match (&weapon.rig, &self.scene.arms) {
                     (Some(rig), Some(arms)) if !self.animator.pose().is_empty() => {
@@ -478,6 +776,7 @@ impl App {
                         view_models.push(DrawCall {
                             mesh: arms.mesh,
                             model: frame,
+                            light: held_light,
                         });
                         let muzzle = rig
                             .gun_node_world(&world, weapon.muzzle_node)
@@ -494,7 +793,11 @@ impl App {
                         (m, m * node)
                     }
                 };
-                view_models.push(DrawCall { mesh, model });
+                view_models.push(DrawCall {
+                    mesh,
+                    model,
+                    light: held_light,
+                });
                 if state.since_shot < 0.05 {
                     let muzzle = muzzle_frame.transform_point3(Vec3::from(weapon.muzzle));
                     let size = 0.012 + 0.006 * (state.since_shot * 300.0).sin().abs();
@@ -516,6 +819,7 @@ impl App {
             sky: self.scene.sky.map(|mesh| DrawCall {
                 mesh,
                 model: Mat4::IDENTITY,
+                light: None,
             }),
             sky_proj: camera::projection(aspect, magnification, 1.0, 10000.0) * sky_view,
             view_proj,
@@ -571,27 +875,17 @@ impl ApplicationHandler for App {
                     MouseButton::Left if down && !self.captured => self.set_capture(true),
                     MouseButton::Left => {
                         self.fire_held = down;
-                        self.fire_tapped |= down;
+                        self.taps.fire |= down;
                     }
                     MouseButton::Right => {
                         self.zoom_held = down && self.captured;
-                        self.zoom_tapped |= self.zoom_held;
+                        self.taps.zoom |= self.zoom_held;
                     }
+                    MouseButton::Middle => self.taps.throw_grenade |= down && self.captured,
                     _ => {}
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } if self.captured => {
-                let up = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y > 0.0,
-                    MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
-                };
-                let n = self.scene.weapons.len().max(1);
-                self.switch_weapon(if up {
-                    self.weapon + n - 1
-                } else {
-                    self.weapon + 1
-                });
-            }
+            WindowEvent::MouseWheel { .. } if self.captured => self.taps.switch_weapon = true,
             WindowEvent::Focused(false) => {
                 self.set_capture(false);
                 self.keys.clear();
@@ -653,10 +947,11 @@ impl App {
                 self.walking = !self.walking;
                 if self.walking {
                     // Drop in where the fly camera is.
-                    let feet =
-                        self.camera.position - Vec3::Z * self.player.biped.standing_camera_height;
-                    self.player.position = feet;
-                    self.player.velocity = Vec3::ZERO;
+                    let p = &mut self.game.players[self.me];
+                    p.body.position =
+                        self.camera.position - Vec3::Z * p.body.biped.standing_camera_height;
+                    p.body.velocity = Vec3::ZERO;
+                    self.eyes = (p.eye(), p.eye());
                 }
             }
             KeyCode::Escape => {
@@ -666,9 +961,11 @@ impl App {
                     event_loop.exit();
                 }
             }
-            KeyCode::KeyQ => self.switch_weapon(self.weapon + 1),
-            KeyCode::KeyF => self.melee_tapped = true,
-            KeyCode::KeyR => self.reload_tapped = true,
+            KeyCode::KeyQ => self.taps.switch_weapon = true,
+            KeyCode::KeyF => self.taps.melee = true,
+            KeyCode::KeyR => self.taps.reload = true,
+            KeyCode::KeyG => self.taps.throw_grenade = true,
+            KeyCode::KeyX => self.taps.switch_grenade = true,
             KeyCode::Digit1
             | KeyCode::Digit2
             | KeyCode::Digit3
@@ -677,12 +974,7 @@ impl App {
             | KeyCode::Digit6
             | KeyCode::Digit7
             | KeyCode::Digit8
-            | KeyCode::Digit9 => {
-                let i = code as usize - KeyCode::Digit1 as usize;
-                if i < self.scene.weapons.len() {
-                    self.switch_weapon(i);
-                }
-            }
+            | KeyCode::Digit9 => self.give_weapon(code as usize - KeyCode::Digit1 as usize),
             _ => {}
         }
     }
@@ -703,50 +995,85 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("loading {}", path.display());
     let scene = Scene::load(&path)?;
     println!(
-        "{} triangles, {} textures, {} weapons",
+        "{} triangles, {} textures, {} weapons, {} items",
         scene.triangle_count(),
         scene.textures.len() - 1,
-        scene.weapons.len()
+        scene.weapons.len(),
+        scene.items.len()
     );
-    let camera = match scene.spawn {
-        Some(s) => {
-            let eye = Vec3::from(s.position) + Vec3::Z * scene.biped.standing_camera_height;
-            FlyCamera::looking_at(eye, eye + glam::vec3(s.facing.cos(), s.facing.sin(), 0.0))
-        }
-        None => {
-            let (focus, radius) = level_focus(&scene.collision);
-            FlyCamera::looking_at(
-                focus + glam::vec3(radius * 0.6, -radius * 0.6, radius * 0.4),
-                focus,
-            )
-        }
-    };
+    // H2_POS="x y z yaw_degrees" starts somewhere else (for testing).
+    let start = std::env::var("H2_POS").ok().and_then(|v| {
+        let n: Vec<f32> = v
+            .split_whitespace()
+            .filter_map(|x| x.parse().ok())
+            .collect();
+        (n.len() == 4).then(|| PlayerSpawn {
+            position: [n[0], n[1], n[2]],
+            facing: n[3].to_radians(),
+        })
+    });
     let name = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     let world = World::new(&scene.collision.positions, &scene.collision.indices);
-    let walking = scene.spawn.is_some();
-    let spawn_point =
-        camera.position - Vec3::Z * scene.biped.standing_camera_height + Vec3::Z * 0.05;
-    let player = Player::new(spawn_point, scene.movement, scene.biped);
-    let weapon_states = scene
-        .weapons
+    let walking = start.is_some() || !scene.spawns.is_empty();
+    let (focus, radius) = level_focus(&scene.collision);
+    let mut spawns: Vec<(Vec3, f32)> = scene
+        .spawns
         .iter()
-        .map(|w| WeaponState::new(&w.def))
+        .map(|s| (Vec3::from(s.position), s.facing))
         .collect();
+    if spawns.is_empty() {
+        spawns.push((focus, 0.0));
+    }
+    let items = scene
+        .items
+        .iter()
+        .map(|i| ItemSpawn {
+            kind: i.kind,
+            position: i.position,
+            respawn: i.respawn_seconds,
+        })
+        .collect();
+    let mut game = Game::new(
+        rules(&scene),
+        scene.weapons.iter().map(|w| w.def.clone()).collect(),
+        spawns,
+        items,
+        scene.movement,
+        scene.biped,
+    );
+    let me = game.add_player();
+    if let Some(s) = start {
+        let p = &mut game.players[me];
+        p.body.position = Vec3::from(s.position) + Vec3::Z * 0.05;
+        p.yaw = s.facing;
+    }
+    game.events.clear();
+    let p = &game.players[me];
+    let camera = if walking {
+        let eye = p.eye();
+        FlyCamera::looking_at(eye, eye + glam::vec3(p.yaw.cos(), p.yaw.sin(), 0.0))
+    } else {
+        FlyCamera::looking_at(
+            focus + glam::vec3(radius * 0.6, -radius * 0.6, radius * 0.4),
+            focus,
+        )
+    };
+    let eyes = (p.eye(), p.eye());
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
         scene,
         world,
-        player,
+        game,
+        me,
         walking,
-        spawn_point,
         title: format!(
-            "Halo 2 Rust: {name} (click to play, WASD move, mouse fire/zoom, R reload, Q switch weapon, Esc release)"
+            "Halo 2 Rust: {name} (click to play, WASD move, mouse fire/zoom, G grenade, E pick up, F melee, R reload, Q switch weapon, Esc release)"
         ),
         window: None,
         gpu: None,
@@ -756,24 +1083,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         last_frame: Instant::now(),
         fire_held: false,
         zoom_held: false,
-        fire_tapped: false,
-        zoom_tapped: false,
-        weapon: 0,
-        weapon_states,
-        readying: 0.0,
+        taps: Taps::default(),
+        pending: 0.0,
+        eyes,
         effects: Effects::new(),
         bob_phase: 0.0,
         animator: rig::Animator::default(),
+        shown_weapon: None,
         shots_fired: 0,
-        melee_tapped: false,
-        reload_tapped: false,
+        messages: Vec::new(),
     };
-    // Start holding the first weapon (or H2_WEAPON=<n>, for testing).
-    if let Some(rig) = app.scene.weapons.first().and_then(|w| w.rig.as_ref()) {
-        app.animator.play(rig.find("first_person:idle", 0), true);
-    }
+    // H2_WEAPON=<n> starts with another weapon in hand (for testing).
     if let Some(n) = std::env::var("H2_WEAPON").ok().and_then(|v| v.parse().ok()) {
-        app.switch_weapon(n);
+        app.give_weapon(n);
     }
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -795,5 +1117,13 @@ mod tests {
         assert_eq!(hud_role("5x", 5.0), HudRole::Zoomed);
         assert_eq!(hud_role("10x", 5.0), HudRole::Hidden);
         assert_eq!(hud_role("crosshair_friendly", 1.0), HudRole::Hidden);
+    }
+
+    #[test]
+    fn kill_feed_wording() {
+        assert_eq!(kill_message(0, Some(0), 1), "YOU KILLED PLAYER 2");
+        assert_eq!(kill_message(0, Some(1), 0), "PLAYER 2 KILLED YOU");
+        assert_eq!(kill_message(0, Some(0), 0), "YOU KILLED YOURSELF");
+        assert_eq!(kill_message(0, None, 2), "PLAYER 3 DIED");
     }
 }

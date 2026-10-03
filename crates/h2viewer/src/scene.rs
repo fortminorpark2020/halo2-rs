@@ -1,6 +1,7 @@
 //! CPU-side scene: meshes (level, weapons), their textures, HUD bitmaps and
 //! the gameplay data read from the map's tags.
 
+use crate::probe::LevelLight;
 use crate::rig::{FirstPersonRig, Skeleton, SkinnedMesh};
 use blam_cache::animation;
 use blam_cache::bitmap::{self, Image};
@@ -11,8 +12,11 @@ use blam_cache::model::{self, RenderModel};
 use blam_cache::physics::{self, BipedPhysics, PlayerMovement};
 use blam_cache::render::{LevelGeometry, Section, SectionOwner};
 use blam_cache::shader::{self, Blend};
-use blam_cache::{render, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp};
-use h2sim::WeaponDef;
+use blam_cache::{
+    render, scenario, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp,
+};
+use glam::{Mat4, Vec3};
+use h2sim::{ItemKind, WeaponDef};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -206,7 +210,11 @@ pub struct HudWidget {
 
 /// Everything needed to hold and fire one weapon.
 pub struct WeaponAssets {
+    /// The `weap` tag.
+    pub tag: DatumIndex,
     pub def: WeaponDef,
+    /// Third person model (lying on the map), in `Scene::meshes`.
+    pub world_mesh: Option<usize>,
     /// First person model, in `Scene::meshes`.
     pub view_mesh: Option<usize>,
     pub skeleton: Skeleton,
@@ -219,6 +227,42 @@ pub struct WeaponAssets {
     /// First person animations (arms and gun), when the map has them.
     pub rig: Option<FirstPersonRig>,
     pub hud: Vec<HudWidget>,
+}
+
+/// An object placed in the level, drawn with the level's light where it stands.
+pub struct SceneObject {
+    pub mesh: usize,
+    pub transform: Mat4,
+    /// Baked light under the object (see `probe::LevelLight::at`).
+    pub light: Option<[f32; 3]>,
+}
+
+/// A multiplayer item spawn: a weapon or grenades lying on the map.
+/// `ItemKind::Weapon` indexes `Scene::weapons`.
+pub struct MapItem {
+    pub kind: ItemKind,
+    pub mesh: Option<usize>,
+    pub transform: Mat4,
+    pub position: Vec3,
+    pub respawn_seconds: f32,
+    pub light: Option<[f32; 3]>,
+}
+
+/// World transform of a scenario placement: yaw about +z, then pitch
+/// (raising +x), then roll about +x.
+pub fn placement_matrix(position: [f32; 3], rotation: [f32; 3], scale: f32) -> Mat4 {
+    let [yaw, pitch, roll] = rotation;
+    Mat4::from_translation(Vec3::from(position))
+        * Mat4::from_rotation_z(yaw)
+        * Mat4::from_rotation_y(-pitch)
+        * Mat4::from_rotation_x(roll)
+        * Mat4::from_scale(Vec3::splat(scale))
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct GrenadeAssets {
+    pub mesh: Option<usize>,
+    pub speed: Option<f32>,
 }
 
 /// Master Chief's first person arms.
@@ -237,7 +281,8 @@ pub struct Scene {
     pub meshes: Vec<MeshData>,
     /// HUD bitmaps; their channels are data (meters, masks), not colours.
     pub hud_textures: Vec<Image>,
-    pub spawn: Option<PlayerSpawn>,
+    /// Multiplayer respawn points.
+    pub spawns: Vec<PlayerSpawn>,
     /// Collision geometry, used for walking, shooting and framing.
     pub collision: Mesh,
     pub movement: PlayerMovement,
@@ -247,6 +292,13 @@ pub struct Scene {
     pub arms: Option<Arms>,
     /// The sky's model, drawn around the camera behind everything.
     pub sky: Option<usize>,
+    /// Frag and plasma grenades: their models, and throw speed from the
+    /// projectile tags.
+    pub grenades: [GrenadeAssets; 2],
+    pub objects: Vec<SceneObject>,
+    pub items: Vec<MapItem>,
+    /// The level's baked light, for lighting objects.
+    pub level_light: LevelLight,
     /// The player's own HUD (shields, motion tracker, grenades).
     pub player_hud: Vec<HudWidget>,
     /// HUD textures for text and solid fills.
@@ -289,6 +341,7 @@ struct Loader {
     materials: Vec<Material>,
     material_of_shader: HashMap<DatumIndex, usize>,
     lightmap_pages: HashMap<(DatumIndex, usize), usize>,
+    mesh_of_object: HashMap<DatumIndex, Option<usize>>,
     hud_textures: Vec<Image>,
     hud_of_bitmap: HashMap<(DatumIndex, i8), usize>,
     failures: usize,
@@ -524,7 +577,10 @@ impl Loader {
             _ => None,
         };
         let hud = w.hud.map(|h| self.hud_widgets(h)).unwrap_or_default();
+        let world_mesh = self.object_mesh(datum, meshes);
         Some(WeaponAssets {
+            tag: datum,
+            world_mesh,
             def,
             view_mesh,
             skeleton,
@@ -535,6 +591,24 @@ impl Loader {
             rig,
             hud,
         })
+    }
+
+    /// The mesh of an object tag's render model, loaded once.
+    fn object_mesh(&mut self, object: DatumIndex, meshes: &mut Vec<MeshData>) -> Option<usize> {
+        if let Some(&m) = self.mesh_of_object.get(&object) {
+            return m;
+        }
+        let mesh = match model::object_render_model(&mut self.set, object)
+            .and_then(|mode| model::read_render_model(&mut self.set, mode))
+        {
+            Ok(m) => {
+                meshes.push(self.model_mesh(&m));
+                Some(meshes.len() - 1)
+            }
+            Err(_) => None,
+        };
+        self.mesh_of_object.insert(object, mesh);
+        mesh
     }
 
     fn sky(&mut self, meshes: &mut Vec<MeshData>) -> Option<usize> {
@@ -586,11 +660,7 @@ impl Scene {
         for bsp in &bsps {
             collision.append(&set.map.bsp_collision_mesh(bsp)?);
         }
-        let spawn = set
-            .map
-            .player_spawns()
-            .ok()
-            .and_then(|s| s.first().copied());
+        let spawns = set.map.player_spawns().unwrap_or_default();
         let movement = physics::player_movement(&mut set).unwrap_or_default();
         let biped = physics::player_biped(&mut set).unwrap_or_default();
 
@@ -601,6 +671,7 @@ impl Scene {
             materials: vec![Material::plain(0)],
             material_of_shader: HashMap::new(),
             lightmap_pages: HashMap::new(),
+            mesh_of_object: HashMap::new(),
             hud_textures: Vec::new(),
             hud_of_bitmap: HashMap::new(),
             failures: 0,
@@ -650,6 +721,77 @@ impl Scene {
             .iter()
             .filter_map(|name| loader.weapon(name, arms.as_ref().map(|a| &a.skeleton), &mut meshes))
             .collect();
+        let weapons: Vec<WeaponAssets> = weapons;
+        let level_light = LevelLight::new(&meshes[0]);
+        let mut objects = Vec::new();
+        for p in scenario::scenery(&mut loader.set).unwrap_or_default() {
+            if let Some(mesh) = loader.object_mesh(p.object, &mut meshes) {
+                let light =
+                    level_light.at(&loader.textures, Vec3::from(p.position) + Vec3::Z * 0.2);
+                objects.push(SceneObject {
+                    mesh,
+                    transform: placement_matrix(p.position, p.rotation, p.scale),
+                    light,
+                });
+            }
+        }
+        let mut items = Vec::new();
+        for spawn in scenario::netgame_equipment(&mut loader.set).unwrap_or_default() {
+            let collection = scenario::item_collection(&mut loader.set, spawn.collection);
+            let Some(&(_, item)) = collection.ok().and_then(|c| c.first().copied()).as_ref() else {
+                continue;
+            };
+            let name = loader
+                .set
+                .locate(item)
+                .map(|(_, t)| t.name)
+                .unwrap_or_default();
+            let kind = if let Some(w) = weapons.iter().position(|w| w.tag == item) {
+                ItemKind::Weapon(w)
+            } else if name.ends_with("frag_grenade") {
+                ItemKind::FragGrenades
+            } else if name.ends_with("plasma_grenade") {
+                ItemKind::PlasmaGrenades
+            } else {
+                continue;
+            };
+            let mesh = match kind {
+                ItemKind::Weapon(w) => weapons[w].world_mesh,
+                _ => loader.object_mesh(item, &mut meshes),
+            };
+            let light =
+                level_light.at(&loader.textures, Vec3::from(spawn.position) + Vec3::Z * 0.2);
+            items.push(MapItem {
+                kind,
+                mesh,
+                // Items settle on the ground in the game; lay them on their
+                // side rather than as placed in the editor.
+                transform: placement_matrix(
+                    spawn.position,
+                    [spawn.rotation[0], 0.0, std::f32::consts::FRAC_PI_2],
+                    1.0,
+                ),
+                position: Vec3::from(spawn.position),
+                respawn_seconds: match spawn.respawn_seconds {
+                    0 => 30.0,
+                    s => s as f32,
+                },
+                light,
+            });
+        }
+        let grenades = ["frag_grenade", "plasma_grenade"].map(|g| {
+            let name = format!("objects\\weapons\\grenade\\{g}\\{g}");
+            GrenadeAssets {
+                mesh: loader
+                    .find("eqip", &name)
+                    .and_then(|e| loader.object_mesh(e, &mut meshes)),
+                speed: loader
+                    .find("proj", &name)
+                    .and_then(|p| weapon::read_projectile(&mut loader.set, p).ok())
+                    .map(|p| p.initial_velocity)
+                    .filter(|v| *v > 0.0),
+            }
+        });
         let player_hud = match loader.find("nhdt", "ui\\hud\\masterchief") {
             Some(h) => loader.hud_widgets(h),
             None => Vec::new(),
@@ -670,13 +812,17 @@ impl Scene {
             materials: loader.materials,
             meshes,
             hud_textures: loader.hud_textures,
-            spawn,
+            spawns,
             collision,
             movement,
             biped,
             weapons,
             arms,
             sky,
+            grenades,
+            objects,
+            items,
+            level_light,
             player_hud,
             hud_font,
             hud_white,

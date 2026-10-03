@@ -9,7 +9,7 @@ pub struct FlyCamera {
     /// Radians around +z, 0 = looking down +x.
     pub yaw: f32,
     /// Radians above the horizon.
-    pitch: f32,
+    pub pitch: f32,
 }
 
 const SPEED: f32 = 4.0;

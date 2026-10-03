@@ -15,6 +15,7 @@
 //!   h2tool hud   <file.map> <nhdt> [dir] a HUD's bitmap widgets (optionally dump their images)
 //!   h2tool jmad  <file.map> <tag>        an animation graph's skeleton and animations
 //!   h2tool jmadscan <file.map>           decode every animation the map can see
+//!   h2tool objects <file.map>            scenery and multiplayer item spawns
 //!   h2tool hex   <file.map> <datum|group:name> [path]
 //!                                        hex dump of a tag, or of a block inside it;
 //!                                        path = `offset:size[@index]/...` (hex), e.g. 8:c/0:10
@@ -44,6 +45,7 @@ fn main() -> ExitCode {
         Some("jmadscan") if args.len() >= 2 => jmadscan(&args[1]),
         Some("shader") if args.len() >= 3 => shader_dump(&args[1], &args[2]),
         Some("lightmap") if args.len() >= 2 => lightmap_dump(&args[1]),
+        Some("objects") if args.len() >= 2 => objects(&args[1]),
         Some("hex") if args.len() >= 3 => hex(&args[1], &args[2], args.get(3).map(String::as_str)),
         Some("model") if args.len() >= 3 => {
             model(&args[1], &args[2], args.get(3).map(String::as_str))
@@ -446,6 +448,40 @@ fn sim(path: &str) -> Res {
         spawns.len(),
         walked / spawns.len().max(1) as f32
     );
+    Ok(())
+}
+
+fn objects(path: &str) -> Res {
+    use blam_cache::{scenario, MapSet};
+    let mut set = MapSet::open(path)?;
+    let name = |set: &MapSet, d: blam_cache::DatumIndex| {
+        set.locate(d)
+            .map(|(_, t)| format!("{} {}", t.group, t.name))
+            .unwrap_or_else(|| format!("{:08x}", d.0))
+    };
+    for p in scenario::scenery(&mut set)? {
+        println!(
+            "scenery {:<70} at {:7.2?} rot {:5.2?} scale {}",
+            name(&set, p.object),
+            p.position,
+            p.rotation,
+            p.scale
+        );
+    }
+    for i in scenario::netgame_equipment(&mut set)? {
+        let items = scenario::item_collection(&mut set, i.collection).unwrap_or_default();
+        let first = items
+            .first()
+            .map(|(_, d)| name(&set, *d))
+            .unwrap_or_default();
+        println!(
+            "item {:<50} -> {:<60} at {:7.2?} respawn {}s",
+            name(&set, i.collection),
+            first,
+            i.position,
+            i.respawn_seconds
+        );
+    }
     Ok(())
 }
 

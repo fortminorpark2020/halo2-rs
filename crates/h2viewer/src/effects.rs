@@ -101,6 +101,89 @@ impl Effects {
         }
     }
 
+    /// A grenade going off: a flash, a fireball (blue for plasma), sparks
+    /// and smoke.
+    pub fn explosion(&mut self, position: Vec3, plasma: bool) {
+        let (core, edge) = if plasma {
+            ([0.55, 0.75, 1.0, 1.0], [0.25, 0.45, 1.0, 0.9])
+        } else {
+            ([1.0, 0.9, 0.6, 1.0], [1.0, 0.45, 0.12, 0.9])
+        };
+        self.particles.push(Particle {
+            position,
+            velocity: Vec3::ZERO,
+            age: 0.0,
+            life: 0.18,
+            size: (0.6, 1.4),
+            color: core,
+            gravity: 0.0,
+        });
+        for _ in 0..14 {
+            let v = self.random_unit() * (1.0 + self.random() * 2.0);
+            let life = 0.25 + self.random() * 0.25;
+            self.particles.push(Particle {
+                position: position + v * 0.1,
+                velocity: v,
+                age: 0.0,
+                life,
+                size: (0.25, 0.6),
+                color: edge,
+                gravity: -0.5,
+            });
+        }
+        for _ in 0..20 {
+            let v = self.random_unit() * (3.0 + self.random() * 5.0);
+            let life = 0.3 + self.random() * 0.4;
+            self.particles.push(Particle {
+                position,
+                velocity: v,
+                age: 0.0,
+                life,
+                size: (0.02, 0.005),
+                color: core,
+                gravity: 4.0,
+            });
+        }
+        if !plasma {
+            for _ in 0..10 {
+                let v = (self.random_unit() + Vec3::Z * 0.5) * (0.3 + self.random() * 0.6);
+                let life = 1.5 + self.random() * 1.5;
+                self.particles.push(Particle {
+                    position: position + v * 0.3,
+                    velocity: v,
+                    age: 0.0,
+                    life,
+                    size: (0.3, 1.0),
+                    color: [0.3, 0.29, 0.27, 0.5],
+                    gravity: -0.15,
+                });
+            }
+        }
+    }
+
+    /// A shot hitting a player: a flare off their shields, or blood once
+    /// the shields are down.
+    pub fn player_hit(&mut self, position: Vec3, shielded: bool) {
+        let color = if shielded {
+            [1.0, 0.85, 0.3, 0.9]
+        } else {
+            [0.55, 0.05, 0.03, 0.9]
+        };
+        for _ in 0..6 {
+            let v = self.random_unit() * (0.4 + self.random() * 0.6);
+            let life = 0.15 + self.random() * 0.15;
+            self.particles.push(Particle {
+                position,
+                velocity: v,
+                age: 0.0,
+                life,
+                size: (0.03, 0.06),
+                color,
+                gravity: if shielded { 0.0 } else { 3.0 },
+            });
+        }
+    }
+
     pub fn update(&mut self, dt: f32) {
         for d in &mut self.decals {
             d.age += dt;

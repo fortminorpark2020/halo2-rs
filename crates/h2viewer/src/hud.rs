@@ -8,6 +8,8 @@ use blam_cache::hud::{Anchor, FLIP_HORIZONTALLY, FLIP_VERTICALLY};
 /// Halo 2's HUD blue.
 pub const BLUE: [f32; 4] = [0.30, 0.62, 1.0, 0.9];
 pub const RED: [f32; 4] = [1.0, 0.25, 0.2, 0.95];
+/// HUD blue, dimmed (the grenade type not selected).
+pub const DIM_BLUE: [f32; 4] = [0.30, 0.62, 1.0, 0.4];
 
 /// Distance of the corner anchors from the screen edge, in HUD pixels.
 const MARGIN: [f32; 2] = [24.0, 20.0];
@@ -169,6 +171,19 @@ impl HudBuilder {
             }
             x += cw;
         }
+    }
+
+    /// Text starting at `x` with its top at `y`.
+    pub fn text_left(
+        &mut self,
+        font_texture: usize,
+        [x, y]: [f32; 2],
+        height: f32,
+        text: &str,
+        color: [f32; 4],
+    ) {
+        let width = height * font::ASPECT * text.chars().count() as f32;
+        self.text(font_texture, [x + width * 0.5, y], height, text, color);
     }
 
     pub fn finish(self) -> Vec<HudBatch> {
