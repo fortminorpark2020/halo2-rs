@@ -11,6 +11,7 @@ const WEAP_AUTOAIM_RANGE: usize = 0x20C;
 const WEAP_MAGNETISM_ANGLE: usize = 0x210;
 const WEAP_MAGNETISM_RANGE: usize = 0x214;
 const WEAP_READY_TIME: usize = 0x13C;
+const WEAP_FLAGS: usize = 0x12C;
 /// The first hit of a melee combo (the player melee damage field is unused).
 const WEAP_MELEE_DAMAGE: usize = 0x1BC;
 const WEAP_FIRST_PERSON: usize = 0x2A8;
@@ -89,6 +90,10 @@ pub struct Barrel {
     pub projectile: DatumIndex,
     /// Radians, first to last shot of sustained fire.
     pub angle_change_per_shot: (f32, f32),
+    /// Spread and damage when the weapon is held in one of two hands.
+    pub dual_minimum_error: f32,
+    pub dual_error_angle: (f32, f32),
+    pub dual_damage_scale: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -120,6 +125,8 @@ pub struct Weapon {
     pub first_person_animations: Option<DatumIndex>,
     /// The weapon's HUD (`nhdt`): crosshair, ammo meter, scope.
     pub hud: Option<DatumIndex>,
+    /// The weapon flags (see [`Weapon::CAN_BE_DUAL_WIELDED`]).
+    pub flags: u32,
     pub ready_time: f32,
     pub zoom_levels: i16,
     pub zoom_range: (f32, f32),
@@ -133,6 +140,14 @@ pub struct Weapon {
     pub magazines: Vec<Magazine>,
     pub triggers: Vec<Trigger>,
     pub barrels: Vec<Barrel>,
+}
+
+impl Weapon {
+    pub const CAN_BE_DUAL_WIELDED: u32 = 1 << 22;
+
+    pub fn can_be_dual_wielded(&self) -> bool {
+        self.flags & Self::CAN_BE_DUAL_WIELDED != 0
+    }
 }
 
 fn range(b: &[u8], o: usize) -> (f32, f32) {
@@ -208,6 +223,9 @@ pub fn read_weapon(set: &mut MapSet, weap: DatumIndex) -> Result<Weapon> {
             first_person_offset: [f32_at(b, 0x7C), f32_at(b, 0x80), f32_at(b, 0x84)],
             projectile: tag_ref(b, 0x8C).unwrap_or(DatumIndex::NONE),
             angle_change_per_shot: range(b, 0xB0),
+            dual_minimum_error: f32_at(b, 0x58),
+            dual_error_angle: range(b, 0x5C),
+            dual_damage_scale: f32_at(b, 0x64),
         })
         .collect();
     Ok(Weapon {
@@ -216,6 +234,7 @@ pub fn read_weapon(set: &mut MapSet, weap: DatumIndex) -> Result<Weapon> {
         first_person_model: first.and_then(|f| tag_ref(f, 0x0)),
         first_person_animations: first.and_then(|f| tag_ref(f, 0x8)),
         hud: tag_ref(&d, WEAP_HUD),
+        flags: u32_at(&d, WEAP_FLAGS),
         ready_time: f32_at(&d, WEAP_READY_TIME),
         zoom_levels: i16_at(&d, WEAP_ZOOM_LEVELS),
         zoom_range: range(&d, WEAP_ZOOM_RANGE),

@@ -48,6 +48,18 @@ pub struct WeaponDef {
     pub ready_time: f32,
     /// Melee damage when it differs from the usual strike (the flag's smash).
     pub melee_damage: Option<f32>,
+    /// How it fires held in one of two hands, if it can be.
+    pub dual: Option<DualWield>,
+}
+
+/// A one-handed weapon's spread and damage when dual wielded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DualWield {
+    /// Radians.
+    pub minimum_error: f32,
+    /// Radians, from the first shot to sustained fire.
+    pub error_angle: (f32, f32),
+    pub damage_scale: f32,
 }
 
 /// Used when a weapon's ready animation is unknown.
@@ -91,6 +103,16 @@ impl WeaponDef {
             .filter(|r| *r > 0.0)
             .unwrap_or(DEFAULT_RANGE);
         let upper = damage.map(|d| d.upper_bound.0.max(d.upper_bound.1));
+        let dual = w.can_be_dual_wielded().then_some(DualWield {
+            minimum_error: barrel.dual_minimum_error,
+            error_angle: barrel.dual_error_angle,
+            // Unset (the Magnum): no change.
+            damage_scale: if barrel.dual_damage_scale > 0.0 {
+                barrel.dual_damage_scale
+            } else {
+                1.0
+            },
+        });
         WeaponDef {
             name: w.name.rsplit('\\').next().unwrap_or(&w.name).to_string(),
             behavior: trigger.behavior,
@@ -120,6 +142,26 @@ impl WeaponDef {
             damage_lower_bound: damage.map(|d| d.lower_bound).unwrap_or(0.0),
             ready_time: DEFAULT_READY_TIME,
             melee_damage: None,
+            dual,
+        }
+    }
+
+    /// The weapon as it fires held in one of two hands: wider spread and
+    /// sometimes less damage. Itself if it can't be dual wielded.
+    pub fn dual_wielded(&self) -> WeaponDef {
+        let Some(d) = self.dual else {
+            return self.clone();
+        };
+        WeaponDef {
+            minimum_error: d.minimum_error.max(self.minimum_error),
+            error_angle: (
+                d.error_angle.0.max(self.error_angle.0),
+                d.error_angle.1.max(self.error_angle.1),
+            ),
+            damage: self.damage * d.damage_scale,
+            damage_lower_bound: self.damage_lower_bound * d.damage_scale,
+            zoom_levels: 0,
+            ..self.clone()
         }
     }
 
@@ -379,6 +421,7 @@ mod tests {
             damage_lower_bound: 6.0,
             ready_time: DEFAULT_READY_TIME,
             melee_damage: None,
+            dual: None,
         }
     }
 

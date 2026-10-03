@@ -22,6 +22,10 @@ pub struct PadState {
     pub crouch: bool,
     pub zoom: bool,
     pub action: bool,
+    /// Y and the left trigger held (dual wielding: take a second gun, and
+    /// fire it).
+    pub switch: bool,
+    pub grenade: bool,
     /// Back held: the scoreboard.
     pub scores: bool,
 }
@@ -157,6 +161,8 @@ impl Pads {
             crouch: pad.is_pressed(Button::LeftThumb),
             zoom: pad.is_pressed(Button::RightThumb),
             action: pad.is_pressed(Button::West),
+            switch: pad.is_pressed(Button::North),
+            grenade: trigger(Button::LeftTrigger2),
             scores: pad.is_pressed(Button::Select),
         })
     }

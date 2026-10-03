@@ -201,13 +201,15 @@ impl Soundscape {
 
     /// The sound of something that just happened in the game.
     pub fn event(&mut self, scene: &Scene, game: &Game, listeners: &[Listener], e: &Event) {
-        let weapon_sounds = |player: usize| {
+        // The gun in a player's right hand, or their left.
+        let hand_sounds = |player: usize, left: bool| {
             game.players
                 .get(player)
-                .and_then(|p| p.held())
+                .and_then(|p| if left { p.left.as_ref() } else { p.held() })
                 .and_then(|h| scene.weapons.get(h.weapon))
                 .map(|w| (w.sounds, w.def.shots_per_fire > 1))
         };
+        let weapon_sounds = |player: usize| hand_sounds(player, false);
         let body = |player: usize| {
             game.players
                 .get(player)
@@ -312,6 +314,7 @@ impl Soundscape {
             Event::Juggernaut { .. } => self.announce(a.new_juggernaut),
             Event::Shot {
                 player,
+                left,
                 origin,
                 hit,
                 hit_player,
@@ -320,7 +323,7 @@ impl Soundscape {
                 if player >= self.players.len() {
                     self.players.resize(player + 1, PlayerSounds::default());
                 }
-                if let Some((sounds, burst)) = weapon_sounds(player) {
+                if let Some((sounds, burst)) = hand_sounds(player, left) {
                     let last = self.players[player].last_shot;
                     self.players[player].last_shot = game.time;
                     if !burst || game.time - last > BURST_GAP {
@@ -338,8 +341,8 @@ impl Soundscape {
                     _ => {}
                 }
             }
-            Event::Reloaded { player, .. } => {
-                let s = weapon_sounds(player).and_then(|w| w.0.reload);
+            Event::Reloaded { player, left, .. } => {
+                let s = hand_sounds(player, left).and_then(|w| w.0.reload);
                 self.play(scene, s, body(player), Some(player), listeners, 1.0);
             }
             Event::Switched { player } => {

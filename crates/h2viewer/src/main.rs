@@ -349,7 +349,8 @@ enum Mode {
 struct BodyPose {
     vertices: Vec<scene::Vertex>,
     object: Mat4,
-    weapon: Mat4,
+    /// Where the weapons go in the right and left hands.
+    weapons: [Mat4; 2],
 }
 
 struct App {
@@ -453,19 +454,34 @@ impl App {
         }
     }
 
-    /// For testing: swap the weapon in hand for any weapon.
+    /// For testing: swap the weapon in hand for any weapon. Asking for the
+    /// one-handed gun in hand again puts a second one in the left hand.
     fn give_weapon(&mut self, player: usize, w: usize) {
         let Some(def) = self.scene.weapons.get(w).map(|a| &a.def) else {
             return;
         };
         let p = &mut self.game.players[player];
-        if !p.alive || p.weapons.iter().any(|h| h.weapon == w) {
-            return;
-        }
         let held = HeldWeapon {
             weapon: w,
             state: WeaponState::new(def),
         };
+        let in_hand = p.weapons.get(p.current).is_some_and(|h| h.weapon == w);
+        if p.alive && in_hand && def.dual.is_some() && p.left.is_none() && p.objective.is_none() {
+            p.left = Some(held);
+            self.game.events.push(Event::Switched { player });
+            return;
+        }
+        if !p.alive {
+            return;
+        }
+        // On the back: bring it up.
+        if let Some(k) = p.weapons.iter().position(|h| h.weapon == w) {
+            if k != p.current {
+                p.current = k;
+                self.game.events.push(Event::Switched { player });
+            }
+            return;
+        }
         match p.weapons.get_mut(p.current) {
             Some(h) => *h = held,
             None => p.weapons.push(held),
@@ -650,12 +666,17 @@ impl App {
             match e {
                 Event::Shot {
                     player,
+                    left,
                     hit,
                     hit_player,
                     ..
                 } => {
                     if let Some(l) = self.local_of(player) {
-                        l.view.fired = true;
+                        if left {
+                            l.view.fired_left = true;
+                        } else {
+                            l.view.fired = true;
+                        }
                     }
                     match (hit, hit_player) {
                         (Some((p, _)), Some(j)) => {
@@ -666,10 +687,19 @@ impl App {
                         _ => {}
                     }
                 }
-                Event::Reloaded { player, empty } => {
-                    self.body_actions.push((player, "reload_1"));
+                Event::Reloaded {
+                    player,
+                    left,
+                    empty,
+                } => {
+                    let what = if left { "reload_1_left" } else { "reload_1" };
+                    self.body_actions.push((player, what));
                     if let Some(l) = self.local_of(player) {
-                        l.view.reload = Some(empty);
+                        if left {
+                            l.view.reload_left = Some(empty);
+                        } else {
+                            l.view.reload = Some(empty);
+                        }
                     }
                 }
                 Event::Switched { player } => {
@@ -761,10 +791,13 @@ impl App {
         self.bodies.resize_with(n, BodyAnimator::default);
         self.body_poses.resize_with(n, || None);
         for (i, p) in self.game.players.iter().enumerate().take(n) {
-            let style = p
+            let mut style = p
                 .held()
                 .and_then(|h| self.scene.weapons.get(h.weapon))
                 .map_or(("rifle", "any"), |w| body::weapon_style(&w.def.name));
+            if p.left.is_some() {
+                style.0 = "dual";
+            }
             let (s, c) = p.yaw.sin_cos();
             let v = p.body.velocity.truncate();
             let input = BodyInput {
@@ -782,7 +815,7 @@ impl App {
             self.body_poses[i] = Some(BodyPose {
                 vertices: rig.skin.pose(&rig.skin_matrices(&world)),
                 object: Mat4::from_translation(p.body.position) * Mat4::from_rotation_z(p.yaw),
-                weapon: rig.weapon_frame(&world),
+                weapons: [false, true].map(|left| rig.weapon_frame(&world, left)),
             });
         }
     }
@@ -863,20 +896,25 @@ impl App {
             light,
             colors: Some(player_colors(&self.game, player)),
         }];
-        let weapon = p.held().filter(|_| p.alive);
-        if let Some(mesh) = weapon
-            .and_then(|h| self.scene.weapons.get(h.weapon))
-            .and_then(|w| w.world_mesh)
-        {
-            out.push(DrawCall {
-                mesh,
-                model: pose.object * pose.weapon,
-                light,
-                colors: None,
-            });
+        for (held, hand) in [
+            (p.held(), pose.weapons[0]),
+            (p.left.as_ref(), pose.weapons[1]),
+        ] {
+            if let Some(mesh) = held
+                .filter(|_| p.alive)
+                .and_then(|h| self.scene.weapons.get(h.weapon))
+                .and_then(|w| w.world_mesh)
+            {
+                out.push(DrawCall {
+                    mesh,
+                    model: pose.object * hand,
+                    light,
+                    colors: None,
+                });
+            }
         }
         if p.alive {
-            let pole = pose.object * pose.weapon;
+            let pole = pose.object * pose.weapons[0];
             if let Some(cloth) = objective::carried_cloth(&self.scene, &self.game, player, pole) {
                 out.push(DrawCall { light, ..cloth });
             }

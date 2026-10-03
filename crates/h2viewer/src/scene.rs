@@ -125,6 +125,16 @@ impl MeshData {
         self.indices.len() / 3
     }
 
+    /// A copy with every triangle wound the other way, to draw mirrored
+    /// (the left hand's gun and arm when dual wielding).
+    pub fn mirrored(&self) -> MeshData {
+        let mut m = self.clone();
+        for t in m.indices.as_chunks_mut::<3>().0 {
+            t.swap(1, 2);
+        }
+        m
+    }
+
     /// Build from sections whose parts index `materials` (the model's
     /// shaders, mapped to scene materials). Level geometry passes each
     /// section's baked lighting in `lights`.
@@ -224,6 +234,8 @@ pub struct WeaponAssets {
     pub world_mesh: Option<usize>,
     /// First person model, in `Scene::meshes`.
     pub view_mesh: Option<usize>,
+    /// The same, mirrored for the left hand (one-handed weapons).
+    pub mirror_mesh: Option<usize>,
     pub skeleton: Skeleton,
     pub skin: SkinnedMesh,
     /// The muzzle: a gun node and the offset from it.
@@ -445,6 +457,8 @@ pub struct Body {
 /// Master Chief's first person arms.
 pub struct Arms {
     pub mesh: usize,
+    /// The arms mirrored, for the left hand's gun.
+    pub mirror: usize,
     pub skeleton: Skeleton,
     pub skin: SkinnedMesh,
 }
@@ -832,6 +846,7 @@ impl Loader {
             .filter(|d| *d > 0.0);
 
         let mut view_mesh = None;
+        let mut mirror_mesh = None;
         let mut muzzle = [0.2, 0.0, 0.04];
         let mut muzzle_node = 0;
         let mut grip = [0.0; 3];
@@ -853,6 +868,10 @@ impl Loader {
                     skeleton = Skeleton::new(&m.nodes);
                     let mesh = self.model_mesh(&m);
                     skin = SkinnedMesh::new(&mesh);
+                    if def.dual.is_some() {
+                        meshes.push(mesh.mirrored());
+                        mirror_mesh = Some(meshes.len() - 1);
+                    }
                     meshes.push(mesh);
                     view_mesh = Some(meshes.len() - 1);
                 }
@@ -909,6 +928,7 @@ impl Loader {
             world_mesh,
             def,
             view_mesh,
+            mirror_mesh,
             skeleton,
             skin,
             muzzle_node,
@@ -1099,7 +1119,7 @@ impl Loader {
                 graph,
                 Skeleton::new(&m.nodes),
                 skin,
-                m.marker("right_hand").copied(),
+                ["right_hand", "left_hand"].map(|h| m.marker(h).copied()),
             ),
             meshes: (first..first + MAX_BODIES).collect(),
         })
@@ -1116,9 +1136,11 @@ impl Loader {
         };
         let mesh = self.model_mesh(&m);
         let skin = SkinnedMesh::new(&mesh);
+        meshes.push(mesh.mirrored());
         meshes.push(mesh);
         Some(Arms {
             mesh: meshes.len() - 1,
+            mirror: meshes.len() - 2,
             skeleton: Skeleton::new(&m.nodes),
             skin,
         })

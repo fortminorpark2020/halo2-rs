@@ -34,6 +34,16 @@ enum HudRole {
     Hidden,
 }
 
+/// The role of a widget of the left hand's gun (dual wielding): only its
+/// own background and ammo meter, top left.
+fn left_hud_role(name: &str) -> HudRole {
+    match name {
+        "weapon_background_left" => HudRole::Background,
+        "ammo_meter_left" => HudRole::AmmoMeter,
+        _ => HudRole::Hidden,
+    }
+}
+
 fn hud_role(name: &str, magnification: f32) -> HudRole {
     match name {
         "weapon_background_single" | "weapon_background_right" => HudRole::Background,
@@ -56,6 +66,94 @@ fn hud_role(name: &str, magnification: f32) -> HudRole {
 fn melee_strike(rig: &rig::FirstPersonRig, n: usize) -> Option<usize> {
     rig.find(&format!("first_person:melee_strike_{}", 1 + n % 2), 0)
         .or_else(|| rig.find("first_person:melee_strike_1", 0))
+}
+
+/// A first person animation, Halo 2's dual wield version when holding two
+/// guns (`first_person:dual:idle`), else the usual one.
+fn hand_animation(rig: &rig::FirstPersonRig, dual: bool, what: &str, pick: usize) -> Option<usize> {
+    dual.then(|| rig.find(&format!("first_person:dual:{what}"), pick))
+        .flatten()
+        .or_else(|| rig.find(&format!("first_person:{what}"), pick))
+}
+
+/// One hand's first person arm and gun: its animation, pose, meshes
+/// (arms, gun) and frame.
+struct Hand<'a> {
+    rig: &'a rig::FirstPersonRig,
+    pose: &'a [rig::NodePose],
+    meshes: (usize, usize),
+    frame: Mat4,
+}
+
+/// A flash at the muzzle just after a shot.
+fn muzzle_flash(
+    out: &mut Vec<SpriteVertex>,
+    weapon: &WeaponAssets,
+    state: &WeaponState,
+    muzzle_frame: Mat4,
+    (r, u): (Vec3, Vec3),
+) {
+    if state.since_shot < 0.05 {
+        let muzzle = muzzle_frame.transform_point3(Vec3::from(weapon.muzzle));
+        let size = 0.012 + 0.006 * (state.since_shot * 300.0).sin().abs();
+        effects::quad(out, muzzle, r * size, u * size, [1.0, 0.8, 0.4, 0.9]);
+    }
+}
+
+/// What one hand's first person animation should react to.
+struct HandCues {
+    ready: bool,
+    fired: bool,
+    melee: bool,
+    thrown: bool,
+    reload: Option<bool>,
+}
+
+fn animate_hand(
+    animator: &mut rig::Animator,
+    rig: &rig::FirstPersonRig,
+    dual: bool,
+    cues: HandCues,
+    shots: &mut usize,
+    dt: f32,
+) {
+    if cues.ready {
+        animator.play(hand_animation(rig, dual, "ready", *shots), false);
+    }
+    if cues.fired {
+        *shots += 1;
+        let anim = hand_animation(rig, dual, "fire_1", *shots);
+        if anim.is_some() {
+            animator.play(anim, false);
+        }
+    }
+    if cues.melee && !dual {
+        *shots += 1;
+        let anim = melee_strike(rig, *shots);
+        if anim.is_some() {
+            animator.play(anim, false);
+        }
+    }
+    if cues.thrown && !dual {
+        let anim = rig.find("first_person:throw_grenade", 0);
+        if anim.is_some() {
+            animator.play(anim, false);
+        }
+    }
+    if let Some(empty) = cues.reload {
+        let name = if empty && !dual {
+            "reload_empty"
+        } else {
+            "reload_full"
+        };
+        let anim =
+            hand_animation(rig, dual, name, 0).or_else(|| rig.find("first_person:reload_full", 0));
+        animator.play(anim, false);
+    }
+    if animator.finished(rig) {
+        animator.play(hand_animation(rig, dual, "idle", *shots), true);
+    }
+    animator.update(rig, dt);
 }
 
 fn smoothstep(x: f32) -> f32 {
@@ -157,9 +255,11 @@ pub struct Taps {
 #[derive(Default)]
 pub struct ViewEvents {
     pub fired: bool,
+    pub fired_left: bool,
     pub melee: bool,
     pub thrown: bool,
     pub reload: Option<bool>,
+    pub reload_left: Option<bool>,
     pub switched: bool,
 }
 
@@ -197,6 +297,11 @@ pub struct LocalPlayer {
     /// The weapon the first person animation belongs to.
     pub shown_weapon: Option<usize>,
     pub shots_fired: usize,
+    /// The left hand's gun and animation, dual wielding.
+    pub left_animator: rig::Animator,
+    pub shown_left: Option<usize>,
+    pub left_shots: usize,
+    pub shown_dual: bool,
     /// Kill feed and pickups, newest last, with seconds left on screen.
     pub messages: Vec<(String, f32)>,
     /// A standing line at the top of the view (LAN games to join).
@@ -220,6 +325,10 @@ impl LocalPlayer {
             animator: rig::Animator::default(),
             shown_weapon: None,
             shots_fired: 0,
+            left_animator: rig::Animator::default(),
+            shown_left: None,
+            left_shots: 0,
+            shown_dual: false,
             messages: Vec::new(),
             notice: None,
             view: ViewEvents::default(),
@@ -289,6 +398,9 @@ impl LocalPlayer {
             cmd.zoom |= k.zoom_held || held(KeyCode::KeyZ);
             cmd.reload |= held(KeyCode::KeyR);
             cmd.action = held(KeyCode::KeyE);
+            // Held, for taking and firing a second gun.
+            cmd.switch_weapon |= held(KeyCode::KeyQ);
+            cmd.throw_grenade |= held(KeyCode::KeyG) && k.captured;
         }
         if let Some(p) = pad {
             if p.left != glam::Vec2::ZERO {
@@ -299,6 +411,8 @@ impl LocalPlayer {
             cmd.fire |= p.fire;
             cmd.zoom |= p.zoom;
             cmd.action |= p.action;
+            cmd.switch_weapon |= p.switch;
+            cmd.throw_grenade |= p.grenade;
             // Halo 2's X both reloads and picks up.
             cmd.reload |= p.action;
         }
@@ -332,57 +446,57 @@ impl LocalPlayer {
         self.messages.retain(|m| m.1 > 0.0);
     }
 
-    /// Pick and advance the first person animation: bring a new weapon up,
-    /// fire, melee, throw and reload on cue, otherwise idle.
+    /// Pick and advance the first person animations: bring a new weapon up,
+    /// fire, melee, throw and reload on cue, otherwise idle. Dual wielding,
+    /// each hand plays Halo 2's dual animations on its own gun.
     pub fn animate_view_model(&mut self, scene: &Scene, game: &Game, dt: f32) {
         let view = std::mem::take(&mut self.view);
-        let weapon = self.me(game).held().map(|h| h.weapon);
-        let Some(rig) = weapon
-            .and_then(|w| scene.weapons.get(w))
-            .and_then(|w| w.rig.as_ref())
-        else {
-            self.shown_weapon = weapon;
-            return;
+        let me = self.me(game);
+        let left = me.left.as_ref().map(|h| h.weapon);
+        let dual = left.is_some();
+        let switched = view.switched || dual != self.shown_dual;
+        self.shown_dual = dual;
+        let rig_of = |w: Option<usize>| {
+            w.and_then(|w| scene.weapons.get(w))
+                .and_then(|w| w.rig.as_ref())
         };
-        if view.switched || weapon != self.shown_weapon {
-            self.shown_weapon = weapon;
-            self.animator.play(rig.find("first_person:ready", 0), false);
-        }
-        if view.fired {
-            self.shots_fired += 1;
-            let anim = rig.find("first_person:fire_1", self.shots_fired);
-            if anim.is_some() {
-                self.animator.play(anim, false);
-            }
-        }
-        if view.melee {
-            self.shots_fired += 1;
-            let anim = melee_strike(rig, self.shots_fired);
-            if anim.is_some() {
-                self.animator.play(anim, false);
-            }
-        }
-        if view.thrown {
-            let anim = rig.find("first_person:throw_grenade", 0);
-            if anim.is_some() {
-                self.animator.play(anim, false);
-            }
-        }
-        if let Some(empty) = view.reload {
-            let name = if empty {
-                "first_person:reload_empty"
-            } else {
-                "first_person:reload_full"
+        let right = me.held().map(|h| h.weapon);
+        if let Some(rig) = rig_of(right) {
+            let hand = HandCues {
+                ready: switched || right != self.shown_weapon,
+                fired: view.fired,
+                melee: view.melee,
+                thrown: view.thrown,
+                reload: view.reload,
             };
-            let anim = rig
-                .find(name, 0)
-                .or_else(|| rig.find("first_person:reload_full", 0));
-            self.animator.play(anim, false);
+            animate_hand(
+                &mut self.animator,
+                rig,
+                dual,
+                hand,
+                &mut self.shots_fired,
+                dt,
+            );
         }
-        if self.animator.finished(rig) {
-            self.animator.play(rig.find("first_person:idle", 0), true);
+        self.shown_weapon = right;
+        if let Some(rig) = rig_of(left) {
+            let hand = HandCues {
+                ready: switched || left != self.shown_left,
+                fired: view.fired_left,
+                melee: false,
+                thrown: false,
+                reload: view.reload_left,
+            };
+            animate_hand(
+                &mut self.left_animator,
+                rig,
+                true,
+                hand,
+                &mut self.left_shots,
+                dt,
+            );
         }
-        self.animator.update(rig, dt);
+        self.shown_left = left;
     }
 
     /// The camera's frame (x forward, y left, z up, like Halo's first person
@@ -450,28 +564,16 @@ impl LocalPlayer {
         // The gun and arms take the light where the player stands.
         let light = scene.level_light.at(&scene.textures, self.camera.position);
         let (_, r, u) = self.camera.basis();
-        let (model, muzzle_frame) = match (&weapon.rig, &scene.arms) {
+        let posed = match (&weapon.rig, &scene.arms) {
             (Some(rig), Some(arms)) if !self.animator.pose().is_empty() => {
-                // Arms and gun posed by the animation, in camera space.
-                let world = rig.world(self.animator.pose());
                 let frame = self.view_frame(game);
-                out.posed.push((
-                    arms.mesh,
-                    arms.skin.pose(&rig.arms_skin(&world, &arms.skeleton)),
-                ));
-                out.posed.push((
-                    mesh,
-                    weapon.skin.pose(&rig.gun_skin(&world, &weapon.skeleton)),
-                ));
-                out.view_models.push(DrawCall {
-                    mesh: arms.mesh,
-                    model: frame,
-                    light,
-                    colors: Some(player_colors(game, self.player)),
-                });
-                let muzzle = rig
-                    .gun_node_world(&world, weapon.muzzle_node)
-                    .map_or(frame, |m| frame * m);
+                let hand = Hand {
+                    rig,
+                    pose: self.animator.pose(),
+                    meshes: (arms.mesh, mesh),
+                    frame,
+                };
+                let (world, muzzle) = self.draw_hand(&mut out, scene, game, weapon, &hand, light);
                 // The flag's cloth hangs from the top of the pole.
                 let carried = game
                     .flags
@@ -490,36 +592,89 @@ impl LocalPlayer {
                         colors: Some(crate::objective::flag_colors(f.team)),
                     });
                 }
-                (frame, muzzle)
+                // The left hand's gun: the same arm and gun, mirrored.
+                let left = self.me(game).left.as_ref();
+                let left = left.and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state)));
+                if let Some((lw, ls)) = left {
+                    if let (Some(lrig), Some(lmesh)) = (&lw.rig, lw.mirror_mesh) {
+                        if !self.left_animator.pose().is_empty() {
+                            let hand = Hand {
+                                rig: lrig,
+                                pose: self.left_animator.pose(),
+                                meshes: (arms.mirror, lmesh),
+                                frame: frame * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)),
+                            };
+                            let (_, m) = self.draw_hand(&mut out, scene, game, lw, &hand, light);
+                            muzzle_flash(&mut out.view_sprites, lw, ls, m, (r, u));
+                        }
+                    }
+                }
+                Some(muzzle)
             }
-            _ => {
-                let m = self.view_model_matrix(game, weapon, state);
-                let node = weapon
-                    .skeleton
-                    .inverse_bind
-                    .get(weapon.muzzle_node)
-                    .map_or(Mat4::IDENTITY, Mat4::inverse);
-                (m, m * node)
-            }
+            _ => None,
         };
+        let muzzle_frame = posed.unwrap_or_else(|| {
+            let m = self.view_model_matrix(game, weapon, state);
+            out.view_models.push(DrawCall {
+                mesh,
+                model: m,
+                light,
+                colors: None,
+            });
+            let node = weapon
+                .skeleton
+                .inverse_bind
+                .get(weapon.muzzle_node)
+                .map_or(Mat4::IDENTITY, Mat4::inverse);
+            m * node
+        });
+        muzzle_flash(&mut out.view_sprites, weapon, state, muzzle_frame, (r, u));
+        out
+    }
+
+    /// Pose and draw one hand's arm and gun. Returns the rig's world
+    /// matrices and the gun's muzzle frame.
+    fn draw_hand(
+        &self,
+        out: &mut ViewDraws,
+        scene: &Scene,
+        game: &Game,
+        weapon: &WeaponAssets,
+        hand: &Hand,
+        light: Option<[f32; 3]>,
+    ) -> (Vec<Mat4>, Mat4) {
+        let Some(arms) = &scene.arms else {
+            return (Vec::new(), hand.frame);
+        };
+        let world = hand.rig.world(hand.pose);
+        let (arms_mesh, gun_mesh) = hand.meshes;
+        out.posed.push((
+            arms_mesh,
+            arms.skin.pose(&hand.rig.arms_skin(&world, &arms.skeleton)),
+        ));
+        out.posed.push((
+            gun_mesh,
+            weapon
+                .skin
+                .pose(&hand.rig.gun_skin(&world, &weapon.skeleton)),
+        ));
         out.view_models.push(DrawCall {
-            mesh,
-            model,
+            mesh: arms_mesh,
+            model: hand.frame,
+            light,
+            colors: Some(player_colors(game, self.player)),
+        });
+        out.view_models.push(DrawCall {
+            mesh: gun_mesh,
+            model: hand.frame,
             light,
             colors: None,
         });
-        if state.since_shot < 0.05 {
-            let muzzle = muzzle_frame.transform_point3(Vec3::from(weapon.muzzle));
-            let size = 0.012 + 0.006 * (state.since_shot * 300.0).sin().abs();
-            effects::quad(
-                &mut out.view_sprites,
-                muzzle,
-                r * size,
-                u * size,
-                [1.0, 0.8, 0.4, 0.9],
-            );
-        }
-        out
+        let muzzle = hand
+            .rig
+            .gun_node_world(&world, weapon.muzzle_node)
+            .map_or(hand.frame, |m| hand.frame * m);
+        (world, muzzle)
     }
 
     /// Projection for the first person weapon, which ignores zoom.
@@ -547,7 +702,8 @@ impl LocalPlayer {
                     hb.widget(widget, color, hud_mode::METER_GREY, shield);
                 }
                 "shield_mask" => hb.widget(widget, hud::BLUE, hud_mode::PLAIN, 0.0),
-                "frag_grenade_default" => {
+                // Dual wielding, the left gun's display takes its place.
+                "frag_grenade_default" if me.left.is_none() => {
                     hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0);
                     // Plasma grenades in the left box, frags in the right;
                     // the selected kind is bright.
@@ -654,57 +810,28 @@ impl LocalPlayer {
             );
             return hb.finish();
         }
-        if let Some(weapon) = game.swap_prompt(self.player) {
-            if let Some(a) = scene.weapons.get(weapon) {
-                let button = if self.keyboard { "E" } else { "X" };
-                let text = format!("HOLD {button} TO PICK UP {}", display_name(&a.def.name));
-                hb.text(
-                    font,
-                    [w * 0.5, h * 0.5 + 64.0 * s],
-                    9.0 * s,
-                    &text,
-                    hud::BLUE,
-                );
+        let prompts = [
+            (game.swap_prompt(self.player), ["E", "X"], "PICK UP"),
+            (game.dual_prompt(self.player), ["Q", "Y"], "DUAL WIELD"),
+        ];
+        let mut y = h * 0.5 + 64.0 * s;
+        for (weapon, buttons, what) in prompts {
+            if let Some(a) = weapon.and_then(|w| scene.weapons.get(w)) {
+                let button = buttons[!self.keyboard as usize];
+                let name = display_name(&a.def.name);
+                let text = format!("HOLD {button} TO {what} {name}");
+                hb.text(font, [w * 0.5, y], 9.0 * s, &text, hud::BLUE);
+                y += 12.0 * s;
             }
         }
         let Some((weapon, state)) = self.current(scene, game) else {
             return hb.finish();
         };
-        let zoomed = state.zoom > 0;
         let def = &weapon.def;
-        let magnification = def.magnification(state.zoom);
-        let ammo_fill = if def.uses_ammo() {
-            state.loaded as f32 / def.magazine_size.max(1) as f32
-        } else {
-            1.0
-        };
-        for widget in &weapon.hud {
-            match hud_role(&widget.name, magnification) {
-                HudRole::Scope if zoomed => {
-                    hb.scope(widget, scene.hud_white, [0.0, 0.0, 0.0, 132.0 / 255.0]);
-                }
-                HudRole::Background => {
-                    hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0);
-                    if def.uses_ammo() {
-                        let rect = hb.widget_rect(widget);
-                        let th = (rect[3] - rect[1]) * 0.5;
-                        hb.text(
-                            font,
-                            [rect[0] + (rect[2] - rect[0]) * 0.19, rect[1] + th * 0.5],
-                            th,
-                            &state.reserve.to_string(),
-                            hud::BLUE,
-                        );
-                    }
-                }
-                HudRole::AmmoMeter => hb.widget(widget, hud::BLUE, hud_mode::METER_BLUE, ammo_fill),
-                HudRole::ZoomedAmmoMeter if zoomed => {
-                    hb.widget(widget, hud::BLUE, hud_mode::METER_BLUE, ammo_fill)
-                }
-                HudRole::Static => hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0),
-                HudRole::Zoomed if zoomed => hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0),
-                _ => {}
-            }
+        weapon_hud(&mut hb, scene, weapon, state, hud_role);
+        let left = me.left.as_ref();
+        if let Some((lw, ls)) = left.and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state))) {
+            weapon_hud(&mut hb, scene, lw, ls, |name, _| left_hud_role(name));
         }
         if def.uses_ammo() && state.loaded == 0 && state.reloading.is_none() {
             let msg = if state.reserve == 0 {
@@ -723,6 +850,54 @@ impl LocalPlayer {
             );
         }
         hb.finish()
+    }
+}
+
+/// A weapon's HUD widgets: background with spare ammo, ammo meter,
+/// crosshair, scope. `role` says which widgets are this hand's.
+fn weapon_hud(
+    hb: &mut HudBuilder,
+    scene: &Scene,
+    weapon: &WeaponAssets,
+    state: &WeaponState,
+    role: impl Fn(&str, f32) -> HudRole,
+) {
+    let font = scene.hud_font;
+    let zoomed = state.zoom > 0;
+    let def = &weapon.def;
+    let magnification = def.magnification(state.zoom);
+    let ammo_fill = if def.uses_ammo() {
+        state.loaded as f32 / def.magazine_size.max(1) as f32
+    } else {
+        1.0
+    };
+    for widget in &weapon.hud {
+        match role(&widget.name, magnification) {
+            HudRole::Scope if zoomed => {
+                hb.scope(widget, scene.hud_white, [0.0, 0.0, 0.0, 132.0 / 255.0]);
+            }
+            HudRole::Background => {
+                hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0);
+                if def.uses_ammo() {
+                    let rect = hb.widget_rect(widget);
+                    let th = (rect[3] - rect[1]) * 0.5;
+                    hb.text(
+                        font,
+                        [rect[0] + (rect[2] - rect[0]) * 0.19, rect[1] + th * 0.5],
+                        th,
+                        &state.reserve.to_string(),
+                        hud::BLUE,
+                    );
+                }
+            }
+            HudRole::AmmoMeter => hb.widget(widget, hud::BLUE, hud_mode::METER_BLUE, ammo_fill),
+            HudRole::ZoomedAmmoMeter if zoomed => {
+                hb.widget(widget, hud::BLUE, hud_mode::METER_BLUE, ammo_fill)
+            }
+            HudRole::Static => hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0),
+            HudRole::Zoomed if zoomed => hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0),
+            _ => {}
+        }
     }
 }
 

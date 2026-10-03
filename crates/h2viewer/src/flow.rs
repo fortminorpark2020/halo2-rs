@@ -425,6 +425,10 @@ impl App {
         self.game.events.clear();
         if let Some(w) = self.start_weapon {
             self.give_weapon(0, w);
+            // H2_DUAL=1: a second one in the left hand (for testing).
+            if std::env::var_os("H2_DUAL").is_some() {
+                self.give_weapon(0, w);
+            }
         }
         self.mode = Mode::Playing;
         self.menu_open = false;

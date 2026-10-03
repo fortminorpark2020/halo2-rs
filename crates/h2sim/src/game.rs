@@ -11,6 +11,7 @@ use blam_cache::physics::{BipedPhysics, PlayerMovement};
 use glam::{Vec2, Vec3};
 
 mod ctf;
+mod dual;
 mod juggernaut;
 mod sync;
 mod zones;
@@ -345,6 +346,8 @@ pub struct Spartan {
     /// At most two; `current` is in hand.
     pub weapons: Vec<HeldWeapon>,
     pub current: usize,
+    /// A second one-handed weapon, in the left hand (dual wielding).
+    pub left: Option<HeldWeapon>,
     /// A flag carried in hand in place of the weapons.
     pub objective: Option<HeldWeapon>,
     pub frags: u8,
@@ -368,6 +371,8 @@ pub struct Spartan {
     melee_cooldown: f32,
     grenade_cooldown: f32,
     action_held: f32,
+    /// Seconds the switch button has been held (negative once acted on).
+    switch_held: f32,
     last: Command,
 }
 
@@ -393,6 +398,13 @@ impl Spartan {
         let r = f.cross(Vec3::Z).normalize_or(Vec3::X);
         (f, r, r.cross(f))
     }
+}
+
+/// What walking over a weapon took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Taken {
+    Ammo,
+    Weapon,
 }
 
 /// A weapon on the ground: a map item, or one a player dropped.
@@ -424,6 +436,8 @@ pub struct Grenade {
 pub enum Event {
     Shot {
         player: usize,
+        /// Fired by the left hand's weapon.
+        left: bool,
         origin: Vec3,
         direction: Vec3,
         /// Where it hit the level or a player, and the surface normal.
@@ -432,6 +446,7 @@ pub enum Event {
     },
     Reloaded {
         player: usize,
+        left: bool,
         empty: bool,
     },
     Switched {
@@ -710,6 +725,7 @@ impl Game {
             respawn_in: 0.0,
             weapons,
             current: 0,
+            left: None,
             objective: None,
             frags: self.rules.starting_frags,
             plasmas: self.rules.starting_plasmas,
@@ -726,6 +742,7 @@ impl Game {
             melee_cooldown: 0.0,
             grenade_cooldown: 0.0,
             action_held: 0.0,
+            switch_held: f32::MIN,
             last: Command::default(),
         }
     }
@@ -848,13 +865,7 @@ impl Game {
             }
         }
 
-        if pressed(cmd.switch_weapon, last.switch_weapon) {
-            if self.players[i].objective.is_some() {
-                self.drop_flag(i);
-            } else {
-                self.switch_weapon(i);
-            }
-        }
+        self.press_switch(i, cmd.switch_weapon, last.switch_weapon, dt);
         if pressed(cmd.switch_grenade, last.switch_grenade) {
             let p = &mut self.players[i];
             p.grenade = match p.grenade {
@@ -872,7 +883,9 @@ impl Game {
         if pressed(cmd.melee, last.melee) && self.players[i].melee_cooldown <= 0.0 {
             self.melee(i, lunges);
         }
-        if pressed(cmd.throw_grenade, last.throw_grenade) {
+        // Dual wielding, the grenade button is the left trigger.
+        let dual = self.players[i].left.is_some();
+        if pressed(cmd.throw_grenade, last.throw_grenade) && !dual {
             self.throw_grenade(i);
         }
 
@@ -880,13 +893,18 @@ impl Game {
         let (eye, (f, r, u)) = (self.players[i].eye(), self.players[i].basis());
         let ready = self.players[i].readying <= 0.0;
         let mut shots = Vec::new();
-        let mut reloaded = None;
+        let mut reloaded = Vec::new();
         // A flag in hand only melees.
         let gun = match &self.players[i].objective {
             Some(_) => None,
             None => self.players[i].held().map(|h| h.weapon),
         };
-        if let Some(def) = gun.and_then(|w| self.weapons.get(w)).cloned() {
+        if let Some(def) = gun.and_then(|w| self.weapons.get(w)) {
+            let def = if dual {
+                def.dual_wielded()
+            } else {
+                def.clone()
+            };
             let p = &mut self.players[i];
             let held = &mut p.weapons[p.current];
             let was = (held.state.reloading.is_some(), held.state.loaded == 0);
@@ -900,24 +918,48 @@ impl Game {
             let input = WeaponInput {
                 fire: cmd.fire && ready && !lunges,
                 reload: cmd.reload,
-                zoom: cmd.zoom,
+                zoom: cmd.zoom && !dual,
             };
             for shot in held.state.update(&def, input, dt) {
-                shots.push((shot.direction(f, r, u), def.clone()));
+                shots.push((shot.direction(f, r, u), def.clone(), false));
             }
             if held.state.reloading.is_some() && !was.0 {
-                reloaded = Some(was.1);
+                reloaded.push((false, was.1));
+            }
+        }
+        // The left hand's gun, on the left trigger (zoom or grenade).
+        let left = self.players[i].left.as_ref().map(|h| h.weapon);
+        if let Some(def) = left
+            .and_then(|w| self.weapons.get(w))
+            .map(|d| d.dual_wielded())
+        {
+            let held = self.players[i].left.as_mut().expect("a left hand gun");
+            let was = (held.state.reloading.is_some(), held.state.loaded == 0);
+            let input = WeaponInput {
+                fire: (cmd.zoom || cmd.throw_grenade) && ready,
+                reload: cmd.reload,
+                zoom: false,
+            };
+            for shot in held.state.update(&def, input, dt) {
+                shots.push((shot.direction(f, r, u), def.clone(), true));
+            }
+            if held.state.reloading.is_some() && !was.0 {
+                reloaded.push((true, was.1));
             }
         }
         if lunges && pressed(cmd.fire, last.fire) && ready && self.players[i].melee_cooldown <= 0.0
         {
             self.melee(i, true);
         }
-        if let Some(empty) = reloaded {
-            self.events.push(Event::Reloaded { player: i, empty });
+        for (left, empty) in reloaded {
+            self.events.push(Event::Reloaded {
+                player: i,
+                left,
+                empty,
+            });
         }
-        for (dir, def) in shots {
-            self.fire(world, i, eye, dir, &def);
+        for (dir, def, left) in shots {
+            self.fire(world, i, eye, dir, &def, left);
         }
         self.players[i].last = cmd;
     }
@@ -956,13 +998,14 @@ impl Game {
         best
     }
 
-    fn fire(&mut self, world: &World, i: usize, eye: Vec3, dir: Vec3, def: &WeaponDef) {
+    fn fire(&mut self, world: &World, i: usize, eye: Vec3, dir: Vec3, def: &WeaponDef, left: bool) {
         let range = def.range;
         let wall = world.raycast_hit(eye, dir, range);
         let target = self
             .trace_players(i, eye, dir)
             .filter(|&(_, t, _)| t <= range && wall.is_none_or(|(wt, _)| t < wt));
-        let weapon = self.players[i].held().map(|h| h.weapon);
+        let p = &self.players[i];
+        let weapon = if left { p.left.as_ref() } else { p.held() }.map(|h| h.weapon);
         let (hit, hit_player) = match target {
             Some((j, t, head)) => {
                 let damage = WeaponState::damage_at(def, t);
@@ -975,6 +1018,7 @@ impl Game {
         };
         self.events.push(Event::Shot {
             player: i,
+            left,
             origin: eye,
             direction: dir,
             hit,
@@ -1212,6 +1256,7 @@ impl Game {
                 ttl: DROPPED_WEAPON_LIFETIME,
             });
         }
+        self.drop_left(victim);
         self.events.push(Event::Killed {
             killer,
             victim,
@@ -1353,11 +1398,24 @@ impl Game {
                     (*count < max).then(|| *count += 1).is_some()
                 }
                 ItemKind::Weapon(w) => {
-                    let fresh = match self.weapons.get(w) {
+                    let mut state = match self.weapons.get(w) {
                         Some(def) => WeaponState::new(def),
                         None => continue,
                     };
-                    self.take_weapon(i, w, fresh, action)
+                    match self.take_weapon(i, w, &mut state, action) {
+                        // A one-handed gun stays, emptier, for a second hand.
+                        Some(Taken::Ammo) if self.one_handed(w) => {
+                            self.dropped.push(DroppedWeapon {
+                                weapon: w,
+                                state,
+                                position: spawn.position,
+                                yaw: 0.0,
+                                ttl: DROPPED_WEAPON_LIFETIME,
+                            });
+                            true
+                        }
+                        taken => taken.is_some(),
+                    }
                 }
             };
             if taken {
@@ -1373,54 +1431,75 @@ impl Game {
         while d < self.dropped.len() {
             if near(self.dropped[d].position) {
                 let w = self.dropped[d].weapon;
-                let state = self.dropped[d].state.clone();
-                if self.take_weapon(i, w, state, action) {
-                    self.dropped.remove(d);
+                let mut state = self.dropped[d].state.clone();
+                let taken = self.take_weapon(i, w, &mut state, action);
+                if taken.is_some() {
                     self.events.push(Event::PickedUp {
                         player: i,
                         kind: ItemKind::Weapon(w),
                     });
-                    continue;
+                }
+                match taken {
+                    Some(Taken::Ammo) if self.one_handed(w) => self.dropped[d].state = state,
+                    Some(_) => {
+                        self.dropped.remove(d);
+                        continue;
+                    }
+                    None => {}
                 }
             }
             d += 1;
         }
     }
 
-    /// A weapon on the ground: ammo if the player has one already, the
-    /// weapon itself if they have a free hand or hold the action key.
-    fn take_weapon(&mut self, i: usize, w: usize, state: WeaponState, action: bool) -> bool {
-        let Some(def) = self.weapons.get(w).cloned() else {
-            return false;
-        };
+    /// A weapon on the ground (`state`): ammo if the player has one
+    /// already (drained from `state`), the weapon itself if they have a
+    /// free hand or hold the action key.
+    fn take_weapon(
+        &mut self,
+        i: usize,
+        w: usize,
+        state: &mut WeaponState,
+        action: bool,
+    ) -> Option<Taken> {
+        let def = self.weapons.get(w).cloned()?;
         let p = &mut self.players[i];
-        if let Some(h) = p.weapons.iter_mut().find(|h| h.weapon == w) {
+        let mut have = p.weapons.iter_mut().chain(p.left.as_mut());
+        if let Some(h) = have.find(|h| h.weapon == w) {
             if !def.uses_ammo() {
-                return false;
+                return None;
             }
             let room = def.maximum_rounds.saturating_sub(h.state.reserve);
             let take = (state.loaded + state.reserve).min(room);
             if take == 0 {
-                return false;
+                return None;
             }
             h.state.reserve += take;
-            return true;
+            let spare = take.min(state.reserve);
+            state.reserve -= spare;
+            state.loaded -= take - spare;
+            return Some(Taken::Ammo);
         }
         // Hands full with the flag: ammo only.
         if p.objective.is_some() {
-            return false;
+            return None;
         }
+        let state = state.clone();
         if p.weapons.len() < 2 {
             p.weapons.push(HeldWeapon { weapon: w, state });
             p.current = p.weapons.len() - 1;
             p.readying = ready_time(&self.weapons, p);
             self.events.push(Event::Switched { player: i });
-            return true;
+            return Some(Taken::Weapon);
         }
         if action && p.action_held >= SWAP_HOLD {
             p.action_held = f32::MIN;
             let old = std::mem::replace(&mut p.weapons[p.current], HeldWeapon { weapon: w, state });
             p.readying = ready_time(&self.weapons, p);
+            if def.dual.is_none() {
+                self.drop_left(i);
+            }
+            let p = &mut self.players[i];
             let (pos, yaw) = (p.body.position + Vec3::Z * 0.1, p.yaw);
             self.dropped.push(DroppedWeapon {
                 weapon: old.weapon,
@@ -1430,9 +1509,9 @@ impl Game {
                 ttl: DROPPED_WEAPON_LIFETIME,
             });
             self.events.push(Event::Switched { player: i });
-            return true;
+            return Some(Taken::Weapon);
         }
-        false
+        None
     }
 
     fn step_items(&mut self, dt: f32) {

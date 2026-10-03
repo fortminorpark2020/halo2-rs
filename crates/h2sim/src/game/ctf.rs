@@ -320,13 +320,16 @@ impl Game {
             weapon: w,
             state: WeaponState::new(def),
         };
+        let ready = def.ready_time;
+        // It takes both hands.
+        self.drop_left(i);
         let p = &mut self.players[i];
         if let Some(h) = p.weapons.get_mut(p.current) {
             h.state.zoom = 0;
             h.state.reloading = None;
         }
         p.objective = Some(held);
-        p.readying = def.ready_time;
+        p.readying = ready;
         let flag = &mut self.flags[f];
         flag.carrier = Some(i);
         flag.dropped_by = None;

@@ -33,7 +33,8 @@ pub struct BodyRig {
     nodes: Vec<Option<usize>>,
     /// Animation index by full name and by name without its `:varN` suffix.
     names: HashMap<String, usize>,
-    right_hand: Option<Marker>,
+    /// Where the weapons go in each hand.
+    hands: [Option<Marker>; 2],
 }
 
 /// How a weapon is held: its animation class and short code.
@@ -65,7 +66,7 @@ impl BodyRig {
         graph: AnimationGraph,
         skeleton: Skeleton,
         skin: SkinnedMesh,
-        right_hand: Option<Marker>,
+        hands: [Option<Marker>; 2],
     ) -> BodyRig {
         let defaults = graph
             .nodes
@@ -96,7 +97,7 @@ impl BodyRig {
             defaults,
             nodes,
             names,
-            right_hand,
+            hands,
         }
     }
 
@@ -172,9 +173,10 @@ impl BodyRig {
             .collect()
     }
 
-    /// Where the weapon's origin goes, relative to the object.
-    pub fn weapon_frame(&self, world: &[Mat4]) -> Mat4 {
-        let Some(m) = self.right_hand else {
+    /// Where the weapon's origin goes, relative to the object: in the
+    /// right hand, or (dual wielding) the left.
+    pub fn weapon_frame(&self, world: &[Mat4], left: bool) -> Mat4 {
+        let Some(m) = self.hands[left as usize] else {
             return Mat4::IDENTITY;
         };
         let node = self.nodes.get(m.node as usize).copied().flatten();
@@ -357,7 +359,7 @@ mod tests {
                 anim("crouch:rifle:idle", AnimationKind::Base, 0.2),
             ],
         };
-        BodyRig::new(graph, skeleton, SkinnedMesh::default(), None)
+        BodyRig::new(graph, skeleton, SkinnedMesh::default(), [None; 2])
     }
 
     #[test]

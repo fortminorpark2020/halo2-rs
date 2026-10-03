@@ -77,6 +77,16 @@ loaded with their real first person models, HUD, crosshairs, scopes and firing
 stats, held by Master Chief's arms with the game's own first person animations
 (ready, idle, fire, reload, melee).
 
+Dual wielding: holding a one-handed gun (SMG, Magnum, Plasma Pistol, Plasma
+Rifle, Needler), stand on another and hold Q (Y on a controller) to take it in
+your left hand. Right mouse or G (the left trigger) fires it, left mouse the
+right gun; R reloads both. Tapping Q drops the left gun and switches to the one
+on your back. Each gun uses Halo 2's dual wield spread and damage and its dual
+first person animations, with the left hand drawn as the right's mirror image,
+and both ammo counters show. No grenades while dual wielding. In testing,
+pressing the number of the one-handed gun in hand gives a second one, and
+`H2_WEAPON=<n> H2_DUAL=1` starts with two.
+
 Controllers use Halo 2's layout (left stick move, right stick look, RT fire,
 LT grenade, A jump, B melee, X reload / hold to pick up, Y switch weapon, click
 sticks to crouch and zoom, Start pauses, hold Back for the scoreboard). A on a

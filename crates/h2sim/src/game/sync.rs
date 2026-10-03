@@ -267,6 +267,7 @@ impl Event {
         match *self {
             Event::Shot {
                 player,
+                left,
                 origin,
                 direction,
                 hit,
@@ -274,6 +275,7 @@ impl Event {
             } => {
                 w.u8(0);
                 w.index(Some(player));
+                w.bool(left);
                 w.vec3(origin);
                 w.vec3(direction);
                 w.bool(hit.is_some());
@@ -283,9 +285,14 @@ impl Event {
                 }
                 w.index(hit_player);
             }
-            Event::Reloaded { player, empty } => {
+            Event::Reloaded {
+                player,
+                left,
+                empty,
+            } => {
                 w.u8(1);
                 w.index(Some(player));
+                w.bool(left);
                 w.bool(empty);
             }
             Event::Switched { player } => {
@@ -385,6 +392,7 @@ impl Event {
         Ok(match r.u8()? {
             0 => {
                 let player = r.index_below(players)?;
+                let left = r.bool()?;
                 let origin = r.vec3()?;
                 let direction = r.vec3()?;
                 let hit = if r.bool()? {
@@ -394,6 +402,7 @@ impl Event {
                 };
                 Event::Shot {
                     player,
+                    left,
                     origin,
                     direction,
                     hit,
@@ -402,6 +411,7 @@ impl Event {
             }
             1 => Event::Reloaded {
                 player: r.index_below(players)?,
+                left: r.bool()?,
                 empty: r.bool()?,
             },
             2 => Event::Switched {
@@ -510,8 +520,8 @@ impl Game {
             w.f32(p.since_damage);
             w.bool(p.alive);
             w.f32(p.respawn_in);
-            w.u8(p.weapons.len().min(2) as u8);
-            for h in p.weapons.iter().take(2) {
+            w.u8(p.weapons.len().min(2) as u8 | (p.left.is_some() as u8) << 4);
+            for h in p.weapons.iter().take(2).chain(&p.left) {
                 w.index(Some(h.weapon));
                 w.u32(h.state.loaded);
                 w.u32(h.state.reserve);
@@ -621,14 +631,20 @@ impl Game {
             p.since_damage = r.f32()?;
             p.alive = r.bool()?;
             p.respawn_in = r.f32()?;
-            let n = r.u8()? as usize;
-            if n > 2 {
+            let counts = r.u8()?;
+            let (n, left) = ((counts & 0xF) as usize, counts >> 4);
+            if n > 2 || left > 1 {
                 return Err(Malformed);
             }
-            for k in 0..n {
+            for k in 0..n + left as usize {
                 let weapon = r.index_below(weapons)?;
                 // Keep the weapon's own timers when it's the same weapon.
-                let mut state = match p.weapons.get(k) {
+                let before = if k < n {
+                    p.weapons.get(k)
+                } else {
+                    p.left.as_ref()
+                };
+                let mut state = match before {
                     Some(h) if h.weapon == weapon => h.state.clone(),
                     _ => WeaponState::new(&self.weapons[weapon]),
                 };
@@ -639,6 +655,7 @@ impl Game {
                 state.since_shot = r.f32()?;
                 held.push(HeldWeapon { weapon, state });
             }
+            p.left = (left > 0).then(|| held.pop()).flatten();
             p.weapons = held;
             p.current = r.u8()? as usize;
             if p.current >= p.weapons.len().max(1) {
@@ -848,6 +865,12 @@ mod tests {
         host.players[b].score = -2;
         host.players[a].body.position = Vec3::new(0.0, 0.0, 0.0);
         host.players[b].body.position = Vec3::new(5.0, 0.0, 0.0);
+        // Player b holds a second gun in the left hand.
+        host.players[b].left = Some(HeldWeapon {
+            weapon: 1,
+            state: WeaponState::new(&host.weapons[1]),
+        });
+        host.players[b].left.as_mut().unwrap().state.loaded = 5;
         let mut events = Vec::new();
         for _ in 0..30 {
             let fire = Command {
@@ -884,7 +907,12 @@ mod tests {
                 h.held().map(|w| w.state.loaded),
                 j.held().map(|w| w.state.loaded)
             );
+            assert_eq!(
+                h.left.as_ref().map(|w| (w.weapon, w.state.loaded)),
+                j.left.as_ref().map(|w| (w.weapon, w.state.loaded))
+            );
         }
+        assert!(joined.players[1].left.is_some());
         assert_eq!(joined.time, host.time);
         assert_eq!(joined.rules.game_type, GameType::TeamSlayer);
         assert_eq!(joined.players[1].team, 1);
