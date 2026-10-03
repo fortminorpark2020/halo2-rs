@@ -173,6 +173,12 @@ impl DatumIndex {
     }
 }
 
+impl Default for DatumIndex {
+    fn default() -> Self {
+        DatumIndex::NONE
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Tag {
     pub group: GroupTag,
@@ -574,10 +580,13 @@ fn cstr(b: &[u8]) -> String {
 
 pub mod bitmap;
 pub mod geometry;
+pub mod hud;
 pub mod mapset;
+pub mod model;
 pub mod physics;
 pub mod render;
 pub mod shader;
+pub mod weapon;
 
 pub use mapset::MapSet;
 

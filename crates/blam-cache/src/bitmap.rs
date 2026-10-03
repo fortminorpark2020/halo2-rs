@@ -4,9 +4,12 @@
 //! a shared map) at the address given by its data pointer.
 
 use crate::mapset::{pointer_offset, MapSet};
-use crate::{i16_at, i32_at, u32_at, DatumIndex, Error, Result};
+use crate::{f32_at, i16_at, i32_at, u32_at, DatumIndex, Error, Result};
 use std::io::Read;
 
+const BITM_SEQUENCES: usize = 0x3C;
+const SEQUENCE_SIZE: usize = 0x3C;
+const SPRITE_SIZE: usize = 0x20;
 const BITM_BITMAPS: usize = 68;
 const BITMAP_DATA_SIZE: usize = 116;
 
@@ -72,15 +75,72 @@ pub struct Image {
     pub rgba: Vec<u8>,
 }
 
+/// A sprite inside one of the bitmap's images, in 0..1 texture coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sprite {
+    pub bitmap: i16,
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+    pub registration: [f32; 2],
+}
+
+/// A named run of images (animation frames, HUD variants) in a bitmap tag.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sequence {
+    pub name: String,
+    pub first_bitmap: i16,
+    pub bitmap_count: i16,
+    pub sprites: Vec<Sprite>,
+}
+
+pub fn read_sequences(set: &mut MapSet, bitmap: DatumIndex) -> Result<Vec<Sequence>> {
+    let (src, _, data) = set.tag_data(bitmap)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let raw = file.read_block(region, &data, BITM_SEQUENCES, SEQUENCE_SIZE)?;
+    let mut out = Vec::new();
+    for s in raw.as_chunks::<SEQUENCE_SIZE>().0 {
+        let name_end = s[..0x20].iter().position(|&b| b == 0).unwrap_or(0x20);
+        let sprites = file
+            .read_block(region, s, 0x34, SPRITE_SIZE)?
+            .as_chunks::<SPRITE_SIZE>()
+            .0
+            .iter()
+            .map(|p| Sprite {
+                bitmap: i16_at(p, 0),
+                left: f32_at(p, 0x8),
+                right: f32_at(p, 0xC),
+                top: f32_at(p, 0x10),
+                bottom: f32_at(p, 0x14),
+                registration: [f32_at(p, 0x18), f32_at(p, 0x1C)],
+            })
+            .collect();
+        out.push(Sequence {
+            name: String::from_utf8_lossy(&s[..name_end]).into_owned(),
+            first_bitmap: i16_at(s, 0x20),
+            bitmap_count: i16_at(s, 0x22),
+            sprites,
+        });
+    }
+    Ok(out)
+}
+
 /// Decode the first 2D image of a bitmap tag.
 pub fn read_bitmap(set: &mut MapSet, bitmap: DatumIndex) -> Result<Image> {
+    read_bitmap_at(set, bitmap, 0)
+}
+
+/// Decode image `index` of a bitmap tag (top mip level only).
+pub fn read_bitmap_at(set: &mut MapSet, bitmap: DatumIndex, index: usize) -> Result<Image> {
     let (src, _, data) = set.tag_data(bitmap)?;
     let file = set.get(src);
     let region = file.meta_region();
     let entries = file.read_block(region, &data, BITM_BITMAPS, BITMAP_DATA_SIZE)?;
     let e = entries
-        .get(..BITMAP_DATA_SIZE)
-        .ok_or_else(|| Error::Corrupt("bitmap has no images".into()))?;
+        .get(index * BITMAP_DATA_SIZE..(index + 1) * BITMAP_DATA_SIZE)
+        .ok_or_else(|| Error::Corrupt(format!("bitmap has no image {index}")))?;
     let width = i16_at(e, 4).max(1) as usize;
     let height = i16_at(e, 6).max(1) as usize;
     let format = Format::from(i16_at(e, 12));

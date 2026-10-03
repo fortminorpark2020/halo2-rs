@@ -10,6 +10,9 @@
 //!   h2tool level <file.map> [png dir]    render geometry + shader/texture summary (optionally dump textures)
 //!   h2tool sim   <file.map>              drop a Spartan at every spawn and walk; reports collision sanity
 //!   h2tool scan  <maps folder>           summary line for every .map in a folder
+//!   h2tool model <file.map> <tag> [png]  render model summary for an object or `mode` tag
+//!   h2tool weapon <file.map> <tag>       a weapon's firing stats (magazine, barrel, projectile)
+//!   h2tool hud   <file.map> <nhdt> [dir] a HUD's bitmap widgets (optionally dump their images)
 
 mod render;
 
@@ -30,9 +33,14 @@ fn main() -> ExitCode {
         Some("level") if args.len() >= 2 => level(&args[1], args.get(2).map(String::as_str)),
         Some("obj") if args.len() >= 3 => obj(&args[1], &args[2]),
         Some("render") if args.len() >= 3 => render_png(&args[1], &args[2]),
+        Some("weapon") if args.len() >= 3 => weapon(&args[1], &args[2]),
+        Some("hud") if args.len() >= 3 => hud(&args[1], &args[2], args.get(3).map(String::as_str)),
+        Some("model") if args.len() >= 3 => {
+            model(&args[1], &args[2], args.get(3).map(String::as_str))
+        }
         _ => {
             eprintln!(
-                "usage: h2tool <info|tags|groups|check|obj|render|level|sim|scan> <path> [group]"
+                "usage: h2tool <info|tags|groups|check|obj|render|level|sim|scan|model> <path> [..]"
             );
             return ExitCode::from(2);
         }
@@ -183,6 +191,155 @@ fn render_png(path: &str, out: &str) -> Res {
     let clip = mesh.bounds().map(|(lo, _)| lo[2] + 1.0);
     render::write_png(out, &render::render(&mesh, w, h, clip), w, h)?;
     println!("wrote {out}");
+    Ok(())
+}
+
+fn hud(path: &str, name: &str, dump: Option<&str>) -> Res {
+    use blam_cache::{bitmap, hud, MapSet};
+    let mut set = MapSet::open(path)?;
+    let nhdt = GroupTag::parse("nhdt").unwrap();
+    let tag = set
+        .map
+        .tags
+        .iter()
+        .find(|t| t.group == nhdt && (t.name == name || t.name.ends_with(name)))
+        .ok_or("no HUD tag with that name")?
+        .clone();
+    let widgets = hud::read_bitmap_widgets(&mut set, tag.datum)?;
+    for w in &widgets {
+        let bname = set
+            .map
+            .tag(w.bitmap)
+            .map(|t| t.name.clone())
+            .unwrap_or_default();
+        println!(
+            "{:<26} {:?} flags {:#x} seq {:>2} offset {:?} reg {:?} {bname}",
+            w.name, w.anchor, w.flags, w.sequence, w.offset, w.registration
+        );
+    }
+    if let Some(dir) = dump {
+        std::fs::create_dir_all(dir)?;
+        for w in widgets {
+            if w.bitmap == blam_cache::DatumIndex::NONE {
+                continue;
+            }
+            let seqs = bitmap::read_sequences(&mut set, w.bitmap).unwrap_or_default();
+            let index = usize::try_from(w.sequence)
+                .ok()
+                .and_then(|s| seqs.get(s))
+                .map(|s| s.first_bitmap.max(0) as usize)
+                .unwrap_or(0);
+            match bitmap::read_bitmap_at(&mut set, w.bitmap, index) {
+                Ok(img) => {
+                    let out = format!("{dir}/{}.png", w.name);
+                    render::write_rgba_png(&out, &img.rgba, img.width, img.height)?;
+                    println!("wrote {out} ({}x{})", img.width, img.height);
+                }
+                Err(e) => println!("{}: {e}", w.name),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn weapon(path: &str, name: &str) -> Res {
+    use blam_cache::{weapon, MapSet};
+    let mut set = MapSet::open(path)?;
+    let weap = GroupTag::parse("weap").unwrap();
+    let tags: Vec<_> = set
+        .map
+        .tags
+        .iter()
+        .filter(|t| t.group == weap && (t.name == name || t.name.ends_with(name)))
+        .map(|t| t.datum)
+        .collect();
+    for datum in tags {
+        let w = weapon::read_weapon(&mut set, datum)?;
+        println!("{w:#?}");
+        for b in &w.barrels {
+            if b.projectile == blam_cache::DatumIndex::NONE {
+                continue;
+            }
+            let p = weapon::read_projectile(&mut set, b.projectile)?;
+            println!("{p:#?}");
+            if p.impact_damage != blam_cache::DatumIndex::NONE {
+                println!("{:#?}", weapon::read_damage(&mut set, p.impact_damage)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn model(path: &str, name: &str, png: Option<&str>) -> Res {
+    use blam_cache::{model, MapSet};
+    let mut set = MapSet::open(path)?;
+    let tag = set
+        .map
+        .tags
+        .iter()
+        .find(|t| t.name == name)
+        .or_else(|| set.map.tags.iter().find(|t| t.name.ends_with(name)))
+        .ok_or("no tag with that name")?
+        .clone();
+    println!("{} {}", tag.group, tag.name);
+    let mode = if tag.group == GroupTag::parse("mode").unwrap() {
+        tag.datum
+    } else {
+        model::object_render_model(&mut set, tag.datum)?
+    };
+    let m = model::read_render_model(&mut set, mode)?;
+    println!(
+        "render model {:08x}: {} sections, {} triangles, {} shaders, {} nodes",
+        mode.0,
+        m.sections.len(),
+        m.triangle_count(),
+        m.shaders.len(),
+        m.nodes.len()
+    );
+    for s in &m.sections {
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for p in &s.positions {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        println!(
+            "  section: {} vertices, {} triangles, bounds {lo:.3?} .. {hi:.3?}",
+            s.positions.len(),
+            s.triangle_count()
+        );
+    }
+    for (i, n) in m.nodes.iter().enumerate() {
+        println!(
+            "  node {i:>2} {:<24} parent {:>2} t {:.3?} q {:.3?}",
+            set.map.string_id(n.name).unwrap_or("?"),
+            n.parent,
+            n.translation,
+            n.rotation
+        );
+    }
+    for g in &m.markers {
+        if let Some(mk) = g.markers.first() {
+            println!(
+                "  marker {:<24} node {} at {:.3?} q {:.3?}",
+                g.name, mk.node, mk.translation, mk.rotation
+            );
+        }
+    }
+    if let Some(out) = png {
+        let mut mesh = blam_cache::geometry::Mesh::default();
+        for s in &m.sections {
+            let base = mesh.positions.len() as u32;
+            mesh.positions.extend_from_slice(&s.positions);
+            for p in &s.parts {
+                mesh.indices.extend(p.indices.iter().map(|i| i + base));
+            }
+        }
+        let (w, h) = (800, 600);
+        render::write_png(out, &render::render(&mesh, w, h, None), w, h)?;
+        println!("wrote {out}");
+    }
     Ok(())
 }
 

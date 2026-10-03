@@ -8,18 +8,57 @@
 use crate::mapset::{MapSet, Source};
 use crate::{f32_at, i16_at, i32_at, u32_at, DatumIndex, Error, Region, Result, StructureBsp};
 
-/// Fields at the start of every section-like tag block element.
-const SECTION_VERTEX_COUNT: usize = 0x0;
-const SECTION_FACE_COUNT: usize = 0x2;
-const SECTION_DATA_POINTER: usize = 0x28;
-const SECTION_DATA_SIZE: usize = 0x2C;
-const SECTION_HEADER_SIZE: usize = 0x30;
-const SECTION_RESOURCES: usize = 0x38;
+/// Where a section-like tag block element keeps its fields. BSP clusters and
+/// instanced geometry share one layout; render model sections use another.
+#[derive(Debug, Clone, Copy)]
+pub struct SectionLayout {
+    vertex_count: usize,
+    face_count: usize,
+    data_pointer: usize,
+    data_size: usize,
+    /// BSP: size of the section header. Models: size of the resource data.
+    size_field: usize,
+    resources: usize,
+    model: bool,
+}
+
+impl SectionLayout {
+    pub const BSP: SectionLayout = SectionLayout {
+        vertex_count: 0x0,
+        face_count: 0x2,
+        data_pointer: 0x28,
+        data_size: 0x2C,
+        size_field: 0x30,
+        resources: 0x38,
+        model: false,
+    };
+    pub const MODEL: SectionLayout = SectionLayout {
+        vertex_count: 0x4,
+        face_count: 0x6,
+        data_pointer: 0x38,
+        data_size: 0x3C,
+        size_field: 0x44,
+        resources: 0x48,
+        model: true,
+    };
+
+    /// Where the resource buffers start inside the section's data block.
+    fn base(&self, data_size: i32, size_field: i32) -> Option<usize> {
+        let base = if self.model {
+            data_size - size_field - 4
+        } else {
+            size_field + 8
+        };
+        usize::try_from(base).ok()
+    }
+}
+
 const RESOURCE_SIZE: usize = 0x10;
 
 /// Halo 2 PC resource kinds (by the locator values the cache files use).
 const RES_INDICES: i16 = 32;
 const RES_VERTEX_BUFFERS: i16 = 56;
+const RES_NODE_MAP: i16 = 100;
 const SUBMESH_SIZE: usize = 72;
 
 const SBSP_CLUSTERS: usize = 0x9C;
@@ -45,6 +84,9 @@ pub struct Section {
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub parts: Vec<Part>,
+    /// Model sections only: the node each vertex follows most (already
+    /// remapped through the section's node map), empty for level geometry.
+    pub nodes: Vec<u8>,
 }
 
 impl Section {
@@ -84,6 +126,7 @@ impl Section {
             normals: self.normals.iter().map(|&n| rot(n)).collect(),
             uvs: self.uvs.clone(),
             parts: self.parts.clone(),
+            nodes: self.nodes.clone(),
         }
     }
 }
@@ -128,32 +171,36 @@ fn slice(data: &[u8], start: usize, len: usize) -> Result<&[u8]> {
     })
 }
 
+fn u16_at(b: &[u8], o: usize) -> u16 {
+    u16::from_le_bytes([b[o], b[o + 1]])
+}
+
 /// Decode one section. `header` is the section's tag block element, read from
 /// the file `owner` (whose meta `region` its pointers refer to).
 pub fn read_section(
     set: &mut MapSet,
     owner: Source,
     region: Region,
+    layout: SectionLayout,
     header: &[u8],
 ) -> Result<Option<Section>> {
-    let vertex_count = u16::from_le_bytes([
-        header[SECTION_VERTEX_COUNT],
-        header[SECTION_VERTEX_COUNT + 1],
-    ]) as usize;
-    let face_count =
-        u16::from_le_bytes([header[SECTION_FACE_COUNT], header[SECTION_FACE_COUNT + 1]]) as usize;
+    let vertex_count = u16_at(header, layout.vertex_count) as usize;
+    let face_count = u16_at(header, layout.face_count) as usize;
     if vertex_count == 0 {
         return Ok(None);
     }
-    let pointer = u32_at(header, SECTION_DATA_POINTER);
-    let data_size = i32_at(header, SECTION_DATA_SIZE);
-    let header_size = i32_at(header, SECTION_HEADER_SIZE);
-    if data_size <= 0 || header_size < 0 {
+    let pointer = u32_at(header, layout.data_pointer);
+    let data_size = i32_at(header, layout.data_size);
+    let size_field = i32_at(header, layout.size_field);
+    let Some(base) = layout.base(data_size, size_field) else {
+        return Ok(None);
+    };
+    if data_size <= 0 || size_field < 0 {
         return Ok(None);
     }
     let res_raw = set
         .get(owner)
-        .read_block(region, header, SECTION_RESOURCES, RESOURCE_SIZE)?;
+        .read_block(region, header, layout.resources, RESOURCE_SIZE)?;
     let resources: Vec<Resource> = res_raw
         .as_chunks::<RESOURCE_SIZE>()
         .0
@@ -166,9 +213,11 @@ pub fn read_section(
         })
         .collect();
     let data = set.read_resource(owner, pointer, data_size as usize)?;
-    let base = header_size as usize + 8;
 
-    let index_count = u16::from_le_bytes([data[40], data[41]]) as usize;
+    if data.len() < 42 {
+        return Ok(None);
+    }
+    let index_count = u16_at(&data, 40) as usize;
     let find = |kind: i16, sub: Option<i16>| {
         resources
             .iter()
@@ -213,6 +262,28 @@ pub fn read_section(
             [f32_at(vbuf, o), f32_at(vbuf, o + 4), f32_at(vbuf, o + 8)]
         })
         .collect();
+    // Model vertices carry their node right after the position (rigid-boned:
+    // one index; skinned: four indices then four weights, strongest first).
+    let nodes = if layout.model && stride > 12 {
+        let map = match find(RES_NODE_MAP, None) {
+            Some(r) => slice(&data, base + r.offset, r.size)?.to_vec(),
+            None => Vec::new(),
+        };
+        (0..vertex_count)
+            .map(|i| {
+                let n = vbuf[i * stride + 12];
+                map.get(n as usize).copied().unwrap_or(n)
+            })
+            .collect()
+    } else if layout.model {
+        // Rigid section: every vertex follows the first mapped node.
+        let first = find(RES_NODE_MAP, None)
+            .and_then(|r| data.get(base + r.offset).copied())
+            .unwrap_or(0);
+        vec![first; vertex_count]
+    } else {
+        Vec::new()
+    };
     let uvs = match find(RES_VERTEX_BUFFERS, Some(1)) {
         Some(r) => {
             let b = slice(&data, base + r.offset, vertex_count * 8)?;
@@ -273,6 +344,7 @@ pub fn read_section(
         normals,
         uvs,
         parts,
+        nodes,
     }))
 }
 
@@ -302,13 +374,19 @@ pub fn bsp_render_geometry(set: &mut MapSet, bsp: &StructureBsp) -> Result<Level
 
     let mut sections = Vec::new();
     for c in clusters.as_chunks::<CLUSTER_SIZE>().0 {
-        if let Some(s) = read_section(set, Source::Map, region, c)? {
+        if let Some(s) = read_section(set, Source::Map, region, SectionLayout::BSP, c)? {
             sections.push(s);
         }
     }
     let mut def_sections = Vec::new();
     for d in defs.as_chunks::<INSTANCE_DEF_SIZE>().0 {
-        def_sections.push(read_section(set, Source::Map, region, d)?);
+        def_sections.push(read_section(
+            set,
+            Source::Map,
+            region,
+            SectionLayout::BSP,
+            d,
+        )?);
     }
     for inst in instances.as_chunks::<INSTANCE_SIZE>().0 {
         let Some(Some(def)) = usize::try_from(i16_at(inst, 0x34))

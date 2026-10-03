@@ -130,7 +130,12 @@ impl World {
 
     /// Distance along `dir` (unit) from `origin` to the first triangle hit, up to `max`.
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<f32> {
-        let mut best: Option<f32> = None;
+        self.raycast_hit(origin, dir, max).map(|(d, _)| d)
+    }
+
+    /// Like [`World::raycast`], also returning the surface normal facing the ray.
+    pub fn raycast_hit(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<(f32, Vec3)> {
+        let mut best: Option<(f32, Vec3)> = None;
         let mut ids = Vec::new();
         // March cell by cell is overkill for short rays; gather along the ray's box.
         let end = origin + dir * max;
@@ -138,8 +143,13 @@ impl World {
         for id in ids {
             let t = &self.triangles[id as usize];
             if let Some(d) = ray_triangle(origin, dir, t) {
-                if d <= max && best.is_none_or(|b| d < b) {
-                    best = Some(d);
+                if d <= max && best.is_none_or(|b| d < b.0) {
+                    let n = if t.normal.dot(dir) > 0.0 {
+                        -t.normal
+                    } else {
+                        t.normal
+                    };
+                    best = Some((d, n));
                 }
             }
         }
@@ -323,6 +333,15 @@ mod tests {
             &mut c,
         );
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn raycast_hit_normal_faces_ray() {
+        let w = floor();
+        let (_, n) = w
+            .raycast_hit(Vec3::new(0.0, 0.0, -2.0), Vec3::Z, 10.0)
+            .unwrap();
+        assert!(n.z < -0.99);
     }
 
     #[test]
