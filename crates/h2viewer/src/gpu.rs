@@ -58,6 +58,7 @@ pub mod hud_mode {
     pub const METER_GREY: f32 = 3.0;
 }
 
+#[derive(Clone, Copy)]
 pub struct DrawCall {
     pub mesh: usize,
     pub model: Mat4,
@@ -73,6 +74,10 @@ pub struct HudBatch {
 }
 
 pub struct Frame<'a> {
+    /// The part of the window this view fills: x, y, width, height in pixels.
+    pub viewport: [u32; 4],
+    /// Skinned meshes posed for this view (mesh, vertices).
+    pub posed: &'a [(usize, Vec<Vertex>)],
     /// The sky, drawn first; `sky_proj` sees it from its own origin.
     pub sky: Option<DrawCall>,
     pub sky_proj: Mat4,
@@ -365,6 +370,8 @@ pub struct Gpu {
     meshes: Vec<GpuMesh>,
     depth: wgpu::TextureView,
     staging: Vec<u8>,
+    /// Size of the viewport being drawn, for the HUD.
+    view_size: (f32, f32),
 }
 
 fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
@@ -898,11 +905,8 @@ impl Gpu {
             meshes,
             depth,
             staging: Vec::new(),
+            view_size: (1.0, 1.0),
         })
-    }
-
-    pub fn aspect(&self) -> f32 {
-        self.config.width as f32 / self.config.height.max(1) as f32
     }
 
     pub fn size(&self) -> (f32, f32) {
@@ -935,7 +939,7 @@ impl Gpu {
         if offset / SLOT >= MAX_DRAWS {
             return None;
         }
-        let (w, h) = self.size();
+        let (w, h) = self.view_size;
         let u = DrawUniforms {
             mvp: (proj * model).to_cols_array_2d(),
             model: model.to_cols_array_2d(),
@@ -970,7 +974,8 @@ impl Gpu {
         })
     }
 
-    pub fn render(&mut self, f: &Frame) {
+    /// Draw each view in its viewport, then show the result.
+    pub fn render(&mut self, frames: &[Frame]) {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -980,6 +985,45 @@ impl Gpu {
             }
             _ => return,
         };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        // Clear once; each view then draws over its own part of the window.
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(SKY),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        self.queue.submit([enc.finish()]);
+        // Views share the uniform buffer and posed meshes, so each one is
+        // submitted before the next overwrites them.
+        for f in frames {
+            self.render_view(&view, f);
+        }
+        self.queue.present(frame);
+    }
+
+    fn render_view(&mut self, view: &wgpu::TextureView, f: &Frame) {
+        let [vx, vy, vw, vh] = f.viewport;
+        let (sw, sh) = (self.config.width, self.config.height);
+        if vw == 0 || vh == 0 || vx + vw > sw || vy + vh > sh {
+            return;
+        }
+        for (mesh, vertices) in f.posed {
+            self.update_mesh(*mesh, vertices);
+        }
+        self.view_size = (vw as f32, vh as f32);
         self.staging.clear();
         let cam = f.camera;
         let sky = f.sky.as_ref().and_then(|d| {
@@ -1022,20 +1066,21 @@ impl Gpu {
             })
             .collect();
 
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        let color = |clear: Option<wgpu::Color>| wgpu::RenderPassColorAttachment {
-            view: &view,
+        let color = || wgpu::RenderPassColorAttachment {
+            view,
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: clear.map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear),
+                load: wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
             },
+        };
+        let fit = |pass: &mut wgpu::RenderPass| {
+            pass.set_viewport(vx as f32, vy as f32, vw as f32, vh as f32, 0.0, 1.0);
+            pass.set_scissor_rect(vx, vy, vw, vh);
         };
         let depth = || wgpu::RenderPassDepthStencilAttachment {
             view: &self.depth,
@@ -1049,10 +1094,11 @@ impl Gpu {
         if let Some((mesh, offset)) = sky {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sky"),
-                color_attachments: &[Some(color(Some(SKY)))],
+                color_attachments: &[Some(color())],
                 depth_stencil_attachment: Some(depth()),
                 ..Default::default()
             });
+            fit(&mut pass);
             let pipelines = (&self.sky_pipeline, &self.sky_alpha_pipeline);
             self.draw_meshes(&mut pass, &[(mesh, offset)], pipelines);
         }
@@ -1060,10 +1106,11 @@ impl Gpu {
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("world"),
-                color_attachments: &[Some(color(sky.is_none().then_some(SKY)))],
+                color_attachments: &[Some(color())],
                 depth_stencil_attachment: Some(depth()),
                 ..Default::default()
             });
+            fit(&mut pass);
             let pipelines = (&self.mesh_pipeline, &self.alpha_pipeline);
             self.draw_meshes(&mut pass, &world, pipelines);
             if let (Some(buf), Some(offset)) = (&sprites, sprites_slot) {
@@ -1074,10 +1121,11 @@ impl Gpu {
         if !views.is_empty() || view_sprites.is_some() {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("view model"),
-                color_attachments: &[Some(color(None))],
+                color_attachments: &[Some(color())],
                 depth_stencil_attachment: Some(depth()),
                 ..Default::default()
             });
+            fit(&mut pass);
             let pipelines = (&self.mesh_pipeline, &self.alpha_pipeline);
             self.draw_meshes(&mut pass, &views, pipelines);
             if let (Some(buf), Some(offset)) = (&view_sprites, view_sprites_slot) {
@@ -1088,9 +1136,10 @@ impl Gpu {
         if let (false, Some(offset)) = (hud.is_empty(), hud_slot) {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud"),
-                color_attachments: &[Some(color(None))],
+                color_attachments: &[Some(color())],
                 ..Default::default()
             });
+            fit(&mut pass);
             pass.set_pipeline(&self.hud_pipeline);
             pass.set_bind_group(0, &self.globals, &[offset]);
             for (texture, buf, count) in &hud {
@@ -1100,7 +1149,6 @@ impl Gpu {
             }
         }
         self.queue.submit([enc.finish()]);
-        self.queue.present(frame);
     }
 
     /// Draw meshes (mesh, uniform offset): opaque surfaces, then alpha

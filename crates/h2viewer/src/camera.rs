@@ -18,6 +18,12 @@ const SENSITIVITY: f32 = 0.0025;
 /// Vertical field of view: Halo 2's 78 degrees horizontal at 4:3, widened
 /// horizontally on wider screens.
 pub const FOV_Y: f32 = 62.0;
+/// Widest horizontal field of view, for very wide views (two player
+/// splitscreen), so their sides don't stretch.
+const MAX_FOV_X: f32 = 100.0;
+/// Controller look speed at full stick, radians per second.
+const STICK_YAW: f32 = 3.2;
+const STICK_PITCH: f32 = 2.2;
 
 impl FlyCamera {
     pub fn looking_at(position: Vec3, target: Vec3) -> Self {
@@ -48,6 +54,14 @@ impl FlyCamera {
     pub fn look(&mut self, dx: f32, dy: f32, scale: f32) {
         self.yaw -= dx * SENSITIVITY * scale;
         self.pitch = (self.pitch - dy * SENSITIVITY * scale).clamp(-1.55, 1.55);
+    }
+
+    /// Controller look: `stick` is the right stick (x right, y up); the
+    /// response curve gives fine control near the centre.
+    pub fn look_stick(&mut self, stick: glam::Vec2, dt: f32, scale: f32) {
+        let curve = |v: f32| v * v.abs();
+        self.yaw -= curve(stick.x) * STICK_YAW * dt * scale;
+        self.pitch = (self.pitch + curve(stick.y) * STICK_PITCH * dt * scale).clamp(-1.55, 1.55);
     }
 
     pub fn update(&mut self, keys: &HashSet<KeyCode>, dt: f32) {
@@ -83,7 +97,8 @@ impl FlyCamera {
 
 /// Reversed-Z perspective (near/far swapped) for far better depth precision.
 pub fn projection(aspect: f32, magnification: f32, near: f32, far: f32) -> Mat4 {
-    let half = (FOV_Y.to_radians() * 0.5).tan() / magnification.max(1.0);
+    let widest = (MAX_FOV_X.to_radians() * 0.5).tan() / aspect.max(0.1);
+    let half = (FOV_Y.to_radians() * 0.5).tan().min(widest) / magnification.max(1.0);
     glam::camera::rh::proj::directx::perspective(2.0 * half.atan(), aspect, far, near)
 }
 
