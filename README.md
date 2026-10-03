@@ -16,8 +16,9 @@ install. No game files are included in this repository.
 - `h2sim`: game simulation (no rendering): level collision, Spartan movement
   using the speeds, jump velocity and size from the game's own globals and biped tags,
   weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
-  Slayer rules (shields, health, grenades, pickups, respawns, multi-kill and
-  spree medals, the lead), bots and their walking graph.
+  Slayer and Team Slayer rules (shields, health, grenades, pickups, respawns,
+  friendly fire and betrayals, multi-kill and spree medals, the lead), bots and
+  their walking graph.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
@@ -29,9 +30,11 @@ install. No game files are included in this repository.
 
 Double-click `h2viewer.exe` to open Halo 2's menus over Lockout from
 `C:\Games\Halo 2 Project Cartographer\maps` (or drag any `.map` file onto it),
-with Halo 2's main menu music. Multiplayer opens the lobby: pick the map
-(every multiplayer map in the maps folder), score to win and number of bots,
-then Start Game. System Link lists games other PCs on the network are hosting.
+with Halo 2's main menu music. Multiplayer opens the lobby: pick the game
+type (Slayer or Team Slayer), the map (every multiplayer map in the maps
+folder), score to win and number of bots, then Start Game. In Team Slayer, T
+(or X on a controller) puts you on the red or blue team; bots fill the smaller
+team. System Link lists games other PCs on the network are hosting.
 Menus work with the arrow keys or WASD, Enter and Esc, the mouse, or a
 controller (d-pad or stick, A, B).
 
@@ -65,7 +68,8 @@ Sound: weapons, reloads, grenades, footsteps, landings, shield recharge and the
 low shield alarm play from the game's own sound files, placed left or right and
 fading with distance (each splitscreen player hears through their own view).
 The announcer calls the game type, multi-kills (Double Kill to Killimanjaro),
-killing sprees, taking, losing and tying the lead, suicides and game over, as
+killing sprees, taking, losing and tying the lead, suicides, betrayals and
+game over, as
 Halo 2's multiplayer globals pair them. The menus have Halo 2's own music and
 menu sounds.
 `H2_MUTE=1` turns sound off; `H2_AUDIO_WAV=out.wav` records the mix to a file

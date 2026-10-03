@@ -3,8 +3,8 @@
 //! joined PCs send their players' controls.
 
 use super::{
-    DroppedWeapon, Event, Game, Grenade, GrenadeKind, HeldWeapon, ItemKind, LeadChange, Medal,
-    Spartan, DROPPED_WEAPON_LIFETIME,
+    DroppedWeapon, Event, Game, GameType, Grenade, GrenadeKind, HeldWeapon, ItemKind, LeadChange,
+    Medal, Spartan, DROPPED_WEAPON_LIFETIME, TEAMS,
 };
 use crate::game::Command;
 use crate::weapon::WeaponState;
@@ -423,6 +423,9 @@ impl Game {
     pub fn write_state(&self, w: &mut Writer) {
         w.f64(self.time);
         w.index(self.winner);
+        w.u8(self.rules.game_type as u8);
+        w.u32(self.rules.score_to_win);
+        w.u8(self.winning_team.unwrap_or(u8::MAX));
         w.u16(self.item_timers.len() as u16);
         for &t in &self.item_timers {
             w.f32(t);
@@ -453,6 +456,8 @@ impl Game {
             w.u8(p.frags);
             w.u8(p.plasmas);
             w.u8(p.grenade as u8);
+            w.u8(p.team);
+            w.u32(p.score as u32);
             w.u32(p.kills);
             w.u32(p.deaths);
             w.u32(p.spree);
@@ -483,6 +488,17 @@ impl Game {
         let weapons = self.weapons.len();
         self.time = r.f64()?;
         let winner = r.index()?;
+        self.rules.game_type = match r.u8()? {
+            0 => GameType::Slayer,
+            1 => GameType::TeamSlayer,
+            _ => return Err(Malformed),
+        };
+        self.rules.score_to_win = r.u32()?;
+        self.winning_team = match r.u8()? {
+            u8::MAX => None,
+            t if t < TEAMS => Some(t),
+            _ => return Err(Malformed),
+        };
         let n = r.u16()? as usize;
         if n != self.item_timers.len() {
             return Err(Malformed);
@@ -539,6 +555,11 @@ impl Game {
             p.frags = r.u8()?;
             p.plasmas = r.u8()?;
             p.grenade = grenade_kind(r.u8()?)?;
+            p.team = r.u8()?;
+            if p.team >= TEAMS {
+                return Err(Malformed);
+            }
+            p.score = r.u32()? as i32;
             p.kills = r.u32()?;
             p.deaths = r.u32()?;
             p.spree = r.u32()?;
@@ -645,8 +666,10 @@ mod tests {
     fn a_joined_game_matches_the_host() {
         let world = floor();
         let mut host = game();
+        host.rules.game_type = GameType::TeamSlayer;
         let a = host.add_player();
         let b = host.add_player();
+        host.players[b].score = -2;
         host.players[a].body.position = Vec3::new(0.0, 0.0, 0.0);
         host.players[b].body.position = Vec3::new(5.0, 0.0, 0.0);
         let mut events = Vec::new();
@@ -679,6 +702,7 @@ mod tests {
             assert_eq!(h.shield, j.shield);
             assert_eq!(h.health, j.health);
             assert_eq!(h.alive, j.alive);
+            assert_eq!((h.team, h.score), (j.team, j.score));
             assert_eq!(h.weapons.len(), j.weapons.len());
             assert_eq!(
                 h.held().map(|w| w.state.loaded),
@@ -686,6 +710,8 @@ mod tests {
             );
         }
         assert_eq!(joined.time, host.time);
+        assert_eq!(joined.rules.game_type, GameType::TeamSlayer);
+        assert_eq!(joined.players[1].team, 1);
 
         // Truncated or garbage data is refused without panicking.
         for cut in [1, 10, w.0.len() / 2] {

@@ -347,6 +347,9 @@ pub struct Announcer {
     /// Kill sprees of 5, 10, 15, 20 and 25.
     pub spree: [Option<usize>; 5],
     pub suicide: Option<usize>,
+    /// Killing a teammate, and being killed by one.
+    pub betrayal: Option<usize>,
+    pub betrayed: Option<usize>,
     pub gained_lead: Option<usize>,
     pub lost_lead: Option<usize>,
     pub tied_lead: Option<usize>,
@@ -1144,6 +1147,8 @@ impl Scene {
                     multi_kill: MULTI_KILLS.map(|n| line(&format!("flavor\\{n}"))),
                     spree: SPREES.map(|n| line(&format!("flavor\\{n}"))),
                     suicide: line("general\\misc\\suicide"),
+                    betrayal: line("general\\misc\\betrayal"),
+                    betrayed: line("general\\misc\\betrayed"),
                     gained_lead: line("general\\misc\\gained_the_lead"),
                     lost_lead: line("general\\misc\\lost_the_lead"),
                     tied_lead: line("general\\misc\\tied_the_leader"),

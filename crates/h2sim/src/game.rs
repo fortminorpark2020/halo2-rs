@@ -40,9 +40,31 @@ const SPREE_STEP: u32 = 5;
 /// The last spree medal.
 const SPREE_MAX: u32 = 25;
 
+/// The kind of game being played.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GameType {
+    /// Everyone for themselves; the most kills wins.
+    #[default]
+    Slayer,
+    /// Red against blue; the team with the most kills wins.
+    TeamSlayer,
+}
+
+impl GameType {
+    pub fn teams(self) -> bool {
+        self == GameType::TeamSlayer
+    }
+}
+
+/// Teams in team games: red and blue.
+pub const TEAMS: u8 = 2;
+
 /// Damage values and timings, from the game's tags where the map has them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rules {
+    pub game_type: GameType,
+    /// Teammates can hurt each other (team games).
+    pub friendly_fire: bool,
     pub shield: f32,
     pub health: f32,
     /// Seconds without damage before shields start to recharge.
@@ -63,7 +85,8 @@ pub struct Rules {
     pub headshot_weapons: Vec<usize>,
     /// Weapons that lunge and kill with melee (the energy sword).
     pub lunge_weapons: Vec<usize>,
-    /// Kills to win; 0 plays forever.
+    /// Points to win (a kill is one, a suicide or betrayal takes one away);
+    /// 0 plays forever.
     pub score_to_win: u32,
 }
 
@@ -82,6 +105,8 @@ pub struct GrenadeDef {
 impl Default for Rules {
     fn default() -> Rules {
         Rules {
+            game_type: GameType::Slayer,
+            friendly_fire: true,
             shield: 70.0,
             health: 45.0,
             shield_delay: 5.0,
@@ -180,6 +205,10 @@ pub struct Spartan {
     pub frags: u8,
     pub plasmas: u8,
     pub grenade: GrenadeKind,
+    /// In team games: 0 red, 1 blue.
+    pub team: u8,
+    /// Kills, less suicides and betrayals.
+    pub score: i32,
     pub kills: u32,
     pub deaths: u32,
     /// Kills since last spawning.
@@ -335,7 +364,9 @@ pub struct Game {
     pub biped: BipedPhysics,
     pub time: f64,
     pub events: Vec<Event>,
+    /// The player who won (in team games, whose kill won it).
     pub winner: Option<usize>,
+    pub winning_team: Option<u8>,
     rng: u32,
 }
 
@@ -396,6 +427,7 @@ impl Game {
             time: 0.0,
             events: Vec::new(),
             winner: None,
+            winning_team: None,
             rng: 0x2545_F491,
         }
     }
@@ -409,13 +441,49 @@ impl Game {
         (x >> 8) as f32 / (1u32 << 24) as f32
     }
 
-    /// Add a player, spawned at once; returns its index.
+    /// Add a player, spawned at once (in team games, on the smaller team);
+    /// returns its index.
     pub fn add_player(&mut self) -> usize {
+        let team = (0..TEAMS)
+            .min_by_key(|&t| self.players.iter().filter(|p| p.team == t).count())
+            .unwrap_or(0);
+        self.add_player_on(team)
+    }
+
+    /// Add a player on a team (ignored outside team games).
+    pub fn add_player_on(&mut self, team: u8) -> usize {
         let i = self.players.len();
-        let spartan = self.fresh_spartan(Vec3::ZERO, 0.0);
+        let mut spartan = self.fresh_spartan(Vec3::ZERO, 0.0);
+        spartan.team = if self.rules.game_type.teams() {
+            team.min(TEAMS - 1)
+        } else {
+            0
+        };
         self.players.push(spartan);
         self.respawn(i);
         i
+    }
+
+    /// Players `a` and `b` are on opposite sides.
+    pub fn is_enemy(&self, a: usize, b: usize) -> bool {
+        a != b && (!self.rules.game_type.teams() || self.players[a].team != self.players[b].team)
+    }
+
+    pub fn team_score(&self, team: u8) -> i32 {
+        self.players
+            .iter()
+            .filter(|p| p.team == team)
+            .map(|p| p.score)
+            .sum()
+    }
+
+    /// A player's score in this game type: their team's in team games.
+    pub fn side_score(&self, player: usize) -> i32 {
+        if self.rules.game_type.teams() {
+            self.team_score(self.players[player].team)
+        } else {
+            self.players[player].score
+        }
     }
 
     fn fresh_spartan(&self, position: Vec3, yaw: f32) -> Spartan {
@@ -445,6 +513,8 @@ impl Game {
             frags: self.rules.starting_frags,
             plasmas: self.rules.starting_plasmas,
             grenade: GrenadeKind::Frag,
+            team: 0,
+            score: 0,
             kills: 0,
             deaths: 0,
             spree: 0,
@@ -458,14 +528,11 @@ impl Game {
         }
     }
 
-    /// Bring a player back at the spawn point farthest from everyone alive.
+    /// Bring a player back at the spawn point farthest from enemies alive.
     pub fn respawn(&mut self, player: usize) {
-        let others: Vec<Vec3> = self
-            .players
-            .iter()
-            .enumerate()
-            .filter(|(i, p)| *i != player && p.alive)
-            .map(|(_, p)| p.body.position)
+        let others: Vec<Vec3> = (0..self.players.len())
+            .filter(|&i| self.is_enemy(player, i) && self.players[i].alive)
+            .map(|i| self.players[i].body.position)
             .collect();
         let mut best = (f32::MIN, (Vec3::ZERO, 0.0));
         for k in 0..self.spawns.len() {
@@ -481,8 +548,11 @@ impl Game {
             }
         }
         let (pos, yaw) = best.1;
-        let (kills, deaths) = (self.players[player].kills, self.players[player].deaths);
+        let old = &self.players[player];
+        let (team, score, kills, deaths) = (old.team, old.score, old.kills, old.deaths);
         let mut s = self.fresh_spartan(pos + Vec3::Z * 0.05, yaw);
+        s.team = team;
+        s.score = score;
         s.kills = kills;
         s.deaths = deaths;
         self.players[player] = s;
@@ -679,7 +749,8 @@ impl Game {
         let reach = if lunge { LUNGE_RANGE } else { MELEE_RANGE };
         let mut target: Option<(usize, f32)> = None;
         for (j, q) in self.players.iter().enumerate() {
-            if j == i || !q.alive {
+            // The sword only lunges at enemies.
+            if j == i || !q.alive || (lunge && !self.is_enemy(i, j)) {
                 continue;
             }
             let centre = q.body.position + Vec3::Z * q.body.height() * 0.6;
@@ -847,6 +918,10 @@ impl Game {
     /// Apply damage: shields first, then health.
     pub fn damage(&mut self, victim: usize, attacker: Option<usize>, amount: f32, headshot: bool) {
         let rules_health = self.rules.health;
+        let teammate = attacker.is_some_and(|a| a != victim && !self.is_enemy(a, victim));
+        if teammate && !self.rules.friendly_fire {
+            return;
+        }
         let p = &mut self.players[victim];
         if !p.alive || amount <= 0.0 {
             return;
@@ -894,68 +969,98 @@ impl Game {
             victim,
             headshot,
         });
-        if let Some(k) = killer.filter(|&k| k != victim) {
-            let leaders = self.leaders();
-            let time = self.time;
-            let p = &mut self.players[k];
-            p.kills += 1;
-            p.spree += 1;
-            let chained = p.multi_kill > 0 && time - p.last_kill <= MULTI_KILL_WINDOW;
-            p.multi_kill = if chained { p.multi_kill + 1 } else { 1 };
-            p.last_kill = time;
-            let (multi, spree) = (p.multi_kill, p.spree);
-            if multi >= 2 {
-                self.events.push(Event::Medal {
-                    player: k,
-                    medal: Medal::MultiKill(multi.min(u8::MAX as u32) as u8),
-                });
+        let leaders = self.leaders();
+        match killer {
+            // Killed themselves, or by the level: a point off.
+            None => self.players[victim].score -= 1,
+            Some(k) if k == victim => self.players[victim].score -= 1,
+            // Betrayed a teammate: a point off.
+            Some(k) if !self.is_enemy(k, victim) => self.players[k].score -= 1,
+            Some(k) => {
+                let time = self.time;
+                let p = &mut self.players[k];
+                p.kills += 1;
+                p.score += 1;
+                p.spree += 1;
+                let chained = p.multi_kill > 0 && time - p.last_kill <= MULTI_KILL_WINDOW;
+                p.multi_kill = if chained { p.multi_kill + 1 } else { 1 };
+                p.last_kill = time;
+                let (multi, spree) = (p.multi_kill, p.spree);
+                if multi >= 2 {
+                    self.events.push(Event::Medal {
+                        player: k,
+                        medal: Medal::MultiKill(multi.min(u8::MAX as u32) as u8),
+                    });
+                }
+                if spree % SPREE_STEP == 0 && spree <= SPREE_MAX {
+                    self.events.push(Event::Medal {
+                        player: k,
+                        medal: Medal::Spree(spree as u8),
+                    });
+                }
             }
-            if spree % SPREE_STEP == 0 && spree <= SPREE_MAX {
-                self.events.push(Event::Medal {
-                    player: k,
-                    medal: Medal::Spree(spree as u8),
-                });
-            }
-            self.lead_changes(k, &leaders);
-            if self.rules.score_to_win > 0 && self.players[k].kills >= self.rules.score_to_win {
+        }
+        self.lead_changes(&leaders);
+        if let Some(k) = killer.filter(|&k| self.is_enemy(k, victim)) {
+            let target = self.rules.score_to_win as i32;
+            if target > 0 && self.side_score(k) >= target {
                 self.winner.get_or_insert(k);
+                if self.rules.game_type.teams() {
+                    self.winning_team.get_or_insert(self.players[k].team);
+                }
             }
         }
     }
 
-    /// Who has the most kills (no one before the first kill).
+    /// Who leads: players, or in team games teams (by team number). No one
+    /// leads until someone scores.
     fn leaders(&self) -> Vec<usize> {
-        let top = self.players.iter().map(|p| p.kills).max().unwrap_or(0);
-        if top == 0 {
+        let sides: Vec<i32> = if self.rules.game_type.teams() {
+            (0..TEAMS).map(|t| self.team_score(t)).collect()
+        } else {
+            self.players.iter().map(|p| p.score).collect()
+        };
+        let top = sides.iter().copied().max().unwrap_or(0);
+        if top <= 0 {
             return Vec::new();
         }
-        (0..self.players.len())
-            .filter(|&i| self.players[i].kills == top)
-            .collect()
+        (0..sides.len()).filter(|&i| sides[i] == top).collect()
     }
 
-    /// Announce how `scorer`'s kill changed the lead.
-    fn lead_changes(&mut self, scorer: usize, before: &[usize]) {
+    /// Announce how the last kill changed the lead: to each player, or to
+    /// everyone on a team.
+    fn lead_changes(&mut self, before: &[usize]) {
         let after = self.leaders();
-        if after == [scorer] && before != [scorer] {
-            self.events.push(Event::Lead {
-                player: scorer,
-                change: LeadChange::Gained,
-            });
-        } else if after.len() > 1 && after.contains(&scorer) && !before.contains(&scorer) {
-            self.events.push(Event::Lead {
-                player: scorer,
-                change: LeadChange::Tied,
-            });
-        }
-        for &j in before {
-            if j != scorer && !after.contains(&j) {
-                self.events.push(Event::Lead {
-                    player: j,
-                    change: LeadChange::Lost,
-                });
+        let teams = self.rules.game_type.teams();
+        let tell = |side: usize, change: LeadChange, events: &mut Vec<Event>| {
+            for (i, p) in self.players.iter().enumerate() {
+                let on_side = if teams {
+                    p.team as usize == side
+                } else {
+                    i == side
+                };
+                if on_side {
+                    events.push(Event::Lead { player: i, change });
+                }
+            }
+        };
+        let mut events = Vec::new();
+        for &side in &after {
+            if after.len() == 1 && !before.contains(&side) {
+                tell(side, LeadChange::Gained, &mut events);
+            } else if after.len() > 1 && !before.contains(&side) {
+                tell(side, LeadChange::Tied, &mut events);
+            } else if after.len() == 1 && before.len() > 1 {
+                // Broke a tie.
+                tell(side, LeadChange::Gained, &mut events);
             }
         }
+        for &side in before {
+            if !after.contains(&side) {
+                tell(side, LeadChange::Lost, &mut events);
+            }
+        }
+        self.events.extend(events);
     }
 
     /// Walk over ammo and grenades; hold the action key to take a weapon.
@@ -1243,6 +1348,91 @@ pub(crate) mod tests {
         }
         assert_eq!(g.players[0].body.position, before);
         assert!(!g.players[1].alive, "no respawning after the end");
+    }
+
+    fn team_game(players: usize) -> Game {
+        let mut g = game();
+        g.rules.game_type = GameType::TeamSlayer;
+        for _ in 0..players {
+            g.add_player();
+        }
+        g
+    }
+
+    #[test]
+    fn players_split_into_teams() {
+        let g = team_game(5);
+        let teams: Vec<u8> = g.players.iter().map(|p| p.team).collect();
+        assert_eq!(teams, [0, 1, 0, 1, 0]);
+        assert!(g.is_enemy(0, 1));
+        assert!(!g.is_enemy(0, 2));
+        assert!(!g.is_enemy(0, 0));
+        // Free for all: everyone is an enemy.
+        let mut ffa = game();
+        ffa.add_player();
+        ffa.add_player();
+        assert!(ffa.is_enemy(0, 1));
+    }
+
+    #[test]
+    fn suicides_and_betrayals_cost_a_point() {
+        let mut g = team_game(4);
+        g.damage(1, Some(0), 500.0, false);
+        assert_eq!((g.players[0].score, g.players[0].kills), (1, 1));
+        // Player 2 is on player 0's team.
+        g.damage(2, Some(0), 500.0, false);
+        assert_eq!((g.players[0].score, g.players[0].kills), (0, 1));
+        g.damage(3, Some(3), 500.0, false);
+        assert_eq!(g.players[3].score, -1);
+        g.damage(0, None, 500.0, false);
+        assert_eq!(g.players[0].score, -1);
+        assert_eq!(g.team_score(0), -1);
+        assert_eq!(g.team_score(1), -1);
+    }
+
+    #[test]
+    fn teammates_are_safe_without_friendly_fire() {
+        let mut g = team_game(3);
+        g.rules.friendly_fire = false;
+        g.damage(2, Some(0), 500.0, false);
+        assert!(g.players[2].alive);
+        g.damage(1, Some(0), 500.0, false);
+        assert!(!g.players[1].alive);
+        // Your own grenade still hurts.
+        g.damage(0, Some(0), 500.0, false);
+        assert!(!g.players[0].alive);
+    }
+
+    #[test]
+    fn a_team_wins_together() {
+        let mut g = team_game(4);
+        g.rules.score_to_win = 3;
+        let lead = |g: &mut Game| -> Vec<(usize, LeadChange)> {
+            g.events
+                .drain(..)
+                .filter_map(|e| match e {
+                    Event::Lead { player, change } => Some((player, change)),
+                    _ => None,
+                })
+                .collect()
+        };
+        g.damage(1, Some(0), 500.0, false);
+        // Both red players hear they took the lead.
+        assert_eq!(
+            lead(&mut g),
+            [(0, LeadChange::Gained), (2, LeadChange::Gained)]
+        );
+        g.respawn(1);
+        g.damage(0, Some(1), 500.0, false);
+        assert_eq!(lead(&mut g), [(1, LeadChange::Tied), (3, LeadChange::Tied)]);
+        g.respawn(0);
+        g.damage(1, Some(2), 500.0, false);
+        g.respawn(1);
+        assert_eq!(g.winner, None);
+        g.damage(3, Some(0), 500.0, false);
+        assert_eq!(g.team_score(0), 3);
+        assert_eq!(g.winner, Some(0));
+        assert_eq!(g.winning_team, Some(0));
     }
 
     #[test]

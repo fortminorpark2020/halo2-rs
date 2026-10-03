@@ -236,6 +236,18 @@ impl Soundscape {
             {
                 self.announce(a.suicide);
             }
+            // A teammate's kill: the betrayer and the betrayed hear it.
+            Event::Killed {
+                killer: Some(k),
+                victim,
+                ..
+            } if !game.is_enemy(k, victim) => {
+                if local(k) {
+                    self.announce(a.betrayal);
+                } else if local(victim) {
+                    self.announce(a.betrayed);
+                }
+            }
             Event::Spawned { player, .. } if local(player) => {
                 self.play_flat(scene, g.respawn, 1.0);
             }

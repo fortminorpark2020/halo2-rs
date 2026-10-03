@@ -3,14 +3,14 @@
 
 use crate::input::PadPress;
 use crate::lan::Net;
-use crate::local::{armor_colors, LocalPlayer};
-use crate::menu::{self, Action, Input, MapChoice, Menu, ScoreLine, Screen};
+use crate::local::{player_colors, LocalPlayer, TEAM_COLORS, TEAM_NAMES};
+use crate::menu::{self, Action, Input, MapChoice, Menu, ScoreLine, Screen, SeatInfo};
 use crate::{
     level_focus, load_level, new_game, scene, App, Level, Loading, Mode, Then, MUSIC_VOLUME,
 };
 use gilrs::GamepadId;
 use h2net::LanGame;
-use h2sim::Bot;
+use h2sim::{game::TEAMS, Bot, Game};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, TryRecvError};
 
@@ -26,11 +26,20 @@ fn overview((focus, radius): (glam::Vec3, f32), angle: f32) -> crate::camera::Fl
     crate::camera::FlyCamera::looking_at(from, focus)
 }
 
+/// Someone playing at this PC: their controller (none for the keyboard)
+/// and the team they picked in the lobby.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Seat {
+    pub pad: Option<GamepadId>,
+    pub team: u8,
+}
+
 /// A controller press, as the menus see it.
 enum Press {
     Menu(Input),
     Join,
     Leave,
+    Team,
     None,
 }
 
@@ -44,6 +53,7 @@ fn press(p: PadPress) -> Press {
         PadPress::Melee => Press::Menu(Input::Back),
         PadPress::Join => Press::Join,
         PadPress::Leave => Press::Leave,
+        PadPress::Reload => Press::Team,
         _ => Press::None,
     }
 }
@@ -61,7 +71,7 @@ impl App {
     /// Run `f` with the menu and what it shows.
     pub(crate) fn with_menu<R>(&mut self, f: impl FnOnce(&mut Menu, &menu::Context) -> R) -> R {
         let scores = self.score_lines();
-        let seats = self.seat_labels();
+        let seats = self.seat_infos();
         let joined = self.joined();
         let ctx = menu::Context {
             maps: &self.maps,
@@ -120,27 +130,30 @@ impl App {
 
     /// A controller press while the menus are up.
     pub(crate) fn menu_pad(&mut self, id: GamepadId, pad_press: PadPress) {
-        let seated = self.seats.iter().position(|s| *s == Some(id));
+        let seated = self.seats.iter().position(|s| s.pad == Some(id));
         let lobby = self.mode == Mode::Menu && self.menu.screen == Screen::Lobby;
         match press(pad_press) {
             Press::Menu(input) => {
                 if input == Input::Select && seated.is_none() && self.seat_free() {
-                    self.seats[0] = Some(id);
+                    self.seats[0].pad = Some(id);
                 }
                 self.menu_input(input);
             }
             Press::Join if lobby && seated.is_none() => {
                 if self.seat_free() {
-                    self.seats[0] = Some(id);
+                    self.seats[0].pad = Some(id);
                 } else if self.seats.len() < crate::MAX_LOCAL {
-                    self.seats.push(Some(id));
+                    self.seats.push(Seat {
+                        pad: Some(id),
+                        team: 0,
+                    });
                 }
                 self.sound.play_ui(&self.scene, menu::Sound::Forward);
             }
             Press::Join if self.menu.screen == Screen::Pause => self.menu_input(Input::Back),
             Press::Join => self.menu_input(Input::Select),
             Press::Leave if lobby => match seated {
-                Some(0) => self.seats[0] = None,
+                Some(0) => self.seats[0].pad = None,
                 Some(k) => {
                     self.seats.remove(k);
                     self.sound.play_ui(&self.scene, menu::Sound::Back);
@@ -148,46 +161,96 @@ impl App {
                 None => {}
             },
             Press::Leave => self.menu_input(Input::Back),
-            Press::None => {}
+            Press::Team if lobby => {
+                if seated.is_none() && self.seat_free() {
+                    self.seats[0].pad = Some(id);
+                }
+                if let Some(k) = self.seats.iter().position(|s| s.pad == Some(id)) {
+                    self.change_team(k);
+                }
+            }
+            Press::Team | Press::None => {}
         }
     }
 
     /// Player one is free for a controller: no one has used the keyboard or
     /// mouse, and no controller has it yet.
     fn seat_free(&self) -> bool {
-        !self.keyboard_used && self.seats[0].is_none()
+        !self.keyboard_used && self.seats[0].pad.is_none()
+    }
+
+    /// Put someone at this PC on the other team, in team games.
+    pub(crate) fn change_team(&mut self, seat: usize) {
+        if !self.menu.settings.game_type().teams() {
+            return;
+        }
+        if let Some(s) = self.seats.get_mut(seat) {
+            s.team = (s.team + 1) % TEAMS;
+            self.sound.play_ui(&self.scene, menu::Sound::Cursor);
+        }
     }
 
     /// How each person at this PC plays, for the lobby.
-    fn seat_labels(&self) -> Vec<&'static str> {
+    fn seat_infos(&self) -> Vec<SeatInfo> {
         self.seats
             .iter()
-            .map(|s| {
-                if s.is_some() {
+            .map(|s| SeatInfo {
+                how: if s.pad.is_some() {
                     "CONTROLLER"
                 } else {
                     "KEYBOARD"
-                }
+                },
+                team: s.team,
             })
             .collect()
     }
 
-    /// Everyone's score, best first.
+    /// Everyone's score, best first; in team games, each team (best first)
+    /// heads its players.
     pub(crate) fn score_lines(&self) -> Vec<ScoreLine> {
-        let mut lines: Vec<ScoreLine> = self
-            .game
-            .players
-            .iter()
-            .enumerate()
-            .map(|(i, p)| ScoreLine {
+        let game = &self.game;
+        let line = |i: usize| {
+            let p = &game.players[i];
+            ScoreLine {
                 name: format!("PLAYER {}", i + 1),
+                score: p.score,
                 kills: p.kills,
                 deaths: p.deaths,
-                color: armor_colors(i)[0],
+                color: player_colors(game, i)[0],
                 local: self.locals.iter().any(|l| l.player == i),
-            })
+                header: false,
+            }
+        };
+        let by_score =
+            |a: &ScoreLine, b: &ScoreLine| b.score.cmp(&a.score).then(a.deaths.cmp(&b.deaths));
+        let mut players: Vec<ScoreLine> = (0..game.players.len()).map(line).collect();
+        players.sort_by(by_score);
+        if !game.rules.game_type.teams() {
+            return players;
+        }
+        let mut teams: Vec<u8> = (0..TEAMS)
+            .filter(|&t| game.players.iter().any(|p| p.team == t))
             .collect();
-        lines.sort_by(|a, b| b.kills.cmp(&a.kills).then(a.deaths.cmp(&b.deaths)));
+        teams.sort_by_key(|&t| std::cmp::Reverse(game.team_score(t)));
+        let mut lines = Vec::new();
+        for t in teams {
+            let members = || game.players.iter().filter(|p| p.team == t);
+            lines.push(ScoreLine {
+                name: format!("{} TEAM", TEAM_NAMES[t as usize]),
+                score: game.team_score(t),
+                kills: members().map(|p| p.kills).sum(),
+                deaths: members().map(|p| p.deaths).sum(),
+                color: TEAM_COLORS[t as usize],
+                local: false,
+                header: true,
+            });
+            let mut mine: Vec<ScoreLine> = (0..game.players.len())
+                .filter(|&i| game.players[i].team == t)
+                .map(line)
+                .collect();
+            mine.sort_by(by_score);
+            lines.extend(mine);
+        }
         lines
     }
 
@@ -291,11 +354,17 @@ impl App {
             }
         };
         self.reset_match();
-        self.game = new_game(&self.scene, self.score_to_win());
+        self.game = self.fresh_game();
     }
 
-    fn score_to_win(&self) -> u32 {
-        menu::SCORES[self.menu.settings.score]
+    /// A game with no one in it yet, under the lobby's settings.
+    fn fresh_game(&self) -> Game {
+        let settings = &self.menu.settings;
+        new_game(
+            &self.scene,
+            settings.game_type(),
+            menu::SCORES[settings.score],
+        )
     }
 
     /// Clear away the last game: its players, effects and sounds.
@@ -317,16 +386,21 @@ impl App {
     /// A fresh game for the people here; `bots` computer players join them.
     fn seat_players(&mut self, bots: usize) {
         self.reset_match();
-        self.game = new_game(&self.scene, self.score_to_win());
+        self.game = self.fresh_game();
         let seats = self.seats.clone();
-        for (k, pad) in seats.into_iter().enumerate() {
+        let teams = self.game.rules.game_type.teams();
+        for (k, seat) in seats.into_iter().enumerate() {
             if self.game.players.len() >= scene::MAX_BODIES {
                 break;
             }
-            let i = self.game.add_player();
+            let i = if teams {
+                self.game.add_player_on(seat.team)
+            } else {
+                self.game.add_player()
+            };
             let mut l = LocalPlayer::new(i, &self.game);
             l.keyboard = k == 0;
-            l.pad = pad;
+            l.pad = seat.pad;
             self.locals.push(l);
         }
         if let Some(s) = self.start_pos {
@@ -375,22 +449,26 @@ impl App {
     pub(crate) fn end_game(&mut self) {
         self.net = Net::Offline;
         if self.mode == Mode::Playing {
-            let mut seats: Vec<Option<GamepadId>> = Vec::new();
+            let seat = |l: &LocalPlayer| Seat {
+                pad: l.pad,
+                team: self.game.players.get(l.player).map_or(0, |p| p.team),
+            };
+            let mut seats: Vec<Seat> = Vec::new();
             for l in self.locals.iter().filter(|l| l.keyboard) {
-                seats.push(l.pad);
+                seats.push(seat(l));
             }
             for l in self.locals.iter().filter(|l| !l.keyboard) {
                 if seats.is_empty() {
-                    seats.push(None);
+                    seats.push(Seat::default());
                 }
-                seats.push(l.pad);
+                seats.push(seat(l));
             }
             if !seats.is_empty() {
                 self.seats = seats;
             }
         }
         self.reset_match();
-        self.game = new_game(&self.scene, self.score_to_win());
+        self.game = self.fresh_game();
         self.mode = Mode::Menu;
         self.menu_open = false;
         self.menu.show(Screen::Lobby);

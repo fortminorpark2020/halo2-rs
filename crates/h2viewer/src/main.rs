@@ -47,11 +47,13 @@ use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use gpu::{hud_mode, DrawCall, Frame, HudBatch};
 use h2sim::game::{Event, GrenadeKind, HeldWeapon, TICK};
-use h2sim::{Bot, Command, Game, ItemKind, ItemSpawn, NavGraph, Rules, WeaponState, World};
+use h2sim::{
+    Bot, Command, Game, GameType, ItemKind, ItemSpawn, NavGraph, Rules, WeaponState, World,
+};
 use hud::HudBuilder;
 use input::{PadPress, Pads};
 use lan::Net;
-use local::{armor_colors, display_name, kill_message, Keyboard, LocalPlayer, Taps};
+use local::{display_name, kill_message, player_colors, Keyboard, LocalPlayer, Taps};
 use menu::{MapChoice, Menu, Screen, Settings};
 use scene::Scene;
 use std::collections::HashSet;
@@ -167,7 +169,7 @@ fn level_spawns(scene: &Scene) -> Vec<(Vec3, f32)> {
 }
 
 /// A game on the scene's level, with no one in it yet.
-fn new_game(scene: &Scene, score_to_win: u32) -> Game {
+fn new_game(scene: &Scene, game_type: GameType, score_to_win: u32) -> Game {
     let items = scene
         .items
         .iter()
@@ -178,6 +180,7 @@ fn new_game(scene: &Scene, score_to_win: u32) -> Game {
         })
         .collect();
     let rules = Rules {
+        game_type,
         score_to_win,
         ..rules(scene)
     };
@@ -266,8 +269,8 @@ struct App {
     /// The people playing at this computer, one view each.
     locals: Vec<LocalPlayer>,
     /// The people at this computer between games: player one (keyboard and
-    /// maybe a controller) and the controllers of the others.
-    seats: Vec<Option<GamepadId>>,
+    /// maybe a controller) and the others with controllers.
+    seats: Vec<flow::Seat>,
     pads: Pads,
     window: Option<Arc<Window>>,
     gpu: Option<gpu::Gpu>,
@@ -595,12 +598,14 @@ impl App {
                         .explosion(position, kind == GrenadeKind::Plasma);
                 }
                 Event::Killed { killer, victim, .. } => {
+                    let betrayal =
+                        killer.is_some_and(|k| k != victim && !self.game.is_enemy(k, victim));
                     println!(
                         "{}",
-                        kill_message(usize::MAX, killer, victim).to_lowercase()
+                        kill_message(usize::MAX, killer, victim, betrayal).to_lowercase()
                     );
                     for l in &mut self.locals {
-                        l.message(kill_message(l.player, killer, victim));
+                        l.message(kill_message(l.player, killer, victim, betrayal));
                         if victim == l.player {
                             // The death camera starts behind and above the body.
                             l.camera.pitch = -0.6;
@@ -747,7 +752,7 @@ impl App {
             mesh: body.meshes[player],
             model: pose.object,
             light,
-            colors: Some(armor_colors(player)),
+            colors: Some(player_colors(&self.game, player)),
         }];
         let weapon = p.held().filter(|_| p.alive);
         if let Some(mesh) = weapon
@@ -1067,6 +1072,10 @@ impl App {
         if self.loading.is_some() {
             return;
         }
+        if self.mode == Mode::Menu && self.menu.screen == Screen::Lobby && code == KeyCode::KeyT {
+            self.change_team(0);
+            return;
+        }
         if self.in_menu() {
             let input = match code {
                 KeyCode::ArrowUp | KeyCode::KeyW => menu::Input::Up,
@@ -1163,7 +1172,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3)
         .min(menu::MAX_BOTS);
+    // H2_GAME=team plays Team Slayer (for testing).
+    let game_type = match env("H2_GAME").as_deref() {
+        Some("team") => 1,
+        _ => 0,
+    };
     let settings = Settings {
+        game_type,
         map: 0,
         score: menu::SCORES.iter().position(|&s| s == 25).unwrap_or(0),
         bots,
@@ -1179,14 +1194,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
-        game: new_game(&level.scene, 0),
+        game: new_game(&level.scene, GameType::Slayer, 0),
         scene: level.scene,
         world: level.world,
         bots: Vec::new(),
         nav: level.nav,
         focus: (Vec3::ZERO, 1.0),
         locals: Vec::new(),
-        seats: vec![None],
+        seats: vec![flow::Seat::default()],
         pads: Pads::new(),
         window: None,
         gpu: None,
@@ -1231,7 +1246,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1);
     for _ in 1..split.min(MAX_LOCAL) {
-        app.seats.push(None);
+        app.seats.push(flow::Seat::default());
     }
     // H2_JOIN=<address:port> joins a LAN game at once, and H2_PLAY=1 starts
     // a game at once (for testing).

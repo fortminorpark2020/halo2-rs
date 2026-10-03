@@ -81,7 +81,7 @@ impl Bot {
         game.players
             .iter()
             .enumerate()
-            .filter(|(j, p)| *j != me && p.alive)
+            .filter(|(j, p)| game.is_enemy(me, *j) && p.alive)
             .map(|(j, p)| (j, p.eye().distance(eye), p.eye() - Vec3::Z * 0.1))
             .filter(|&(_, d, chest)| d < SIGHT && Bot::visible(world, eye, chest))
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -283,5 +283,36 @@ mod tests {
         }
         assert!(fired);
         assert!(hurt);
+    }
+
+    #[test]
+    fn bots_on_both_teams_fight() {
+        let world = crate::game::tests::floor();
+        let mut game = crate::game::tests::game();
+        game.rules.game_type = crate::GameType::TeamSlayer;
+        game.rules.score_to_win = 0;
+        let nav = NavGraph::build(&world, &[Vec3::ZERO, Vec3::new(8.0, 0.0, 0.0)]);
+        let mut bots: Vec<(usize, Bot)> = (0..4)
+            .map(|k| (game.add_player(), Bot::new(k * 31 + 5)))
+            .collect();
+        for (i, _) in &bots {
+            let x = if game.players[*i].team == 0 { 0.0 } else { 8.0 };
+            game.players[*i].body.position = Vec3::new(x, *i as f32, 0.0);
+        }
+        for _ in 0..60 * 60 {
+            let mut cmds = vec![Command::default(); game.players.len()];
+            for (i, bot) in &mut bots {
+                cmds[*i] = bot.think(&game, &world, &nav, *i);
+            }
+            game.step(&world, &cmds);
+        }
+        let kills = |t: u8| -> u32 {
+            game.players
+                .iter()
+                .filter(|p| p.team == t)
+                .map(|p| p.kills)
+                .sum()
+        };
+        assert!(kills(0) > 0 && kills(1) > 0);
     }
 }

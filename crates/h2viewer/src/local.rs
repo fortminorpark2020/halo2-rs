@@ -85,6 +85,26 @@ pub fn armor_colors(player: usize) -> [[f32; 3]; 2] {
     [primary, secondary]
 }
 
+/// Red and blue team armour.
+pub const TEAM_COLORS: [[f32; 3]; 2] = [ARMOR_COLORS[0], ARMOR_COLORS[1]];
+pub const TEAM_NAMES: [&str; 2] = ["RED", "BLUE"];
+
+/// A team's colour, bright enough for text and markers.
+pub fn team_hud_color(team: u8) -> [f32; 4] {
+    [[1.0, 0.3, 0.25, 1.0], [0.35, 0.55, 1.0, 1.0]][team.min(1) as usize]
+}
+
+/// Armour colours in this game: by team in team games.
+pub fn player_colors(game: &Game, player: usize) -> [[f32; 3]; 2] {
+    match game.players.get(player) {
+        Some(p) if game.rules.game_type.teams() => {
+            let c = TEAM_COLORS[p.team.min(1) as usize];
+            [c, c.map(|v| v * 0.6)]
+        }
+        _ => armor_colors(player),
+    }
+}
+
 /// "battle_rifle" -> "BATTLE RIFLE".
 pub fn display_name(name: &str) -> String {
     name.replace('_', " ").to_uppercase()
@@ -98,12 +118,13 @@ pub fn player_name(me: usize, i: usize) -> String {
     }
 }
 
-/// A kill feed line, as Halo 2 words it.
-pub fn kill_message(me: usize, killer: Option<usize>, victim: usize) -> String {
+/// A kill feed line, as Halo 2 words it. A betrayal is a teammate's kill.
+pub fn kill_message(me: usize, killer: Option<usize>, victim: usize, betrayal: bool) -> String {
     let v = player_name(me, victim);
     match killer {
         Some(k) if k == victim && k == me => "YOU KILLED YOURSELF".into(),
         Some(k) if k == victim => format!("{v} COMMITTED SUICIDE"),
+        Some(k) if betrayal => format!("{} BETRAYED {v}", player_name(me, k)),
         Some(k) => format!("{} KILLED {v}", player_name(me, k)),
         None => format!("{v} DIED"),
     }
@@ -435,7 +456,7 @@ impl LocalPlayer {
                     mesh: arms.mesh,
                     model: frame,
                     light,
-                    colors: Some(armor_colors(self.player)),
+                    colors: Some(player_colors(game, self.player)),
                 });
                 let muzzle = rig
                     .gun_node_world(&world, weapon.muzzle_node)
@@ -540,17 +561,29 @@ impl LocalPlayer {
         if let Some(notice) = &self.notice {
             hb.text(font, [w * 0.5, 64.0 * s], 8.0 * s, notice, hud::BLUE);
         }
-        // Your score, and the best of everyone else's under it.
-        let best_other = (0..game.players.len())
-            .filter(|&i| i != self.player)
-            .map(|i| game.players[i].kills)
-            .max();
+        // Your score (your team's in team games), and the best of the
+        // others under it.
+        let teams = game.rules.game_type.teams();
+        let (mine, best_other, colors) = if teams {
+            let enemy = 1 - me.team.min(1);
+            (
+                game.team_score(me.team),
+                Some(game.team_score(enemy)),
+                [team_hud_color(me.team), team_hud_color(enemy)],
+            )
+        } else {
+            let best = (0..game.players.len())
+                .filter(|&i| i != self.player)
+                .map(|i| game.players[i].score)
+                .max();
+            (me.score, best, [hud::BLUE, hud::DIM_BLUE])
+        };
         hb.text(
             font,
             [w - 40.0 * s, h - 52.0 * s],
             14.0 * s,
-            &me.kills.to_string(),
-            hud::BLUE,
+            &mine.to_string(),
+            colors[0],
         );
         if let Some(k) = best_other {
             hb.text(
@@ -558,14 +591,15 @@ impl LocalPlayer {
                 [w - 40.0 * s, h - 34.0 * s],
                 10.0 * s,
                 &k.to_string(),
-                hud::DIM_BLUE,
+                colors[1],
             );
         }
         if let Some(winner) = game.winner {
-            let text = if winner == self.player {
-                "YOU WIN".to_string()
-            } else {
-                format!("{} WINS", player_name(self.player, winner))
+            let text = match game.winning_team {
+                Some(t) if t == me.team => "YOUR TEAM WINS".to_string(),
+                Some(t) => format!("{} TEAM WINS", TEAM_NAMES[t.min(1) as usize]),
+                None if winner == self.player => "YOU WIN".to_string(),
+                None => format!("{} WINS", player_name(self.player, winner)),
             };
             hb.text(font, [w * 0.5, h * 0.3], 20.0 * s, &text, hud::BLUE);
         }
@@ -689,10 +723,12 @@ mod tests {
 
     #[test]
     fn kill_feed_wording() {
-        assert_eq!(kill_message(0, Some(0), 1), "YOU KILLED PLAYER 2");
-        assert_eq!(kill_message(0, Some(1), 0), "PLAYER 2 KILLED YOU");
-        assert_eq!(kill_message(0, Some(0), 0), "YOU KILLED YOURSELF");
-        assert_eq!(kill_message(0, None, 2), "PLAYER 3 DIED");
+        assert_eq!(kill_message(0, Some(0), 1, false), "YOU KILLED PLAYER 2");
+        assert_eq!(kill_message(0, Some(1), 0, false), "PLAYER 2 KILLED YOU");
+        assert_eq!(kill_message(0, Some(0), 0, false), "YOU KILLED YOURSELF");
+        assert_eq!(kill_message(0, None, 2, false), "PLAYER 3 DIED");
+        assert_eq!(kill_message(0, Some(0), 2, true), "YOU BETRAYED PLAYER 3");
+        assert_eq!(kill_message(0, Some(1), 0, true), "PLAYER 2 BETRAYED YOU");
     }
 
     #[test]

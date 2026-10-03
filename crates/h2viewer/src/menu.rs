@@ -5,6 +5,7 @@
 use crate::gpu::hud_mode;
 use crate::hud::HudBuilder;
 use h2net::LanGame;
+use h2sim::GameType;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,9 +104,16 @@ pub fn find_maps(dir: &Path) -> Vec<MapChoice> {
 /// Kills to win the lobby offers; 0 plays on without end.
 pub const SCORES: [u32; 6] = [5, 10, 15, 25, 50, 0];
 pub const MAX_BOTS: usize = 15;
+/// The game types the lobby offers, with their names.
+pub const GAME_TYPES: [(GameType, &str); 2] = [
+    (GameType::Slayer, "SLAYER"),
+    (GameType::TeamSlayer, "TEAM SLAYER"),
+];
 
 #[derive(Clone, Debug)]
 pub struct Settings {
+    /// In `GAME_TYPES`.
+    pub game_type: usize,
     /// In `Context::maps`.
     pub map: usize,
     /// In `SCORES`.
@@ -113,15 +121,32 @@ pub struct Settings {
     pub bots: usize,
 }
 
-/// A line of the scoreboard.
+impl Settings {
+    pub fn game_type(&self) -> GameType {
+        GAME_TYPES[self.game_type.min(GAME_TYPES.len() - 1)].0
+    }
+}
+
+/// A line of the scoreboard: a player, or a team's totals heading its
+/// players.
 #[derive(Clone, Debug)]
 pub struct ScoreLine {
     pub name: String,
+    pub score: i32,
     pub kills: u32,
     pub deaths: u32,
     pub color: [f32; 3],
     /// Someone playing at this PC.
     pub local: bool,
+    pub header: bool,
+}
+
+/// Someone at this PC, in the lobby.
+#[derive(Clone, Copy, Debug)]
+pub struct SeatInfo {
+    /// "KEYBOARD" or "CONTROLLER".
+    pub how: &'static str,
+    pub team: u8,
 }
 
 /// What the game should do after a menu input.
@@ -160,8 +185,8 @@ pub enum Sound {
 pub struct Context<'a> {
     pub maps: &'a [MapChoice],
     pub lan: &'a [LanGame],
-    /// People at this PC, and how each plays ("KEYBOARD", "CONTROLLER").
-    pub seats: &'a [&'static str],
+    /// People at this PC.
+    pub seats: &'a [SeatInfo],
     pub scores: &'a [ScoreLine],
     /// Playing in another PC's game.
     pub joined: bool,
@@ -304,7 +329,10 @@ impl Menu {
             Row::Multiplayer => ("MULTIPLAYER".into(), None),
             Row::SystemLink => ("SYSTEM LINK".into(), None),
             Row::Quit => ("QUIT".into(), None),
-            Row::GameType => ("GAME TYPE".into(), Some("SLAYER".into())),
+            Row::GameType => (
+                "GAME TYPE".into(),
+                Some(GAME_TYPES[s.game_type.min(GAME_TYPES.len() - 1)].1.into()),
+            ),
             Row::Map => (
                 "MAP".into(),
                 Some(
@@ -405,7 +433,7 @@ impl Menu {
             Row::Map => s.map = cycle(s.map, ctx.maps.len()),
             Row::Score => s.score = cycle(s.score, SCORES.len()),
             Row::Bots => s.bots = cycle(s.bots, MAX_BOTS + 1),
-            Row::GameType => {}
+            Row::GameType => s.game_type = cycle(s.game_type, GAME_TYPES.len()),
             _ => return false,
         }
         true
@@ -644,9 +672,11 @@ impl Menu {
     ) {
         let s = f.s;
         let (x, mut y) = (372.0, ROW_Y);
+        let teams = self.settings.game_type().teams();
         let lines = ctx.seats.len() + (self.settings.bots > 0) as usize;
         let invite = ctx.seats.len() < crate::MAX_LOCAL;
-        let height = 34.0 + 16.0 * lines as f32 + if invite { 30.0 } else { 0.0 };
+        let hints = invite as usize * 2 + teams as usize;
+        let height = 34.0 + 16.0 * lines as f32 + 6.0 + 11.0 * hints as f32;
         hb.quad(
             white,
             f.rect([x - 8.0, y - 8.0, x + 236.0, y + height]),
@@ -657,8 +687,13 @@ impl Menu {
         );
         hb.text_left(font, f.at(x, y), 11.0 * s, "PLAYERS", BRIGHT);
         y += 24.0;
-        for (i, how) in ctx.seats.iter().enumerate() {
-            let c = crate::local::armor_colors(i)[0];
+        for (i, seat) in ctx.seats.iter().enumerate() {
+            let c = if teams {
+                crate::local::TEAM_COLORS[seat.team.min(1) as usize]
+            } else {
+                crate::local::armor_colors(i)[0]
+            };
+            let how = seat.how;
             let swatch = f.rect([x, y, x + 8.0, y + 9.0]);
             hb.quad(
                 white,
@@ -678,8 +713,12 @@ impl Menu {
             hb.text_left(font, f.at(x + 14.0, y), 9.0 * s, &line, DIM);
             y += 16.0;
         }
+        y += 6.0;
+        if teams {
+            hb.text_left(font, f.at(x, y), 7.0 * s, "T OR X: CHANGE TEAM", DIM);
+            y += 11.0;
+        }
         if invite {
-            y += 6.0;
             hb.text_left(
                 font,
                 f.at(x, y),
@@ -698,7 +737,11 @@ impl Menu {
     }
 }
 
-/// The scoreboard, best first, its top at `top` (screen units).
+/// Most lines the scoreboard shows: 16 players and two team totals.
+const MAX_SCORE_LINES: usize = 18;
+
+/// The scoreboard, best first, its top at `top` (screen units). Places go
+/// to teams when there are team totals, otherwise to players.
 fn draw_scores(
     hb: &mut HudBuilder,
     font: usize,
@@ -708,18 +751,30 @@ fn draw_scores(
     scores: &[ScoreLine],
 ) {
     let s = f.s;
-    let cols = [ROW_X + 10.0, ROW_X + 70.0, ROW_X + 330.0, ROW_X + 420.0];
+    let cols = [
+        ROW_X + 10.0,
+        ROW_X + 70.0,
+        ROW_X + 290.0,
+        ROW_X + 360.0,
+        ROW_X + 430.0,
+    ];
     let mut y = top;
-    for (x, h) in cols.iter().zip(["PLACE", "PLAYER", "KILLS", "DEATHS"]) {
+    for (x, h) in cols
+        .iter()
+        .zip(["PLACE", "PLAYER", "SCORE", "KILLS", "DEATHS"])
+    {
         hb.text_left(font, f.at(*x, y), 8.0 * s, h, DIM);
     }
     y += 16.0;
-    let mut rank = 0;
-    for (i, line) in scores.iter().enumerate().take(16) {
-        if i == 0 || scores[i - 1].kills != line.kills {
-            rank = i + 1;
-        }
-        let bg = if line.local {
+    let teams = scores.iter().any(|l| l.header);
+    let ranked: Vec<&ScoreLine> = scores.iter().filter(|l| l.header == teams).collect();
+    let rank_of =
+        |line: &ScoreLine| -> usize { 1 + ranked.iter().filter(|o| o.score > line.score).count() };
+    for line in scores.iter().take(MAX_SCORE_LINES) {
+        let c = line.color;
+        let bg = if line.header {
+            [c[0] * 0.6, c[1] * 0.6, c[2] * 0.6, 0.85]
+        } else if line.local {
             [0.15, 0.3, 0.55, 0.75]
         } else {
             PANEL
@@ -732,26 +787,33 @@ fn draw_scores(
             hud_mode::PLAIN,
             0.0,
         );
-        let c = line.color;
-        hb.quad(
-            white,
-            f.rect([cols[1] - 14.0, y + 1.0, cols[1] - 6.0, y + 10.0]),
-            [0.0; 4],
-            [c[0], c[1], c[2], 1.0],
-            hud_mode::PLAIN,
-            0.0,
-        );
-        let fg = if line.local { BRIGHT } else { TEXT };
-        hb.text_left(font, f.at(cols[0], y), 9.0 * s, &place(rank), fg);
-        hb.text_left(font, f.at(cols[1], y), 9.0 * s, &line.name, fg);
-        hb.text_left(font, f.at(cols[2], y), 9.0 * s, &line.kills.to_string(), fg);
-        hb.text_left(
-            font,
-            f.at(cols[3], y),
-            9.0 * s,
-            &line.deaths.to_string(),
-            fg,
-        );
+        if !line.header {
+            hb.quad(
+                white,
+                f.rect([cols[1] - 14.0, y + 1.0, cols[1] - 6.0, y + 10.0]),
+                [0.0; 4],
+                [c[0], c[1], c[2], 1.0],
+                hud_mode::PLAIN,
+                0.0,
+            );
+        }
+        let fg = if line.local || line.header {
+            BRIGHT
+        } else {
+            TEXT
+        };
+        if line.header == teams {
+            hb.text_left(font, f.at(cols[0], y), 9.0 * s, &place(rank_of(line)), fg);
+        }
+        let values = [
+            line.name.clone(),
+            line.score.to_string(),
+            line.kills.to_string(),
+            line.deaths.to_string(),
+        ];
+        for (x, v) in cols[1..].iter().zip(&values) {
+            hb.text_left(font, f.at(*x, y), 9.0 * s, v, fg);
+        }
         y += 16.0;
     }
 }
@@ -770,7 +832,7 @@ pub fn draw_scoreboard(
         ROW_X - 12.0,
         70.0,
         ROW_X + 502.0,
-        120.0 + 16.0 * scores.len().min(16) as f32,
+        120.0 + 16.0 * scores.len().min(MAX_SCORE_LINES) as f32,
     ]);
     hb.quad(
         white,
@@ -791,7 +853,10 @@ mod tests {
         Context {
             maps,
             lan,
-            seats: &["KEYBOARD"],
+            seats: &[SeatInfo {
+                how: "KEYBOARD",
+                team: 0,
+            }],
             scores: &[],
             joined: false,
         }
@@ -819,6 +884,7 @@ mod tests {
         let maps = maps();
         let c = ctx(&maps, &[]);
         let mut m = Menu::new(Settings {
+            game_type: 0,
             map: 0,
             score: 3,
             bots: 3,
@@ -849,6 +915,7 @@ mod tests {
     fn system_link_lists_games_to_join() {
         let maps = maps();
         let mut m = Menu::new(Settings {
+            game_type: 0,
             map: 0,
             score: 3,
             bots: 3,
@@ -869,6 +936,7 @@ mod tests {
         let maps = maps();
         let c = ctx(&maps, &[]);
         let mut m = Menu::new(Settings {
+            game_type: 0,
             map: 0,
             score: 3,
             bots: 3,
