@@ -14,3 +14,4 @@ pollster = "1"
 wgpu = "30"
 winit = "0.30"
 gilrs = "0.11.2"
+h2net = { path = "../h2net" }

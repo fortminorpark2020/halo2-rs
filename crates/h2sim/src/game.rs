@@ -10,6 +10,9 @@ use crate::weapon::{WeaponDef, WeaponInput, WeaponState};
 use blam_cache::physics::{BipedPhysics, PlayerMovement};
 use glam::{Vec2, Vec3};
 
+mod sync;
+pub use sync::{Malformed, Reader, Writer};
+
 /// Simulation step: the game advances in fixed ticks so every machine in a
 /// networked game computes the same thing.
 pub const TICK: f32 = 1.0 / 60.0;
@@ -268,6 +271,8 @@ pub enum Event {
     },
     Spawned {
         player: usize,
+        /// The way they face on appearing.
+        yaw: f32,
     },
     PickedUp {
         player: usize,
@@ -291,6 +296,13 @@ pub struct Game {
     pub events: Vec<Event>,
     pub winner: Option<usize>,
     rng: u32,
+}
+
+/// How long the weapon now in a player's hands takes to come up.
+fn ready_time(weapons: &[WeaponDef], p: &Spartan) -> f32 {
+    p.held()
+        .and_then(|h| weapons.get(h.weapon))
+        .map_or(crate::weapon::DEFAULT_READY_TIME, |d| d.ready_time)
 }
 
 /// Distance along a ray to a vertical capsule (feet at `base`), if it hits.
@@ -430,7 +442,7 @@ impl Game {
         s.kills = kills;
         s.deaths = deaths;
         self.players[player] = s;
-        self.events.push(Event::Spawned { player });
+        self.events.push(Event::Spawned { player, yaw });
     }
 
     /// Advance one tick; `commands[i]` drives player i.
@@ -557,7 +569,7 @@ impl Game {
             h.state.reloading = None;
         }
         p.current = (p.current + 1) % p.weapons.len();
-        p.readying = 0.5;
+        p.readying = ready_time(&self.weapons, p);
         self.events.push(Event::Switched { player: i });
     }
 
@@ -921,14 +933,14 @@ impl Game {
         if p.weapons.len() < 2 {
             p.weapons.push(HeldWeapon { weapon: w, state });
             p.current = p.weapons.len() - 1;
-            p.readying = 0.5;
+            p.readying = ready_time(&self.weapons, p);
             self.events.push(Event::Switched { player: i });
             return true;
         }
         if action && p.action_held >= SWAP_HOLD {
             p.action_held = f32::MIN;
             let old = std::mem::replace(&mut p.weapons[p.current], HeldWeapon { weapon: w, state });
-            p.readying = 0.5;
+            p.readying = ready_time(&self.weapons, p);
             let (pos, yaw) = (p.body.position + Vec3::Z * 0.1, p.yaw);
             self.dropped.push(DroppedWeapon {
                 weapon: old.weapon,
@@ -982,83 +994,8 @@ impl Game {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use blam_cache::weapon::TriggerBehavior;
 
-    pub(crate) fn floor() -> World {
-        let s = 50.0;
-        World::new(
-            &[[-s, -s, 0.0], [s, -s, 0.0], [s, s, 0.0], [-s, s, 0.0]],
-            &[0, 1, 2, 0, 2, 3],
-        )
-    }
-
-    fn rifle() -> WeaponDef {
-        WeaponDef {
-            name: "rifle".into(),
-            behavior: TriggerBehavior::Latch,
-            rounds_per_second: (10.0, 10.0),
-            rate_acceleration_time: 0.0,
-            shots_per_fire: 1,
-            fire_recovery_time: 0.0,
-            magazine_size: 12,
-            initial_rounds: 36,
-            maximum_rounds: 108,
-            reload_time: 1.0,
-            rounds_per_shot: 1,
-            projectiles_per_shot: 1,
-            error_angle: (0.0, 0.0),
-            minimum_error: 0.0,
-            error_acceleration_time: 0.0,
-            error_deceleration_time: 0.0,
-            distribution_angle: 0.0,
-            zoom_levels: 0,
-            zoom_range: (1.0, 1.0),
-            range: 100.0,
-            velocity: 0.0,
-            damage: 20.0,
-            damage_range: (0.0, 100.0),
-            damage_lower_bound: 20.0,
-        }
-    }
-
-    pub(crate) fn game() -> Game {
-        let rules = Rules {
-            starting_weapons: vec![0],
-            headshot_weapons: vec![0],
-            ..Rules::default()
-        };
-        let movement = PlayerMovement {
-            run_forward: 2.25,
-            run_backward: 2.0,
-            run_sideways: 2.0,
-            run_acceleration: 9.6,
-            ..PlayerMovement::default()
-        };
-        let biped = BipedPhysics {
-            jump_velocity: 3.0,
-            standing_camera_height: 0.62,
-            crouching_camera_height: 0.45,
-            height_standing: 0.725,
-            height_crouching: 0.5,
-            radius: 0.175,
-            max_slope: 0.87,
-        };
-        Game::new(
-            rules,
-            vec![rifle(), rifle()],
-            vec![
-                (Vec3::new(0.0, 0.0, 0.0), 0.0),
-                (Vec3::new(5.0, 0.0, 0.0), 0.0),
-            ],
-            vec![ItemSpawn {
-                kind: ItemKind::Weapon(1),
-                position: Vec3::new(0.0, 3.0, 0.0),
-                respawn: 30.0,
-            }],
-            movement,
-            biped,
-        )
-    }
+    pub(crate) use crate::testing::{floor, game};
 
     /// Two players facing each other along x.
     fn duel(g: &mut Game) {

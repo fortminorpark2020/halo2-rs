@@ -167,6 +167,8 @@ pub struct LocalPlayer {
     pub shots_fired: usize,
     /// Kill feed and pickups, newest last, with seconds left on screen.
     pub messages: Vec<(String, f32)>,
+    /// A standing line at the top of the view (LAN games to join).
+    pub notice: Option<String>,
     pub view: ViewEvents,
 }
 
@@ -187,6 +189,7 @@ impl LocalPlayer {
             shown_weapon: None,
             shots_fired: 0,
             messages: Vec::new(),
+            notice: None,
             view: ViewEvents::default(),
         }
     }
@@ -299,7 +302,7 @@ impl LocalPlayer {
 
     /// Pick and advance the first person animation: bring a new weapon up,
     /// fire, melee, throw and reload on cue, otherwise idle.
-    pub fn animate_view_model(&mut self, scene: &Scene, game: &mut Game, dt: f32) {
+    pub fn animate_view_model(&mut self, scene: &Scene, game: &Game, dt: f32) {
         let view = std::mem::take(&mut self.view);
         let weapon = self.me(game).held().map(|h| h.weapon);
         let Some(rig) = weapon
@@ -311,11 +314,7 @@ impl LocalPlayer {
         };
         if view.switched || weapon != self.shown_weapon {
             self.shown_weapon = weapon;
-            let ready = rig.find("first_person:ready", 0);
-            if let Some(a) = ready.and_then(|i| rig.graph.animations.get(i)) {
-                game.players[self.player].readying = a.duration();
-            }
-            self.animator.play(ready, false);
+            self.animator.play(rig.find("first_person:ready", 0), false);
         }
         if view.fired {
             self.shots_fired += 1;
@@ -537,6 +536,9 @@ impl LocalPlayer {
                 text,
                 color,
             );
+        }
+        if let Some(notice) = &self.notice {
+            hb.text(font, [w * 0.5, 64.0 * s], 8.0 * s, notice, hud::BLUE);
         }
         // Your score, and the best of everyone else's under it.
         let best_other = (0..game.players.len())

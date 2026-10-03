@@ -5,6 +5,7 @@ pub mod collision;
 pub mod game;
 pub mod nav;
 pub mod player;
+pub mod testing;
 pub mod weapon;
 
 pub use bot::Bot;

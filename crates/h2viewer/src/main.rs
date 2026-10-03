@@ -13,6 +13,9 @@
 //!
 //! Controllers (Halo 2's layout, see `input`): A takes over player one,
 //! Start joins as another splitscreen player, Back leaves.
+//!
+//! LAN: every game is open to other PCs on the network; J joins a game
+//! another PC is hosting (see `lan`).
 
 mod body;
 mod camera;
@@ -21,6 +24,7 @@ mod font;
 mod gpu;
 mod hud;
 mod input;
+mod lan;
 mod local;
 mod probe;
 mod rig;
@@ -37,6 +41,7 @@ use gpu::{DrawCall, Frame};
 use h2sim::game::{Event, GrenadeKind, HeldWeapon, TICK};
 use h2sim::{Bot, Command, Game, ItemKind, ItemSpawn, NavGraph, Rules, WeaponState, World};
 use input::{PadPress, Pads};
+use lan::Net;
 use local::{armor_colors, display_name, kill_message, Keyboard, LocalPlayer, Taps};
 use scene::Scene;
 use std::collections::HashSet;
@@ -51,7 +56,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// Most people sharing one screen.
-const MAX_LOCAL: usize = 4;
+pub(crate) const MAX_LOCAL: usize = 4;
 
 const DEFAULT_MAP_DIRS: &[&str] = &[
     r"C:\Games\Halo 2 Project Cartographer\maps",
@@ -121,6 +126,19 @@ fn rules(scene: &Scene) -> Rules {
     }
 }
 
+/// A weapon's game values, timed to its first person animations.
+fn weapon_def(w: &scene::WeaponAssets) -> h2sim::WeaponDef {
+    let mut def = w.def.clone();
+    let ready = w.rig.as_ref().and_then(|rig| {
+        let i = rig.find("first_person:ready", 0)?;
+        Some(rig.graph.animations.get(i)?.duration())
+    });
+    if let Some(t) = ready.filter(|t| *t > 0.0) {
+        def.ready_time = t;
+    }
+    def
+}
+
 /// A Spartan's body posed for this frame.
 struct BodyPose {
     vertices: Vec<scene::Vertex>,
@@ -154,6 +172,20 @@ struct App {
     /// Actions players started this frame (reload, melee...), for their bodies.
     body_actions: Vec<(usize, &'static str)>,
     body_poses: Vec<Option<BodyPose>>,
+    /// LAN play: hosting, or joined to another PC's game.
+    net: Net,
+    browser: h2net::Browser,
+    lan_games: Vec<h2net::LanGame>,
+    /// Tells this running game apart from others on the network.
+    session: u64,
+    map_path: PathBuf,
+    map_name: String,
+    /// Events of this frame's ticks, for joined PCs.
+    frame_events: Vec<Event>,
+    /// Players a host gave us, until its game includes them.
+    welcome: Option<Vec<usize>>,
+    /// Start again on another map to join a LAN game there.
+    relaunch: Option<lan::Relaunch>,
 }
 
 impl App {
@@ -209,6 +241,10 @@ impl App {
     }
 
     fn add_bot(&mut self) {
+        if self.joined() {
+            self.announce("ONLY THE HOST CAN ADD BOTS");
+            return;
+        }
         if self.game.players.len() >= scene::MAX_BODIES {
             return;
         }
@@ -219,6 +255,10 @@ impl App {
 
     /// Another person joins in splitscreen.
     fn add_local(&mut self, pad: Option<GamepadId>) {
+        if self.joined() {
+            self.request_local(pad);
+            return;
+        }
         if self.locals.len() >= MAX_LOCAL || self.game.players.len() >= scene::MAX_BODIES {
             return;
         }
@@ -247,10 +287,14 @@ impl App {
                 if self.locals[k].keyboard {
                     self.locals[k].pad = None;
                 } else {
-                    // Their Spartan plays on as a bot.
+                    // Their Spartan plays on as a bot (the host's, when joined).
                     let l = self.locals.remove(k);
-                    self.bots
-                        .push((l.player, Bot::new(l.player as u32 * 7919 + 13)));
+                    if self.joined() {
+                        self.release_local(l.player);
+                    } else {
+                        self.bots
+                            .push((l.player, Bot::new(l.player as u32 * 7919 + 13)));
+                    }
                     self.announce(&format!("PLAYER {} LEFT", l.player + 1));
                 }
             }
@@ -284,7 +328,28 @@ impl App {
                 l.camera.update(&self.keys, dt);
             }
         }
-        // The game advances in fixed ticks.
+        self.lan_games = self.browser.poll().to_vec();
+        if self.joined() {
+            self.update_joined(dt);
+        } else {
+            self.step_game(dt);
+        }
+        let notice = self.lan_notice();
+        for l in &mut self.locals {
+            l.notice = notice.clone().filter(|_| l.keyboard);
+            l.update_camera(&self.game, &self.world, self.pending, dt);
+        }
+        self.animate_bodies(dt);
+        for l in &mut self.locals {
+            l.animate_view_model(&self.scene, &self.game, dt);
+        }
+        self.effects.update(dt);
+    }
+
+    /// Run the game here: fixed ticks with everyone's controls (people at
+    /// this PC, bots, and players on PCs that joined).
+    fn step_game(&mut self, dt: f32) {
+        self.poll_host();
         self.pending += dt;
         let mut ticked = false;
         while self.pending >= TICK {
@@ -303,6 +368,7 @@ impl App {
             for (i, bot) in &mut self.bots {
                 commands[*i] = bot.think(&self.game, &self.world, &self.nav, *i);
             }
+            self.remote_commands(&mut commands);
             self.game.step(&self.world, &commands);
             if !ticked {
                 for l in &mut self.locals {
@@ -314,16 +380,10 @@ impl App {
                 let eye = self.game.players[l.player].eye();
                 l.eyes = (l.eyes.1, eye);
             }
+            self.frame_events.extend_from_slice(&self.game.events);
             self.handle_events();
         }
-        for l in &mut self.locals {
-            l.update_camera(&self.game, &self.world, self.pending, dt);
-        }
-        self.animate_bodies(dt);
-        for l in &mut self.locals {
-            l.animate_view_model(&self.scene, &mut self.game, dt);
-        }
-        self.effects.update(dt);
+        self.send_to_joined(ticked);
     }
 
     fn handle_events(&mut self) {
@@ -388,9 +448,8 @@ impl App {
                         }
                     }
                 }
-                Event::Spawned { player } => {
-                    let p = &self.game.players[player];
-                    let (eye, yaw) = (p.eye(), p.yaw);
+                Event::Spawned { player, yaw } => {
+                    let eye = self.game.players[player].eye();
                     if let Some(l) = self.local_of(player) {
                         l.eyes = (eye, eye);
                         l.camera.yaw = yaw;
@@ -755,7 +814,25 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(r) = self.relaunch.take() {
+            // The LAN game is on another map: start again there.
+            println!("lan: switching to {}", r.map.display());
+            let started = std::env::current_exe().and_then(|exe| {
+                std::process::Command::new(exe)
+                    .arg(&r.map)
+                    .env("H2_JOIN", &r.join)
+                    .spawn()
+            });
+            match started {
+                Ok(_) => event_loop.exit(),
+                Err(e) => {
+                    println!("lan: couldn't start again: {e}");
+                    self.announce("COULDN'T SWITCH MAPS");
+                }
+            }
+            return;
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -776,6 +853,11 @@ impl App {
             self.add_bot();
             return;
         }
+        if code == KeyCode::KeyJ {
+            self.relaunch = self.join_lan_game();
+            return;
+        }
+        let joined = self.joined();
         let Some(k) = self.locals.iter().position(|l| l.keyboard) else {
             return;
         };
@@ -784,7 +866,7 @@ impl App {
         match code {
             KeyCode::Tab => {
                 l.flying = !l.flying;
-                if !l.flying {
+                if !l.flying && !joined {
                     // Drop in where the fly camera is.
                     let p = &mut self.game.players[player];
                     p.body.position =
@@ -806,7 +888,9 @@ impl App {
             | KeyCode::Digit6
             | KeyCode::Digit7
             | KeyCode::Digit8
-            | KeyCode::Digit9 => {
+            | KeyCode::Digit9
+                if !joined =>
+            {
                 self.give_weapon(player, code as usize - KeyCode::Digit1 as usize);
             }
             _ => {}
@@ -873,7 +957,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let mut game = Game::new(
         rules(&scene),
-        scene.weapons.iter().map(|w| w.def.clone()).collect(),
+        scene.weapons.iter().map(weapon_def).collect(),
         spawns,
         items,
         scene.movement,
@@ -905,6 +989,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         nav.links.iter().map(Vec::len).sum::<usize>()
     );
 
+    let session = h2net::session_id();
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -916,7 +1001,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         locals: vec![player_one],
         pads: Pads::new(),
         title: format!(
-            "Halo 2 Rust: {name} (click to play, WASD move, mouse fire/zoom, G grenade, E pick up, F melee, R reload, Q switch weapon, B add bot, controller Start joins, Esc release)"
+            "Halo 2 Rust: {name} (click to play, WASD move, mouse fire/zoom, G grenade, E pick up, F melee, R reload, Q switch weapon, B add bot, J join LAN game, controller Start joins, Esc release)"
         ),
         window: None,
         gpu: None,
@@ -930,6 +1015,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         bodies: Vec::new(),
         body_actions: Vec::new(),
         body_poses: Vec::new(),
+        net: Net::Offline,
+        browser: h2net::Browser::new(session),
+        lan_games: Vec::new(),
+        session,
+        map_path: path.clone(),
+        map_name: name.to_lowercase(),
+        frame_events: Vec::new(),
+        welcome: None,
+        relaunch: None,
     };
     // H2_SPLIT=<n> starts with n people in splitscreen (for testing).
     let split = std::env::var("H2_SPLIT")
@@ -939,13 +1033,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for _ in 1..split {
         app.add_local(None);
     }
-    // Three computer opponents (H2_BOTS=<n> for another number).
-    let bots = std::env::var("H2_BOTS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3);
-    for _ in 0..bots {
-        app.add_bot();
+    // H2_JOIN=<address:port> joins a LAN game at once (used when switching
+    // to the map a LAN game is on).
+    match std::env::var("H2_JOIN") {
+        Ok(address) => app.join_address(&address),
+        Err(_) => {
+            app.start_hosting();
+            // Three computer opponents (H2_BOTS=<n> for another number).
+            let bots = std::env::var("H2_BOTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3);
+            for _ in 0..bots {
+                app.add_bot();
+            }
+        }
     }
     // H2_WEAPON=<n> starts with another weapon in hand (for testing).
     if let Some(n) = std::env::var("H2_WEAPON").ok().and_then(|v| v.parse().ok()) {

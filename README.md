@@ -14,8 +14,11 @@ install. No game files are included in this repository.
 - `h2tool`: command-line inspector.
 - `h2sim`: game simulation (no rendering): level collision, Spartan movement
   using the speeds, jump velocity and size from the game's own globals and biped tags,
-  and weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags.
-- `h2viewer`: walk or fly around a level with its real geometry and textures (simple lighting; lightmaps not yet).
+  weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
+  Slayer rules (shields, health, grenades, pickups, respawns), bots and their walking graph.
+- `h2net`: LAN games: hosting, joining, and finding games on the local network.
+- `h2viewer`: the game: Halo 2's maps with their lighting, Spartans, weapons and HUD,
+  bots, splitscreen for up to four with controllers, and LAN play.
 
 ### h2viewer
 
@@ -26,10 +29,22 @@ Ctrl or C to crouch, Tab to switch between walking and flying (flying: Space / C
 Shift fast), Esc to release the mouse, Esc again to quit.
 
 Weapons: left mouse fires, right mouse or Z zooms, R reloads, F melees, Q or the
-mouse wheel switches weapon, 1-9 pick one directly. All 15 multiplayer weapons are
+mouse wheel switches weapon, G throws a grenade, X switches grenade type, E picks
+up (hold to swap weapons), 1-9 pick one directly. B adds a bot. All 15 multiplayer weapons are
 loaded with their real first person models, HUD, crosshairs, scopes and firing
 stats, held by Master Chief's arms with the game's own first person animations
 (ready, idle, fire, reload, melee).
+
+Controllers use Halo 2's layout (left stick move, right stick look, RT fire,
+LT grenade, A jump, B melee, X reload / hold to pick up, Y switch weapon, click
+sticks to crouch and zoom). A on a new controller takes over player one; Start
+on another controller adds a splitscreen player (up to four); Back leaves.
+
+LAN: every game is open to other PCs on the same network (allow h2viewer through
+Windows Firewall when asked). When another PC is hosting, the screen says so;
+press J to join it. If that game is on another map, h2viewer restarts on that
+map and joins. The host runs the game and its bots; if the host quits, the
+joined PC carries on alone with bots.
 
 ```
 h2tool scan  "C:\Games\Halo 2 Project Cartographer\maps"
@@ -54,9 +69,9 @@ Multiplayer maps only store the tags unique to them; the rest live in
 ## Roadmap
 
 1. Map file reader (done)
-2. Fly-camera level viewer (textured geometry done; lightmaps, scenery and skybox next)
+2. Fly-camera level viewer (done, with lightmaps, scenery and skies)
 3. Spartan movement, collision, weapons with first person animations (done)
-4. Splitscreen and LAN multiplayer
+4. Splitscreen and LAN multiplayer (done)
 5. Matchmaking, 1-50 ranks, parties
 6. Campaign and AI
 

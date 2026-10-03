@@ -43,7 +43,13 @@ pub struct WeaponDef {
     /// Damage falls to the lower bound over this distance range.
     pub damage_range: (f32, f32),
     pub damage_lower_bound: f32,
+    /// Seconds to bring the weapon up after switching to it (the length of
+    /// its first person "ready" animation).
+    pub ready_time: f32,
 }
+
+/// Used when a weapon's ready animation is unknown.
+pub const DEFAULT_READY_TIME: f32 = 0.5;
 
 impl WeaponDef {
     pub fn from_tags(w: &Weapon, projectile: Option<&Projectile>, damage: Option<&Damage>) -> Self {
@@ -110,6 +116,7 @@ impl WeaponDef {
                 .map(|p| p.air_damage_range)
                 .unwrap_or((0.0, range)),
             damage_lower_bound: damage.map(|d| d.lower_bound).unwrap_or(0.0),
+            ready_time: DEFAULT_READY_TIME,
         }
     }
 
@@ -367,6 +374,7 @@ mod tests {
             damage: 6.0,
             damage_range: (0.0, 40.0),
             damage_lower_bound: 6.0,
+            ready_time: DEFAULT_READY_TIME,
         }
     }
 
