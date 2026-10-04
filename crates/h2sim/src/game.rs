@@ -457,7 +457,7 @@ pub struct DroppedWeapon {
     pub state: WeaponState,
     pub position: Vec3,
     pub yaw: f32,
-    ttl: f32,
+    pub(crate) ttl: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

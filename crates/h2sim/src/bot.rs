@@ -11,6 +11,7 @@ use crate::weapon::WeaponDef;
 use blam_cache::weapon::TriggerBehavior;
 use glam::{Vec2, Vec3};
 
+mod arms;
 mod ride;
 use ride::Riding;
 
@@ -69,6 +70,11 @@ pub struct Bot {
     /// The walking graph has no way to the objective: roam instead.
     no_way: bool,
     riding: Riding,
+    /// Seconds before switching weapons again.
+    switch_wait: f32,
+    /// The weapon being fetched and for how long; ones given up on.
+    fetching: Option<(Vec3, f32)>,
+    shunned_weapons: Vec<Vec3>,
 }
 
 /// Computer players' names, picked by player number.
@@ -133,6 +139,9 @@ impl Bot {
             blocked: Vec::new(),
             no_way: false,
             riding: Riding::default(),
+            switch_wait: 0.0,
+            fetching: None,
+            shunned_weapons: Vec::new(),
         };
         let rides = bot.random() < RIDES;
         bot.riding.reset(rides);
@@ -364,6 +373,8 @@ impl Bot {
             self.watching = None;
             self.blocked.clear();
             self.target = None;
+            self.fetching = None;
+            self.shunned_weapons.clear();
             self.yaw = p.yaw;
             self.pitch = 0.0;
             let rides = self.random() < RIDES;
@@ -413,6 +424,7 @@ impl Bot {
             self.strafe = [-1.0, 0.0, 1.0][(self.random() * 3.0) as usize % 3];
         }
         self.grenade_wait -= dt;
+        self.switch_wait -= dt;
         self.pulse = !self.pulse;
 
         let mut walk_to: Option<Vec3> = None;
@@ -443,12 +455,22 @@ impl Bot {
                     Some(TriggerBehavior::Spew) | None => true,
                     _ => self.pulse,
                 };
+                // Dual wielding: the left trigger fires the left gun, the
+                // two semi-automatics in turn.
+                let left = p.left.as_ref().and_then(|h| game.weapons.get(h.weapon));
+                if let Some(l) = left {
+                    cmd.throw_grenade = match l.behavior {
+                        TriggerBehavior::Spew => true,
+                        _ => !self.pulse,
+                    };
+                }
             }
+            self.choose_weapon(game, me, dist, &mut cmd);
             let reach = if melee_only && !carrying { 2.0 } else { 0.9 };
             if dist < reach && self.seen_for > REACTION {
                 cmd.melee = self.pulse;
             }
-            let has_grenade = p.frags + p.plasmas > 0;
+            let has_grenade = p.frags + p.plasmas > 0 && p.left.is_none();
             if has_grenade && self.grenade_wait <= 0.0 && (4.0..12.0).contains(&dist) {
                 cmd.throw_grenade = true;
                 self.grenade_wait = 4.0 + self.random() * 6.0;
@@ -480,9 +502,20 @@ impl Bot {
             walk_to = Some(entry);
             boarding = Bot::board_now(game, me, v);
         } else {
-            let objective = Bot::objective(game, me);
+            // A better weapon lying close by comes first.
+            let weapon = if carrying {
+                None
+            } else {
+                self.weapon_to_fetch(game, world, me, dt)
+            };
+            let objective = weapon
+                .map(|at| (at, false))
+                .or_else(|| Bot::objective(game, me));
             if let Some(o) = objective {
                 walk_to = self.walk_to_objective(nav, world, feet, o);
+                if weapon.is_some() && self.no_way {
+                    self.shun_weapon(o.0);
+                }
             } else {
                 self.heading_for = None;
             }
@@ -528,6 +561,9 @@ impl Bot {
                 let takes = game.can_take(me, f) || (flag.armed.is_some() && flag.team != team);
                 takes && flag.position.distance(feet) < 1.5
             }) && p.objective.is_none();
+        if target.is_none() && !boarding {
+            self.pick_up(game, me, &mut cmd);
+        }
         if !on_route {
             let drift = game.players[me].body.velocity.truncate();
             cmd.movement = self.keep_off_ledges(world, feet, drift, cmd.movement);

@@ -272,6 +272,8 @@ pub struct RoundAssets {
     /// off all together (needles).
     pub impact: Option<usize>,
     pub supercombine: Option<usize>,
+    /// The sound it makes in flight, looped.
+    pub flight: Option<usize>,
 }
 
 /// How a weapon's rounds look: (glow, size, fiery), by the weapon's name.
@@ -1056,6 +1058,7 @@ impl Loader {
                     supercombine: f.sticky.and_then(|_| {
                         self.sound_named("sound\\weapons\\needler\\needler_super_expl")
                     }),
+                    flight: self.attached_loop(barrel.projectile),
                 }
             }
             None => RoundAssets::default(),

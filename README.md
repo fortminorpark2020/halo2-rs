@@ -28,7 +28,9 @@ install. No game files are included in this repository.
   the game's own tags, and bots that play each objective, escort carriers and
   defend, finding their way over a walking graph sampled from each level's
   floors, and in Slayer take the vehicles they come across (driving, running
-  people over, manning turrets and a teammate's Warthog gun).
+  people over, manning turrets and a teammate's Warthog gun). Bots go for
+  power weapons lying nearby, dual wield, and switch to the gun that suits
+  the fight.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
@@ -151,8 +153,8 @@ Windows Firewall when asked); System Link lists them and joins the one you
 pick, loading its map first if it's another one. The host runs the game and its
 bots; if the host leaves, the joined PCs go back to System Link.
 
-Sound: weapons, reloads, grenades, footsteps, landings, shield recharge and the
-low shield alarm play from the game's own sound files, placed left or right and
+Sound: weapons, reloads, grenades, footsteps, landings, shield recharge, the
+low shield alarm and rockets in flight play from the game's own sound files, placed left or right and
 fading with distance (each splitscreen player hears through their own view).
 The announcer calls the game type, multi-kills (Double Kill to Killimanjaro),
 killing sprees, taking, losing and tying the lead, suicides, betrayals and
@@ -164,8 +166,8 @@ instead of the speakers. For testing, `H2_GAME=<type>` (`slayer`, `team`, `ctf`,
 `teamking`, `oddball`, `teamoddball`, `juggernaut`, `territories` or `assault`)
 and `H2_BOTS=<n>` start a game straight away, and `H2_SIM=<seconds>` plays the
 bots against each other without a window, printing kills, objective events and
-the score (`H2_SEED=<n>` varies the run, `H2_SIM_WHERE=1` also prints where
-every bot is and what it is doing every 20 seconds).
+the score and kills by weapon (`H2_SEED=<n>` varies the run, `H2_SIM_WHERE=1` also prints where
+every bot is, what it carries and what it is doing every 20 seconds).
 
 ```
 h2tool scan  "C:\Games\Halo 2 Project Cartographer\maps"

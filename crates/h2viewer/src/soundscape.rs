@@ -67,6 +67,9 @@ pub struct Soundscape {
     respawn_ticks: Vec<(usize, u32)>,
     /// Per vehicle: its engine and boost loops while someone drives.
     engines: Vec<[Option<u64>; 3]>,
+    /// Rounds in flight with a sound of their own (a rocket's roar): the
+    /// weapon, where the round was last frame, and its loop.
+    rounds: Vec<(usize, Vec3, u64)>,
 }
 
 /// Volume at distance `d` for a sound carrying over `range`.
@@ -127,6 +130,7 @@ impl Soundscape {
             announced_winner: false,
             respawn_ticks: Vec::new(),
             engines: Vec::new(),
+            rounds: Vec::new(),
         }
     }
 
@@ -141,6 +145,7 @@ impl Soundscape {
         self.announced_winner = false;
         self.respawn_ticks.clear();
         self.engines.clear();
+        self.rounds.clear();
     }
 
     /// A menu sound.
@@ -510,6 +515,7 @@ impl Soundscape {
         self.shield_alarms(scene, game, listeners);
         self.respawn_countdown(scene, game, listeners);
         self.engines(scene, game, listeners);
+        self.flying_rounds(scene, game, listeners, dt);
 
         // The game type as play begins, and the end of the game.
         let a = g.announcer;
@@ -573,6 +579,44 @@ impl Soundscape {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// The sound rounds make in flight (rockets, Fuel Rod shots), following
+    /// each round. Rounds aren't numbered, so each is matched to the nearest
+    /// one of its kind last frame.
+    fn flying_rounds(&mut self, scene: &Scene, game: &Game, listeners: &[Listener], dt: f32) {
+        let mut before = std::mem::take(&mut self.rounds);
+        for r in &game.projectiles {
+            let Some(asset) = scene
+                .weapons
+                .get(r.weapon)
+                .and_then(|w| w.round.flight)
+                .and_then(|s| scene.sounds.get(s))
+            else {
+                continue;
+            };
+            let reach = 1.0 + r.velocity.length() * dt * 3.0;
+            let was = before
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.0 == r.weapon)
+                .map(|(k, b)| (k, b.1.distance(r.position)))
+                .filter(|&(_, d)| d < reach)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(k, _)| before.swap_remove(k).2);
+            let g = placed(asset.distance, r.position, None, listeners).map(|g| g * asset.gain);
+            let voice = match was {
+                Some(id) => {
+                    self.audio.adjust(id, g, 1.0);
+                    id
+                }
+                None => self.audio.play_loop(&asset.clips[0], g, 1.0),
+            };
+            self.rounds.push((r.weapon, r.position, voice));
+        }
+        for (.., id) in before {
+            self.audio.fade_out(id, 0.15);
         }
     }
 

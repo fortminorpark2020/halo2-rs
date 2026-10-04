@@ -227,6 +227,17 @@ impl Loader {
         self.sound(tag)
     }
 
+    /// The first looping sound an object (a projectile) carries attached.
+    pub(super) fn attached_loop(&mut self, object: DatumIndex) -> Option<usize> {
+        let lsnd = GroupTag::parse("lsnd")?;
+        let attached = vehicle::object_attachments(&mut self.set, object).ok()?;
+        let tag = attached
+            .iter()
+            .find(|&&(d, _)| self.set.locate(d).is_some_and(|t| t.1.group == lsnd))?
+            .0;
+        self.looping_sound(tag)
+    }
+
     /// The engine and boost loops among a vehicle's attachments, and the
     /// horn among its built-in weapons' (the Warthog's).
     fn engine_sounds(&mut self, tag: &VehicleTag) -> [Option<usize>; 3] {

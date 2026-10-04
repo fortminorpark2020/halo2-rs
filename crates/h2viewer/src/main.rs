@@ -267,8 +267,8 @@ fn load_level(path: &Path) -> Result<Level, String> {
         for w in &scene.weapons {
             let hud: Vec<&str> = w.hud.iter().map(|h| h.name.as_str()).collect();
             println!(
-                "weapon {} autoaim {:.1} hud {hud:?}",
-                w.def.name, w.autoaim_range
+                "weapon {} autoaim {:.1} flight sound {:?} hud {hud:?}",
+                w.def.name, w.autoaim_range, w.round.flight
             );
         }
     }
@@ -430,6 +430,7 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             (i, Bot::new(i as u32 * 7919 + 13 + seed * 104_729))
         })
         .collect();
+    let mut kills_with = std::collections::HashMap::<String, u32>::new();
     for tick in 0..(seconds / TICK) as usize {
         let commands: Vec<Command> = bots
             .iter_mut()
@@ -441,9 +442,26 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             match e {
                 Event::Killed { killer, victim, .. } => {
                     let at = game.players[victim].body.position;
+                    // What the killer had in hand (and in the left).
+                    let gun = |h: Option<&HeldWeapon>| {
+                        h.and_then(|h| game.weapons.get(h.weapon))
+                            .map(|d| d.name.clone())
+                    };
+                    let with = killer.filter(|&k| k != victim).and_then(|k| {
+                        let p = &game.players[k];
+                        let right = gun(p.held())?;
+                        Some(match gun(p.left.as_ref()) {
+                            Some(left) => format!("{right}+{left}"),
+                            None => right,
+                        })
+                    });
+                    if let Some(w) = &with {
+                        *kills_with.entry(w.clone()).or_insert(0) += 1;
+                    }
                     let killer = killer.map_or("THE LEVEL", |k| game.name(k));
                     let victim = game.name(victim);
-                    println!("{t:6.1} {killer} killed {victim} at {at:.1}");
+                    let with = with.map_or(String::new(), |w| format!(" with {w}"));
+                    println!("{t:6.1} {killer} killed {victim}{with} at {at:.1}");
                 }
                 Event::Flag { team, player, what } => {
                     println!("{t:6.1} flag {team} {what:?} by {player:?}");
@@ -469,7 +487,17 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             let at: Vec<String> = game
                 .players
                 .iter()
-                .map(|p| format!("{:.0?}{}", p.body.position, if p.alive { "" } else { "x" }))
+                .map(|p| {
+                    let guns: Vec<&str> = p
+                        .weapons
+                        .iter()
+                        .chain(&p.left)
+                        .filter_map(|h| game.weapons.get(h.weapon))
+                        .map(|d| d.name.as_str())
+                        .collect();
+                    let dead = if p.alive { "" } else { "x" };
+                    format!("{:.0?}{dead} {}", p.body.position, guns.join("/"))
+                })
                 .collect();
             println!("{t:6.1} at {}", at.join(" "));
             for (i, bot) in &bots {
@@ -479,6 +507,9 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
     }
     let scores: Vec<i32> = game.players.iter().map(|p| p.score).collect();
     println!("scores {scores:?}");
+    let mut kills_with: Vec<_> = kills_with.into_iter().collect();
+    kills_with.sort_by_key(|(w, n)| (std::cmp::Reverse(*n), w.clone()));
+    println!("kills by weapon {kills_with:?}");
 }
 
 /// A map loading in the background, behind the loading screen.
