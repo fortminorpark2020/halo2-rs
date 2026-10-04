@@ -60,6 +60,7 @@ fn main() -> ExitCode {
             sound(&args[1], &args[2], args.get(3).map(String::as_str))
         }
         Some("soundscan") if args.len() >= 2 => soundscan(&args[1]),
+        Some("effect") if args.len() >= 3 => effect(&args[1], &args[2]),
         Some("bitmap") if args.len() >= 4 => bitmap_png(&args[1], &args[2], &args[3]),
         Some("refs") if args.len() >= 3 => refs(&args[1], &args[2]),
         Some("events") if args.len() >= 2 => events(&args[1]),
@@ -1342,6 +1343,36 @@ fn jmad(path: &str, name: &str) -> Res {
 }
 
 /// Decode every animation graph the map can see; report failures.
+/// An effect's (`effe`) parts: what each event spawns.
+fn effect(path: &str, name: &str) -> Res {
+    use blam_cache::{u32_at, DatumIndex, MapSet};
+    let mut set = MapSet::open(path)?;
+    let tag = find_tag(&set, "effe", name).ok_or("no effect with that name")?;
+    let (src, _, d) = set.tag_data(tag.datum)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let events = file.read_block(region, &d, 0x14, 0x38)?;
+    let mut parts = Vec::new();
+    for (k, e) in events.as_chunks::<0x38>().0.iter().enumerate() {
+        for p in file
+            .read_block(region, e, 0x18, 0x38)?
+            .as_chunks::<0x38>()
+            .0
+        {
+            parts.push((k, DatumIndex(u32_at(p, 0x10))));
+        }
+    }
+    for (k, part) in parts {
+        let what = set
+            .locate(part)
+            .map_or(format!("{:08x}", part.0), |(_, t)| {
+                format!("{} {}", t.group, t.name)
+            });
+        println!("event {k}: {what}");
+    }
+    Ok(())
+}
+
 fn sound(path: &str, name: &str, out: Option<&str>) -> Res {
     use blam_cache::{sound::SoundReader, MapSet};
     let mut set = MapSet::open(path)?;

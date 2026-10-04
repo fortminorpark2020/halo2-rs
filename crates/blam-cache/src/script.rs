@@ -36,6 +36,8 @@ pub mod value_type {
     pub const STARTING_PROFILE: u16 = 0x18;
     pub const STRUCTURE_BSP: u16 = 0x1A;
     pub const SOUND: u16 = 0x20;
+    pub const EFFECT: u16 = 0x21;
+    pub const DAMAGE: u16 = 0x22;
     pub const LOOPING_SOUND: u16 = 0x23;
     pub const ANIMATION_GRAPH: u16 = 0x24;
     pub const GAME_DIFFICULTY: u16 = 0x2C;

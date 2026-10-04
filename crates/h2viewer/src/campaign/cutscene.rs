@@ -2,7 +2,7 @@
 //! Chief, Johnson, Miranda...) and scenery (In Amber Clad) playing theirs,
 //! all relative to an anchor, and the subtitles under them.
 
-use super::{Ctx, Mission};
+use super::{Ctx, Mission, MissionSound};
 use crate::rig;
 use crate::scene::{CinemaBody, Scene, Vertex};
 use blam_cache::animation::{Animation, FRAME_RATE};
@@ -30,6 +30,9 @@ pub(super) struct Cutscene {
     fov: Option<f32>,
     /// Named objects' animations.
     objects: HashMap<u16, Playing>,
+    /// Permutations scripts swapped in (region and permutation string
+    /// ids), by object name.
+    looks: HashMap<u16, (u32, u32)>,
     /// A subtitle (by string id) and when it goes.
     subtitle: Option<(u32, f32)>,
     /// In a cutscene the player can skip, and skipping it.
@@ -153,6 +156,49 @@ impl Ctx<'_> {
         }
     }
 
+    /// Where an effect on an object goes: where a cutscene has it, else
+    /// where it is.
+    fn effect_at(&self, o: Obj) -> Option<Vec3> {
+        if let Obj::Name(n) = o {
+            if let Some(p) = self.st.cutscene.objects.get(&n) {
+                let lift = match self.scene.ai.cinema.bodies.contains_key(&n) {
+                    true => 0.6,
+                    false => 0.0,
+                };
+                return Some(
+                    p.root(self.scene, self.st.time)?
+                        .transform_point3(Vec3::Z * lift),
+                );
+            }
+        }
+        self.position(o)
+    }
+
+    /// Set off an effect (or damage) at `at`: its sounds and its look.
+    fn effect(&mut self, tag: Option<u32>, at: Option<Vec3>) {
+        let (Some(effect), Some(at)) = (tag.and_then(|t| self.scene.ai.effects.get(&t)), at) else {
+            return;
+        };
+        if self.st.log {
+            println!(
+                "script: effect {:?} with {} sounds at {at:.1} at {:.1}",
+                effect.look,
+                effect.sounds.len(),
+                self.st.time
+            );
+        }
+        for &sound in &effect.sounds {
+            self.st.sounds.push(MissionSound::Line {
+                sound,
+                at: Some(at),
+                gain: 1.0,
+            });
+        }
+        if let Some(look) = effect.look {
+            self.st.effects.push((look, at));
+        }
+    }
+
     /// The scripts' cutscene camera, animation and subtitle functions;
     /// `None` for any other function.
     pub(super) fn cutscene_call(&mut self, function: &str, args: &[Value]) -> Option<Value> {
@@ -265,6 +311,35 @@ impl Ctx<'_> {
                 self.st.cutscene.skippable = false;
                 Value::Void
             }
+            "effect_new" | "damage_new" => {
+                let at = arg(1)
+                    .index()
+                    .and_then(|k| self.scene.ai.flags.get(k as usize))
+                    .map(|f| f.0);
+                self.effect(arg(0).handle(), at);
+                Value::Void
+            }
+            "effect_new_on_object_marker" => {
+                let at = arg(1).objects().first().and_then(|&o| self.effect_at(o));
+                self.effect(arg(0).handle(), at);
+                Value::Void
+            }
+            "object_set_permutation" => {
+                let (region, perm) = (arg(1).handle(), arg(2).handle());
+                for &o in arg(0).objects() {
+                    if let (Obj::Name(n), Some(r), Some(p)) = (o, region, perm) {
+                        self.st.cutscene.looks.insert(n, (r, p));
+                    }
+                }
+                Value::Void
+            }
+            "unit_get_custom_animation_time" => {
+                let left = arg(0).objects().iter().find_map(|&o| match o {
+                    Obj::Name(n) => self.st.cutscene.objects.get(&n),
+                    _ => None,
+                });
+                ticks(left.map_or(0.0, |p| p.left(self.scene, now)))
+            }
             "cinematic_subtitle" => {
                 if let Some(id) = arg(0).handle() {
                     self.st.cutscene.subtitle = Some((id, now + arg(1).num()));
@@ -327,7 +402,15 @@ impl Mission {
                 .zip(&body.skeleton.inverse_bind)
                 .map(|(w, inv)| *w * *inv)
                 .collect();
-            out.push((body.mesh, body.skin.pose(&skin), playing.anchor, body));
+            // The look a script swapped in, if it did.
+            let look = self.state.cutscene.looks.get(&name).and_then(|&(r, p)| {
+                body.looks
+                    .iter()
+                    .find(|l| (l.0, l.1) == (r, p))
+                    .map(|l| (l.2, &l.3))
+            });
+            let (mesh, skinned) = look.unwrap_or((body.mesh, &body.skin));
+            out.push((mesh, skinned.pose(&skin), playing.anchor, body));
         }
         out
     }

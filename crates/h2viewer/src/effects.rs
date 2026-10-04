@@ -104,11 +104,7 @@ impl Effects {
     /// A grenade going off: a flash, a fireball (blue for plasma), sparks
     /// and smoke.
     pub fn explosion(&mut self, position: Vec3, plasma: bool) {
-        let (core, edge) = if plasma {
-            ([0.55, 0.75, 1.0, 1.0], [0.25, 0.45, 1.0, 0.9])
-        } else {
-            ([1.0, 0.9, 0.6, 1.0], [1.0, 0.45, 0.12, 0.9])
-        };
+        let (core, edge) = fireball(plasma);
         self.blast(position, core, edge, !plasma, 1.0);
     }
 
@@ -334,6 +330,15 @@ impl Effects {
 }
 
 /// Two triangles spanning `center ± right ± up`.
+/// A fireball's colours, core and edge: orange, or blue for plasma.
+pub fn fireball(plasma: bool) -> ([f32; 4], [f32; 4]) {
+    if plasma {
+        ([0.55, 0.75, 1.0, 1.0], [0.25, 0.45, 1.0, 0.9])
+    } else {
+        ([1.0, 0.9, 0.6, 1.0], [1.0, 0.45, 0.12, 0.9])
+    }
+}
+
 pub fn quad(out: &mut Vec<SpriteVertex>, center: Vec3, right: Vec3, up: Vec3, color: [f32; 4]) {
     let v = |p: Vec3, uv: [f32; 2]| SpriteVertex {
         position: p.into(),

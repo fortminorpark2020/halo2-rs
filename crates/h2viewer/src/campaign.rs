@@ -2,7 +2,7 @@
 //! scenario's squads as actors when the player gets to them, opening doors
 //! and following the player from one part of the level to the next.
 
-use crate::scene::Scene;
+use crate::scene::{EffectLook, Scene};
 use blam_cache::ai::{AiTeam, SeatType};
 use blam_cache::scenario::ControlKind;
 use blam_cache::script::value_type;
@@ -299,6 +299,8 @@ struct State {
     objectives: (usize, usize),
     /// Sounds to play, for whoever's listening.
     sounds: Vec<MissionSound>,
+    /// Effects the scripts set off, and where.
+    effects: Vec<(EffectLook, Vec3)>,
     /// The structure BSP the players are in.
     bsp: u16,
     devices: HashMap<u16, Device>,
@@ -542,6 +544,7 @@ impl Mission {
         // without its lines.
         if self.state.cutscene.fast_forward() {
             let heard = self.state.sounds.len();
+            let seen = self.state.effects.len();
             for _ in 0..SKIP_TICKS {
                 if !self.state.cutscene.fast_forward() {
                     break;
@@ -556,6 +559,7 @@ impl Mission {
                 k <= heard || !matches!(s, MissionSound::Line { .. })
             });
             self.state.sounds.push(MissionSound::Hush);
+            self.state.effects.truncate(seen);
             self.state.cutscene.hush();
         }
     }
@@ -704,6 +708,11 @@ impl Mission {
     /// The sounds the scripts played since last asked.
     pub fn take_sounds(&mut self) -> Vec<MissionSound> {
         std::mem::take(&mut self.state.sounds)
+    }
+
+    /// The effects the scripts set off since last asked, and where.
+    pub fn take_effects(&mut self) -> Vec<(EffectLook, Vec3)> {
+        std::mem::take(&mut self.state.effects)
     }
 
     /// The mission's last script said it's won.

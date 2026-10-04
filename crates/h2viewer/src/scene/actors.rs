@@ -76,6 +76,8 @@ pub struct CampaignAi {
     pub sounds: HashMap<u32, usize>,
     /// The music and loops scripts start, by tag.
     pub loops: HashMap<u32, ScriptLoop>,
+    /// Effects (and damage) scripts set off, by tag.
+    pub effects: HashMap<u32, ScriptEffect>,
     /// The mission dialogue lines scripts have actors say, by the string
     /// id scripts name them with: each voice's designator and its sound
     /// (in `Scene::sounds`).
@@ -89,6 +91,77 @@ pub struct CampaignAi {
     pub trigger_names: HashMap<u32, u16>,
     /// What the cutscenes play.
     pub cinema: Cinema,
+}
+
+/// What an effect a script sets off looks like, roughly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EffectLook {
+    /// A fireball (`scale` times a grenade's), blue for plasma.
+    Explosion {
+        plasma: bool,
+        scale: f32,
+    },
+    Smoke,
+    /// A small glow of light (Cortana appearing, a beam charging).
+    Glow([f32; 4]),
+}
+
+/// An effect a script sets off: its sounds and how it looks.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptEffect {
+    pub sounds: Vec<usize>,
+    pub look: Option<EffectLook>,
+}
+
+/// How an effect looks, going by its tag's name.
+fn effect_look(name: &str) -> Option<EffectLook> {
+    let has = |k: &str| name.contains(k);
+    let blue = has("plasma") || has("covenant") || has("cortana") || has("teleport");
+    if [
+        "explosion",
+        "air_hit",
+        "detonation",
+        "blast",
+        "bomb",
+        "attack",
+    ]
+    .iter()
+    .any(|k| has(k))
+    {
+        let scale = if has("large") || has("vehicle") || has("ships") {
+            2.0
+        } else if has("small") {
+            0.7
+        } else {
+            1.0
+        };
+        return Some(EffectLook::Explosion {
+            plasma: blue,
+            scale,
+        });
+    }
+    if has("smoke") || has("burn") || has("charred") {
+        return Some(EffectLook::Smoke);
+    }
+    if [
+        "spark",
+        "charging",
+        "beam",
+        "teleport",
+        "on_off",
+        "data_transfer",
+        "glow",
+    ]
+    .iter()
+    .any(|k| has(k))
+    {
+        return Some(EffectLook::Glow(if blue || has("data") {
+            [0.45, 0.7, 1.0, 0.9]
+        } else {
+            [1.0, 0.8, 0.45, 0.9]
+        }));
+    }
+    None
 }
 
 /// What the mission's cutscenes play: the animation graphs scripts name,
@@ -120,6 +193,9 @@ pub struct CinemaBody {
     pub skeleton: Skeleton,
     pub parents: Vec<i16>,
     pub skin: SkinnedMesh,
+    /// Its other looks, a script having swapped one region's permutation
+    /// (a Marine's face): region and permutation (string ids), mesh, skin.
+    pub looks: Vec<(u32, u32, usize, SkinnedMesh)>,
 }
 
 /// A title scripts put on screen: its text, where (top, left, bottom,
@@ -472,6 +548,21 @@ impl Loader {
                 Err(e) => println!("warning: cutscene animations {tag:08x}: {e}"),
             }
         }
+        // The permutations scripts swap in: object name, region and
+        // permutation (string ids).
+        let scripts = &out.scripts;
+        let swaps: Vec<(u16, u32, u32)> = (0..scripts.expressions.len() as u16)
+            .filter(|&i| {
+                scripts.expressions[i as usize].kind == script::NodeKind::Call
+                    && scripts.function_name(i) == "object_set_permutation"
+            })
+            .filter_map(|i| {
+                let args = scripts.arguments(i);
+                let arg = |k: usize| scripts.expression(*args.get(k)?);
+                let object = arg(0).filter(|e| e.kind == script::NodeKind::Value)?;
+                Some((object.value as u16, arg(1)?.value, arg(2)?.value))
+            })
+            .collect();
         for (name, object, variant) in std::mem::take(&mut out.cinema.cast) {
             let tag_name = self
                 .set
@@ -492,9 +583,11 @@ impl Loader {
                 Ok::<_, blam_cache::Error>((
                     model::read_render_model_variant(set, mode, v.as_ref())?,
                     colors,
+                    v,
+                    mode,
                 ))
             };
-            let (m, colors) = match read(&mut self.set) {
+            let (m, colors, v, mode) = match read(&mut self.set) {
                 Ok(m) => m,
                 Err(e) => {
                     println!("warning: cutscene object {:08x}: {e}", object.0);
@@ -509,15 +602,34 @@ impl Loader {
             let mesh = self.model_mesh(&m);
             let skin = SkinnedMesh::new(&mesh);
             meshes.push(mesh);
+            let mut looks = Vec::new();
+            for &(_, region, perm) in swaps.iter().filter(|s| s.0 == name) {
+                let sid = |id: u32| out.string_ids.get(&id).cloned().unwrap_or_default();
+                let (region_name, perm_name) = (sid(region), sid(perm));
+                let mut swapped = v.clone().unwrap_or_default();
+                swapped.regions.retain(|r| r.0 != region_name);
+                swapped
+                    .regions
+                    .push((region_name, Some(perm_name).filter(|p| !p.is_empty())));
+                let Ok(m) = model::read_render_model_variant(&mut self.set, mode, Some(&swapped))
+                else {
+                    continue;
+                };
+                let mesh = self.model_mesh(&m);
+                let skin = SkinnedMesh::new(&mesh);
+                meshes.push(mesh);
+                looks.push((region, perm, meshes.len() - 1, skin));
+            }
             out.cinema.bodies.insert(
                 name,
                 CinemaBody {
-                    mesh: meshes.len() - 1,
+                    mesh: meshes.len() - 1 - looks.len(),
                     chief,
                     colors,
                     skeleton: Skeleton::new(&m.nodes),
                     parents: m.nodes.iter().map(|n| n.parent).collect(),
                     skin,
+                    looks,
                 },
             );
         }
@@ -533,7 +645,10 @@ impl Loader {
                 e.kind == script::NodeKind::Value
                     && matches!(
                         e.value_type,
-                        script::value_type::SOUND | script::value_type::LOOPING_SOUND
+                        script::value_type::SOUND
+                            | script::value_type::LOOPING_SOUND
+                            | script::value_type::EFFECT
+                            | script::value_type::DAMAGE
                     )
             })
             .map(|e| (e.value_type, e.value))
@@ -541,6 +656,23 @@ impl Loader {
         for (kind, tag) in tags {
             let datum = DatumIndex(tag);
             if datum == DatumIndex::NONE {
+                continue;
+            }
+            if matches!(
+                kind,
+                script::value_type::EFFECT | script::value_type::DAMAGE
+            ) {
+                if out.effects.contains_key(&tag) {
+                    continue;
+                }
+                let name = self.set.locate(datum).map(|(_, t)| t.name);
+                let sounds = blam_cache::sound::effect_sounds(&mut self.set, datum)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|s| self.sound(s))
+                    .collect();
+                let look = name.as_deref().and_then(effect_look);
+                out.effects.insert(tag, ScriptEffect { sounds, look });
                 continue;
             }
             if kind == script::value_type::SOUND {

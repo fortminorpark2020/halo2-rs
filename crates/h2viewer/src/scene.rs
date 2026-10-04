@@ -32,7 +32,7 @@ mod actors;
 mod lifts;
 mod vehicles;
 
-pub use actors::{CampaignAi, CinemaBody};
+pub use actors::{CampaignAi, CinemaBody, EffectLook};
 pub use lifts::{Lift, Switch};
 pub use vehicles::Vehicles;
 

@@ -69,7 +69,7 @@ use input::{PadPress, Pads};
 use lan::Net;
 use local::{display_name, kill_message, player_colors, Keyboard, LocalPlayer, Taps};
 use menu::{MapChoice, Menu, Screen, Settings};
-use scene::{BodyKind, Scene};
+use scene::{BodyKind, EffectLook, Scene};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 use std::path::{Path, PathBuf};
@@ -310,10 +310,12 @@ fn load_level(path: &Path) -> Result<Level, String> {
         );
         let cinema = &scene.ai.cinema;
         println!(
-            "cutscenes: {} animation graphs, {} cast, {} subtitles",
+            "cutscenes: {} animation graphs, {} cast ({} other looks), {} subtitles, {} effects",
             cinema.graphs.len(),
             cinema.bodies.len(),
-            cinema.subtitles.len()
+            cinema.bodies.values().map(|b| b.looks.len()).sum::<usize>(),
+            cinema.subtitles.len(),
+            scene.ai.effects.len()
         );
     }
     // H2_LIST_WEAPONS=1: each weapon's crosshair range and HUD pieces.
@@ -1183,11 +1185,22 @@ impl App {
                         l.camera.pitch = 0.0;
                     }
                 }
+                let effects = m.take_effects();
                 let sounds = m.take_sounds();
                 if !sounds.is_empty() {
                     let listeners = self.listeners();
                     for s in sounds {
                         self.sound.mission(&self.scene, s, &listeners);
+                    }
+                }
+                for (look, at) in effects {
+                    match look {
+                        EffectLook::Explosion { plasma, scale } => {
+                            let (core, edge) = effects::fireball(plasma);
+                            self.effects.blast(at, core, edge, !plasma, scale);
+                        }
+                        EffectLook::Smoke => self.effects.smolder(at, false, 1.0),
+                        EffectLook::Glow(c) => self.effects.blast(at, c, c, false, 0.4),
                     }
                 }
             }
