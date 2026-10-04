@@ -7,7 +7,7 @@ use crate::conn::{Connection, MAX_BACKLOG, MAX_MESSAGE};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,8 +24,10 @@ const MAX_REQUEST: usize = 16 << 10;
 /// What a connection to a server asked for, and at what path (only the
 /// path: without any query).
 pub enum Request {
-    /// A WebSocket, at this path (`/live`, say).
-    WebSocket(Connection, String),
+    /// A WebSocket, at this path (`/live`, say), and the address a proxy in
+    /// front of the server (a host's) says it came from, if one does.
+    /// Anyone can say that, so it's only worth believing behind a proxy.
+    WebSocket(Connection, String, Option<IpAddr>),
     /// A page at this path (for a browser, or a health check): answer it
     /// with `reply`.
     Http(TcpStream, String),
@@ -366,7 +368,18 @@ pub(crate) fn accept_within(stream: TcpStream, timeout: Duration) -> Result<Requ
     let stream = Stream::Plain(tcp);
     let socket = WebSocket::from_partially_read(stream, rest, Role::Server, Some(config()));
     let conn = Connection::ws(socket).map_err(|e| e.to_string())?;
-    Ok(Request::WebSocket(conn, path))
+    // Where a proxy says it's from: Cloudflare's own header (hosts behind
+    // Cloudflare, as Render is, pass it on), or else the first address in
+    // X-Forwarded-For.
+    let header = |name: &str| {
+        let mut headers = parsed.headers.iter();
+        let value = headers.find(|h| h.name.eq_ignore_ascii_case(name))?.value;
+        std::str::from_utf8(value).ok()
+    };
+    let forwarded = header("cf-connecting-ip")
+        .or_else(|| header("x-forwarded-for")?.split(',').next())
+        .and_then(|ip| ip.trim().parse().ok());
+    Ok(Request::WebSocket(conn, path, forwarded))
 }
 
 /// Answer a web request that can't be taken, and say why it wasn't.

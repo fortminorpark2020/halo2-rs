@@ -128,11 +128,12 @@ impl Server {
     /// first, names a link that wasn't given out (or the other end of
     /// one), or waits too long is dropped.
     pub(super) fn read_legs(&mut self, now: f64) {
-        let tokens = &self.tokens;
+        let (tokens, traffic) = (&self.tokens, &mut self.traffic);
         self.legs.retain_mut(|leg| {
             let Ok(messages) = leg.conn.receive() else {
                 return false;
             };
+            *traffic |= !messages.is_empty();
             for (kind, body) in messages {
                 let Ok(ToServer::LinkHello { token, account }) = ToServer::read(kind, &body) else {
                     return false;
@@ -218,6 +219,7 @@ impl Server {
                 };
                 if !messages.is_empty() {
                     link.heard[from] = now;
+                    self.traffic = true;
                 }
                 let bytes: usize = messages.iter().map(|(_, body)| 1 + body.len()).sum();
                 if let Some(relayed) = self.relayed.get_mut(&link.id) {

@@ -762,6 +762,7 @@ fn four_players_play_double_team_through_the_relay() {
     a.until(5.0, |a| {
         (0..4).all(|i| a.w.party(i).activity == Activity::Playing)
     });
+    assert_eq!(a.w.server.matches_in_progress(), 1);
 
     // The host links to everyone through the relay, and the game starts.
     let host = a.pc(m.host);
@@ -810,6 +811,7 @@ fn four_players_play_double_team_through_the_relay() {
     a.until(5.0, |a| {
         (0..4).all(|i| a.w.party(i).activity == Activity::Lobby)
     });
+    assert_eq!(a.w.server.matches_in_progress(), 0);
     for (i, &(_, level)) in expected.iter().enumerate() {
         assert_eq!(a.w.welcome(i).levels, [(DOUBLE_TEAM, level, 11)]);
         let playlists = &a.w.pcs[i].view.playlists;
@@ -1085,6 +1087,8 @@ fn a_party_plays_custom_games_together() {
         .iter()
         .all(|g| g.custom == Some((leader, "lockout".into()))));
     a.until(5.0, |a| a.w.party(1).activity == Activity::Custom);
+    assert_eq!(a.w.server.custom_games(), 1);
+    assert_eq!(a.w.server.matches_in_progress(), 0);
     // Everyone else comes into the leader's lobby through the relay.
     a.until(5.0, |a| a.hosted(0).is_some_and(|h| h.host.joined() == 2));
     // The leader moves it to another map everyone has.
@@ -1119,6 +1123,7 @@ fn a_party_plays_custom_games_together() {
     a.until(5.0, |a| {
         (0..4).all(|i| a.w.party(i).activity == Activity::Lobby)
     });
+    assert_eq!(a.w.server.custom_games(), 0);
     a.until(5.0, |a| {
         (1..4).all(|i| a.gamers[i].joined.as_ref().unwrap().lost)
     });

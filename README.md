@@ -234,6 +234,21 @@ h2tool sid    lockout.map 0x1234abcd    # look up a string id
 Multiplayer maps only store the tags unique to them; the rest live in
 `shared.map` (and `single_player_shared.map` for campaign).
 
+### h2live
+
+`h2live.exe` is the online service: accounts, parties, matchmaking and the
+relay that carries online games. It reads no map files. Double-click it on
+the PC that hosts it (allow it through Windows Firewall when asked): it
+listens on port 47050, keeps accounts in `h2live-data` (back that folder
+up), asks the router to open the port (UPnP), and says how players reach
+it: `READY: ws://<address>:47050`, `FORWARD TCP 47050 TO <this PC>` when
+the router needs a port forward set by hand, or `CGNAT: USE THE HOSTED
+OPTION` when the internet provider makes that impossible. Ctrl+C stops it.
+An `h2live.txt` next to it can set `port=` and `data=`. On a host online,
+`PORT`, `H2LIVE_DATA` and `H2LIVE_SECRET` (what signs players' stat cards)
+set the same; `/health` answers health checks, and `/` says how many
+players are online. `H2LIVE_UPNP=0` leaves the router alone.
+
 ## Roadmap
 
 1. Map file reader (done)

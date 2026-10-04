@@ -301,7 +301,7 @@ fn ws_pair() -> (Connection, Connection) {
     let url = format!("ws://{}/link", listener.local_addr().unwrap());
     let dialing = dial(&url, Duration::from_secs(5));
     let (stream, _) = listener.accept().unwrap();
-    let Ok(Request::WebSocket(taken, path)) = accept(stream) else {
+    let Ok(Request::WebSocket(taken, path, _)) = accept(stream) else {
         panic!("no WebSocket");
     };
     assert_eq!(path, "/link");
@@ -1501,10 +1501,11 @@ fn servers_answer_web_requests_and_take_websockets() {
     // A game, on the same port.
     let dialing = dial(&format!("ws://{address}/live"), Duration::from_secs(5));
     let (stream, _) = listener.accept().unwrap();
-    let Ok(Request::WebSocket(mut taken, path)) = accept(stream) else {
+    let Ok(Request::WebSocket(mut taken, path, forwarded)) = accept(stream) else {
         panic!("no WebSocket");
     };
     assert_eq!(path, "/live");
+    assert_eq!(forwarded, None);
     let mut dialed = dialing.recv().unwrap().unwrap();
     dialed.send(7, b"hello");
     let got = deliver(&mut dialed, &mut taken, 1);
@@ -1525,7 +1526,7 @@ fn servers_see_just_the_path() {
     // Without the query...
     let dialing = dial(&format!("ws://{address}/live?v=1"), Duration::from_secs(5));
     let (stream, _) = listener.accept().unwrap();
-    let Ok(Request::WebSocket(_, path)) = accept(stream) else {
+    let Ok(Request::WebSocket(_, path, _)) = accept(stream) else {
         panic!("no WebSocket");
     };
     assert_eq!(path, "/live");
@@ -1605,6 +1606,35 @@ fn a_websocket_asked_for_wrongly_is_answered() {
 }
 
 #[test]
+fn servers_hear_where_a_proxy_says_a_websocket_is_from() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let forwarded = |headers: &str| {
+        let mut s = std::net::TcpStream::connect(address).unwrap();
+        let request = format!(
+            "GET /live HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{headers}\r\n"
+        );
+        s.write_all(request.as_bytes()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let Ok(Request::WebSocket(_, _, forwarded)) = accept(stream) else {
+            panic!("no WebSocket");
+        };
+        forwarded.map(|ip| ip.to_string())
+    };
+    assert_eq!(forwarded(""), None);
+    // The first address is the PC's; proxies add theirs after it.
+    let chain = "X-Forwarded-For: 203.0.113.7, 104.16.0.1, 10.0.0.2\r\n";
+    assert_eq!(forwarded(chain).as_deref(), Some("203.0.113.7"));
+    // Cloudflare's own header can't be made up, so it comes first.
+    let cloudflare = format!("{chain}CF-Connecting-IP: 2001:db8::5\r\n");
+    assert_eq!(forwarded(&cloudflare).as_deref(), Some("2001:db8::5"));
+    assert_eq!(forwarded("X-Forwarded-For: nonsense\r\n"), None);
+}
+
+#[test]
 fn the_largest_messages_arrive_over_tcp() {
     the_largest_messages_arrive(tcp_pair());
 }
@@ -1663,7 +1693,7 @@ fn a_websocket_that_pings_and_takes_nothing_is_too_slow() {
         }
     });
     let (stream, _) = listener.accept().unwrap();
-    let Ok(Request::WebSocket(mut taken, _)) = accept(stream) else {
+    let Ok(Request::WebSocket(mut taken, _, _)) = accept(stream) else {
         panic!("no WebSocket");
     };
     // The answers wait to go out, as more of what it's behind by.

@@ -24,7 +24,7 @@
 //! and every member is linked to them, those who join later as well. They
 //! change no levels.
 
-use super::Server;
+use super::{log, Server};
 use crate::card;
 use crate::levels::{self, Finish, Placed, Rank, MAX_LEVEL};
 use crate::matchmaker::{self, Event, Member, Seat, Ticket};
@@ -399,14 +399,14 @@ impl Server {
             countdown: LINK_WAIT as u8,
             players: players.collect(),
         };
-        println!(
+        log(format_args!(
             "live: match {:016x}: {:?} on {}, {} PCs and {} bots",
             m.id,
             m.variant.game_type,
             m.map,
             m.players.len(),
             m.bots
-        );
+        ));
         for s in &m.players {
             if let Some(party) = self.parties.get_mut(&s.party) {
                 party.activity = Activity::Playing;
@@ -628,6 +628,8 @@ impl Server {
         let m = &mut self.matches[k];
         m.started = Some(now);
         let (id, players) = (m.info.id, m.seats.clone());
+        let pcs = 1 + m.linked.len();
+        log(format_args!("live: match {id:016x} started with {pcs} PCs"));
         for s in players {
             if self.matches[k].has(s.account) {
                 self.tell(s.account, &ToPc::Go(id));
@@ -819,12 +821,12 @@ impl Server {
                 })
                 .collect(),
         };
-        let log = self.dir.join("games.log");
-        if let Err(e) = store::log_game(&log, &record) {
-            println!("live: can't log to {}: {e}", log.display());
+        let games = self.dir.join("games.log");
+        if let Err(e) = store::log_game(&games, &record) {
+            log(format_args!("live: can't log to {}: {e}", games.display()));
         }
         let bytes = self.relayed.remove(&id).unwrap_or(0);
-        println!(
+        log(format_args!(
             "live: match {id:016x} is over{}{}, {bytes} bytes relayed",
             match counted {
                 Counted::No => "",
@@ -836,7 +838,7 @@ impl Server {
             } else {
                 format!(": {reason}")
             }
-        );
+        ));
         self.unlink(id, None);
 
         for s in &seats {
@@ -913,7 +915,9 @@ impl Server {
         }
         self.party_changed(id);
         self.relayed.insert(id, 0);
-        println!("live: party {id} opened a custom game on {map}");
+        log(format_args!(
+            "live: party {id} opened a custom game on {map}"
+        ));
         for account in members {
             self.join_custom(id, me, account);
         }
@@ -983,7 +987,9 @@ impl Server {
         party.custom_map.clear();
         self.unlink(id, None);
         let bytes = self.relayed.remove(&id).unwrap_or(0);
-        println!("live: party {id} closed its custom game, {bytes} bytes relayed");
+        log(format_args!(
+            "live: party {id} closed its custom game, {bytes} bytes relayed"
+        ));
         self.party_changed(id);
     }
 

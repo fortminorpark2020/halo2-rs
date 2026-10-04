@@ -181,6 +181,8 @@ pub struct Server {
     online_sent: f64,
     /// The Unix time when the server's clock read 0.
     epoch: u64,
+    /// Whether anything came in during this poll.
+    traffic: bool,
 }
 
 impl Server {
@@ -223,6 +225,7 @@ impl Server {
             online_changed: false,
             online_sent: f64::NEG_INFINITY,
             epoch,
+            traffic: false,
         })
     }
 
@@ -234,6 +237,17 @@ impl Server {
     /// Players signed in now.
     pub fn players_online(&self) -> usize {
         self.pcs.iter().filter(|pc| pc.account.is_some()).count()
+    }
+
+    /// Matches formed and not yet over.
+    pub fn matches_in_progress(&self) -> usize {
+        self.matches.len()
+    }
+
+    /// Parties playing custom games now.
+    pub fn custom_games(&self) -> usize {
+        let custom = |p: &&Party| p.activity == Activity::Custom;
+        self.parties.values().filter(custom).count()
     }
 
     /// The account with this id, as the server keeps it.
@@ -276,8 +290,10 @@ impl Server {
 
     /// Read and answer everything that arrived, pass games on, find
     /// matches and see them through, ping, drop connections that went
-    /// quiet, and tell players what changed, at time `now`.
-    pub fn poll(&mut self, now: f64) {
+    /// quiet, and tell players what changed, at time `now`. True if
+    /// anything came in (so more may soon).
+    pub fn poll(&mut self, now: f64) -> bool {
+        self.traffic = false;
         for k in 0..self.pcs.len() {
             self.read_pc(k, now);
         }
@@ -307,6 +323,7 @@ impl Server {
             .retain_mut(|(conn, until)| conn.flush().is_ok() && now < *until);
         self.sign_ins
             .retain(|_, times| times.last().is_some_and(|&t| now - t < 60.0));
+        self.traffic
     }
 
     /// Keep a dropped connection a moment, to send what's left.
@@ -336,8 +353,8 @@ impl Server {
         pc.gone = Some(why.to_string());
         let (account, party, ip) = (pc.account.take(), pc.party, pc.ip);
         match account.and_then(|id| self.accounts.get(&id)) {
-            Some(a) => println!("live: {} signed out: {why}", a.gamertag),
-            None => println!("live: {ip} dropped: {why}"),
+            Some(a) => log(format_args!("live: {} signed out: {why}", a.gamertag)),
+            None => log(format_args!("live: {ip} dropped: {why}")),
         }
         if let Some(id) = account {
             self.remove_member(party, id);
@@ -359,6 +376,7 @@ impl Server {
         };
         if !messages.is_empty() {
             self.pcs[k].heard = now;
+            self.traffic = true;
         }
         for (kind, body) in messages {
             if self.pcs[k].gone.is_some() {
@@ -437,7 +455,10 @@ impl Server {
         let restored = card::verify(&login.card, &self.key.verifying_key())
             .filter(|a| a.key == login.key && a.seq > existing.map_or(0, |e| e.seq));
         if let Some(a) = &restored {
-            println!("live: {} restored from a stat card", a.gamertag);
+            log(format_args!(
+                "live: {} restored from a stat card",
+                a.gamertag
+            ));
         }
         let mut account = restored
             .or_else(|| existing.cloned())
@@ -464,10 +485,10 @@ impl Server {
         pc.guests = login.guests;
         // The first ping goes at once.
         pc.pinged = now - live::PING_EVERY;
-        println!(
+        log(format_args!(
             "live: {} signed in from {}",
             self.accounts[&id].gamertag, pc.ip
-        );
+        ));
         self.welcome(id);
         let playlists = ToPc::Playlists(self.playlists_for(id, &self.playlist_counts()));
         self.tell(id, &playlists);
@@ -536,7 +557,7 @@ impl Server {
         let path = self.dir.join("accounts.txt");
         if changed {
             if let Err(e) = store::save(&path, self.accounts.values()) {
-                println!("live: can't save {}: {e}", path.display());
+                log(format_args!("live: can't save {}: {e}", path.display()));
             }
         }
         changed
@@ -625,6 +646,34 @@ fn signed(key: &[u8; 32], nonce: &[u8; 32], signature: &[u8; 64]) -> bool {
     let signature = Signature::from_bytes(signature);
     key.verify_strict(&live::proof(nonce, key.as_bytes()), &signature)
         .is_ok()
+}
+
+/// Tell whoever runs the server something, on a line that starts with the
+/// date and time (UTC).
+pub fn log(line: impl std::fmt::Display) {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    println!("{} {line}", utc(unix));
+}
+
+/// A Unix time as a date and time, as "2026-10-04 12:34:56".
+fn utc(unix: u64) -> String {
+    let (days, seconds) = (unix / 86_400, unix % 86_400);
+    // Howard Hinnant's `civil_from_days`, for years of March to February
+    // in 400-year eras.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let m = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * m + 2) / 5 + 1;
+    let month = if m < 10 { m + 3 } else { m - 9 };
+    let year = era * 400 + year_of_era + u64::from(month <= 2);
+    let (h, min, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    format!("{year}-{month:02}-{day:02} {h:02}:{min:02}:{s:02}")
 }
 
 #[cfg(test)]
