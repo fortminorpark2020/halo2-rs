@@ -70,6 +70,15 @@ impl App {
             if !self.client_status(status) || self.loading.is_some() {
                 return;
             }
+            // Online, a PC that comes during the host's game on the map
+            // loaded here goes straight into it. (The host's options arrive
+            // with its game.)
+            if let Some(players) = self.welcome.take() {
+                self.seat_players(0, &GameOptions::default());
+                self.welcome = Some(players);
+                self.menu.notice = None;
+                return;
+            }
             // Splitscreen players coming and going here, and their teams,
             // show in the host's lobby.
             let wanted = self.wanted_teams();
