@@ -531,14 +531,21 @@ pub struct GrenadeAssets {
 /// body mesh to pose).
 pub const MAX_BODIES: usize = 16;
 
-/// The multiplayer Spartan seen in third person.
+const SPARTAN: &str = "objects\\characters\\masterchief\\masterchief_mp";
+const ELITE: &str = "objects\\characters\\elite\\elite_mp";
+const SPARTAN_ARMS: &str = "objects\\characters\\masterchief\\fp\\fp";
+const ELITE_ARMS: &str = "objects\\characters\\elite\\fp_arms\\fp_arms";
+
+/// A multiplayer Spartan or Elite seen in third person.
 pub struct Body {
     pub rig: BodyRig,
     /// One copy of the mesh per Spartan on screen.
     pub meshes: Vec<usize>,
+    /// Another, for the profile menu's model.
+    pub preview: usize,
 }
 
-/// Master Chief's first person arms.
+/// First person arms: Master Chief's or an Elite's.
 pub struct Arms {
     pub mesh: usize,
     /// The arms mirrored, for the left hand's gun.
@@ -565,7 +572,9 @@ pub struct Scene {
     /// Weapons the player can switch between; the Battle Rifle first.
     pub weapons: Vec<WeaponAssets>,
     pub arms: Option<Arms>,
+    pub elite_arms: Option<Arms>,
     pub body: Option<Body>,
+    pub elite: Option<Body>,
     /// The sky's model, drawn around the camera behind everything.
     pub sky: Option<usize>,
     /// Frag and plasma grenades: their models, and throw speed from the
@@ -1236,25 +1245,27 @@ impl Loader {
         }
     }
 
-    fn body(&mut self, meshes: &mut Vec<MeshData>) -> Option<Body> {
-        let bipd = self.find("bipd", "objects\\characters\\masterchief\\masterchief_mp")?;
-        let loaded = model::object_render_model(&mut self.set, bipd)
+    /// A multiplayer biped's body: the Spartan or the Elite, with the
+    /// markers its hands hold weapons by.
+    fn body(&mut self, bipd: &str, hands: [&str; 2], meshes: &mut Vec<MeshData>) -> Option<Body> {
+        let tag = self.find("bipd", bipd)?;
+        let loaded = model::object_render_model(&mut self.set, tag)
             .and_then(|mode| model::read_render_model(&mut self.set, mode))
             .and_then(|m| {
-                let jmad = model::object_animations(&mut self.set, bipd)?;
+                let jmad = model::object_animations(&mut self.set, tag)?;
                 Ok((m, animation::read_animation_graph(&mut self.set, jmad)?))
             });
         let (m, graph) = match loaded {
             Ok(x) => x,
             Err(e) => {
-                println!("warning: Spartan model: {e}");
+                println!("warning: {bipd}: {e}");
                 return None;
             }
         };
         let mesh = self.model_mesh(&m);
         let skin = SkinnedMesh::new(&mesh);
         let first = meshes.len();
-        for _ in 0..MAX_BODIES {
+        for _ in 0..=MAX_BODIES {
             meshes.push(mesh.clone());
         }
         Some(Body {
@@ -1262,18 +1273,19 @@ impl Loader {
                 graph,
                 Skeleton::new(&m.nodes),
                 skin,
-                ["right_hand", "left_hand"].map(|h| m.marker(h).copied()),
+                hands.map(|h| m.marker(h).copied()),
             ),
             meshes: (first..first + MAX_BODIES).collect(),
+            preview: first + MAX_BODIES,
         })
     }
 
-    fn arms(&mut self, meshes: &mut Vec<MeshData>) -> Option<Arms> {
-        let mode = self.find("mode", "objects\\characters\\masterchief\\fp\\fp")?;
+    fn arms(&mut self, name: &str, meshes: &mut Vec<MeshData>) -> Option<Arms> {
+        let mode = self.find("mode", name)?;
         let m = match model::read_render_model(&mut self.set, mode) {
             Ok(m) => m,
             Err(e) => {
-                println!("warning: first person arms: {e}");
+                println!("warning: {name}: {e}");
                 return None;
             }
         };
@@ -1291,6 +1303,25 @@ impl Loader {
 }
 
 impl Scene {
+    /// The third person body for a Spartan or an Elite (the Spartan's if
+    /// the map has no Elite).
+    pub fn body_for(&self, elite: bool) -> Option<&Body> {
+        if elite {
+            self.elite.as_ref().or(self.body.as_ref())
+        } else {
+            self.body.as_ref()
+        }
+    }
+
+    /// First person arms for a Spartan or an Elite.
+    pub fn arms_for(&self, elite: bool) -> Option<&Arms> {
+        if elite {
+            self.elite_arms.as_ref().or(self.arms.as_ref())
+        } else {
+            self.arms.as_ref()
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Scene, Box<dyn std::error::Error>> {
         let mut set = MapSet::open(path)?;
         if set.shared.is_none() {
@@ -1362,8 +1393,10 @@ impl Scene {
 
         let mut meshes = vec![level];
         let sky = loader.sky(&mut meshes);
-        let arms = loader.arms(&mut meshes);
-        let body = loader.body(&mut meshes);
+        let arms = loader.arms(SPARTAN_ARMS, &mut meshes);
+        let elite_arms = loader.arms(ELITE_ARMS, &mut meshes);
+        let body = loader.body(SPARTAN, ["right_hand", "left_hand"], &mut meshes);
+        let elite = loader.body(ELITE, ["right_hand_elite", "left_hand_elite"], &mut meshes);
         let weapons = WEAPONS
             .iter()
             .filter_map(|name| loader.weapon(name, arms.as_ref().map(|a| &a.skeleton), &mut meshes))
@@ -1589,7 +1622,9 @@ impl Scene {
             biped,
             weapons,
             arms,
+            elite_arms,
             body,
+            elite,
             sky,
             grenades,
             objects,

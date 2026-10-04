@@ -56,6 +56,7 @@ fn main() -> ExitCode {
         Some("bitmap") if args.len() >= 4 => bitmap_png(&args[1], &args[2], &args[3]),
         Some("refs") if args.len() >= 3 => refs(&args[1], &args[2]),
         Some("events") if args.len() >= 2 => events(&args[1]),
+        Some("colors") if args.len() >= 2 => colors(&args[1]),
         Some("netgame") if args.len() >= 2 => netgame(&args[1]),
         Some("sid") if args.len() >= 3 => {
             let map = blam_cache::CacheFile::open(&args[1]);
@@ -684,6 +685,20 @@ fn netgame(path: &str) -> Res {
     Ok(())
 }
 
+fn colors(path: &str) -> Res {
+    use blam_cache::{colors, physics, MapSet};
+    let mut set = MapSet::open(path)?;
+    for (i, c) in colors::profile_colors(&mut set)?.iter().enumerate() {
+        println!("profile color {i}: {c:.3?}");
+    }
+    for (i, c) in colors::team_colors(&mut set)?.iter().enumerate() {
+        println!("team color {i}: {c:.3?}");
+    }
+    println!("spartan {:?}", physics::player_biped(&mut set)?);
+    println!("elite {:?}", physics::elite_biped(&mut set)?);
+    Ok(())
+}
+
 fn events(path: &str) -> Res {
     use blam_cache::{i16_at, u32_at, DatumIndex, MapSet};
     let mut set = MapSet::open(path)?;
@@ -823,6 +838,18 @@ fn jmad(path: &str, name: &str) -> Res {
     {
         if let Some(a) = g.animations.get(k) {
             println!("{} ({} frames)", a.name, a.frame_count);
+            // H2_FRAME=<frame> prints every node at that frame instead.
+            if let Some(f) = std::env::var("H2_FRAME")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+            {
+                for (n, node) in g.nodes.iter().enumerate() {
+                    let t = a.translations[n].as_ref().map(|t| t.sample(f));
+                    let r = a.rotations[n].as_ref().map(|t| t.sample(f));
+                    println!("  {n:>2} {:<16} t {t:.3?} r {r:.3?}", node.name);
+                }
+                return Ok(());
+            }
             for f in 0..a.frame_count {
                 let t = a.translations[0].as_ref().map(|t| t.sample(f as f32));
                 let r = a.rotations[0].as_ref().map(|t| t.sample(f as f32));

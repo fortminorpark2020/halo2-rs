@@ -40,6 +40,7 @@ mod mapinfo;
 mod menu;
 mod objective;
 mod probe;
+mod profile;
 mod rig;
 mod scene;
 mod soundscape;
@@ -53,7 +54,7 @@ use effects::Effects;
 use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use gpu::{hud_mode, DrawCall, Frame, HudBatch};
-use h2sim::bot::bot_name;
+use h2sim::bot::{bot_look, bot_name};
 use h2sim::game::{guest_name, Event, GrenadeKind, HeldWeapon, TICK};
 use h2sim::vehicle::SeatRole;
 use h2sim::{
@@ -427,6 +428,7 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         .map(|_| {
             let i = game.add_player();
             game.set_name(i, bot_name(i));
+            game.set_look(i, bot_look(i));
             (i, Bot::new(i as u32 * 7919 + 13 + seed * 104_729))
         })
         .collect();
@@ -534,6 +536,9 @@ enum Mode {
 
 /// A Spartan's body posed for this frame.
 struct BodyPose {
+    /// Which body: the Spartan's or the Elite's mesh for this player.
+    mesh: usize,
+    elite: bool,
     vertices: Vec<scene::Vertex>,
     object: Mat4,
     /// Where the weapons go in the right and left hands.
@@ -572,6 +577,9 @@ struct App {
     /// Actions players started this frame (reload, melee...), for their bodies.
     body_actions: Vec<(usize, &'static str)>,
     body_poses: Vec<Option<BodyPose>>,
+    /// The player's own model beside the profile menu.
+    preview: BodyAnimator,
+    preview_pose: Option<BodyPose>,
     /// LAN play: hosting, or joined to another PC's game.
     net: Net,
     browser: h2net::Browser,
@@ -686,6 +694,7 @@ impl App {
         }
         let i = self.game.add_player();
         self.game.set_name(i, bot_name(i));
+        self.game.set_look(i, bot_look(i));
         self.bots.push((i, Bot::new(i as u32 * 7919 + 13)));
         self.announce(&format!("{} JOINED", self.game.name(i)));
     }
@@ -700,8 +709,10 @@ impl App {
             return;
         }
         let i = self.game.add_player();
-        let guest = guest_name(&h2net::player_name(), self.locals.len());
+        let profile = &self.menu.profile;
+        let guest = guest_name(&profile.name, self.locals.len());
         self.game.set_name(i, &guest);
+        self.game.set_look(i, profile.look.guest(self.locals.len()));
         let mut l = LocalPlayer::new(i, &self.game);
         l.pad = pad;
         self.locals.push(l);
@@ -756,6 +767,9 @@ impl App {
         self.lan_games = self.browser.poll().to_vec();
         self.menu_time += dt;
         if self.mode == Mode::Menu || self.loading.is_some() {
+            if self.menu.screen == Screen::Profile {
+                self.animate_preview(dt);
+            }
             self.effects.update(dt);
             return;
         }
@@ -1084,14 +1098,23 @@ impl App {
     /// body while it looks through their eyes.
     fn animate_bodies(&mut self, dt: f32) {
         let actions = std::mem::take(&mut self.body_actions);
-        let Some(body) = &self.scene.body else {
-            return;
-        };
-        let rig = &body.rig;
         let n = self.game.players.len().min(scene::MAX_BODIES);
         self.bodies.resize_with(n, BodyAnimator::default);
         self.body_poses.resize_with(n, || None);
         for (i, p) in self.game.players.iter().enumerate().take(n) {
+            let Some(body) = self.scene.body_for(p.look.elite) else {
+                continue;
+            };
+            let rig = &body.rig;
+            // The two species have their own animation graphs: start over
+            // when a player's changes.
+            let elite = self.scene.elite.is_some() && p.look.elite;
+            if self.body_poses[i]
+                .as_ref()
+                .is_some_and(|b| b.elite != elite)
+            {
+                self.bodies[i] = BodyAnimator::default();
+            }
             let mut style = p
                 .held()
                 .and_then(|h| self.scene.weapons.get(h.weapon))
@@ -1151,11 +1174,106 @@ impl App {
             let pose = self.bodies[i].update(rig, &input, dt);
             let world = rig.world(&pose);
             self.body_poses[i] = Some(BodyPose {
+                mesh: body.meshes[i],
+                elite,
                 vertices: rig.skin.pose(&rig.skin_matrices(&world)),
                 object,
                 weapons: [false, true].map(|left| rig.weapon_frame(&world, left)),
             });
         }
+    }
+
+    /// Pose the player's model for the profile menu, standing with a
+    /// Battle Rifle.
+    fn animate_preview(&mut self, dt: f32) {
+        let look = self.menu.profile.look;
+        let Some(body) = self.scene.body_for(look.elite) else {
+            self.preview_pose = None;
+            return;
+        };
+        let elite = self.scene.elite.is_some() && look.elite;
+        if self.preview_pose.as_ref().is_some_and(|p| p.elite != elite) {
+            self.preview = BodyAnimator::default();
+        }
+        let rig = &body.rig;
+        let input = BodyInput {
+            velocity: glam::Vec2::ZERO,
+            grounded: true,
+            crouching: false,
+            alive: true,
+            style: ("rifle", "br"),
+            seat: None,
+            pitch: 0.0,
+        };
+        let pose = self.preview.update(rig, &input, dt);
+        let world = rig.world(&pose);
+        self.preview_pose = Some(BodyPose {
+            mesh: body.preview,
+            elite,
+            vertices: rig.skin.pose(&rig.skin_matrices(&world)),
+            object: Mat4::IDENTITY,
+            weapons: [false, true].map(|left| rig.weapon_frame(&world, left)),
+        });
+    }
+
+    /// The profile menu's model, standing to the right of the menu and
+    /// slowly turning: its draws, and its posed mesh to upload.
+    fn preview_draws(
+        &self,
+        camera: &FlyCamera,
+        (w, h): (f32, f32),
+    ) -> (Vec<DrawCall>, Option<(usize, Vec<scene::Vertex>)>) {
+        let Some(pose) = self
+            .preview_pose
+            .as_ref()
+            .filter(|_| self.mode == Mode::Menu && self.menu.screen == Screen::Profile)
+        else {
+            return (Vec::new(), None);
+        };
+        // Where on screen, in the menus' 640x480 layout.
+        const SPOT: [f32; 2] = [488.0, 250.0];
+        const DISTANCE: f32 = 1.35;
+        const MIDDLE: f32 = 0.37;
+        let s = (h / 480.0).min(w / 640.0);
+        let px = (w - 640.0 * s) * 0.5 + SPOT[0] * s;
+        let py = (h - 480.0 * s) * 0.5 + SPOT[1] * s;
+        let aspect = w / h.max(1.0);
+        let half = camera::half_height(aspect) * DISTANCE;
+        let x = (px / (w * 0.5) - 1.0) * half * aspect;
+        let y = (1.0 - py / (h * 0.5)) * half;
+        let (f, r, u) = camera.basis();
+        let feet = camera.position + f * DISTANCE + r * x + u * (y - MIDDLE);
+        let turn = 0.6 + self.menu_time * 0.5;
+        let toward = -f;
+        let facing = toward * turn.cos() + u.cross(toward) * turn.sin();
+        let object = Mat4::from_cols(
+            facing.extend(0.0),
+            u.cross(facing).extend(0.0),
+            u.extend(0.0),
+            feet.extend(1.0),
+        );
+        let light = Some([0.9, 0.9, 0.95]);
+        let mut draws = vec![DrawCall {
+            mesh: pose.mesh,
+            model: object,
+            light,
+            colors: Some(local::armor_colors(self.menu.profile.look)),
+        }];
+        let rifle = self
+            .scene
+            .weapons
+            .iter()
+            .find(|w| w.def.name == "battle_rifle")
+            .and_then(|w| w.world_mesh);
+        if let Some(mesh) = rifle {
+            draws.push(DrawCall {
+                mesh,
+                model: object * pose.weapons[0],
+                light,
+                colors: None,
+            });
+        }
+        (draws, Some((pose.mesh, pose.vertices.clone())))
     }
 
     /// Everything in the world besides the level: scenery, items lying on
@@ -1233,7 +1351,7 @@ impl App {
 
     /// A player's body and the weapon in their hands.
     fn body_draws(&self, player: usize) -> Vec<DrawCall> {
-        let (Some(body), Some(Some(pose))) = (&self.scene.body, self.body_poses.get(player)) else {
+        let Some(Some(pose)) = self.body_poses.get(player) else {
             return Vec::new();
         };
         let p = &self.game.players[player];
@@ -1242,7 +1360,7 @@ impl App {
             .level_light
             .at(&self.scene.textures, p.body.position + Vec3::Z * 0.2);
         let mut out = vec![DrawCall {
-            mesh: body.meshes[player],
+            mesh: pose.mesh,
             model: pose.object,
             light,
             colors: Some(player_colors(&self.game, player)),
@@ -1297,12 +1415,8 @@ impl App {
         // Posed bodies and vehicles go up once, with the first view.
         let (vehicle_draws, mut body_meshes) = vehicles::draws(&self.scene, &self.game);
         shared.extend(vehicle_draws);
-        if let Some(body) = &self.scene.body {
-            for (i, pose) in self.body_poses.iter().enumerate() {
-                if let Some(pose) = pose {
-                    body_meshes.push((body.meshes[i], pose.vertices.clone()));
-                }
-            }
+        for pose in self.body_poses.iter().flatten() {
+            body_meshes.push((pose.mesh, pose.vertices.clone()));
         }
         let ctf = self.game.rules.game_type == GameType::Ctf;
         if let (Some(flag), true) = (&self.scene.flag, ctf && self.game.has_flags()) {
@@ -1326,12 +1440,16 @@ impl App {
             let camera = self.menu_camera();
             let (_, r, u) = camera.basis();
             let viewport = ports[0];
+            let mut world = shared.clone();
+            let (preview, posed) = self.preview_draws(&camera, (w, h));
+            world.extend(preview);
+            body_meshes.extend(posed);
             views.push(View {
                 viewport,
                 aspect: viewport[2] as f32 / viewport[3].max(1) as f32,
                 magnification: 1.0,
                 camera,
-                world: shared.clone(),
+                world,
                 sprites: self.effects.sprites(r, u),
                 draws: local::ViewDraws {
                     view_models: Vec::new(),
@@ -1532,6 +1650,10 @@ impl ApplicationHandler for App {
                 let PhysicalKey::Code(code) = event.physical_key else {
                     return;
                 };
+                if self.menu.editing && self.in_menu() && event.state == ElementState::Pressed {
+                    self.type_key(code, event.text.as_deref());
+                    return;
+                }
                 match event.state {
                     ElementState::Pressed => {
                         if !event.repeat {
@@ -1587,6 +1709,20 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    /// A key pressed while typing a gamertag.
+    fn type_key(&mut self, code: KeyCode, text: Option<&str>) {
+        let typed = match code {
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Escape => menu::Typed::Done,
+            KeyCode::Backspace => menu::Typed::Erase,
+            _ => match text {
+                Some(t) => menu::Typed::Text(t.to_string()),
+                None => return,
+            },
+        };
+        let action = self.menu.typed(typed);
+        self.after_menu(action);
+    }
+
     fn key_pressed(&mut self, code: KeyCode) {
         self.keyboard_used = true;
         if self.loading.is_some() {
@@ -1752,6 +1888,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         bodies: Vec::new(),
         body_actions: Vec::new(),
         body_poses: Vec::new(),
+        preview: BodyAnimator::default(),
+        preview_pose: None,
         net: Net::Offline,
         browser: h2net::Browser::new(session),
         lan_games: Vec::new(),
@@ -1762,7 +1900,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         welcome: None,
         sound: soundscape::Soundscape::new(),
         mode: Mode::Menu,
-        menu: Menu::new(settings),
+        menu: Menu::new(settings, profile::Profile::load()),
         menu_open: false,
         maps,
         map_pictures,

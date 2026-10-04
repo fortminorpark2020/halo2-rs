@@ -4,7 +4,7 @@
 
 use super::{
     DroppedWeapon, Event, Flag, FlagEvent, Game, GameType, Grenade, GrenadeKind, HeldWeapon,
-    HillControl, HillEvent, ItemKind, LeadChange, Medal, Projectile, Spartan, StuckRound,
+    HillControl, HillEvent, ItemKind, LeadChange, Look, Medal, Projectile, Spartan, StuckRound,
     DROPPED_WEAPON_LIFETIME, NEUTRAL, TEAMS,
 };
 use crate::game::Command;
@@ -616,6 +616,7 @@ impl Game {
         w.u16(self.players.len() as u16);
         for p in &self.players {
             w.str(&p.name);
+            p.look.write(w);
             w.vec3(p.body.position);
             w.vec3(p.body.velocity);
             w.bool(p.body.grounded);
@@ -769,6 +770,7 @@ impl Game {
             let mut held = Vec::new();
             let p = &mut self.players[i];
             p.name = super::clean_name(&r.str()?);
+            p.look = Look::read(r)?;
             p.body.position = r.vec3()?;
             p.body.velocity = r.vec3()?;
             p.body.grounded = r.bool()?;
@@ -1089,6 +1091,13 @@ mod tests {
         let a = host.add_player();
         let b = host.add_player();
         host.players[b].score = -2;
+        host.set_look(
+            b,
+            Look {
+                elite: true,
+                colors: [5, 9],
+            },
+        );
         host.players[a].body.position = Vec3::new(0.0, 0.0, 0.0);
         host.players[b].body.position = Vec3::new(5.0, 0.0, 0.0);
         // Player b holds a second gun in the left hand.
@@ -1136,6 +1145,7 @@ mod tests {
             assert_eq!(h.alive, j.alive);
             assert_eq!((h.team, h.score), (j.team, j.score));
             assert_eq!(h.name, j.name);
+            assert_eq!(h.look, j.look);
             assert_eq!(h.weapons.len(), j.weapons.len());
             assert_eq!(
                 h.held().map(|w| w.state.loaded),

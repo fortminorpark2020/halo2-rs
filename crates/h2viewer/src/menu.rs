@@ -1,10 +1,13 @@
 //! Halo 2 style menus, drawn over the map: the main menu, the multiplayer
-//! lobby, the system link browser, the pause menu and the post-game
-//! carnage report. Keyboard, mouse and controllers all work them.
+//! lobby, the system link browser, the player profile, the pause menu and
+//! the post-game carnage report. Keyboard, mouse and controllers all work
+//! them.
 
 use crate::gpu::hud_mode;
 use crate::hud::HudBuilder;
+use crate::profile::{color_name, Profile};
 use h2net::LanGame;
+use h2sim::game::{clean_name, Look, MAX_NAME, PROFILE_COLORS};
 use h2sim::GameType;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +16,7 @@ pub enum Screen {
     Main,
     Lobby,
     SystemLink,
+    Profile,
     Pause,
     PostGame,
 }
@@ -151,7 +155,7 @@ pub fn scores(game_type: GameType) -> (&'static [u32], usize) {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Settings {
     /// In `GAME_TYPES`.
     pub game_type: usize,
@@ -197,6 +201,7 @@ pub struct SeatInfo {
     /// "KEYBOARD" or "CONTROLLER".
     pub how: &'static str,
     pub team: u8,
+    pub look: Look,
 }
 
 /// What the game should do after a menu input.
@@ -206,6 +211,8 @@ pub enum Action {
     /// Start a game with the lobby's settings.
     Start,
     Join(LanGame),
+    /// The player changed their profile: keep it.
+    SaveProfile,
     Resume,
     /// Back to the lobby (ending or leaving the game).
     EndGame,
@@ -220,6 +227,14 @@ pub enum Input {
     Right,
     Select,
     Back,
+}
+
+/// Typing in a text box (the gamertag).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Typed {
+    Text(String),
+    Erase,
+    Done,
 }
 
 /// The menu's sounds, for the game to play.
@@ -246,7 +261,12 @@ pub struct Context<'a> {
 enum Row {
     Multiplayer,
     SystemLink,
+    Profile,
     Quit,
+    Name,
+    Model,
+    Primary,
+    Secondary,
     GameType,
     Map,
     Score,
@@ -272,6 +292,9 @@ pub struct Menu {
     /// A line to show (why a game ended, a join that failed).
     pub notice: Option<String>,
     pub sound: Option<Sound>,
+    pub profile: Profile,
+    /// Typing a new gamertag.
+    pub editing: bool,
 }
 
 /// Layout, in Halo 2's 640x480 screen units.
@@ -336,13 +359,15 @@ impl Frame {
 }
 
 impl Menu {
-    pub fn new(settings: Settings) -> Menu {
+    pub fn new(settings: Settings, profile: Profile) -> Menu {
         Menu {
             screen: Screen::Main,
             cursor: 0,
             settings,
             notice: None,
             sound: None,
+            profile,
+            editing: false,
         }
     }
 
@@ -356,6 +381,7 @@ impl Menu {
             Screen::Main => "HALO 2",
             Screen::Lobby => "MULTIPLAYER",
             Screen::SystemLink => "SYSTEM LINK",
+            Screen::Profile => "PLAYER PROFILE",
             Screen::Pause => "PAUSED",
             Screen::PostGame => "GAME OVER",
         }
@@ -363,7 +389,8 @@ impl Menu {
 
     fn rows(&self, ctx: &Context) -> Vec<Row> {
         match self.screen {
-            Screen::Main => vec![Row::Multiplayer, Row::SystemLink, Row::Quit],
+            Screen::Main => vec![Row::Multiplayer, Row::SystemLink, Row::Profile, Row::Quit],
+            Screen::Profile => vec![Row::Name, Row::Model, Row::Primary, Row::Secondary],
             Screen::Lobby => vec![
                 Row::GameType,
                 Row::Map,
@@ -383,7 +410,31 @@ impl Menu {
         match row {
             Row::Multiplayer => ("MULTIPLAYER".into(), None),
             Row::SystemLink => ("SYSTEM LINK".into(), None),
+            Row::Profile => ("PLAYER PROFILE".into(), None),
             Row::Quit => ("QUIT".into(), None),
+            Row::Name if self.editing => {
+                ("GAMERTAG".into(), Some(format!("{}_", self.profile.name)))
+            }
+            Row::Name => ("GAMERTAG".into(), Some(self.profile.name.clone())),
+            Row::Model => (
+                "MODEL".into(),
+                Some(
+                    if self.profile.look.elite {
+                        "ELITE"
+                    } else {
+                        "SPARTAN"
+                    }
+                    .into(),
+                ),
+            ),
+            Row::Primary => (
+                "PRIMARY COLOR".into(),
+                Some(color_name(self.profile.look.colors[0]).into()),
+            ),
+            Row::Secondary => (
+                "SECONDARY COLOR".into(),
+                Some(color_name(self.profile.look.colors[1]).into()),
+            ),
             Row::GameType => (
                 "GAME TYPE".into(),
                 Some(GAME_TYPES[s.game_type.min(GAME_TYPES.len() - 1)].1.into()),
@@ -435,6 +486,12 @@ impl Menu {
     }
 
     pub fn input(&mut self, input: Input, ctx: &Context) -> Action {
+        if self.editing {
+            return match input {
+                Input::Select | Input::Back => self.typed(Typed::Done),
+                _ => Action::None,
+            };
+        }
         let rows = self.rows(ctx);
         self.settle(&rows);
         let n = rows.len();
@@ -459,12 +516,13 @@ impl Menu {
             }
             Input::Left | Input::Right => {
                 let step = if input == Input::Left { -1 } else { 1 };
-                if let Some(r) = row {
-                    if self.adjust(r, step, ctx) {
+                match row {
+                    Some(r) if self.adjust(r, step, ctx) => {
                         self.sound = Some(Sound::Cursor);
+                        self.saving(r)
                     }
+                    _ => Action::None,
                 }
-                Action::None
             }
             Input::Select => match row {
                 Some(r) => self.choose(r, ctx),
@@ -492,6 +550,11 @@ impl Menu {
                 s.game_type = cycle(s.game_type, GAME_TYPES.len());
                 s.score = scores(s.game_type()).1;
             }
+            Row::Model => self.profile.look.elite = !self.profile.look.elite,
+            Row::Primary | Row::Secondary => {
+                let c = &mut self.profile.look.colors[(row == Row::Secondary) as usize];
+                *c = cycle(*c as usize, PROFILE_COLORS as usize) as u8;
+            }
             _ => return false,
         }
         true
@@ -507,12 +570,24 @@ impl Menu {
         match row {
             Row::Multiplayer => forward(self, Screen::Lobby),
             Row::SystemLink => forward(self, Screen::SystemLink),
+            Row::Profile => forward(self, Screen::Profile),
             Row::Quit => Action::Quit,
-            Row::GameType | Row::Map | Row::Score | Row::Bots => {
+            Row::Name => {
+                self.editing = true;
+                self.sound = Some(Sound::Forward);
+                Action::None
+            }
+            Row::GameType
+            | Row::Map
+            | Row::Score
+            | Row::Bots
+            | Row::Model
+            | Row::Primary
+            | Row::Secondary => {
                 if self.adjust(row, 1, ctx) {
                     self.sound = Some(Sound::Cursor);
                 }
-                Action::None
+                self.saving(row)
             }
             Row::StartGame if ctx.maps.is_empty() => {
                 self.notice = Some("NO MULTIPLAYER MAPS FOUND".into());
@@ -541,9 +616,59 @@ impl Menu {
         }
     }
 
+    /// After changing a row's value: profile rows are kept.
+    fn saving(&self, row: Row) -> Action {
+        if matches!(row, Row::Model | Row::Primary | Row::Secondary) {
+            Action::SaveProfile
+        } else {
+            Action::None
+        }
+    }
+
+    /// A key typed while editing the gamertag.
+    pub fn typed(&mut self, typed: Typed) -> Action {
+        if !self.editing {
+            return Action::None;
+        }
+        let name = &mut self.profile.name;
+        match typed {
+            Typed::Text(text) => {
+                let before = name.len();
+                name.extend(text.chars().filter(|c| c.is_ascii_graphic() || *c == ' '));
+                name.make_ascii_uppercase();
+                name.truncate(MAX_NAME);
+                if name.len() != before {
+                    self.sound = Some(Sound::Cursor);
+                }
+                Action::None
+            }
+            Typed::Erase => {
+                if name.pop().is_some() {
+                    self.sound = Some(Sound::Cursor);
+                }
+                Action::None
+            }
+            Typed::Done => {
+                self.editing = false;
+                *name = clean_name(name);
+                if name.is_empty() {
+                    *name = Profile::default().name;
+                }
+                self.sound = Some(Sound::Back);
+                Action::SaveProfile
+            }
+        }
+    }
+
     fn back(&mut self) -> Action {
         match self.screen {
             Screen::Main => Action::None,
+            Screen::Profile => {
+                self.show(Screen::Main);
+                self.cursor = 2;
+                self.sound = Some(Sound::Back);
+                Action::None
+            }
             Screen::Lobby | Screen::SystemLink => {
                 let from = self.screen;
                 self.show(Screen::Main);
@@ -608,7 +733,17 @@ impl Menu {
         self.cursor = k;
         let row = self.rows(ctx)[k];
         let (_, value) = self.label(row, ctx);
-        if value.is_some() && matches!(row, Row::Map | Row::Score | Row::Bots | Row::GameType) {
+        let stepped = matches!(
+            row,
+            Row::Map
+                | Row::Score
+                | Row::Bots
+                | Row::GameType
+                | Row::Model
+                | Row::Primary
+                | Row::Secondary
+        );
+        if value.is_some() && stepped && !self.editing {
             let input = if along < 0.6 {
                 Input::Left
             } else {
@@ -638,7 +773,7 @@ impl Menu {
         let s = f.s;
         // Darken behind the menu so it reads over any map.
         match self.screen {
-            Screen::Main | Screen::Lobby | Screen::SystemLink => {
+            Screen::Main | Screen::Lobby | Screen::SystemLink | Screen::Profile => {
                 hb.quad(
                     white,
                     [0.0, 0.0, w, h],
@@ -692,7 +827,7 @@ impl Menu {
             let text_y = rect[1] + (ROW_H - 11.0) * 0.5;
             hb.text_left(font, f.at(rect[0] + 10.0, text_y), 11.0 * s, &label, fg);
             if let Some(v) = value {
-                let v = if selected && !matches!(row, Row::Join(_)) {
+                let v = if selected && !matches!(row, Row::Join(_) | Row::Name) {
                     format!("< {v} >")
                 } else {
                     v
@@ -706,6 +841,9 @@ impl Menu {
             let top = self.draw_map(hb, font, &f, ctx, white);
             self.draw_players(hb, font, white, &f, ctx, top);
         }
+        if self.screen == Screen::Profile {
+            self.draw_profile(hb, font, white, &f);
+        }
         if self.screen == Screen::SystemLink {
             let y = ROW_Y - 22.0;
             hb.text_left(font, f.at(ROW_X, y), 9.0 * s, "GAMES ON YOUR NETWORK", DIM);
@@ -714,6 +852,7 @@ impl Menu {
             hb.text_left(font, f.at(ROW_X, 400.0), 10.0 * s, n, WARNING);
         }
         let hint = match self.screen {
+            Screen::Profile if self.editing => "TYPE A GAMERTAG, THEN PRESS ENTER",
             Screen::Main => "ENTER OR A: SELECT",
             Screen::PostGame => "ENTER OR A: CONTINUE",
             _ => "ENTER OR A: SELECT   ESC OR B: BACK",
@@ -770,6 +909,39 @@ impl Menu {
         y + height + 20.0
     }
 
+    /// The profile's armour colours, beside its rows (the model itself
+    /// stands to the right, drawn with the level).
+    fn draw_profile(&self, hb: &mut HudBuilder, font: usize, white: usize, f: &Frame) {
+        let s = f.s;
+        let look = self.profile.look;
+        let colors = crate::local::armor_colors(look);
+        let (x, y) = (ROW_X, ROW_Y + 4.0 * ROW_STEP + 12.0);
+        let height = 54.0;
+        hb.quad(
+            white,
+            f.rect([x, y, x + ROW_W, y + height]),
+            [0.0; 4],
+            PANEL,
+            hud_mode::PLAIN,
+            0.0,
+        );
+        for (k, (label, c)) in ["PRIMARY", "SECONDARY"].iter().zip(colors).enumerate() {
+            let sx = x + 10.0 + k as f32 * 145.0;
+            let swatch = f.rect([sx, y + 10.0, sx + 34.0, y + 44.0]);
+            hb.quad(
+                white,
+                swatch,
+                [0.0; 4],
+                gamma_color(c),
+                hud_mode::PLAIN,
+                0.0,
+            );
+            hb.text_left(font, f.at(sx + 42.0, y + 14.0), 8.0 * s, label, DIM);
+            let name = color_name(look.colors[k]);
+            hb.text_left(font, f.at(sx + 42.0, y + 27.0), 10.0 * s, name, TEXT);
+        }
+    }
+
     fn draw_players(
         &self,
         hb: &mut HudBuilder,
@@ -796,11 +968,11 @@ impl Menu {
         );
         hb.text_left(font, f.at(x, y), 11.0 * s, "PLAYERS", BRIGHT);
         y += 24.0;
-        for (i, seat) in ctx.seats.iter().enumerate() {
+        for seat in ctx.seats {
             let c = if teams {
                 crate::local::TEAM_COLORS[seat.team.min(1) as usize]
             } else {
-                crate::local::armor_colors(i)[0]
+                crate::local::armor_colors(seat.look)[0]
             };
             let how = seat.how;
             let swatch = f.rect([x, y, x + 8.0, y + 9.0]);
@@ -808,7 +980,7 @@ impl Menu {
                 white,
                 swatch,
                 [0.0; 4],
-                [c[0], c[1], c[2], 1.0],
+                gamma_color(c),
                 hud_mode::PLAIN,
                 0.0,
             );
@@ -844,6 +1016,12 @@ impl Menu {
             );
         }
     }
+}
+
+/// An armour or team colour as a HUD colour: they're in gamma space, the
+/// HUD's colours linear.
+fn gamma_color(c: [f32; 3]) -> [f32; 4] {
+    [c[0].powf(2.2), c[1].powf(2.2), c[2].powf(2.2), 1.0]
 }
 
 /// Break `text` into lines of at most `width` characters, at spaces.
@@ -916,7 +1094,7 @@ fn draw_scores(
                 white,
                 f.rect([cols[1] - 14.0, y + 1.0, cols[1] - 6.0, y + 10.0]),
                 [0.0; 4],
-                [c[0], c[1], c[2], 1.0],
+                gamma_color(c),
                 hud_mode::PLAIN,
                 0.0,
             );
@@ -981,6 +1159,7 @@ mod tests {
                 name: "JOHN".into(),
                 how: "KEYBOARD",
                 team: 0,
+                look: Look::default(),
             }]),
             scores: &[],
             joined: false,
@@ -1008,12 +1187,15 @@ mod tests {
     fn the_lobby_changes_settings_and_starts() {
         let maps = maps();
         let c = ctx(&maps, &[]);
-        let mut m = Menu::new(Settings {
-            game_type: 0,
-            map: 0,
-            score: 3,
-            bots: 3,
-        });
+        let mut m = Menu::new(
+            Settings {
+                game_type: 0,
+                map: 0,
+                score: 3,
+                bots: 3,
+            },
+            Profile::default(),
+        );
         assert_eq!(m.input(Input::Select, &c), Action::None);
         assert_eq!(m.screen, Screen::Lobby);
         m.input(Input::Down, &c);
@@ -1039,12 +1221,15 @@ mod tests {
     #[test]
     fn system_link_lists_games_to_join() {
         let maps = maps();
-        let mut m = Menu::new(Settings {
-            game_type: 0,
-            map: 0,
-            score: 3,
-            bots: 3,
-        });
+        let mut m = Menu::new(
+            Settings {
+                game_type: 0,
+                map: 0,
+                score: 3,
+                bots: 3,
+            },
+            Profile::default(),
+        );
         m.show(Screen::SystemLink);
         // Nothing found yet: nothing to choose.
         assert_eq!(m.input(Input::Select, &ctx(&maps, &[])), Action::None);
@@ -1057,15 +1242,54 @@ mod tests {
     }
 
     #[test]
+    fn the_profile_picks_a_model_colours_and_a_gamertag() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Profile);
+        // Model: Spartan to Elite.
+        m.input(Input::Down, &c);
+        assert_eq!(m.input(Input::Right, &c), Action::SaveProfile);
+        assert!(m.profile.look.elite);
+        // Primary colour steps through the 18, wrapping around.
+        m.input(Input::Down, &c);
+        m.profile.look.colors[0] = 0;
+        assert_eq!(m.input(Input::Left, &c), Action::SaveProfile);
+        assert_eq!(m.profile.look.colors[0], PROFILE_COLORS - 1);
+        // The gamertag is typed, capitalised and kept to 15 characters.
+        m.input(Input::Up, &c);
+        m.input(Input::Up, &c);
+        m.input(Input::Select, &c);
+        assert!(m.editing);
+        for _ in 0..30 {
+            m.typed(Typed::Erase);
+        }
+        m.typed(Typed::Text("the arbiter of sanghelios".into()));
+        assert_eq!(m.profile.name.len(), MAX_NAME);
+        // Arrows do nothing while typing; Enter keeps the name.
+        assert_eq!(m.input(Input::Down, &c), Action::None);
+        assert_eq!(m.typed(Typed::Done), Action::SaveProfile);
+        assert!(!m.editing);
+        assert_eq!(m.profile.name, "THE ARBITER OF");
+        // Back returns to the main menu, on PLAYER PROFILE.
+        m.input(Input::Back, &c);
+        assert_eq!(m.screen, Screen::Main);
+        assert_eq!(m.rows(&c)[m.cursor], Row::Profile);
+    }
+
+    #[test]
     fn rows_are_found_under_the_mouse() {
         let maps = maps();
         let c = ctx(&maps, &[]);
-        let mut m = Menu::new(Settings {
-            game_type: 0,
-            map: 0,
-            score: 3,
-            bots: 3,
-        });
+        let mut m = Menu::new(
+            Settings {
+                game_type: 0,
+                map: 0,
+                score: 3,
+                bots: 3,
+            },
+            Profile::default(),
+        );
         m.show(Screen::Lobby);
         // 1280x720: 1.5 pixels per unit, the 640 wide screen centred.
         let f = Frame::new(1280.0, 720.0);

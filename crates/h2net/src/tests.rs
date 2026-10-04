@@ -1,5 +1,5 @@
 use super::*;
-use h2sim::game::Event;
+use h2sim::game::{Event, Look};
 use h2sim::testing::{floor, game};
 use h2sim::Command;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -30,6 +30,10 @@ fn address(host: &Host) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, host.port()))
 }
 
+fn me() -> (&'static str, Look) {
+    ("TESTER", Look::default())
+}
+
 #[test]
 fn a_joined_pc_plays_in_the_hosts_game() {
     let world = floor();
@@ -37,7 +41,12 @@ fn a_joined_pc_plays_in_the_hosts_game() {
     let me = hg.add_player();
     let mut host = Host::new("testmap", 1).unwrap();
     let mut cg = game();
-    let mut client = Client::connect(address(&host), &cg, "testmap", 1).unwrap();
+    let look = Look {
+        elite: true,
+        colors: [12, 3],
+    };
+    let mut client =
+        Client::connect(address(&host), &cg, "testmap", 1, ("Noble Six", look)).unwrap();
 
     let mut mine = None;
     pump(&mut host, &mut hg, &mut client, &mut cg, |he, ce, cg| {
@@ -55,9 +64,11 @@ fn a_joined_pc_plays_in_the_hosts_game() {
     let mine = mine.unwrap();
     assert_ne!(mine, me);
     assert!(host.is_remote(mine));
-    // They go by the name of the person at that PC, on both PCs.
-    assert_eq!(hg.players[mine].name, player_name());
-    assert_eq!(cg.players[mine].name, player_name());
+    // They go by the name and look of the person at that PC, on both PCs.
+    assert_eq!(hg.players[mine].name, "NOBLE SIX");
+    assert_eq!(cg.players[mine].name, "NOBLE SIX");
+    assert_eq!(hg.players[mine].look, look);
+    assert_eq!(cg.players[mine].look, look);
 
     // The joined player walks forward and fires; the host runs it and the
     // joined PC sees the result.
@@ -114,7 +125,7 @@ fn taps_between_ticks_are_not_lost() {
     hg.add_player();
     let mut host = Host::new("testmap", 2).unwrap();
     let mut cg = game();
-    let mut client = Client::connect(address(&host), &cg, "testmap", 1).unwrap();
+    let mut client = Client::connect(address(&host), &cg, "testmap", 1, me()).unwrap();
     let mut mine = None;
     pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
         if let Some(ClientEvent::Welcomed { players, .. }) = ce.first() {
@@ -144,7 +155,7 @@ fn a_pc_on_another_map_is_turned_away() {
     hg.add_player();
     let mut host = Host::new("lockout", 3).unwrap();
     let mut cg = game();
-    let mut client = Client::connect(address(&host), &cg, "midship", 1).unwrap();
+    let mut client = Client::connect(address(&host), &cg, "midship", 1, me()).unwrap();
     let mut refused = None;
     pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
         if let Some(ClientEvent::Refused(why)) = ce.first() {

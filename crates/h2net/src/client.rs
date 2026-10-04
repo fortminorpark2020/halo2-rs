@@ -3,7 +3,7 @@
 
 use crate::conn::Connection;
 use crate::{kind, MAGIC, PROTOCOL};
-use h2sim::game::{Event, Reader, Writer};
+use h2sim::game::{Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -37,13 +37,14 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connect to a host and ask to play with `locals` players. `game` must
-    /// be the same map the host is on.
+    /// Connect to a host and ask to play with `locals` players, going by
+    /// `name` and `look`. `game` must be the same map the host is on.
     pub fn connect(
         address: SocketAddr,
         game: &Game,
         map: &str,
         locals: usize,
+        (name, look): (&str, Look),
     ) -> std::io::Result<Client> {
         let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)?;
         let mut conn = Connection::new(stream)?;
@@ -55,7 +56,8 @@ impl Client {
         w.u16(game.item_spawns.len() as u16);
         w.u8(locals.clamp(1, 4) as u8);
         w.str(&crate::computer_name());
-        w.str(&crate::player_name());
+        w.str(name);
+        look.write(&mut w);
         conn.send(kind::HELLO, &w.0);
         conn.flush().map_err(std::io::Error::other)?;
         Ok(Client {

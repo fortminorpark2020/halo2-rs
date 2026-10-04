@@ -146,24 +146,34 @@ pub fn falling_damage(set: &mut MapSet) -> Result<Option<FallingDamage>> {
 
 /// Physics of the multiplayer Spartan (falls back to the campaign Master Chief).
 pub fn player_biped(set: &mut MapSet) -> Result<BipedPhysics> {
+    let found = biped_physics(set, "objects\\characters\\masterchief\\masterchief_mp")?.or(
+        biped_physics(set, "objects\\characters\\masterchief\\masterchief")?,
+    );
+    Ok(found.unwrap_or_default())
+}
+
+/// Physics of the multiplayer Elite, if the maps have it.
+pub fn elite_biped(set: &mut MapSet) -> Result<Option<BipedPhysics>> {
+    biped_physics(set, "objects\\characters\\elite\\elite_mp")
+}
+
+/// Physics of a biped tag, by name.
+pub fn biped_physics(set: &mut MapSet, name: &str) -> Result<Option<BipedPhysics>> {
     let bipd = GroupTag::parse("bipd").expect("valid group");
-    let find = |name: &str| -> Option<DatumIndex> {
-        set.map
-            .tags
-            .iter()
-            .find(|t| t.group == bipd && t.name == name)
-            .map(|t| t.datum)
-    };
-    let Some(datum) = find("objects\\characters\\masterchief\\masterchief_mp")
-        .or_else(|| find("objects\\characters\\masterchief\\masterchief"))
+    let Some(datum) = set
+        .map
+        .tags
+        .iter()
+        .find(|t| t.group == bipd && t.name == name)
+        .map(|t| t.datum)
     else {
-        return Ok(BipedPhysics::default());
+        return Ok(None);
     };
     let (_, _, d) = set.tag_data(datum)?;
     if d.len() < 0x2A0 {
-        return Ok(BipedPhysics::default());
+        return Ok(None);
     }
-    Ok(BipedPhysics {
+    Ok(Some(BipedPhysics {
         jump_velocity: f32_at(&d, 0x1F8),
         standing_camera_height: f32_at(&d, 0x218),
         crouching_camera_height: f32_at(&d, 0x21C),
@@ -171,5 +181,5 @@ pub fn player_biped(set: &mut MapSet) -> Result<BipedPhysics> {
         height_crouching: f32_at(&d, 0x26C),
         radius: f32_at(&d, 0x270),
         max_slope: f32_at(&d, 0x29C),
-    })
+    }))
 }

@@ -241,7 +241,14 @@ impl App {
     pub(crate) fn connect(&mut self, game: &LanGame) {
         // Stop hosting first so no one joins us meanwhile.
         self.net = Net::Offline;
-        match Client::connect(game.address, &self.game, &self.map_name, self.locals.len()) {
+        let me = (self.menu.profile.name.as_str(), self.menu.profile.look);
+        match Client::connect(
+            game.address,
+            &self.game,
+            &self.map_name,
+            self.locals.len(),
+            me,
+        ) {
             Ok(client) => {
                 self.announce(&format!("JOINING {}", game.computer.to_uppercase()));
                 self.net = Net::Joined {

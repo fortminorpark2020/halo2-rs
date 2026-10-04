@@ -95,10 +95,16 @@ impl FlyCamera {
     }
 }
 
+/// Half the view's height at unit distance (the tangent of half the
+/// vertical field of view), unzoomed.
+pub fn half_height(aspect: f32) -> f32 {
+    let widest = (MAX_FOV_X.to_radians() * 0.5).tan() / aspect.max(0.1);
+    (FOV_Y.to_radians() * 0.5).tan().min(widest)
+}
+
 /// Reversed-Z perspective (near/far swapped) for far better depth precision.
 pub fn projection(aspect: f32, magnification: f32, near: f32, far: f32) -> Mat4 {
-    let widest = (MAX_FOV_X.to_radians() * 0.5).tan() / aspect.max(0.1);
-    let half = (FOV_Y.to_radians() * 0.5).tan().min(widest) / magnification.max(1.0);
+    let half = half_height(aspect) / magnification.max(1.0);
     glam::camera::rh::proj::directx::perspective(2.0 * half.atan(), aspect, far, near)
 }
 

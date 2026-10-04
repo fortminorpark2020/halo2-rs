@@ -31,6 +31,25 @@ pub const TICK: f32 = 1.0 / 60.0;
 /// Longest gamertag, in characters (Xbox Live allowed 15).
 pub const MAX_NAME: usize = 15;
 
+/// Halo 2 has 18 profile colours (White, Steel, Red ... Tan).
+pub const PROFILE_COLORS: u8 = 18;
+/// Armour colours players start with, by player number, so everyone looks
+/// different: red, blue, green, orange, purple, gold, brown, pink...
+pub const DEFAULT_COLORS: [[u8; 2]; 12] = [
+    [2, 1],
+    [11, 0],
+    [6, 1],
+    [3, 16],
+    [13, 0],
+    [4, 1],
+    [16, 17],
+    [14, 0],
+    [0, 2],
+    [1, 11],
+    [8, 1],
+    [15, 1],
+];
+
 /// A name as gamertags are shown here: capitals and printable characters,
 /// at most `MAX_NAME` of them.
 pub fn clean_name(name: &str) -> String {
@@ -55,6 +74,50 @@ pub fn guest_name(name: &str, guest: usize) -> String {
         .take(MAX_NAME - tag.len())
         .collect();
     format!("{}{tag}", base.trim_end())
+}
+
+/// How a player looks: a Spartan or an Elite, in two of the profile colours.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Look {
+    pub elite: bool,
+    /// Primary and secondary armour colour, indices into the profile
+    /// colours.
+    pub colors: [u8; 2],
+}
+
+impl Look {
+    /// The look player number `i` starts with.
+    pub fn default_for(i: usize) -> Look {
+        Look {
+            elite: false,
+            colors: DEFAULT_COLORS[i % DEFAULT_COLORS.len()],
+        }
+    }
+
+    /// A splitscreen guest's look: the same species in colours of their own.
+    pub fn guest(self, guest: usize) -> Look {
+        if guest == 0 {
+            return self;
+        }
+        let shift = (guest * 5) as u8;
+        Look {
+            elite: self.elite,
+            colors: self.colors.map(|c| (c + shift) % PROFILE_COLORS),
+        }
+    }
+
+    pub fn write(&self, w: &mut Writer) {
+        w.u8(self.elite as u8);
+        w.u8(self.colors[0]);
+        w.u8(self.colors[1]);
+    }
+
+    pub fn read(r: &mut Reader) -> Result<Look, Malformed> {
+        Ok(Look {
+            elite: r.u8()? != 0,
+            colors: [r.u8()? % PROFILE_COLORS, r.u8()? % PROFILE_COLORS],
+        })
+    }
 }
 
 /// How hard grenade blasts throw people (world units per second).
@@ -372,6 +435,8 @@ pub enum GrenadeKind {
 pub struct Spartan {
     /// The gamertag shown in the scoreboard and kill messages.
     pub name: String,
+    /// Spartan or Elite, and their armour colours.
+    pub look: Look,
     pub body: Player,
     pub yaw: f32,
     pub pitch: f32,
@@ -768,6 +833,7 @@ impl Game {
         let i = self.players.len();
         let mut spartan = self.fresh_spartan(Vec3::ZERO, 0.0);
         spartan.name = format!("PLAYER {}", i + 1);
+        spartan.look = Look::default_for(i);
         spartan.team = if self.rules.game_type.teams() {
             team.min(TEAMS - 1)
         } else {
@@ -783,6 +849,16 @@ impl Game {
         let name = clean_name(name);
         if let (Some(p), false) = (self.players.get_mut(player), name.is_empty()) {
             p.name = name;
+        }
+    }
+
+    /// Set how a player looks: Elite or Spartan, and armour colours.
+    pub fn set_look(&mut self, player: usize, look: Look) {
+        if let Some(p) = self.players.get_mut(player) {
+            p.look = Look {
+                elite: look.elite,
+                colors: look.colors.map(|c| c % PROFILE_COLORS),
+            };
         }
     }
 
@@ -828,6 +904,7 @@ impl Game {
             .collect();
         Spartan {
             name: String::new(),
+            look: Look::default(),
             body: Player::new(position, self.movement, self.biped),
             yaw,
             pitch: 0.0,
@@ -903,8 +980,10 @@ impl Game {
         let old = &mut self.players[player];
         let (team, score, kills, deaths) = (old.team, old.score, old.kills, old.deaths);
         let name = std::mem::take(&mut old.name);
+        let look = old.look;
         let mut s = self.fresh_spartan(pos + Vec3::Z * 0.05, yaw);
         s.name = name;
+        s.look = look;
         s.team = team;
         s.score = score;
         s.kills = kills;

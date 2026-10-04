@@ -151,8 +151,7 @@ pub struct FirstPersonRig {
     pub graph: AnimationGraph,
     /// Pose of each graph node when no animation moves it.
     defaults: Vec<NodePose>,
-    /// For each arms / gun model node, the graph node driving it.
-    arms_nodes: Vec<Option<usize>>,
+    /// For each gun model node, the graph node driving it.
     gun_nodes: Vec<Option<usize>>,
     camera: Option<usize>,
 }
@@ -172,12 +171,10 @@ impl FirstPersonRig {
                 }
             })
             .collect();
-        let arms_nodes = arms.names.iter().map(|n| graph.node(n)).collect();
         let gun_nodes = gun.names.iter().map(|n| graph.node(n)).collect();
         let camera = graph.node("camera_control");
         FirstPersonRig {
             defaults,
-            arms_nodes,
             gun_nodes,
             camera,
             graph,
@@ -252,8 +249,11 @@ impl FirstPersonRig {
             .copied()
     }
 
+    /// Skinning matrices for arms, matched to the graph by node name (the
+    /// Spartan's and the Elite's arms share the weapons' animations).
     pub fn arms_skin(&self, world: &[Mat4], arms: &Skeleton) -> Vec<Mat4> {
-        self.skin(world, arms, &self.arms_nodes)
+        let nodes: Vec<Option<usize>> = arms.names.iter().map(|n| self.graph.node(n)).collect();
+        self.skin(world, arms, &nodes)
     }
 
     pub fn gun_skin(&self, world: &[Mat4], gun: &Skeleton) -> Vec<Mat4> {

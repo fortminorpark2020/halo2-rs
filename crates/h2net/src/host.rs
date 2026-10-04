@@ -4,7 +4,7 @@
 use crate::conn::Connection;
 use crate::discovery::Beacon;
 use crate::{kind, MAGIC, PROTOCOL};
-use h2sim::game::{guest_name, Event, Reader, Writer};
+use h2sim::game::{guest_name, Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
 use std::net::{SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
@@ -37,8 +37,9 @@ struct Remote {
     conn: Connection,
     address: SocketAddr,
     computer: String,
-    /// The gamertag of the person at that PC.
+    /// The gamertag of the person at that PC, and how they look.
     name: String,
+    look: Look,
     since: Instant,
     welcomed: bool,
     /// Needs the whole game now (just joined).
@@ -70,6 +71,7 @@ fn seat(game: &Game, player: usize) -> (usize, Command, Command) {
 struct Hello {
     computer: String,
     name: String,
+    look: Look,
     locals: usize,
 }
 
@@ -88,6 +90,7 @@ fn check_hello(r: &mut Reader, game: &Game, map: &str) -> Result<Hello, String> 
     let locals = (r.u8().map_err(bad)? as usize).max(1);
     let computer = r.str().map_err(bad)?;
     let name = r.str().map_err(bad)?;
+    let look = Look::read(r).map_err(bad)?;
     if !their_map.eq_ignore_ascii_case(map)
         || weapons != game.weapons.len()
         || items != game.item_spawns.len()
@@ -97,6 +100,7 @@ fn check_hello(r: &mut Reader, game: &Game, map: &str) -> Result<Hello, String> 
     Ok(Hello {
         computer,
         name,
+        look,
         locals,
     })
 }
@@ -153,6 +157,7 @@ impl Host {
                     address,
                     computer: address.ip().to_string(),
                     name: String::new(),
+                    look: Look::default(),
                     since: Instant::now(),
                     welcomed: false,
                     fresh: false,
@@ -211,6 +216,7 @@ impl Host {
                     let Hello {
                         computer,
                         name,
+                        look,
                         locals,
                     } = hello;
                     if game.players.len() + locals > max_players {
@@ -223,6 +229,7 @@ impl Host {
                     let players: Vec<usize> = (0..locals).map(|_| game.add_player()).collect();
                     for (k, &p) in players.iter().enumerate() {
                         game.set_name(p, &guest_name(&name, k));
+                        game.set_look(p, look.guest(k));
                     }
                     let mut w = Writer::default();
                     w.str(&self.computer);
@@ -233,6 +240,7 @@ impl Host {
                     r.conn.send(kind::WELCOME, &w.0);
                     r.computer = computer.clone();
                     r.name = name;
+                    r.look = look;
                     r.welcomed = true;
                     r.fresh = true;
                     r.players = players.iter().map(|&p| seat(game, p)).collect();
@@ -254,6 +262,7 @@ impl Host {
                     if game.players.len() < max_players && r.players.len() < 4 {
                         let p = game.add_player();
                         game.set_name(p, &guest_name(&r.name, r.players.len()));
+                        game.set_look(p, r.look.guest(r.players.len()));
                         r.players.push(seat(game, p));
                         let mut w = Writer::default();
                         w.index(Some(p));

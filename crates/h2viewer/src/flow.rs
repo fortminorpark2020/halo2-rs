@@ -10,7 +10,7 @@ use crate::{
 };
 use gilrs::GamepadId;
 use h2net::LanGame;
-use h2sim::bot::bot_name;
+use h2sim::bot::{bot_look, bot_name};
 use h2sim::game::guest_name;
 use h2sim::{game::TEAMS, Bot, Game};
 use std::path::PathBuf;
@@ -113,7 +113,7 @@ impl App {
         self.gpu.as_ref().map_or((1280.0, 720.0), |g| g.size())
     }
 
-    fn after_menu(&mut self, action: Action) {
+    pub(crate) fn after_menu(&mut self, action: Action) {
         if let Some(s) = self.menu.sound.take() {
             self.sound.play_ui(&self.scene, s);
         }
@@ -121,6 +121,7 @@ impl App {
             Action::None => {}
             Action::Start => self.start_selected(),
             Action::Join(game) => self.join_game(&game),
+            Action::SaveProfile => self.menu.profile.save(),
             Action::Resume => {
                 self.menu_open = false;
                 self.set_capture(true);
@@ -194,12 +195,13 @@ impl App {
 
     /// How each person at this PC plays, for the lobby.
     fn seat_infos(&self) -> Vec<SeatInfo> {
-        let name = h2net::player_name();
+        let profile = &self.menu.profile;
         self.seats
             .iter()
             .enumerate()
             .map(|(k, s)| SeatInfo {
-                name: guest_name(&name, k),
+                name: guest_name(&profile.name, k),
+                look: profile.look.guest(k),
                 how: if s.pad.is_some() {
                     "CONTROLLER"
                 } else {
@@ -401,7 +403,9 @@ impl App {
             } else {
                 self.game.add_player()
             };
-            self.game.set_name(i, &guest_name(&h2net::player_name(), k));
+            let profile = &self.menu.profile;
+            self.game.set_name(i, &guest_name(&profile.name, k));
+            self.game.set_look(i, profile.look.guest(k));
             let mut l = LocalPlayer::new(i, &self.game);
             l.keyboard = k == 0;
             l.pad = seat.pad;
@@ -427,6 +431,7 @@ impl App {
             }
             let i = self.game.add_player();
             self.game.set_name(i, bot_name(i));
+            self.game.set_look(i, bot_look(i));
             self.bots.push(bot_for(i));
         }
         self.game.events.clear();

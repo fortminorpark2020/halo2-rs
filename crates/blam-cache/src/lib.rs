@@ -606,6 +606,7 @@ fn cstr(b: &[u8]) -> String {
 
 pub mod animation;
 pub mod bitmap;
+pub mod colors;
 pub mod geometry;
 pub mod hud;
 pub mod lightmap;

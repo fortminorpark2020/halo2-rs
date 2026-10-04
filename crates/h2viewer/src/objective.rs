@@ -230,7 +230,8 @@ const NEUTRAL_GLOW: [f32; 3] = [1.0, 0.85, 0.4];
 fn side_color(game: &Game, player: usize) -> [f32; 3] {
     match game.players.get(player) {
         Some(p) if game.rules.game_type.teams() => TEAM_COLORS[p.team.min(1) as usize],
-        _ => armor_colors(player)[0],
+        Some(p) => armor_colors(p.look)[0],
+        None => NEUTRAL_GLOW,
     }
 }
 

@@ -11,7 +11,7 @@ use crate::rig;
 use crate::scene::{Scene, Vertex, WeaponAssets};
 use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
-use h2sim::game::{GrenadeKind, Spartan, VehicleAction, TICK};
+use h2sim::game::{GrenadeKind, Look, Spartan, VehicleAction, TICK};
 use h2sim::vehicle::{SeatDef, SeatRole};
 use h2sim::{Command, Game, WeaponState, World};
 use std::collections::HashSet;
@@ -83,6 +83,7 @@ fn hand_animation(rig: &rig::FirstPersonRig, dual: bool, what: &str, pick: usize
 struct Hand<'a> {
     rig: &'a rig::FirstPersonRig,
     pose: &'a [rig::NodePose],
+    arms: &'a crate::scene::Arms,
     meshes: (usize, usize),
     frame: Mat4,
 }
@@ -163,30 +164,14 @@ fn smoothstep(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
-/// Free-for-all armour colours, in player order: Halo 2's red, blue, green,
-/// orange, purple, gold, brown, pink, white and black.
-const ARMOR_COLORS: [[f32; 3]; 10] = [
-    [0.62, 0.10, 0.10],
-    [0.15, 0.27, 0.65],
-    [0.22, 0.45, 0.16],
-    [0.88, 0.45, 0.12],
-    [0.40, 0.20, 0.58],
-    [0.82, 0.64, 0.16],
-    [0.40, 0.27, 0.15],
-    [0.92, 0.52, 0.64],
-    [0.85, 0.85, 0.85],
-    [0.13, 0.13, 0.14],
-];
-
-/// A player's primary and secondary armour colours.
-pub fn armor_colors(player: usize) -> [[f32; 3]; 2] {
-    let primary = ARMOR_COLORS[player % ARMOR_COLORS.len()];
-    let secondary = ARMOR_COLORS[(player + 8) % ARMOR_COLORS.len()];
-    [primary, secondary]
+/// A look's primary and secondary armour colours.
+pub fn armor_colors(look: Look) -> [[f32; 3]; 2] {
+    look.colors
+        .map(|c| crate::profile::COLORS[c as usize % crate::profile::COLORS.len()].1)
 }
 
-/// Red and blue team armour.
-pub const TEAM_COLORS: [[f32; 3]; 2] = [ARMOR_COLORS[0], ARMOR_COLORS[1]];
+/// Red and blue team armour (the game's multiplayer globals).
+pub const TEAM_COLORS: [[f32; 3]; 2] = [[0.757, 0.243, 0.243], [0.212, 0.224, 0.788]];
 pub const TEAM_NAMES: [&str; 2] = ["RED", "BLUE"];
 
 /// A team's colour, bright enough for text and markers.
@@ -194,14 +179,15 @@ pub fn team_hud_color(team: u8) -> [f32; 4] {
     [[1.0, 0.3, 0.25, 1.0], [0.35, 0.55, 1.0, 1.0]][team.min(1) as usize]
 }
 
-/// Armour colours in this game: by team in team games.
+/// Armour colours in this game: their own, or their team's in team games.
 pub fn player_colors(game: &Game, player: usize) -> [[f32; 3]; 2] {
     match game.players.get(player) {
         Some(p) if game.rules.game_type.teams() => {
             let c = TEAM_COLORS[p.team.min(1) as usize];
             [c, c.map(|v| v * 0.6)]
         }
-        _ => armor_colors(player),
+        Some(p) => armor_colors(p.look),
+        None => armor_colors(Look::default()),
     }
 }
 
@@ -729,16 +715,17 @@ impl LocalPlayer {
         // The gun and arms take the light where the player stands.
         let light = scene.level_light.at(&scene.textures, self.camera.position);
         let (_, r, u) = self.camera.basis();
-        let posed = match (&weapon.rig, &scene.arms) {
+        let posed = match (&weapon.rig, scene.arms_for(self.me(game).look.elite)) {
             (Some(rig), Some(arms)) if !self.animator.pose().is_empty() => {
                 let frame = self.view_frame(game);
                 let hand = Hand {
                     rig,
                     pose: self.animator.pose(),
+                    arms,
                     meshes: (arms.mesh, mesh),
                     frame,
                 };
-                let (world, muzzle) = self.draw_hand(&mut out, scene, game, weapon, &hand, light);
+                let (world, muzzle) = self.draw_hand(&mut out, game, weapon, &hand, light);
                 // The flag's cloth hangs from the top of the pole.
                 let carried = game
                     .flags
@@ -766,10 +753,11 @@ impl LocalPlayer {
                             let hand = Hand {
                                 rig: lrig,
                                 pose: self.left_animator.pose(),
+                                arms,
                                 meshes: (arms.mirror, lmesh),
                                 frame: frame * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)),
                             };
-                            let (_, m) = self.draw_hand(&mut out, scene, game, lw, &hand, light);
+                            let (_, m) = self.draw_hand(&mut out, game, lw, &hand, light);
                             muzzle_flash(&mut out.view_sprites, lw, ls, m, (r, u));
                         }
                     }
@@ -802,15 +790,12 @@ impl LocalPlayer {
     fn draw_hand(
         &self,
         out: &mut ViewDraws,
-        scene: &Scene,
         game: &Game,
         weapon: &WeaponAssets,
         hand: &Hand,
         light: Option<[f32; 3]>,
     ) -> (Vec<Mat4>, Mat4) {
-        let Some(arms) = &scene.arms else {
-            return (Vec::new(), hand.frame);
-        };
+        let arms = hand.arms;
         let world = hand.rig.world(hand.pose);
         let (arms_mesh, gun_mesh) = hand.meshes;
         out.posed.push((

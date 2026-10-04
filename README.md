@@ -45,7 +45,7 @@ Double-click `h2viewer.exe` to open Halo 2's menus over Lockout from
 with Halo 2's main menu music. Multiplayer opens the lobby: pick the game
 type (Slayer, Team Slayer, Capture the Flag, King of the Hill, Team King,
 Oddball, Team Oddball, Juggernaut, Territories or Assault), the map (every multiplayer map in the maps and dlc
-folder, with Halo 2's own picture and description from `mainmenu.map`), score to win and number of bots, then Start Game. In team games, T
+folders, with Halo 2's own picture and description from `mainmenu.map`), score to win and number of bots, then Start Game. In team games, T
 (or X on a controller) puts you on the red or blue team; bots fill the smaller
 team. System Link lists games other PCs on the network are hosting.
 Menus work with the arrow keys or WASD, Enter and Esc, the mouse, or a
@@ -58,8 +58,16 @@ and flying (flying: Space / C up / down, Shift fast). When someone reaches the
 score to win, the game stops and the carnage report shows everyone's kills and
 deaths; Continue goes back to the lobby.
 
-Names: you play under your Windows user name (set `H2_NAME` to pick another),
-splitscreen guests as NAME(1), NAME(2) and so on, and bots under callsigns.
+Player Profile (main menu): type your gamertag, choose Spartan or Elite and
+your primary and secondary armour colours from Halo 2's 18, with your model
+turning beside the menu. It's saved in `%APPDATA%\halo2-rs\profile.txt` and
+sent to the other PCs in a System Link game. In team games armour takes the
+team's colour. Splitscreen guests play the same model in other colours; bots
+each have their own look, about a third of them Elites.
+
+Names: you play under your gamertag (at first your Windows user name; set
+`H2_NAME` to override it), splitscreen guests as NAME(1), NAME(2) and so on,
+and bots under callsigns.
 Names show in the lobby, scoreboard, kill feed and announcements, over
 teammates in sight, and over whoever is under your crosshair, which turns red
 on an enemy in your weapon's range as in Halo 2. `H2_LIST_WEAPONS=1` lists each

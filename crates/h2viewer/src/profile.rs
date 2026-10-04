@@ -1,0 +1,157 @@
+//! The player's profile: their gamertag, Spartan or Elite, and armour
+//! colours. It's kept in a small text file so it lasts between games.
+
+use h2sim::game::{clean_name, Look, PROFILE_COLORS};
+use std::path::PathBuf;
+
+/// Halo 2's 18 profile colours, as its profile lists them, with the RGB
+/// from the game's globals (`h2tool colors` prints them).
+pub const COLORS: [(&str, [f32; 3]); PROFILE_COLORS as usize] = [
+    ("WHITE", [0.992, 0.996, 1.000]),
+    ("STEEL", [0.325, 0.325, 0.325]),
+    ("RED", [0.745, 0.173, 0.173]),
+    ("ORANGE", [0.961, 0.478, 0.122]),
+    ("GOLD", [0.961, 0.824, 0.173]),
+    ("OLIVE", [0.624, 0.675, 0.349]),
+    ("GREEN", [0.129, 0.573, 0.184]),
+    ("SAGE", [0.137, 0.337, 0.267]),
+    ("CYAN", [0.086, 0.627, 0.627]),
+    ("TEAL", [0.212, 0.455, 0.478]),
+    ("COBALT", [0.255, 0.424, 0.561]),
+    ("BLUE", [0.157, 0.271, 0.608]),
+    ("VIOLET", [0.416, 0.306, 0.714]),
+    ("PURPLE", [0.459, 0.275, 0.427]),
+    ("PINK", [0.984, 0.608, 0.788]),
+    ("CRIMSON", [0.596, 0.071, 0.267]),
+    ("BROWN", [0.400, 0.306, 0.243]),
+    ("TAN", [0.694, 0.573, 0.337]),
+];
+
+/// A profile colour's name.
+pub fn color_name(color: u8) -> &'static str {
+    COLORS[color as usize % COLORS.len()].0
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Profile {
+    /// Their gamertag.
+    pub name: String,
+    pub look: Look,
+}
+
+impl Default for Profile {
+    fn default() -> Profile {
+        Profile {
+            name: h2net::player_name(),
+            look: Look::default_for(0),
+        }
+    }
+}
+
+impl Profile {
+    /// The saved profile, or a new one named after the person signed in to
+    /// this computer. `H2_NAME` overrides the name.
+    pub fn load() -> Profile {
+        let mut profile = path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map_or_else(Profile::default, |text| Profile::parse(&text));
+        if let Some(name) = std::env::var("H2_NAME").ok().map(|n| clean_name(&n)) {
+            if !name.is_empty() {
+                profile.name = name;
+            }
+        }
+        profile
+    }
+
+    /// Keep the profile for next time.
+    pub fn save(&self) {
+        let Some(path) = path() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(&path, self.to_text()) {
+            println!(
+                "warning: couldn't save the profile to {}: {e}",
+                path.display()
+            );
+        }
+    }
+
+    fn parse(text: &str) -> Profile {
+        let mut p = Profile::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+            let color = || {
+                COLORS
+                    .iter()
+                    .position(|c| c.0.eq_ignore_ascii_case(value))
+                    .map(|i| i as u8)
+                    .or_else(|| value.parse::<u8>().ok().filter(|&c| c < PROFILE_COLORS))
+            };
+            match key.trim() {
+                "name" => {
+                    let name = clean_name(value);
+                    if !name.is_empty() {
+                        p.name = name;
+                    }
+                }
+                "model" => p.look.elite = value.eq_ignore_ascii_case("elite"),
+                "primary" => p.look.colors[0] = color().unwrap_or(p.look.colors[0]),
+                "secondary" => p.look.colors[1] = color().unwrap_or(p.look.colors[1]),
+                _ => {}
+            }
+        }
+        p
+    }
+
+    fn to_text(&self) -> String {
+        format!(
+            "name={}\nmodel={}\nprimary={}\nsecondary={}\n",
+            self.name,
+            if self.look.elite { "elite" } else { "spartan" },
+            color_name(self.look.colors[0]).to_lowercase(),
+            color_name(self.look.colors[1]).to_lowercase(),
+        )
+    }
+}
+
+/// Where the profile lives: `H2_PROFILE`, or `halo2-rs\profile.txt` in the
+/// user's application data (on Windows `%APPDATA%`, elsewhere `~/.config`).
+fn path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("H2_PROFILE") {
+        return Some(PathBuf::from(p));
+    }
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("halo2-rs").join("profile.txt"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profiles_read_back_what_was_saved() {
+        let p = Profile {
+            name: "MASTER CHIEF".into(),
+            look: Look {
+                elite: true,
+                colors: [15, 4],
+            },
+        };
+        assert!(p.to_text().contains("primary=crimson"));
+        assert_eq!(Profile::parse(&p.to_text()), p);
+        // Numbers work for colours too; nonsense is skipped.
+        let q = Profile::parse("name=  arbiter \nprimary=3\nsecondary=plaid\nmodel=ELITE");
+        assert_eq!(q.name, "ARBITER");
+        assert!(q.look.elite);
+        assert_eq!(q.look.colors, [3, Look::default_for(0).colors[1]]);
+    }
+}

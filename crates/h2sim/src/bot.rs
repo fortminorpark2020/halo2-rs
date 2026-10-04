@@ -4,7 +4,7 @@
 //! Bots produce the same `Command`s as people.
 
 use crate::collision::World;
-use crate::game::{Command, Game, GameType, Spartan, VehicleAction};
+use crate::game::{Command, Game, GameType, Look, Spartan, VehicleAction, PROFILE_COLORS};
 use crate::nav::NavGraph;
 use crate::player::GRAVITY;
 use crate::weapon::WeaponDef;
@@ -86,6 +86,24 @@ const BOT_NAMES: [&str; 16] = [
 /// The name a computer player in seat `player` goes by.
 pub fn bot_name(player: usize) -> &'static str {
     BOT_NAMES[player % BOT_NAMES.len()]
+}
+
+/// A computer player's look, the same every game for the same name: about
+/// a third of them are Elites.
+pub fn bot_look(player: usize) -> Look {
+    let h = bot_name(player).bytes().fold(0x811c_9dc5_u32, |h, b| {
+        (h ^ b as u32).wrapping_mul(0x0100_0193)
+    });
+    let n = PROFILE_COLORS as u32;
+    let primary = (h >> 4) % n;
+    let mut secondary = (h >> 12) % n;
+    if secondary == primary {
+        secondary = (primary + n / 2) % n;
+    }
+    Look {
+        elite: h % 3 == 0,
+        colors: [primary as u8, secondary as u8],
+    }
 }
 
 fn wrap(a: f32) -> f32 {
