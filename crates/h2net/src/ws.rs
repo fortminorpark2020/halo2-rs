@@ -4,9 +4,12 @@
 //! on the same port.
 
 use crate::conn::{Connection, MAX_MESSAGE};
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, RootCertStore};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tungstenite::handshake::server::{create_response, write_response};
 use tungstenite::handshake::HandshakeError;
@@ -27,6 +30,76 @@ pub enum Request {
     Http(TcpStream, String),
 }
 
+/// What a WebSocket runs over: TCP, or TLS over TCP (to a server online).
+pub(crate) enum Stream {
+    Plain(TcpStream),
+    Tls(Box<ClientConnection>, TcpStream),
+}
+
+impl Stream {
+    pub(crate) fn tcp(&self) -> &TcpStream {
+        match self {
+            Stream::Plain(tcp) | Stream::Tls(_, tcp) => tcp,
+        }
+    }
+}
+
+// Not rustls's own `StreamOwned`, which can hold back what it has already
+// decrypted while what it has to send waits for the network: the other end
+// may be waiting to be read before it takes more.
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let (tls, tcp) = match self {
+            Stream::Plain(tcp) => return tcp.read(buf),
+            Stream::Tls(tls, tcp) => (tls, tcp),
+        };
+        loop {
+            match tls.reader().read(buf) {
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                done => return done,
+            }
+            // Nothing to hand over yet: take in more of what has arrived,
+            // and answer what needs answering (in the handshake, say) as far
+            // as the network takes it now. Anything wrong with writing shows
+            // when flushing.
+            tls.read_tls(tcp)?;
+            let packets = tls.process_new_packets();
+            packets.map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
+            let _ = send_tls(tls, tcp);
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let (tls, tcp) = match self {
+            Stream::Plain(tcp) => return tcp.write(buf),
+            Stream::Tls(tls, tcp) => (tls, tcp),
+        };
+        // Make room first, as far as the network takes what's waiting.
+        let _ = send_tls(tls, tcp);
+        match tls.writer().write(buf)? {
+            0 if !buf.is_empty() => Err(ErrorKind::WouldBlock.into()),
+            n => Ok(n),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Stream::Plain(tcp) => tcp.flush(),
+            Stream::Tls(tls, tcp) => send_tls(tls, tcp),
+        }
+    }
+}
+
+/// Write out what `tls` has encrypted, or has to say.
+fn send_tls(tls: &mut ClientConnection, tcp: &mut TcpStream) -> io::Result<()> {
+    while tls.wants_write() {
+        tls.write_tls(tcp)?;
+    }
+    Ok(())
+}
+
 /// Messages no larger than over TCP.
 fn config() -> WebSocketConfig {
     WebSocketConfig::default()
@@ -34,31 +107,59 @@ fn config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_MESSAGE))
 }
 
-/// Connect to the server at `url`: ws://host:port/path. This goes on in
-/// the background, so the game can go on meanwhile: the connection, or why
+/// Connect to the server at `url`: ws://host:port/path, or wss://host/path
+/// for a secure connection (as to a server online). This goes on in the
+/// background, so the game can go on meanwhile: the connection, or why
 /// there isn't one, comes through the channel within `timeout` (and however
 /// long finding the host by name takes).
 pub fn dial(url: &str, timeout: Duration) -> Receiver<Result<Connection, String>> {
+    let roots = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    dial_trusting(url, timeout, roots)
+}
+
+/// `dial`, trusting only certificates from `roots` (a test's own, say).
+pub(crate) fn dial_trusting(
+    url: &str,
+    timeout: Duration,
+    roots: RootCertStore,
+) -> Receiver<Result<Connection, String>> {
     let (tx, rx) = mpsc::channel();
     let url = url.to_string();
     std::thread::spawn(move || {
         // Whoever dialed may have stopped waiting.
-        let _ = tx.send(connect(&url, Instant::now() + timeout));
+        let _ = tx.send(connect(&url, Instant::now() + timeout, roots));
     });
     rx
 }
 
-fn connect(url: &str, deadline: Instant) -> Result<Connection, String> {
+fn connect(url: &str, deadline: Instant, roots: RootCertStore) -> Result<Connection, String> {
     let bad = || format!("not a server address: {url}");
     let uri: Uri = url.parse().map_err(|_| bad())?;
-    if !uri.scheme_str().unwrap_or("").eq_ignore_ascii_case("ws") {
-        return Err(bad());
-    }
-    let host = uri.host().ok_or_else(bad)?.to_string();
-    let stream = reach(&host, uri.port_u16().unwrap_or(80), deadline)?;
+    let secure = match uri.scheme_str().map(str::to_ascii_lowercase).as_deref() {
+        Some("ws") => false,
+        Some("wss") => true,
+        _ => return Err(bad()),
+    };
+    // IPv6 addresses come in brackets in URLs.
+    let host = uri
+        .host()
+        .ok_or_else(bad)?
+        .trim_matches(['[', ']'])
+        .to_string();
+    let port = uri.port_u16().unwrap_or(if secure { 443 } else { 80 });
+    let tcp = reach(&host, port, deadline)?;
     // The handshake has the time that's left.
     let left = deadline.saturating_duration_since(Instant::now());
-    set_timeouts(&stream, left.max(Duration::from_millis(1)))?;
+    set_timeouts(&tcp, left.max(Duration::from_millis(1)))?;
+    let stream = if secure {
+        let name = ServerName::try_from(host.clone()).map_err(|_| bad())?;
+        let tls = ClientConnection::new(tls_config(roots)?, name).map_err(|e| e.to_string())?;
+        Stream::Tls(Box::new(tls), tcp)
+    } else {
+        Stream::Plain(tcp)
+    };
     let (socket, _) = tungstenite::client::client_with_config(uri, stream, Some(config()))
         .map_err(|e| match e {
             // A read timed out (on Unix).
@@ -68,12 +169,21 @@ fn connect(url: &str, deadline: Instant) -> Result<Connection, String> {
     Connection::ws(socket).map_err(|e| e.to_string())
 }
 
+/// How to make secure connections, trusting certificates from `roots`.
+fn tls_config(roots: RootCertStore) -> Result<Arc<ClientConfig>, String> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
 /// A TCP connection to `host`, trying each of its addresses in turn.
 fn reach(host: &str, port: u16, deadline: Instant) -> Result<TcpStream, String> {
-    // IPv6 addresses come in brackets in URLs.
-    let name = host.trim_start_matches('[').trim_end_matches(']');
     let not_found = || format!("couldn't find {host}");
-    let addresses = (name, port).to_socket_addrs().map_err(|_| not_found())?;
+    let addresses = (host, port).to_socket_addrs().map_err(|_| not_found())?;
     let mut why = not_found();
     for address in addresses {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -109,6 +219,8 @@ fn failed(host: &str, e: tungstenite::Error) -> String {
         tungstenite::Error::Http(response) => {
             format!("{host} isn't a game server ({})", response.status())
         }
+        // Without tungstenite's "IO error" (for a bad certificate, say).
+        tungstenite::Error::Io(e) => format!("couldn't connect to {host}: {e}"),
         e => format!("couldn't connect to {host}: {e}"),
     }
 }
@@ -166,6 +278,7 @@ pub fn accept(mut stream: TcpStream) -> Result<Request, String> {
     stream.write_all(&head).map_err(|e| e.to_string())?;
     // Anything after the request is the WebSocket's.
     let rest = request[size..].to_vec();
+    let stream = Stream::Plain(stream);
     let socket = WebSocket::from_partially_read(stream, rest, Role::Server, Some(config()));
     let conn = Connection::ws(socket).map_err(|e| e.to_string())?;
     Ok(Request::WebSocket(conn, path))

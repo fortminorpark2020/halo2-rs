@@ -3,6 +3,7 @@
 //! handed straight across between the two ends of a pair in this process
 //! (for tests).
 
+use crate::ws::Stream;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -44,7 +45,7 @@ enum Link {
     },
     /// Each message a WebSocket message: the kind, then the body.
     Ws {
-        socket: Box<WebSocket<TcpStream>>,
+        socket: Box<WebSocket<Stream>>,
         /// Messages not given to tungstenite yet, and their size. It gets
         /// them once it has written out all it had, so what it holds is
         /// never more than it was last given.
@@ -85,9 +86,9 @@ impl Connection {
     }
 
     /// A WebSocket, its handshake done (see `dial` and `accept`).
-    pub(crate) fn ws(socket: WebSocket<TcpStream>) -> io::Result<Connection> {
-        socket.get_ref().set_nonblocking(true)?;
-        socket.get_ref().set_nodelay(true)?;
+    pub(crate) fn ws(socket: WebSocket<Stream>) -> io::Result<Connection> {
+        socket.get_ref().tcp().set_nonblocking(true)?;
+        socket.get_ref().tcp().set_nodelay(true)?;
         Ok(Connection::over(Link::Ws {
             socket: Box::new(socket),
             outbox: VecDeque::new(),
@@ -293,7 +294,7 @@ fn hand_over(
 /// had, and write out as much as the network takes now. Why the connection
 /// is gone, if it is.
 fn write_ws(
-    socket: &mut WebSocket<TcpStream>,
+    socket: &mut WebSocket<Stream>,
     outbox: &mut VecDeque<Vec<u8>>,
     queued: &mut usize,
     handed: &mut usize,
@@ -319,7 +320,7 @@ fn write_ws(
 
 /// Read the messages that have arrived. Why the connection is gone, if it
 /// is.
-fn read_ws(socket: &mut WebSocket<TcpStream>, out: &mut Vec<Message>) -> Option<String> {
+fn read_ws(socket: &mut WebSocket<Stream>, out: &mut Vec<Message>) -> Option<String> {
     use tungstenite::Message as Ws;
     loop {
         match socket.read() {

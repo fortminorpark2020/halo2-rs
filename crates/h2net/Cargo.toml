@@ -9,8 +9,13 @@ description = "LAN games: hosting, joining and finding games on the local networ
 h2sim = { path = "../h2sim" }
 flate2 = "1"
 httparse = "1"
+# ring rather than the default aws-lc-rs, which is hard to cross-compile for
+# Windows.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 socket2 = "0.6"
 tungstenite = "0.30"
+webpki-roots = "1"
 
 [dev-dependencies]
 glam = "0.33"
+rcgen = "0.14"

@@ -1474,3 +1474,87 @@ fn a_websocket_that_takes_nothing_is_too_slow() {
     assert_eq!(why, "connection too slow");
     assert!(sent > conn::MAX_BACKLOG, "{sent} bytes sent");
 }
+
+// Secure WebSockets, to a server behind TLS as online servers are (with a
+// certificate of the test's own).
+
+/// A secure server on loopback, as `name`, that sends back every message
+/// it gets: where it is, and the certificate to trust to reach it.
+fn secure_echo(name: &str) -> (SocketAddr, rustls::RootCertStore) {
+    use std::sync::Arc;
+    let certified = rcgen::generate_simple_self_signed([name.to_string()]).unwrap();
+    let cert = certified.cert.der().clone();
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.clone()], key.into())
+        .unwrap();
+    let config = Arc::new(config);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for tcp in listener.incoming().flatten() {
+            let tls = rustls::ServerConnection::new(config.clone()).unwrap();
+            let Ok(mut ws) = tungstenite::accept(rustls::StreamOwned::new(tls, tcp)) else {
+                continue;
+            };
+            while let Ok(m) = ws.read() {
+                if m.is_binary() && ws.send(m).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    (address, roots)
+}
+
+#[test]
+fn secure_websockets_carry_messages() {
+    let (address, roots) = secure_echo("localhost");
+    let url = format!("wss://localhost:{}/live", address.port());
+    let dialing = ws::dial_trusting(&url, Duration::from_secs(5), roots);
+    let mut conn = dialing.recv().unwrap().unwrap();
+    // Messages of every size up to the largest, more at a time than the
+    // network holds (so it backs up both ways), and they all come back.
+    let largest = conn::MAX_MESSAGE - 1;
+    let sizes = [
+        0, 1, 1000, 100_000, largest, largest, largest, largest, largest,
+    ];
+    for round in 0..3u8 {
+        let sent: Vec<conn::Message> = sizes
+            .iter()
+            .enumerate()
+            .map(|(k, &n)| (round * 10 + k as u8, vec![k as u8 ^ round; n]))
+            .collect();
+        for (kind, body) in &sent {
+            conn.send(*kind, body);
+        }
+        let mut got = Vec::new();
+        let start = Instant::now();
+        while got.len() < sent.len() {
+            conn.flush().unwrap();
+            got.extend(conn.receive().unwrap());
+            assert!(start.elapsed() < Duration::from_secs(5), "still waiting");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(got == sent, "round {round}");
+    }
+}
+
+#[test]
+fn an_untrusted_secure_server_is_refused() {
+    let (address, _) = secure_echo("localhost");
+    let url = format!("wss://localhost:{}/live", address.port());
+    let Err(why) = dial(&url, Duration::from_secs(5)).recv().unwrap() else {
+        panic!("connected");
+    };
+    assert!(
+        why.starts_with("couldn't connect to localhost: invalid peer certificate"),
+        "{why}"
+    );
+}
