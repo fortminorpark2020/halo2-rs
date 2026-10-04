@@ -10,7 +10,7 @@ use h2net::live::{self, ToServer};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,20 @@ impl Program {
     /// Start it on any free port (as a host would give it one, so it
     /// leaves the router alone), keeping its accounts in `data`.
     fn start(data: &Path) -> Program {
+        let (mut program, stdout) = Program::launch(data);
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in stdout.lines().map_while(Result::ok) {
+                let _ = tx.send(line);
+            }
+        });
+        program.lines = lines;
+        program
+    }
+
+    /// Start it, leaving what it says once it has said which port it's on
+    /// to the caller to read (or not).
+    fn launch(data: &Path) -> (Program, BufReader<ChildStdout>) {
         let mut child = Command::new(env!("CARGO_BIN_EXE_h2live"))
             .env("PORT", "0")
             .env("H2LIVE_DATA", data)
@@ -54,23 +68,22 @@ impl Program {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = tx.send(line);
-            }
-        });
-        let mut program = Program {
-            child,
-            lines,
-            said: Vec::new(),
-            port: 0,
-        };
-        let line = program.wait_for("listening on port ");
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("listening on port ") {
+            line.clear();
+            let read = stdout.read_line(&mut line).unwrap();
+            assert!(read > 0, "it never said which port it's on");
+        }
         let after = line.split("listening on port ").nth(1).unwrap();
-        program.port = after.split(' ').next().unwrap().parse().unwrap();
-        program
+        let port = after.split(' ').next().unwrap().parse().unwrap();
+        let program = Program {
+            child,
+            lines: mpsc::channel().1,
+            said: Vec::new(),
+            port,
+        };
+        (program, stdout)
     }
 
     /// The first line it said with `what` in it, once it has.
@@ -90,11 +103,26 @@ impl Program {
 
     /// The whole answer to a web request for `path`.
     fn get(&self, path: &str) -> String {
+        self.ask(&format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+    }
+
+    /// The whole answer to `request`.
+    fn ask(&self, request: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
-        write!(s, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        s.set_read_timeout(Some(WAIT)).unwrap();
+        s.write_all(request.as_bytes()).unwrap();
         let mut answer = String::new();
         s.read_to_string(&mut answer).unwrap();
         answer
+    }
+
+    /// The answer to asking for a WebSocket at `path`.
+    fn ask_websocket(&self, path: &str) -> String {
+        self.ask(&format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        ))
     }
 
     /// Stop it as Ctrl+C does, and wait until it has.
@@ -201,6 +229,11 @@ fn the_program_serves_pcs_and_web_requests_and_stops_cleanly() {
     assert!(page.contains("\n0 MATCHES IN PROGRESS\n"), "{page}");
     let elsewhere = program.get("/admin");
     assert!(elsewhere.starts_with("HTTP/1.1 404 Not Found\r\n"));
+    let elsewhere = program.ask_websocket("/admin");
+    assert!(
+        elsewhere.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "{elsewhere}"
+    );
 
     // Two PCs sign in over WebSockets, and one invites the other into its
     // party.
@@ -238,4 +271,32 @@ fn the_program_serves_pcs_and_web_requests_and_stops_cleanly() {
     let refused = LiveEvent::Refused(live::GAMERTAG_TAKEN.into());
     assert_eq!(pcs.events[charlie], [refused]);
     program.stop();
+}
+
+#[test]
+fn the_program_goes_on_while_no_one_reads_what_it_says() {
+    let data = TempDir::new("unread-data");
+    let (program, _unread) = Program::launch(&data.0);
+    // Far more to say than a pipe holds: WebSockets asked for where there
+    // are none, each said with its long path.
+    let path = format!("/{}", "x".repeat(8000));
+    for _ in 0..40 {
+        let answer = program.ask_websocket(&path);
+        assert!(answer.starts_with("HTTP/1.1 404 Not Found\r\n"), "{answer}");
+    }
+    let health = program.get("/health");
+    assert!(health.ends_with("\r\n\r\nOK"), "{health}");
+}
+
+#[test]
+fn the_program_goes_on_when_what_it_says_has_nowhere_to_go() {
+    let data = TempDir::new("unheard-data");
+    let (mut program, stdout) = Program::launch(&data.0);
+    drop(stdout);
+    // Something to say.
+    program.ask_websocket("/admin");
+    std::thread::sleep(Duration::from_millis(200));
+    let health = program.get("/health");
+    assert!(health.ends_with("\r\n\r\nOK"), "{health}");
+    assert!(program.child.try_wait().unwrap().is_none());
 }

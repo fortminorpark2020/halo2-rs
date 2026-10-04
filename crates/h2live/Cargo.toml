@@ -18,3 +18,5 @@ igd-next = "0.18"
 
 [dev-dependencies]
 glam = "0.33"
+# Connections from more than one of this PC's own addresses.
+socket2 = "0.6"

@@ -1024,6 +1024,7 @@ dependencies = [
  "h2sim",
  "igd-next",
  "sha2",
+ "socket2",
 ]
 
 [[package]]

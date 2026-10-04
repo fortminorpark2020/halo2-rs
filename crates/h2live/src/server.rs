@@ -26,8 +26,13 @@ use h2net::live::{self, Activity, Login, PlaylistInfo, Privacy, ToPc, ToServer, 
 use h2net::Connection;
 use h2sim::game::{clean_name, Look};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 mod matches;
 mod party;
@@ -47,6 +52,11 @@ const PINGS: usize = 16;
 /// A PC's gamertag and look change at most this often (seconds), since
 /// each change rewrites accounts.txt.
 const PROFILE_EVERY: f64 = 1.0;
+/// Log lines waiting to be written out, at most (once they go out in the
+/// background): while nothing takes them, more are dropped.
+const LOG_BACKLOG: usize = 1000;
+/// How long to wait for them to go out, at most, before the program ends.
+const LOG_FLUSH: Duration = Duration::from_secs(1);
 
 /// Where a connection came in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -648,13 +658,61 @@ fn signed(key: &[u8; 32], nonce: &[u8; 32], signature: &[u8; 64]) -> bool {
         .is_ok()
 }
 
+/// Where log lines go once they go out in the background, and how many
+/// have gone there, and been written out (or failed to be).
+static LOG_LINES: OnceLock<SyncSender<String>> = OnceLock::new();
+static LOGGED: AtomicUsize = AtomicUsize::new(0);
+static WRITTEN: AtomicUsize = AtomicUsize::new(0);
+
 /// Tell whoever runs the server something, on a line that starts with the
 /// date and time (UTC).
 pub fn log(line: impl std::fmt::Display) {
     let unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    println!("{} {line}", utc(unix));
+    say(format_args!("{} {line}", utc(unix)));
+}
+
+/// Tell whoever runs the server something, on a line of its own.
+pub fn say(line: impl std::fmt::Display) {
+    let line = format!("{line}\n");
+    match LOG_LINES.get() {
+        Some(lines) => {
+            if lines.try_send(line).is_ok() {
+                LOGGED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        None => print!("{line}"),
+    }
+}
+
+/// From now on, write what's said out on a thread of its own, so the
+/// server goes on when nothing takes it for a while (a console with text
+/// selected, on Windows, or a pipe no one reads), or ever again.
+pub fn log_in_background() {
+    LOG_LINES.get_or_init(|| {
+        let (lines, to_write) = mpsc::sync_channel::<String>(LOG_BACKLOG);
+        std::thread::spawn(move || {
+            let mut out = std::io::stdout();
+            for line in to_write {
+                // Whoever was reading may have gone.
+                let _ = out.write_all(line.as_bytes());
+                WRITTEN.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        lines
+    });
+}
+
+/// Wait (a moment at most) for what's been said to be written out, before
+/// the program ends.
+pub fn flush_log() {
+    let start = Instant::now();
+    while WRITTEN.load(Ordering::SeqCst) < LOGGED.load(Ordering::SeqCst)
+        && start.elapsed() < LOG_FLUSH
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// A Unix time as a date and time, as "2026-10-04 12:34:56".

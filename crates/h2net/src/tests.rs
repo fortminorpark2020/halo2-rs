@@ -301,7 +301,7 @@ fn ws_pair() -> (Connection, Connection) {
     let url = format!("ws://{}/link", listener.local_addr().unwrap());
     let dialing = dial(&url, Duration::from_secs(5));
     let (stream, _) = listener.accept().unwrap();
-    let Ok(Request::WebSocket(taken, path, _)) = accept(stream) else {
+    let Ok(Request::WebSocket(taken, path, _)) = accept(stream, &["/link"]) else {
         panic!("no WebSocket");
     };
     assert_eq!(path, "/link");
@@ -1322,6 +1322,9 @@ fn a_game_under_lag_goes_on() {
 
 // WebSockets: dialing a server, what a server takes, and the limits.
 
+/// Where the servers in these tests take WebSockets.
+const LIVE: &[&str] = &["/live"];
+
 #[test]
 fn dialing_where_no_server_listens_fails_at_once() {
     // A port nothing listens on (any more).
@@ -1435,7 +1438,7 @@ fn dialing_takes_schemes_in_any_case() {
         let dialing = dial(&url, Duration::from_secs(5));
         let (stream, _) = listener.accept().unwrap();
         assert!(
-            matches!(accept(stream), Ok(Request::WebSocket(..))),
+            matches!(accept(stream, LIVE), Ok(Request::WebSocket(..))),
             "{url}"
         );
         assert!(dialing.recv().unwrap().is_ok(), "{url}");
@@ -1489,7 +1492,7 @@ fn servers_answer_web_requests_and_take_websockets() {
         answer
     });
     let (stream, _) = listener.accept().unwrap();
-    let Ok(Request::Http(stream, path)) = accept(stream) else {
+    let Ok(Request::Http(stream, path)) = accept(stream, LIVE) else {
         panic!("no web request");
     };
     assert_eq!(path, "/health");
@@ -1501,7 +1504,7 @@ fn servers_answer_web_requests_and_take_websockets() {
     // A game, on the same port.
     let dialing = dial(&format!("ws://{address}/live"), Duration::from_secs(5));
     let (stream, _) = listener.accept().unwrap();
-    let Ok(Request::WebSocket(mut taken, path, forwarded)) = accept(stream) else {
+    let Ok(Request::WebSocket(mut taken, path, forwarded)) = accept(stream, LIVE) else {
         panic!("no WebSocket");
     };
     assert_eq!(path, "/live");
@@ -1515,7 +1518,26 @@ fn servers_answer_web_requests_and_take_websockets() {
     let mut s = std::net::TcpStream::connect(address).unwrap();
     s.write_all(b"H2RS\x16\0\0\0lockout\r\n\r\n").unwrap();
     let (stream, _) = listener.accept().unwrap();
-    assert_eq!(accept(stream).err().as_deref(), Some("not a web request"));
+    assert_eq!(
+        accept(stream, LIVE).err().as_deref(),
+        Some("not a web request")
+    );
+}
+
+#[test]
+fn servers_take_websockets_only_where_they_serve_them() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let dialing = dial(&format!("ws://{address}/admin"), Duration::from_secs(5));
+    let (stream, _) = listener.accept().unwrap();
+    assert_eq!(
+        accept(stream, LIVE).err().as_deref(),
+        Some("nothing at /admin")
+    );
+    let Err(why) = dialing.recv().unwrap() else {
+        panic!("connected");
+    };
+    assert_eq!(why, "127.0.0.1 isn't a game server (404 Not Found)");
 }
 
 #[test]
@@ -1526,7 +1548,7 @@ fn servers_see_just_the_path() {
     // Without the query...
     let dialing = dial(&format!("ws://{address}/live?v=1"), Duration::from_secs(5));
     let (stream, _) = listener.accept().unwrap();
-    let Ok(Request::WebSocket(_, path, _)) = accept(stream) else {
+    let Ok(Request::WebSocket(_, path, _)) = accept(stream, LIVE) else {
         panic!("no WebSocket");
     };
     assert_eq!(path, "/live");
@@ -1536,7 +1558,7 @@ fn servers_see_just_the_path() {
     s.write_all(b"GET http://localhost/health?all HTTP/1.1\r\n\r\n")
         .unwrap();
     let (stream, _) = listener.accept().unwrap();
-    let Ok(Request::Http(_, path)) = accept(stream) else {
+    let Ok(Request::Http(_, path)) = accept(stream, LIVE) else {
         panic!("no web request");
     };
     assert_eq!(path, "/health");
@@ -1559,7 +1581,7 @@ fn servers_give_up_on_requests_that_never_end_in_time() {
     });
     let (stream, _) = listener.accept().unwrap();
     let start = Instant::now();
-    let why = ws::accept_within(stream, SHORT).err();
+    let why = ws::accept_within(stream, LIVE, SHORT).err();
     assert_eq!(why.as_deref(), Some("never said what it wants"));
     let took = start.elapsed();
     assert!(took < SHORT * 2, "{took:?}");
@@ -1579,7 +1601,7 @@ fn servers_wait_for_the_request_on_connections_that_never_wait() {
     });
     let (stream, _) = listener.accept().unwrap();
     stream.set_nonblocking(true).unwrap();
-    let Ok(Request::Http(_, path)) = accept(stream) else {
+    let Ok(Request::Http(_, path)) = accept(stream, LIVE) else {
         panic!("no web request");
     };
     assert_eq!(path, "/health");
@@ -1594,7 +1616,7 @@ fn a_websocket_asked_for_wrongly_is_answered() {
     s.write_all(b"GET /live HTTP/1.1\r\nUpgrade: websocket\r\nConnection: keep-alive\r\n\r\n")
         .unwrap();
     let (stream, _) = listener.accept().unwrap();
-    let why = accept(stream).err();
+    let why = accept(stream, LIVE).err();
     let expected = "WebSocket protocol error: No \"Connection: upgrade\" header";
     assert_eq!(why.as_deref(), Some(expected));
     let mut answer = String::new();
@@ -1619,7 +1641,7 @@ fn servers_hear_where_a_proxy_says_a_websocket_is_from() {
         );
         s.write_all(request.as_bytes()).unwrap();
         let (stream, _) = listener.accept().unwrap();
-        let Ok(Request::WebSocket(_, _, forwarded)) = accept(stream) else {
+        let Ok(Request::WebSocket(_, _, forwarded)) = accept(stream, LIVE) else {
             panic!("no WebSocket");
         };
         forwarded.map(|ip| ip.to_string())
@@ -1693,7 +1715,7 @@ fn a_websocket_that_pings_and_takes_nothing_is_too_slow() {
         }
     });
     let (stream, _) = listener.accept().unwrap();
-    let Ok(Request::WebSocket(mut taken, _, _)) = accept(stream) else {
+    let Ok(Request::WebSocket(mut taken, _, _)) = accept(stream, LIVE) else {
         panic!("no WebSocket");
     };
     // The answers wait to go out, as more of what it's behind by.

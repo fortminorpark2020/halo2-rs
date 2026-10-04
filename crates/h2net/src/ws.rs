@@ -292,15 +292,20 @@ fn failed(host: &str, e: tungstenite::Error) -> String {
 
 /// Take a connection to a server (`stream`, just accepted): read the web
 /// request it begins with, and take up the WebSocket if that's what it asks
-/// for. This waits for the request (a few seconds at most), so servers
+/// for, at one of the `paths` the server takes them at (anywhere else isn't
+/// found). This waits for the request (a few seconds at most), so servers
 /// take each connection on a thread of its own. Servers never do TLS:
 /// online, whatever they run behind does it for them.
-pub fn accept(stream: TcpStream) -> Result<Request, String> {
-    accept_within(stream, REQUEST_TIMEOUT)
+pub fn accept(stream: TcpStream, paths: &[&str]) -> Result<Request, String> {
+    accept_within(stream, paths, REQUEST_TIMEOUT)
 }
 
 /// `accept`, giving the request `timeout` to arrive (a test's own, say).
-pub(crate) fn accept_within(stream: TcpStream, timeout: Duration) -> Result<Request, String> {
+pub(crate) fn accept_within(
+    stream: TcpStream,
+    paths: &[&str],
+    timeout: Duration,
+) -> Result<Request, String> {
     use ErrorKind::{Interrupted, TimedOut, WouldBlock};
     // What a listener that never waits takes may not either (on Windows).
     stream.set_nonblocking(false).map_err(|e| e.to_string())?;
@@ -335,7 +340,7 @@ pub(crate) fn accept_within(stream: TcpStream, timeout: Duration) -> Result<Requ
     // put first.
     let path = match target.parse::<Uri>() {
         Ok(uri) => uri.path().to_string(),
-        Err(e) => return refuse(tcp.stream, e.to_string()),
+        Err(e) => return refuse(tcp.stream, "400 Bad Request", e.to_string()),
     };
     let upgrade = parsed.headers.iter().any(|h| {
         h.name.eq_ignore_ascii_case("upgrade") && h.value.eq_ignore_ascii_case(b"websocket")
@@ -344,6 +349,9 @@ pub(crate) fn accept_within(stream: TcpStream, timeout: Duration) -> Result<Requ
         // The caller answers it, and has as long again to.
         set_timeouts(&tcp.stream, timeout)?;
         return Ok(Request::Http(tcp.stream, path));
+    }
+    if !paths.contains(&path.as_str()) {
+        return refuse(tcp.stream, "404 Not Found", format!("nothing at {path}"));
     }
     // Answer it as tungstenite's own `accept` would, the request read.
     let mut answer = tungstenite::http::Request::builder()
@@ -358,7 +366,7 @@ pub(crate) fn accept_within(stream: TcpStream, timeout: Duration) -> Result<Requ
         .and_then(|r| create_response(&r).map_err(|e| e.to_string()));
     let response = match response {
         Ok(response) => response,
-        Err(why) => return refuse(tcp.stream, why),
+        Err(why) => return refuse(tcp.stream, "400 Bad Request", why),
     };
     let mut head = Vec::new();
     write_response(&mut head, &response).map_err(|e| e.to_string())?;
@@ -382,9 +390,10 @@ pub(crate) fn accept_within(stream: TcpStream, timeout: Duration) -> Result<Requ
     Ok(Request::WebSocket(conn, path, forwarded))
 }
 
-/// Answer a web request that can't be taken, and say why it wasn't.
-fn refuse(stream: TcpStream, why: String) -> Result<Request, String> {
-    let _ = reply(stream, "400 Bad Request", &why);
+/// Answer a web request that can't be taken with `status`, and say why it
+/// wasn't.
+fn refuse(stream: TcpStream, status: &str, why: String) -> Result<Request, String> {
+    let _ = reply(stream, status, &why);
     Err(why)
 }
 
