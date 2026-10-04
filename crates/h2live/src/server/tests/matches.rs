@@ -1117,12 +1117,14 @@ fn a_party_plays_custom_games_together() {
         a.gamers[d].custom == Some((leader, "midship".into()))
     });
     a.until(5.0, |a| a.hosted(0).is_some_and(|h| h.host.joined() == 3));
-    // When the leader leaves it, everyone is back in the party lobby.
+    // When the leader leaves it, everyone is back in the party lobby: they
+    // hear so before their way into it closes.
     a.send(0, ToServer::Back);
     a.gamers[0].hosted = None;
     a.until(5.0, |a| {
         (0..4).all(|i| a.w.party(i).activity == Activity::Lobby)
     });
+    assert!((1..4).all(|i| !a.gamers[i].joined.as_ref().unwrap().lost));
     assert_eq!(a.w.server.custom_games(), 0);
     a.until(5.0, |a| {
         (1..4).all(|i| a.gamers[i].joined.as_ref().unwrap().lost)
@@ -1133,6 +1135,26 @@ fn a_party_plays_custom_games_together() {
         assert!(a.account(i).stats.is_empty());
     }
     assert_eq!(a.games_log(), "");
+}
+
+#[test]
+fn a_member_who_leaves_a_custom_game_can_come_back() {
+    let mut a = Arena::new("custom_again", 2, None);
+    let party = a.w.party(0).id;
+    a.send(1, ToServer::JoinParty(party));
+    a.until(5.0, |a| a.w.members(0).len() == 2);
+    a.send(0, ToServer::Custom);
+    a.until(5.0, |a| a.hosted(0).is_some_and(|h| h.host.joined() == 1));
+    // They go back to the party lobby; the custom game goes on.
+    a.gamers[1].joined = None;
+    a.gamers[1].custom = None;
+    a.until(5.0, |a| a.hosted(0).is_some_and(|h| h.host.joined() == 0));
+    assert_eq!(a.w.party(1).activity, Activity::Custom);
+    // And come back into it.
+    a.send(1, ToServer::Custom);
+    a.until(5.0, |a| a.gamers[1].custom.is_some());
+    a.until(5.0, |a| a.hosted(0).is_some_and(|h| h.host.joined() == 1));
+    assert_eq!(a.w.server.custom_games(), 1);
 }
 
 #[test]

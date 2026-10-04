@@ -141,7 +141,8 @@ pub enum ToServer {
     Search(u8),
     /// Party leader: stop searching.
     Cancel,
-    /// Party leader: open a custom game, or pick its map.
+    /// Party leader: open a custom game, or pick its map. A member: come
+    /// back into the party's custom game.
     Custom,
     CustomMap(String),
     /// Hosting this match now.

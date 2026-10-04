@@ -55,6 +55,8 @@ pub(super) struct Link {
     accounts: [u64; 2],
     /// When something last came from each end.
     heard: [f64; 2],
+    /// What it was for is over: it closes next time round.
+    over: bool,
 }
 
 /// A link given out (LINK) whose legs haven't both come.
@@ -107,7 +109,9 @@ impl Server {
             link == id && account.is_none_or(|a| accounts.contains(&a))
         };
         self.tokens.retain(|_, t| !theirs(t.id, &t.accounts));
-        self.links.retain(|l| !theirs(l.id, &l.accounts));
+        for l in &mut self.links {
+            l.over |= theirs(l.id, &l.accounts);
+        }
     }
 
     fn gamertag(&self, account: u64) -> String {
@@ -197,6 +201,7 @@ impl Server {
             id: t.id,
             accounts: t.accounts,
             heard: [now; 2],
+            over: false,
         });
         self.linked(t.id, t.accounts[1]);
     }
@@ -204,11 +209,19 @@ impl Server {
     /// Pass on what each end of each link sent, counting the bytes. A link
     /// is dropped when an end goes, or falls too far behind; if that's the
     /// host's end (or it had gone quiet), the match hears the joining PC
-    /// lost the host.
+    /// lost the host. Links that are over close, after a moment (so the
+    /// ends hear why from the server first).
     pub(super) fn relay(&mut self, now: f64) {
         let mut dropped = Vec::new();
         let mut k = 0;
         while k < self.links.len() {
+            if self.links[k].over {
+                let link = self.links.remove(k);
+                for end in link.ends {
+                    self.linger(end, now);
+                }
+                continue;
+            }
             let link = &mut self.links[k];
             // The end that broke the link, if one did.
             let mut broke = None;

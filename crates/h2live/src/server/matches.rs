@@ -880,8 +880,16 @@ impl Server {
     }
 
     /// `me`, leading their party, opens a custom game on a map everyone in
-    /// it has: they host, and everyone else is linked to them.
+    /// it has: they host, and everyone else is linked to them. A member
+    /// who left the party's custom game comes back into it.
     pub(super) fn custom(&mut self, me: u64) {
+        if let Some((id, party)) = self.party_of(me) {
+            if party.activity == Activity::Custom && party.leader != me {
+                let leader = party.leader;
+                self.unlink(id, Some(me));
+                return self.join_custom(id, leader, me);
+            }
+        }
         let Some((id, party)) = self.led_by(me) else {
             return;
         };
