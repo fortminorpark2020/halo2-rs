@@ -407,7 +407,8 @@ impl Soundscape {
                             Event::Exited { .. } => &k.exit_sounds,
                             _ => &k.board_sounds,
                         };
-                        sounds.get(seat).copied().flatten()
+                        let elite = game.players.get(player).is_some_and(|p| p.look.elite);
+                        sounds.get(seat).and_then(|s| s[elite as usize])
                     });
                 self.play(scene, s, body(player), Some(player), listeners, 1.0);
             }

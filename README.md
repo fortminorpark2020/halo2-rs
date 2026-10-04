@@ -63,7 +63,9 @@ your primary and secondary armour colours from Halo 2's 18, with your model
 turning beside the menu. It's saved in `%APPDATA%\halo2-rs\profile.txt` and
 sent to the other PCs in a System Link game. In team games armour takes the
 team's colour. Splitscreen guests play the same model in other colours; bots
-each have their own look, about a third of them Elites.
+each have their own look, about a third of them Elites. Elites hold weapons
+with their own first person animations and make their own sounds getting
+into vehicles.
 
 Names: you play under your gamertag (at first your Windows user name; set
 `H2_NAME` to override it), splitscreen guests as NAME(1), NAME(2) and so on,
