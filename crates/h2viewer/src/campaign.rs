@@ -266,6 +266,10 @@ struct Screen {
     hud: Ramp,
     /// A title (in `CampaignAi::titles`) and when it went up.
     title: Option<(usize, f32)>,
+    /// The view shaking: how hard, and the most it turns (yaw, pitch,
+    /// roll, degrees) at full strength.
+    shake: Ramp,
+    shake_rotation: [f32; 3],
 }
 
 /// The screen as it looks now: a colour over everything, how far the
@@ -708,6 +712,20 @@ impl Mission {
     /// The sounds the scripts played since last asked.
     pub fn take_sounds(&mut self) -> Vec<MissionSound> {
         std::mem::take(&mut self.state.sounds)
+    }
+
+    /// How far the view is shaken off now: yaw and pitch, radians.
+    pub fn shake(&self) -> (f32, f32) {
+        let screen = &self.state.screen;
+        let strength = screen.shake.at(self.state.time);
+        if strength <= 0.0 {
+            return (0.0, 0.0);
+        }
+        // A jitter of a few uneven frequencies, so it doesn't look regular.
+        let t = self.state.time;
+        let wobble = |a: f32, b: f32| ((t * a).sin() + (t * b).sin() * 0.6) / 1.6;
+        let [yaw, pitch, _] = screen.shake_rotation.map(|d| (d * strength).to_radians());
+        (yaw * wobble(23.0, 37.0), pitch * wobble(29.0, 41.0))
     }
 
     /// The effects the scripts set off since last asked, and where.

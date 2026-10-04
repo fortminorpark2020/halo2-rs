@@ -1947,7 +1947,7 @@ impl App {
             }
             // A cutscene sees through its own camera, with no HUD or
             // weapon in view.
-            let camera = match cutscene_camera {
+            let mut camera = match cutscene_camera {
                 Some((at, forward, _)) => FlyCamera::looking_at(at, at + forward),
                 None => FlyCamera {
                     position: l.camera.position,
@@ -1955,6 +1955,10 @@ impl App {
                     pitch: l.camera.pitch,
                 },
             };
+            if let Some((yaw, pitch)) = self.mission.as_ref().map(|m| m.shake()) {
+                camera.yaw += yaw;
+                camera.pitch += pitch;
+            }
             let (_, r, u) = camera.basis();
             let mut draws = if cutscene_camera.is_some() {
                 local::ViewDraws {

@@ -16,7 +16,22 @@ impl Ctx<'_> {
     /// function.
     pub(super) fn cinematic_call(&mut self, function: &str, args: &[Value]) -> Option<Value> {
         let arg = |k: usize| args.get(k).cloned().unwrap_or_default();
+        let now = self.st.time;
         Some(match function {
+            // Shaking the view (the Pelican hit, the carrier's guns).
+            "player_effect_set_max_rotation" => {
+                self.st.screen.shake_rotation = [0, 1, 2].map(|k| arg(k).num());
+                Value::Void
+            }
+            "player_effect_set_max_translation" | "player_effect_set_max_vibration" => Value::Void,
+            "player_effect_start" => {
+                self.st.screen.shake.go(now, arg(0).num(), arg(1).num());
+                Value::Void
+            }
+            "player_effect_stop" => {
+                self.st.screen.shake.go(now, 0.0, arg(0).num());
+                Value::Void
+            }
             "object_teleport" => {
                 if let Some((at, yaw)) = self.flag(&arg(1)) {
                     for &o in arg(0).objects() {
