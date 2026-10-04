@@ -50,6 +50,9 @@ mod kind {
     pub const REMOVE_LOCAL: u8 = 4;
     /// Still here (after a while with nothing else to say).
     pub const ALIVE: u8 = 5;
+    /// How many snapshots have arrived, said as they do: online, the host
+    /// holds the game back from a PC with too many still on their way.
+    pub const GOT: u8 = 6;
     // Host to joined PC.
     pub const WELCOME: u8 = 101;
     pub const REFUSED: u8 = 102;

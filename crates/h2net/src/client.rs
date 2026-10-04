@@ -50,6 +50,10 @@ pub struct Client {
     /// The last snapshot, and its number: the next may come as how it
     /// differs from this one.
     last: Option<(u32, Vec<u8>)>,
+    /// Snapshots that have arrived (taken on or not), and how many of them
+    /// the host was last told of.
+    arrived: u32,
+    told: u32,
 }
 
 /// A command's buttons, without where it aims or moves.
@@ -123,6 +127,8 @@ impl Client {
             sent: Vec::new(),
             input: Pace::new(TICK),
             last: None,
+            arrived: 0,
+            told: 0,
         }
     }
 
@@ -165,6 +171,9 @@ impl Client {
             }
         };
         for (kind, body) in messages {
+            if matches!(kind, kind::SNAPSHOT | kind::SNAPSHOT_DELTA) {
+                self.arrived = self.arrived.wrapping_add(1);
+            }
             let mut r = Reader::new(&body);
             let result = match kind {
                 kind::WELCOME => (|| {
@@ -217,6 +226,13 @@ impl Client {
             if self.gone {
                 break;
             }
+        }
+        // So the host knows how many are still on their way.
+        if self.arrived != self.told && !self.gone {
+            let mut w = Writer::default();
+            w.u32(self.arrived);
+            self.conn.send(kind::GOT, &w.0);
+            self.told = self.arrived;
         }
         self.keep_alive();
         (out, events)

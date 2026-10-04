@@ -583,12 +583,16 @@ impl SimNet {
     }
 
     /// After a tick: send the game if it's time, and check what arrives.
-    fn tick(&mut self, game: &Game, tick: usize) {
+    fn tick(&mut self, game: &mut Game, tick: usize) {
         self.events.extend_from_slice(&game.events);
         if !tick.is_multiple_of(self.every) {
             return;
         }
         let events = std::mem::take(&mut self.events);
+        // Hearing how many have arrived, as a host does every frame.
+        for e in self.host.poll(game, scene::MAX_BODIES) {
+            println!("net: {e:?}");
+        }
         self.host.send(game, &events, true);
         let (status, got) = self.client.poll(&mut self.joined);
         let mut w = h2sim::game::Writer::default();
@@ -754,7 +758,7 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         game.step(&level.world, &commands);
         h2sim::bot::alert_actors(&mut bots, &game, &game.events);
         if let Some(net) = &mut net {
-            net.tick(&game, tick);
+            net.tick(&mut game, tick);
         }
         match step {
             Some(Some(at)) => {

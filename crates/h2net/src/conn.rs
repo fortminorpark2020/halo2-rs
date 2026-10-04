@@ -109,7 +109,7 @@ impl Connection {
     }
 
     /// Bytes sent that the network (or the other end) hasn't taken yet.
-    pub(crate) fn backlog(&self) -> usize {
+    fn backlog(&self) -> usize {
         match &self.link {
             Link::Tcp { outbox, .. } => outbox.len(),
             Link::Memory { queued, .. } => *queued,

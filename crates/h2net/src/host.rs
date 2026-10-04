@@ -16,9 +16,12 @@ use std::time::{Duration, Instant};
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Snapshots a second in online games, whose links are slower than a LAN.
 const ONLINE_RATE: u32 = 30;
-/// Online, a PC with this much still waiting to go to it is behind: it
-/// misses snapshots (but not what happened in them) until it catches up.
-const BEHIND: usize = 32 << 10;
+/// Online, a PC with more snapshots than this on their way to it (two
+/// thirds of a second's worth) is behind: it misses snapshots (but not
+/// what happened in them) until all it was sent have arrived. It says how
+/// many have, so this counts those held up in buffers along the way too
+/// (the network's, a relay's), not just in ours.
+const IN_FLIGHT: u32 = 20;
 
 /// Things the host's game should show or act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +84,10 @@ struct Remote {
     /// The number of the last snapshot it got, if the next can go as how
     /// it differs from that one.
     has: Option<u32>,
+    /// Snapshots sent to it, and how many it last said had arrived: those
+    /// in between are on their way.
+    sent: u32,
+    arrived: u32,
     /// What happened in snapshots it missed being behind, and since when
     /// it has been.
     missed: Vec<Event>,
@@ -108,6 +115,8 @@ impl Remote {
             fresh: false,
             players: Vec::new(),
             has: None,
+            sent: 0,
+            arrived: 0,
             missed: Vec::new(),
             behind: None,
         }
@@ -590,6 +599,7 @@ impl Host {
                 // Controls still on their way from a game that's over.
                 kind::INPUT | kind::ADD_LOCAL | kind::REMOVE_LOCAL if r.welcomed => {}
                 kind::ALIVE => {}
+                kind::GOT => r.arrived = rd.u32().map_err(|e| e.to_string())?,
                 _ => return Err(format!("unexpected message {kind}")),
             }
         }
@@ -659,9 +669,11 @@ impl Host {
             if !r.in_game || !(due || r.fresh) {
                 continue;
             }
-            // A failure shows up as a departure on the next poll.
-            let _ = r.conn.flush();
-            if self.online && r.conn.backlog() > BEHIND {
+            // Once behind, it waits until all it was sent have arrived,
+            // then gets the whole game.
+            let on_the_way = r.sent.wrapping_sub(r.arrived);
+            let behind = on_the_way > IN_FLIGHT || (r.behind.is_some() && on_the_way > 0);
+            if self.online && behind {
                 r.missed.extend_from_slice(&events);
                 r.has = None;
                 r.behind.get_or_insert_with(Instant::now);
@@ -685,6 +697,7 @@ impl Host {
                 (kind::SNAPSHOT, &mine, false)
             };
             r.conn.send(kind, message);
+            r.sent = r.sent.wrapping_add(1);
             self.sent += message.len() as u64;
             r.has = shared.then_some(self.seq);
             r.fresh = false;

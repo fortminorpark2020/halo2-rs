@@ -787,6 +787,7 @@ fn online_hosts_send_the_game_30_times_a_second() {
     let (before, mut made, mut got) = (client.snapshots, 0, 0);
     let start = Instant::now();
     for k in 0..30 {
+        assert!(host.poll(&mut hg, 16).is_empty());
         let mut commands = vec![Command::default(); hg.players.len()];
         commands[shooter].fire = k % 2 == 0;
         hg.step(&world, &commands);
@@ -948,6 +949,7 @@ fn delta_snapshots_rebuild_the_hosts_game() {
     let (mut full, mut events_made, mut events_got) = (0, 0, 0);
     let sent = g.host.sent();
     for _ in 0..1000 {
+        assert!(g.host.poll(&mut g.hg, 16).is_empty());
         let events = g.tick();
         // A whole snapshot: its number, the game, and what happened.
         let mut w = h2sim::game::Writer::default();
@@ -997,6 +999,7 @@ fn a_pc_behind_misses_snapshots_but_not_what_happened() {
         let (ce, events) = g.client.poll(&mut g.cg);
         assert!(ce.is_empty(), "{ce:?}");
         got.extend(events);
+        assert!(g.host.poll(&mut g.hg, 16).is_empty());
         made.extend(g.tick());
     }
     let (_, events) = g.client.poll(&mut g.cg);
@@ -1004,6 +1007,63 @@ fn a_pc_behind_misses_snapshots_but_not_what_happened() {
     assert_eq!(got, made);
     assert_eq!(state(&g.cg), state(&g.hg));
     assert!(g.client.snapshots < 1050);
+}
+
+#[test]
+fn a_pc_behind_deep_buffers_misses_snapshots() {
+    // Online, the game can pile up on its way (in the network's buffers, a
+    // relay's) while the host's own outbox stays empty.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let joining = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (taken, _) = listener.accept().unwrap();
+    let world = floor();
+    let mut hg = game();
+    let shooter = hg.add_player();
+    let mut host = Host::online("testmap");
+    host.set_rate(0);
+    host.add_connection(
+        Connection::tcp(taken).unwrap(),
+        verified("TESTER", ANY_TEAM),
+    );
+    let mut cg = game();
+    let conn = Connection::tcp(joining).unwrap();
+    let mut client = Client::over(conn, &cg, "testmap", &[ANY_TEAM], me());
+    let mut welcomed = false;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, cg| {
+        welcomed |= matches!(ce.first(), Some(ClientEvent::Welcomed { .. }));
+        welcomed && cg.players.len() == 2
+    });
+    let tick = |k: usize, host: &mut Host, hg: &mut h2sim::Game| {
+        assert!(host.poll(hg, 16).is_empty());
+        let mut commands = vec![Command::default(); hg.players.len()];
+        commands[shooter].fire = k.is_multiple_of(2);
+        hg.step(&world, &commands);
+        let events = std::mem::take(&mut hg.events);
+        host.send(hg, &events, true);
+        events
+    };
+    // The joined PC stops reading: soon nothing more goes to it.
+    let mut made = Vec::new();
+    let mut went = 0;
+    for k in 0..300 {
+        let before = host.sent();
+        made.extend(tick(k, &mut host, &mut hg));
+        went += (host.sent() > before) as usize;
+        client.keep_alive();
+    }
+    assert!(went < 50, "{went} of 300 snapshots went");
+    // It reads again and catches up, missing nothing that happened.
+    let mut got = Vec::new();
+    for k in 0..30 {
+        let (ce, events) = client.poll(&mut cg);
+        assert!(ce.is_empty(), "{ce:?}");
+        got.extend(events);
+        made.extend(tick(k, &mut host, &mut hg));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    got.extend(client.poll(&mut cg).1);
+    assert_eq!(got, made);
+    assert_eq!(state(&cg), state(&hg));
 }
 
 #[test]
