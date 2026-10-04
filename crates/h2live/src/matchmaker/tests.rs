@@ -653,6 +653,42 @@ fn a_party_that_cancels_leaves_the_match_it_was_in() {
 }
 
 #[test]
+fn a_countdown_carries_on_when_its_oldest_party_leaves() {
+    let mut mm = matchmaker();
+    for id in 1..=4 {
+        mm.search(solo(id, RUMBLE_PIT, 5), 0.0).unwrap();
+    }
+    let mut events = run(&mut mm, 0.0, 14.75);
+    mm.cancel(1);
+    events.extend(run(&mut mm, 15.0, 19.75));
+    assert_eq!(status_at(&events, 2, 15.25).seconds, 5);
+    assert!(formed(&events).is_empty());
+    let m = &formed(&run(&mut mm, 20.0, 20.0))[0].1;
+    assert_eq!(accounts(m), [2, 3, 4]);
+}
+
+#[test]
+fn a_party_that_takes_over_a_countdown_arrives_like_any_other() {
+    // A level 30 searching for a minute stops minding levels and takes in
+    // three level 1s counting down since 50 s: five seconds more, not a
+    // fresh twenty.
+    let mut mm = matchmaker();
+    mm.search(solo(1, RUMBLE_PIT, 30), 0.0).unwrap();
+    let mut events = run(&mut mm, 0.0, 49.75);
+    for id in 2..=4 {
+        mm.search(solo(id, RUMBLE_PIT, 1), 50.0).unwrap();
+    }
+    events.extend(run(&mut mm, 50.0, 74.75));
+    assert_eq!(status_at(&events, 2, 59.75).seconds, 11);
+    assert_eq!(status_at(&events, 2, 60.0).seconds, 15);
+    let s = status_at(&events, 1, 60.0);
+    assert_eq!((s.stage, s.have, s.seconds), (Stage::WaitingToFill, 4, 15));
+    assert!(formed(&events).is_empty());
+    let m = &formed(&run(&mut mm, 75.0, 75.0))[0].1;
+    assert_eq!(accounts(m), [1, 2, 3, 4]);
+}
+
+#[test]
 fn statuses_are_sent_when_they_change() {
     let mut mm = matchmaker();
     mm.search(solo(1, RUMBLE_PIT, 10), 0.0).unwrap();

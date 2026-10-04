@@ -253,10 +253,8 @@ impl Group {
     }
 }
 
-/// A match with enough players counting down to its start, by the oldest
-/// party in it.
+/// A match with enough players counting down to its start.
 struct Countdown {
-    party: u64,
     /// When it began and when it ends.
     began: f64,
     ends: f64,
@@ -572,7 +570,6 @@ impl Matchmaker {
             let max = usize::from(playlist.max);
             let short = usize::from(playlist.min).saturating_sub(group.people);
             let need = short.max(balance_needed(playlist, &group.sizes).unwrap_or(0));
-            let founder = self.searches[group.parties[0]].ticket.party;
             let mut countdown = None;
             if need == 0 {
                 let parties: Vec<u64> = group
@@ -580,11 +577,15 @@ impl Matchmaker {
                     .iter()
                     .map(|&i| self.searches[i].ticket.party)
                     .collect();
-                let old = self.countdowns.iter().position(|c| c.party == founder);
+                // A countdown carries on while any party in it is still
+                // here, even if the oldest left or an older one took over.
+                let old = self
+                    .countdowns
+                    .iter()
+                    .position(|c| c.parties.iter().any(|p| parties.contains(p)));
                 let mut c = match old {
-                    Some(k) => self.countdowns.swap_remove(k),
+                    Some(k) => self.countdowns.remove(k),
                     None => Countdown {
-                        party: founder,
                         began: now,
                         ends: now + COUNTDOWN,
                         parties: parties.clone(),
