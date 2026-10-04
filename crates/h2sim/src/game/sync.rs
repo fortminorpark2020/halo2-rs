@@ -724,6 +724,7 @@ impl Game {
                 w.index(r);
             }
             w.bool(v.controls.boost);
+            w.bool(v.controls.horn);
         }
     }
 
@@ -951,6 +952,7 @@ impl Game {
                 };
             }
             v.controls.boost = r.bool()?;
+            v.controls.horn = r.bool()?;
         }
         for p in &self.players {
             if let Some((v, s)) = p.seat {

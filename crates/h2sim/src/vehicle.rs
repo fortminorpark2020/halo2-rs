@@ -204,6 +204,8 @@ pub struct VehicleDef {
     pub inertia: Vec3,
     /// Radius around `center` that holds the whole hull.
     pub radius: f32,
+    /// The driver's trigger sounds a horn.
+    pub horn: bool,
 }
 
 impl VehicleDef {
@@ -328,6 +330,8 @@ pub struct Controls {
     pub yaw: f32,
     pub pitch: f32,
     pub boost: bool,
+    /// Sounding the horn (the Warthog's).
+    pub horn: bool,
     /// Someone is driving.
     pub driven: bool,
 }

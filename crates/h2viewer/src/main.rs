@@ -260,7 +260,7 @@ fn load_level(path: &Path) -> Result<Level, String> {
             let def = &scene.vehicles.defs[s.def];
             let kind = &scene.vehicles.kinds[s.def];
             println!(
-                "vehicle {} at {:.2} facing {:.2} ({:?}, {} seats, radius {:.2}, engine {:?}, boost {:?}, enter {:?}, exit {:?}, board {:?})",
+                "vehicle {} at {:.2} facing {:.2} ({:?}, {} seats, radius {:.2}, engine {:?}, boost {:?}, horn {:?}, enter {:?}, exit {:?}, board {:?})",
                 def.name,
                 s.position,
                 s.yaw,
@@ -269,6 +269,7 @@ fn load_level(path: &Path) -> Result<Level, String> {
                 def.radius,
                 kind.engine,
                 kind.boost,
+                kind.horn,
                 kind.enter_sounds,
                 kind.exit_sounds,
                 kind.board_sounds,
@@ -731,6 +732,17 @@ impl App {
             l.animate_view_model(&self.scene, &self.game, dt);
         }
         self.effects.update(dt);
+        // Badly damaged vehicles smoke, then burn.
+        for v in &self.game.vehicles {
+            let Some(def) = self.game.vehicle_defs.get(v.def) else {
+                continue;
+            };
+            let left = v.health / def.health.max(1.0);
+            if !v.destroyed && left < 0.5 && def.drive != h2sim::vehicle::Drive::Fixed {
+                let top = v.center + v.up() * def.radius * 0.35;
+                self.effects.smolder(top, left < 0.25, dt);
+            }
+        }
         for p in &self.game.projectiles {
             // Just out of the barrel it would fill the shooter's view.
             let near = self

@@ -430,6 +430,15 @@ impl App {
                 self.give_weapon(0, w);
             }
         }
+        // H2_VEHICLE_HEALTH=<fraction>: start the vehicles damaged (testing).
+        if let Some(f) = std::env::var("H2_VEHICLE_HEALTH")
+            .ok()
+            .and_then(|f| f.parse::<f32>().ok())
+        {
+            for v in &mut self.game.vehicles {
+                v.health *= f;
+            }
+        }
         self.mode = Mode::Playing;
         self.menu_open = false;
         self.set_capture(true);

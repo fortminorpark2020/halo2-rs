@@ -174,6 +174,39 @@ impl Effects {
         }
     }
 
+    /// A badly damaged vehicle: smoke rising from it over `dt` seconds,
+    /// and (`burning`) flames.
+    pub fn smolder(&mut self, position: Vec3, burning: bool, dt: f32) {
+        let puffs = if burning { 14.0 } else { 7.0 } * dt;
+        let count = puffs as usize + (self.random() < puffs.fract()) as usize;
+        for _ in 0..count {
+            let drift = self.random_unit() * 0.15;
+            let v = Vec3::new(drift.x, drift.y, 0.5 + self.random() * 0.4);
+            let shade = if burning { 0.12 } else { 0.35 };
+            let (life, flame) = (1.6 + self.random(), 0.25 + self.random() * 0.15);
+            self.particles.push(Particle {
+                position: position + drift,
+                velocity: v,
+                age: 0.0,
+                life,
+                size: (0.2, 0.9),
+                color: [shade, shade * 0.97, shade * 0.94, 0.45],
+                gravity: -0.3,
+            });
+            if burning {
+                self.particles.push(Particle {
+                    position: position + drift * 0.5,
+                    velocity: v * 0.6,
+                    age: 0.0,
+                    life: flame,
+                    size: (0.1, 0.03),
+                    color: [1.0, 0.5, 0.12, 0.7],
+                    gravity: -0.5,
+                });
+            }
+        }
+    }
+
     /// A plasma bolt or needle splashing on a wall: a scorch and a few
     /// glowing sparks of its colour.
     pub fn splash(&mut self, position: Vec3, normal: Vec3, color: [f32; 4]) {

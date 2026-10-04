@@ -66,7 +66,7 @@ pub struct Soundscape {
     /// Per local player: the respawn countdown's whole second last ticked.
     respawn_ticks: Vec<(usize, u32)>,
     /// Per vehicle: its engine and boost loops while someone drives.
-    engines: Vec<[Option<u64>; 2]>,
+    engines: Vec<[Option<u64>; 3]>,
 }
 
 /// Volume at distance `d` for a sound carrying over `range`.
@@ -531,7 +531,7 @@ impl Soundscape {
     /// Vehicles' engines while someone drives them, rising with speed, and
     /// their boost.
     fn engines(&mut self, scene: &Scene, game: &Game, listeners: &[Listener]) {
-        self.engines.resize(game.vehicles.len(), [None; 2]);
+        self.engines.resize(game.vehicles.len(), [None; 3]);
         for (k, v) in game.vehicles.iter().enumerate() {
             let (Some(def), Some(kind)) = (
                 game.vehicle_defs.get(v.def),
@@ -547,6 +547,7 @@ impl Soundscape {
             for (slot, sound, on) in [
                 (0, kind.engine, driven),
                 (1, kind.boost, driven && v.controls.boost),
+                (2, kind.horn, driven && v.controls.horn),
             ] {
                 let voice = &mut self.engines[k][slot];
                 let asset = sound.and_then(|s| scene.sounds.get(s));
@@ -554,7 +555,7 @@ impl Soundscape {
                     (Some(asset), true, playing) => {
                         let g = placed(asset.distance, v.center, None, listeners)
                             .map(|g| g * asset.gain);
-                        let pitch = 0.85 + 0.45 * pace;
+                        let pitch = if slot == 2 { 1.0 } else { 0.85 + 0.45 * pace };
                         match playing {
                             Some(id) => self.audio.adjust(id, g, pitch),
                             None => {

@@ -112,7 +112,9 @@ Space (A) loops the Banshee, or with A/D (the stick to one side) barrel rolls
 it aside; rockets locked on lose it. Holding E by an enemy driver or gunner
 boards their seat and throws them out; boarding a Scorpion or Wraith takes a
 second and kills the driver through the hatch. Master Chief's own sounds play
-getting in, getting out and boarding.
+getting in, getting out and boarding. Left mouse (RT) in a Warthog's driver
+seat sounds its horn. Badly damaged vehicles smoke, then burn before they
+blow up (`H2_VEHICLE_HEALTH=<fraction>` starts them damaged, for testing).
 Their speeds, seats, guns, hover pads, wheels and hulls come from the vehicle,
 model and physics tags; wheels turn and ride their suspension, turrets aim,
 and riders sit in Master Chief's seat animations. Vehicles run over and kill

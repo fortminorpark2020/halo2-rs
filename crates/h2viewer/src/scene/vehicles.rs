@@ -87,9 +87,10 @@ pub struct VehicleAssets {
     pub enter_sounds: Vec<Option<usize>>,
     pub exit_sounds: Vec<Option<usize>>,
     pub board_sounds: Vec<Option<usize>>,
-    /// The engine running, and boosting (looped).
+    /// The engine running, boosting, and the horn (looped).
     pub engine: Option<usize>,
     pub boost: Option<usize>,
+    pub horn: Option<usize>,
 }
 
 impl VehicleAssets {
@@ -226,28 +227,36 @@ impl Loader {
         self.sound(tag)
     }
 
-    /// The engine and boost loops among a vehicle's attachments.
-    fn engine_sounds(&mut self, tag: &VehicleTag) -> (Option<usize>, Option<usize>) {
+    /// The engine and boost loops among a vehicle's attachments, and the
+    /// horn among its built-in weapons' (the Warthog's).
+    fn engine_sounds(&mut self, tag: &VehicleTag) -> [Option<usize>; 3] {
         let lsnd = GroupTag::parse("lsnd").expect("a group tag");
-        let loops: Vec<(DatumIndex, String)> = tag
-            .attachments
-            .iter()
-            .filter_map(|&(d, _)| {
-                let t = self.set.locate(d)?.1;
-                (t.group == lsnd).then_some((d, t.name))
-            })
-            .collect();
-        let pick = |want: &dyn Fn(&str) -> bool| loops.iter().find(|l| want(&l.1)).map(|l| l.0);
-        let engine = pick(&|n| {
+        let mut weapons = Vec::new();
+        for &w in &tag.weapons {
+            weapons.extend(vehicle::object_attachments(&mut self.set, w).unwrap_or_default());
+        }
+        let loops = |attached: &[(DatumIndex, String)]| -> Vec<(DatumIndex, String)> {
+            attached
+                .iter()
+                .filter_map(|&(d, _)| {
+                    let t = self.set.locate(d)?.1;
+                    (t.group == lsnd).then_some((d, t.name))
+                })
+                .collect()
+        };
+        let own = loops(&tag.attachments);
+        let weapons = loops(&weapons);
+        let pick = |loops: &[(DatumIndex, String)], want: &dyn Fn(&str) -> bool| {
+            loops.iter().find(|l| want(&l.1)).map(|l| l.0)
+        };
+        let engine = pick(&own, &|n| {
             !["boost", "contrail", "horn", "scrape"]
                 .iter()
                 .any(|x| n.contains(x))
         });
-        let boost = pick(&|n| n.contains("boost"));
-        (
-            engine.and_then(|d| self.looping_sound(d)),
-            boost.and_then(|d| self.looping_sound(d)),
-        )
+        let boost = pick(&own, &|n| n.contains("boost"));
+        let horn = pick(&weapons, &|n| n.contains("horn"));
+        [engine, boost, horn].map(|l| l.and_then(|d| self.looping_sound(d)))
     }
 
     /// Master Chief's sound getting into a seat ("mc_warthog_d_enter"),
@@ -523,7 +532,7 @@ impl Loader {
             Drive::Tank => tag.turn_rate.clamp(0.5, 2.0),
             _ => (tag.max_left_turn.abs().to_radians() * 2.5).max(2.0),
         };
-        let def = VehicleDef {
+        let mut def = VehicleDef {
             name: name.clone(),
             drive,
             mass: physics.as_ref().map_or(1000.0, |p| p.mass).max(50.0),
@@ -555,7 +564,8 @@ impl Loader {
             .filter(|f| at(&f.marker).is_some())
             .map(|f| wheel_nodes(&render, f))
             .collect();
-        let (engine, boost) = self.engine_sounds(&tag);
+        let [engine, boost, horn] = self.engine_sounds(&tag);
+        def.horn = horn.is_some();
         let mut sounds = |what| {
             stances
                 .iter()
@@ -571,6 +581,7 @@ impl Loader {
             board_sounds,
             engine,
             boost,
+            horn,
             body,
             turret,
             wheel_nodes,

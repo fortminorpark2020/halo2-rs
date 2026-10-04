@@ -410,6 +410,7 @@ impl Game {
                     yaw: cmd.yaw,
                     pitch: cmd.pitch,
                     boost: cmd.throw_grenade && matches!(drive, Drive::Hover | Drive::Fly),
+                    horn: def.horn && seat.weapon.is_none() && cmd.fire,
                     driven: true,
                 };
                 veh.last_driver = Some(i);
