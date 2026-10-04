@@ -84,10 +84,14 @@ impl App {
         let outcome = self.outcome();
         let seats = self.lobby_seats();
         let joined = self.joined();
+        // An online match's pregame shows its lobby (the host's, once
+        // there).
+        let match_lobby = self.match_lobby();
         let host_lobby = match &self.net {
             Net::Joined { lobby, .. } => lobby.as_ref(),
             _ => None,
         };
+        let host_lobby = host_lobby.or(match_lobby.as_ref());
         let objectives = self
             .mission
             .as_ref()
@@ -284,7 +288,9 @@ impl App {
                 deaths: p.deaths,
                 color: player_colors(game, i)[0],
                 emblem: Some(p.look.emblem),
-                level: crate::rank::test_level(i),
+                level: self
+                    .match_level(&p.name)
+                    .or_else(|| crate::rank::test_level(i)),
                 local: self.locals.iter().any(|l| l.player == i),
                 header: false,
             }
@@ -476,16 +482,21 @@ impl App {
                     Then::Campaign => self.start_campaign(),
                     Then::Join(game) => self.begin_join(&game),
                     Then::Rejoin => self.rejoin_host(),
+                    // The match goes on when its game starts.
+                    Then::Match => {}
                 }
             }
             Err(e) => {
                 println!("couldn't load the map: {e}");
                 self.campaign = false;
                 let why = format!("COULDN'T LOAD {}", loading.title);
-                if matches!(loading.then, Then::Rejoin) {
-                    self.drop_out(why);
-                } else {
-                    self.menu.notice = Some(why);
+                match loading.then {
+                    Then::Rejoin => self.drop_out(why),
+                    Then::Match => {
+                        self.quit_match(false);
+                        self.menu.notice = Some(why);
+                    }
+                    _ => self.menu.notice = Some(why),
                 }
             }
         }
@@ -529,12 +540,10 @@ impl App {
             return crate::campaign_game(&self.scene);
         }
         let settings = &self.menu.settings;
-        new_game(
-            &self.scene,
-            settings.game_type(),
-            settings.score_to_win(),
-            options,
-        )
+        let (game_type, score) = self
+            .match_rules()
+            .unwrap_or((settings.game_type(), settings.score_to_win()));
+        new_game(&self.scene, game_type, score, options)
     }
 
     /// Clear away the last game: its players, effects and sounds.
@@ -679,8 +688,12 @@ impl App {
     }
 
     /// End the game for the lobby, everyone here (and on PCs that joined)
-    /// staying together.
+    /// staying together; online, leave the match for the party.
     pub(crate) fn end_game(&mut self) {
+        if self.online.in_match() {
+            self.quit_match(false);
+            return;
+        }
         self.back_to_lobby();
     }
 
@@ -722,11 +735,21 @@ impl App {
         self.set_capture(false);
     }
 
-    /// Back to the menus because a LAN game went wrong.
+    /// Back to the menus because a LAN game (or an online match's) went
+    /// wrong: to the games on the network, or the party when online.
     pub(crate) fn drop_out(&mut self, why: String) {
-        self.net = Net::Offline;
-        self.back_to_lobby();
-        self.menu.show(Screen::SystemLink);
+        if self.online.in_match() {
+            self.quit_match(true);
+        } else {
+            self.net = Net::Offline;
+            self.back_to_lobby();
+            let online = self.online.signed_in();
+            self.menu.show(if online {
+                Screen::Live
+            } else {
+                Screen::SystemLink
+            });
+        }
         self.menu.notice = Some(why);
     }
 
@@ -806,7 +829,7 @@ impl App {
     pub(crate) fn overlay(&mut self, w: f32, h: f32) -> Vec<crate::HudBatch> {
         let (font, white) = (self.scene.hud_font, self.scene.hud_white);
         let mut hb = crate::HudBuilder::new(w, h);
-        if let Some(l) = &self.loading {
+        if let Some(l) = self.loading.as_ref().filter(|l| l.shown()) {
             let s = h / 480.0;
             let black = [0.0, 0.0, 0.0, 1.0];
             hb.quad(

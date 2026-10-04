@@ -988,6 +988,14 @@ struct Loading {
     then: Then,
 }
 
+impl Loading {
+    /// The loading screen shows (not for an online match's map, loaded
+    /// behind its pregame lobby).
+    fn shown(&self) -> bool {
+        !matches!(self.then, Then::Match)
+    }
+}
+
 /// What to do once a map has loaded.
 enum Then {
     Play,
@@ -996,6 +1004,8 @@ enum Then {
     Join(h2net::LanGame),
     /// Join the game the host we're with started.
     Rejoin,
+    /// Wait for an online match's game to start.
+    Match,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1267,7 +1277,9 @@ impl App {
         self.lan_games = self.browser.poll().to_vec();
         self.menu_time += dt;
         if self.mode == Mode::Menu || self.loading.is_some() {
-            if self.loading.is_none() {
+            // An online match's host lets PCs into its lobby while its map
+            // loads.
+            if self.loading.is_none() || self.hosting_match() {
                 self.update_lobby_net();
             } else {
                 // Other PCs keep hearing from us while a map loads; what
@@ -2072,7 +2084,7 @@ impl App {
         let Some(g) = &self.gpu else { return };
         let (w, h) = g.size();
         let overlay = self.overlay(w, h);
-        if self.loading.is_some() {
+        if self.loading.as_ref().is_some_and(Loading::shown) {
             let frame = Frame::overlay([0, 0, w as u32, h as u32], &overlay);
             if let Some(g) = &mut self.gpu {
                 g.render(&[frame]);

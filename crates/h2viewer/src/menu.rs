@@ -41,6 +41,8 @@ pub enum Screen {
     Playlists,
     /// The party searching a playlist.
     Matchmaking,
+    /// A match's lobby before its game, while everyone's map loads.
+    Pregame,
 }
 
 /// A multiplayer map in the maps folder.
@@ -432,6 +434,8 @@ enum Row {
     SearchStatus,
     SearchDetail,
     Cancel,
+    /// How soon a match's game starts.
+    Starting,
 }
 
 /// The main menu. The campaign is left off: multiplayer only.
@@ -455,7 +459,8 @@ impl Row {
             | Row::Connecting
             | Row::Nothing
             | Row::SearchStatus
-            | Row::SearchDetail => false,
+            | Row::SearchDetail
+            | Row::Starting => false,
             // The party leader's choices.
             Row::Matchmaking | Row::Quickmatch | Row::CustomGame | Row::Privacy | Row::Cancel => {
                 ctx.online.is_some_and(|o| o.leads())
@@ -653,6 +658,7 @@ impl Menu {
             Screen::Player => "PLAYER",
             Screen::Playlists => "PLAYLISTS",
             Screen::Matchmaking => "MATCHMAKING",
+            Screen::Pregame => "PREGAME LOBBY",
         }
     }
 
@@ -724,6 +730,13 @@ impl Menu {
                 rows.push(Row::Cancel);
                 rows
             }
+            Screen::Pregame => vec![
+                Row::GameType,
+                Row::Map,
+                Row::Score,
+                Row::GameOptions,
+                Row::Starting,
+            ],
         }
     }
 
@@ -890,9 +903,12 @@ impl Menu {
             Row::Searching => ("SEARCHING FOR GAMES...".into(), None),
             Row::Waiting => ("WAITING FOR THE HOST TO START".into(), None),
             Row::Resume => ("RESUME".into(), None),
-            Row::EndGame if ctx.joined => ("LEAVE GAME".into(), None),
+            Row::EndGame if ctx.joined || in_match(ctx) => ("LEAVE GAME".into(), None),
             Row::EndGame => ("END GAME".into(), None),
-            Row::Continue => ("CONTINUE".into(), None),
+            Row::Continue => match ctx.online.and_then(|o| o.returning) {
+                Some(left) => (format!("RETURNING TO PARTY IN {}", left.ceil()), None),
+                None => ("CONTINUE".into(), None),
+            },
             Row::Online => ("ONLINE".into(), None),
             Row::Connecting if ctx.online.is_some_and(|o| o.waking) => {
                 ("WAKING UP THE SERVER (UP TO A MINUTE)...".into(), None)
@@ -915,7 +931,8 @@ impl Menu {
             | Row::Nothing
             | Row::Playlist(_)
             | Row::SearchStatus
-            | Row::SearchDetail => match ctx.online {
+            | Row::SearchDetail
+            | Row::Starting => match ctx.online {
                 Some(o) => self.online_label(row, o),
                 None => (String::new(), None),
             },
@@ -961,6 +978,7 @@ impl Menu {
                 (headline, Some(clock_text(seconds)))
             }
             Row::SearchDetail => (o.search_status().1.unwrap_or_default(), None),
+            Row::Starting => o.pregame_status(),
             _ => (String::new(), None),
         }
     }
@@ -1008,6 +1026,10 @@ impl Menu {
                 Input::Back => self.back(ctx),
                 _ => Action::None,
             };
+        }
+        if self.screen == Screen::Pregame {
+            // The match's game starts by itself.
+            return Action::None;
         }
         let rows = self.rows(ctx);
         self.settle(&rows, ctx);
@@ -1261,7 +1283,11 @@ impl Menu {
                 self.back_to(Screen::Live, Row::Matchmaking, ctx);
                 Action::CancelSearch
             }
-            Row::Connecting | Row::Nothing | Row::SearchStatus | Row::SearchDetail => Action::None,
+            Row::Connecting
+            | Row::Nothing
+            | Row::SearchStatus
+            | Row::SearchDetail
+            | Row::Starting => Action::None,
         }
     }
 
@@ -1319,7 +1345,8 @@ impl Menu {
     /// lobby when joined, once the host is back there.
     fn end_game(&mut self, ctx: &Context) -> Action {
         self.sound = Some(Sound::Forward);
-        match (ctx.joined, self.screen) {
+        // Online, everyone leaves the match for their party.
+        match (ctx.joined && !in_match(ctx), self.screen) {
             (true, Screen::PostGame) => {
                 self.notice = Some("WAITING FOR THE HOST".into());
                 Action::None
@@ -1454,6 +1481,7 @@ impl Menu {
                     Action::None
                 }
             }
+            Screen::Pregame => Action::None,
         }
     }
 
@@ -1570,7 +1598,8 @@ impl Menu {
             | Screen::Players
             | Screen::Player
             | Screen::Playlists
-            | Screen::Matchmaking => {
+            | Screen::Matchmaking
+            | Screen::Pregame => {
                 hb.quad(
                     white,
                     [0.0, 0.0, w, h],
@@ -1625,7 +1654,8 @@ impl Menu {
         let first = shown.start;
         for (k, &row) in rows.iter().enumerate().take(shown.end).skip(first) {
             let rect = self.row_rect(k - first);
-            let fixed = self.screen == Screen::Lobby && ctx.host_lobby.is_some();
+            let fixed = self.screen == Screen::Pregame
+                || self.screen == Screen::Lobby && ctx.host_lobby.is_some();
             let selectable = row.selectable(ctx);
             let selected = k == cursor && selectable && !fixed;
             let (label, value) = self.label(row, ctx);
@@ -1633,7 +1663,7 @@ impl Menu {
                 (HIGHLIGHT, BRIGHT)
             } else if selectable {
                 (PANEL, TEXT)
-            } else if row == Row::SearchStatus {
+            } else if matches!(row, Row::SearchStatus | Row::Starting) {
                 ([0.0; 4], BRIGHT)
             } else {
                 ([0.0; 4], DIM)
@@ -1676,6 +1706,10 @@ impl Menu {
             let top = self.draw_map(hb, font, &f, ctx, white);
             self.draw_players(hb, font, white, &f, ctx, top);
         }
+        if self.screen == Screen::Pregame {
+            let top = self.draw_map(hb, font, &f, ctx, white);
+            draw_roster(hb, font, white, &f, ctx, top);
+        }
         if self.screen == Screen::Profile {
             self.draw_profile(hb, font, white, &f);
         }
@@ -1715,6 +1749,7 @@ impl Menu {
             _ if self.editing => "TYPE A GAMERTAG, THEN PRESS ENTER",
             Screen::Main => "ENTER OR A: SELECT",
             Screen::PostGame => "ENTER OR A: CONTINUE",
+            Screen::Pregame => "",
             Screen::Live if ctx.online.is_some_and(|o| o.live.is_some()) => {
                 "ENTER OR A: SELECT   ESC OR B: SIGN OUT"
             }
@@ -1738,6 +1773,10 @@ impl Menu {
             }
             Screen::Playlists => Some("CHOOSE A PLAYLIST".into()),
             Screen::Matchmaking => Some(o?.search_name()),
+            Screen::Pregame => {
+                let o = o?;
+                Some(o.playlist_name(o.game?.playlist))
+            }
             _ => None,
         }
     }
@@ -1908,6 +1947,49 @@ impl Menu {
                 DIM,
             );
         }
+    }
+}
+
+/// In an online match.
+fn in_match(ctx: &Context) -> bool {
+    ctx.online.is_some_and(|o| o.game.is_some())
+}
+
+/// The lowest the pregame's player list reaches (screen units), above the
+/// notice line.
+const ROSTER_BOTTOM: f32 = 392.0;
+
+/// Everyone in an online match, beside its pregame lobby: their team's
+/// colour (or their own), emblem, gamertag and rank, large.
+fn draw_roster(hb: &mut HudBuilder, font: usize, white: usize, f: &Frame, ctx: &Context, top: f32) {
+    let s = f.s;
+    let teams = ctx.host_lobby.is_some_and(|l| l.teams);
+    let (x, mut y) = (PANEL_X, top);
+    let n = ctx.seats.len().max(1) as f32;
+    let step = ((ROSTER_BOTTOM - top - 30.0) / n).clamp(10.0, 22.0);
+    let back = f.rect([x - 8.0, y - 8.0, x + PANEL_W + 8.0, y + 30.0 + step * n]);
+    hb.quad(white, back, [0.0; 4], PANEL, hud_mode::PLAIN, 0.0);
+    hb.text_left(font, f.at(x, y), 11.0 * s, "PLAYERS", BRIGHT);
+    y += 26.0;
+    for seat in ctx.seats {
+        let c = if teams {
+            crate::local::TEAM_COLORS[seat.team.min(1) as usize]
+        } else {
+            crate::local::armor_colors(seat.look)[0]
+        };
+        let h = step - 4.0;
+        let bar = f.rect([x, y, x + 3.0, y + h]);
+        hb.quad(white, bar, [0.0; 4], gamma_color(c), hud_mode::PLAIN, 0.0);
+        let badge = f.rect([x + 6.0, y, x + 6.0 + h, y + h]);
+        crate::emblem::draw(hb, badge, seat.look.emblem);
+        let size = (h - 4.0).min(10.0);
+        let at = f.at(x + 12.0 + h, y + (h - size) * 0.5);
+        hb.text_left(font, at, size * s, &seat.name, TEXT);
+        if let Some(level) = seat.level {
+            let icon = f.rect([x + PANEL_W - h - 2.0, y - 1.0, x + PANEL_W, y + h + 1.0]);
+            rank::draw(hb, icon, level);
+        }
+        y += step;
     }
 }
 
@@ -2262,7 +2344,8 @@ mod tests {
     use super::*;
     use h2live::client::View;
     use h2net::live::{
-        Activity, OnlinePlayer, PartyInfo, PartyMember, PlaylistInfo, SearchStatus, Stage, Welcome,
+        Activity, MatchInfo, OnlinePlayer, PartyInfo, PartyMember, PlaylistInfo, SearchStatus,
+        Stage, Welcome,
     };
 
     fn ctx<'a>(maps: &'a [MapChoice], lan: &'a [LanGame]) -> Context<'a> {
@@ -2663,6 +2746,9 @@ mod tests {
             waking: false,
             text: Box::leak(Box::default()),
             search: None,
+            game: None,
+            countdown: None,
+            returning: None,
         }
     }
 
@@ -3020,5 +3106,112 @@ mod tests {
         assert_eq!(draw(Screen::Players), 4);
         // Playlists: our level in the ranked one.
         assert_eq!(draw(Screen::Playlists), 1);
+    }
+
+    #[test]
+    fn a_match_waits_in_its_pregame_lobby_and_returns_to_the_party() {
+        let maps = maps();
+        let view = signed_in(1, &[(1, "JOHN")]);
+        let info = MatchInfo {
+            id: 7,
+            playlist: 2,
+            ranked: true,
+            map: "lockout".into(),
+            hash: 0,
+            game_type: GameType::TeamSlayer,
+            preset: "DEFAULT".into(),
+            score: 25,
+            time_limit: 600,
+            bots: 0,
+            host: 1,
+            countdown: 20,
+            players: Vec::new(),
+        };
+        let lobby = Lobby {
+            map: "lockout".into(),
+            game_type: "TEAM SLAYER".into(),
+            score: "25".into(),
+            options: "DEFAULT, 10 MIN".into(),
+            teams: true,
+            players: Vec::new(),
+            bots: 0,
+        };
+        let seats: Vec<SeatInfo> = ["JOHN", "SARGE", "KEYES", "JOHNSON"]
+            .iter()
+            .zip(1..)
+            .map(|(name, level)| SeatInfo {
+                name: name.to_string(),
+                how: "ONLINE",
+                team: level % 2,
+                look: Look::default(),
+                level: Some(level),
+            })
+            .collect();
+        let o = OnlineView {
+            game: Some(&info),
+            countdown: Some(14.2),
+            ..online(Some(&view))
+        };
+        let c = Context {
+            online: Some(&o),
+            host_lobby: Some(&lobby),
+            seats: &seats,
+            ..ctx(&maps, &[])
+        };
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Pregame);
+        assert_eq!(m.header(&c).as_deref(), Some("DOUBLE TEAM"));
+        assert_eq!(m.rows(&c)[4], Row::Starting);
+        let label = |row| m.label(row, &c);
+        assert_eq!(label(Row::GameType).1.as_deref(), Some("TEAM SLAYER"));
+        assert_eq!(
+            label(Row::GameOptions).1.as_deref(),
+            Some("DEFAULT, 10 MIN")
+        );
+        assert_eq!(
+            label(Row::Starting),
+            ("GAME ABOUT TO START!".into(), Some("0:15".into()))
+        );
+        // Nothing to choose, and no way back: the game starts by itself.
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.input(Input::Back, &c), Action::None);
+        assert_eq!(m.screen, Screen::Pregame);
+        // Everyone's rank, from the large icons.
+        let mut hb = HudBuilder::new(1280.0, 720.0);
+        m.draw(&mut hb, 0, 1, 1280.0, 720.0, &c);
+        let large: usize = hb
+            .finish()
+            .iter()
+            .filter(|b| b.texture == crate::gpu::RANK_TEXTURES + 1)
+            .map(|b| b.vertices.len() / 6)
+            .sum();
+        assert_eq!(large, 4);
+        // Once the service says go, the wait is for everyone's map.
+        let going = OnlineView {
+            countdown: None,
+            ..online(Some(&view))
+        };
+        let c = Context {
+            online: Some(&going),
+            ..c
+        };
+        let waiting = m.label(Row::Starting, &c).0;
+        assert_eq!(waiting, "WAITING FOR EVERYONE TO LOAD THE MAP...");
+        // After the game, back to the party by itself, or at once; joined
+        // too, and leaving mid-game says so.
+        let over = OnlineView {
+            game: Some(&info),
+            returning: Some(11.3),
+            ..online(Some(&view))
+        };
+        let c = Context {
+            online: Some(&over),
+            joined: true,
+            ..ctx(&maps, &[])
+        };
+        m.show(Screen::PostGame);
+        assert_eq!(m.label(Row::Continue, &c).0, "RETURNING TO PARTY IN 12");
+        assert_eq!(m.input(Input::Select, &c), Action::EndGame);
+        assert_eq!(m.label(Row::EndGame, &c).0, "LEAVE GAME");
     }
 }

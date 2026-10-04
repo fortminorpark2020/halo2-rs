@@ -87,16 +87,22 @@ impl App {
             }
             return;
         }
-        let in_lobby = matches!(self.menu.screen, Screen::Lobby | Screen::Options);
-        if !in_lobby {
-            // Leaving the lobby closes it.
-            self.net = Net::Offline;
-            return;
-        }
-        if matches!(self.net, Net::Offline) && self.can_host {
-            self.start_hosting();
-        }
-        let lobby = self.lobby_info();
+        // An online match's host keeps its lobby up through the pregame.
+        let lobby = match self.match_lobby().filter(|_| self.hosting_match()) {
+            Some(lobby) => lobby,
+            None => {
+                let in_lobby = matches!(self.menu.screen, Screen::Lobby | Screen::Options);
+                if !in_lobby {
+                    // Leaving the lobby closes it.
+                    self.net = Net::Offline;
+                    return;
+                }
+                if matches!(self.net, Net::Offline) && self.can_host {
+                    self.start_hosting();
+                }
+                self.lobby_info()
+            }
+        };
         let Net::Hosting(host) = &mut self.net else {
             return;
         };
@@ -144,6 +150,9 @@ impl App {
 
     /// Everyone in the lobby, as the menus list them.
     pub(crate) fn lobby_seats(&self) -> Vec<SeatInfo> {
+        if let Some(seats) = self.match_seats() {
+            return seats;
+        }
         if let Net::Joined {
             lobby: Some(lobby), ..
         } = &self.net
@@ -242,11 +251,14 @@ impl App {
                     self.bots.push(bot_for(player));
                     self.announce(&format!("{} LEFT", self.game.name(player)));
                 }
-                HostEvent::Left { players, .. } => {
+                HostEvent::Left {
+                    computer, players, ..
+                } => {
                     for &p in &players {
                         self.announce(&format!("{} LEFT", self.game.name(p)));
                     }
                     self.bots.extend(players.into_iter().map(bot_for));
+                    self.match_left(&computer);
                 }
             }
         }
@@ -335,8 +347,12 @@ impl App {
         for s in status {
             match s {
                 ClientEvent::Welcomed { computer, players } => {
+                    // Online, the host is known by its gamertag.
+                    let online = self.online.in_match();
                     if let Net::Joined { computer: name, .. } = &mut self.net {
-                        *name = computer;
+                        if !online {
+                            *name = computer;
+                        }
                     }
                     self.welcome = Some(players);
                 }
@@ -347,6 +363,11 @@ impl App {
                 }
                 ClientEvent::Lost(why) => {
                     println!("lan: lost the host: {why}");
+                    // Online, the host's link goes with the match.
+                    if self.match_game_over() {
+                        self.net = Net::Offline;
+                        return false;
+                    }
                     self.drop_out("LOST CONNECTION TO THE HOST".into());
                     return false;
                 }
@@ -415,8 +436,13 @@ impl App {
         }
     }
 
-    /// Leave the PC we joined, for the list of games on the network.
+    /// Leave the PC we joined, for the list of games on the network (or
+    /// the party, online).
     pub(crate) fn leave_game(&mut self) {
+        if self.online.in_match() {
+            self.quit_match(false);
+            return;
+        }
         self.net = Net::Offline;
         self.back_to_lobby();
         self.menu.show(Screen::SystemLink);
