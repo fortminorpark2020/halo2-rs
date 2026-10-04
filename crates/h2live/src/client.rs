@@ -2,14 +2,26 @@
 //! answering pings, and keeping what the server last said (who we are, the
 //! playlists, our party, who's online). The game and the tests both sign
 //! in through this.
+//!
+//! In a match the server says what to do, and the game does it: load the
+//! map (`LiveEvent::Match`); host it if asked (`HostMatch`, answered with
+//! `ToServer::Hosting`); open a relay leg for each link it's given
+//! (`Link`, then `LiveClient::open_leg`), which once joined is the
+//! connection to the host (for `h2net::Client::over`) or to a joining PC
+//! (for `h2net::Host::add_connection`); start (`Go`); and at the end send
+//! how it went (`ToServer::Result`, see `results`), or that it left
+//! (`ToServer::LeftMatch`). Then the levels come (`MatchOver`).
 
+use crate::levels::{self, Finish};
 use crate::store;
 use ed25519_dalek::{Signer, SigningKey};
 use h2net::live::{
-    self, Login, OnlinePlayer, PartyInfo, PlaylistInfo, SearchStatus, ToPc, ToServer, Welcome,
+    self, LinkInfo, Login, MatchInfo, MatchOver, OnlinePlayer, PartyInfo, PlayerResult,
+    PlaylistInfo, SearchStatus, ToPc, ToServer, Welcome,
 };
 use h2net::Connection;
 use h2sim::game::{clean_name, Look};
+use h2sim::Game;
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -46,6 +58,8 @@ pub struct View {
     /// Parties we're invited to, and who asked us.
     pub invites: Vec<(u64, String)>,
     pub status: Option<SearchStatus>,
+    /// The match we're in, from MATCH until MATCH_OVER.
+    pub game: Option<MatchInfo>,
     /// The latest notices, oldest first.
     pub notices: Vec<String>,
     /// The latest round trip to the server, in milliseconds.
@@ -67,8 +81,94 @@ pub enum LiveEvent {
         from: String,
     },
     Notice(String),
-    /// Anything else the server sent (matches, say).
-    Other(ToPc),
+    /// A match is ready: load its map. It comes again, with another host,
+    /// if the one asked didn't start hosting.
+    Match(MatchInfo),
+    /// Host this match: open `h2net::Host::online` on its map, then say so
+    /// (`ToServer::Hosting`).
+    HostMatch(u64),
+    /// Open a relay leg (`LiveClient::open_leg`): to the host of a match
+    /// or custom game, or as its host to a PC joining it.
+    Link(LinkInfo),
+    /// Start this match's game.
+    Go(u64),
+    /// A match is over, and what it did to our levels. (The new stat card
+    /// on it is kept already.)
+    MatchOver(MatchOver),
+    /// Our party's leader opened a custom game on `map` (or moved it
+    /// there): the leader hosts it, and everyone else is given a link.
+    CustomOpen {
+        party: u64,
+        leader: u64,
+        map: String,
+    },
+}
+
+/// One end of a game relayed through the server: a connection to the
+/// server's `/link`, which says which link it's for (LINK_HELLO) and waits
+/// for the server to join it to the other end.
+pub struct RelayLeg {
+    /// The link, as the server gave it out (LINK).
+    pub link: LinkInfo,
+    conn: Option<Connection>,
+}
+
+impl RelayLeg {
+    /// The connection to the other end, once the server joined the two
+    /// legs (LINKED): what comes over it is the other end's. An error if
+    /// the server gave up on the leg (no other end came) or the connection
+    /// was taken already.
+    pub fn poll(&mut self) -> Result<Option<Connection>, String> {
+        let conn = self.conn.as_mut().ok_or("taken already")?;
+        let mut messages = conn.receive()?;
+        let Some((kind, body)) = messages.first() else {
+            return Ok(None);
+        };
+        if ToPc::read(*kind, body) != Ok(ToPc::Linked) {
+            return Err("not a relay leg".into());
+        }
+        messages.remove(0);
+        let mut conn = self.conn.take().ok_or("taken already")?;
+        // What came after LINKED is the game's.
+        conn.put_back(messages);
+        Ok(Some(conn))
+    }
+}
+
+/// How a finished game ended, as a RESULT says: for each PC's account, the
+/// Spartan of the person at it (`players`: account and player index), and
+/// whether that PC quit (`left`). Places come from the game alone: in team
+/// games the winning team's players first, then by team score; otherwise
+/// by score, bots too. (The server puts those who quit last in
+/// free-for-all games itself.)
+pub fn results(game: &Game, players: &[(u64, usize)], left: &[u64]) -> Vec<PlayerResult> {
+    let finishes: Vec<Finish> = game
+        .players
+        .iter()
+        .map(|p| Finish {
+            team: p.team,
+            score: p.score,
+            left: false,
+        })
+        .collect();
+    let teams = game.rules.game_type.teams();
+    let places = levels::places(&finishes, teams, game.winning_team);
+    let count = |n: u32| n.min(u32::from(u16::MAX)) as u16;
+    players
+        .iter()
+        .filter_map(|&(account, i)| {
+            let p = game.players.get(i)?;
+            Some(PlayerResult {
+                account,
+                team: p.team,
+                place: places[i],
+                score: p.score,
+                kills: count(p.kills),
+                deaths: count(p.deaths),
+                left: left.contains(&account),
+            })
+        })
+        .collect()
 }
 
 pub struct LiveClient {
@@ -147,6 +247,31 @@ impl LiveClient {
     /// Our account, once signed in.
     pub fn account(&self) -> Option<u64> {
         self.view.welcome.as_ref().map(|w| w.account)
+    }
+
+    /// Open a relay leg for `link` (from LINK) over `conn`, a new
+    /// connection to the server's `/link`.
+    pub fn open_leg(&self, link: LinkInfo, mut conn: Connection) -> RelayLeg {
+        let hello = ToServer::LinkHello {
+            token: link.token,
+            account: self.account().unwrap_or(0),
+        };
+        hello.send(&mut conn);
+        // Errors surface when polling the leg.
+        let _ = conn.flush();
+        RelayLeg {
+            link,
+            conn: Some(conn),
+        }
+    }
+
+    /// Open a relay leg as `open_leg` does, over a connection `dial` makes.
+    pub fn dial_leg(
+        &self,
+        link: LinkInfo,
+        dial: impl FnOnce() -> Result<Connection, String>,
+    ) -> Result<RelayLeg, String> {
+        Ok(self.open_leg(link, dial()?))
     }
 
     /// Ask the server for something.
@@ -253,11 +378,25 @@ impl LiveClient {
                     view.round_trip = Some(((now - sent) * 1000.0).round() as u32);
                 }
             }
-            ToPc::MatchOver(over) => {
-                self.keep_card(&over.card);
-                events.push(LiveEvent::Other(ToPc::MatchOver(over)));
+            ToPc::Match(info) => {
+                view.game = Some(info.clone());
+                events.push(LiveEvent::Match(info));
             }
-            other => events.push(LiveEvent::Other(other)),
+            ToPc::HostMatch(id) => events.push(LiveEvent::HostMatch(id)),
+            ToPc::Link(link) => events.push(LiveEvent::Link(link)),
+            ToPc::Go(id) => events.push(LiveEvent::Go(id)),
+            ToPc::MatchOver(over) => {
+                if view.game.as_ref().is_some_and(|g| g.id == over.id) {
+                    view.game = None;
+                }
+                self.keep_card(&over.card);
+                events.push(LiveEvent::MatchOver(over));
+            }
+            ToPc::CustomOpen { party, leader, map } => {
+                events.push(LiveEvent::CustomOpen { party, leader, map });
+            }
+            // Only relay legs are told they're linked.
+            ToPc::Linked => {}
         }
     }
 
