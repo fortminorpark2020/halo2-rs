@@ -17,6 +17,11 @@ const CUTSCENE_TITLE_SIZE: usize = 0x24;
 /// The string lists of the chapter titles and of the objectives.
 const SCNR_CHAPTER_TITLE_TEXT: usize = 0x200;
 const SCNR_OBJECTIVES: usize = 0x3B8;
+/// The mission dialogue (`mdlg`) tags: the lines scripts make actors say.
+const SCNR_MISSION_DIALOGUE: usize = 0x3B0;
+const MISSION_DIALOGUE_SIZE: usize = 0x8;
+const DIALOGUE_LINE_SIZE: usize = 0x10;
+const DIALOGUE_VARIANT_SIZE: usize = 0x10;
 const DEVICE_GROUP_SIZE: usize = 0x28;
 const SCNR_NETGAME_EQUIPMENT: usize = 0x120;
 const NETGAME_FLAG_SIZE: usize = 0x20;
@@ -542,6 +547,67 @@ pub fn text_lists(set: &mut MapSet) -> Result<(DatumIndex, DatumIndex)> {
         DatumIndex(u32_at(&data, SCNR_CHAPTER_TITLE_TEXT + 4)),
         DatumIndex(u32_at(&data, SCNR_OBJECTIVES + 4)),
     ))
+}
+
+/// A line of mission dialogue scripts make actors say, recorded once per
+/// character that can say it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DialogueLine {
+    pub name: String,
+    pub variants: Vec<DialogueVariant>,
+}
+
+/// One character's recording of a line: the character's three-letter
+/// designation (its character tag's variant designator) and the sound.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DialogueVariant {
+    pub designation: String,
+    pub sound: DatumIndex,
+}
+
+/// The lines of every mission dialogue tag the scenario uses.
+pub fn mission_dialogue(set: &mut MapSet) -> Result<Vec<DialogueLine>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let tags = map.read_block(meta, &data, SCNR_MISSION_DIALOGUE, MISSION_DIALOGUE_SIZE)?;
+    let mut lines = Vec::new();
+    for t in tags.as_chunks::<MISSION_DIALOGUE_SIZE>().0 {
+        let tag = DatumIndex(u32_at(t, 4));
+        if tag == DatumIndex::NONE {
+            continue;
+        }
+        let (src, _, mdlg) = set.tag_data(tag)?;
+        let file = set.get(src);
+        let region = file.meta_region();
+        let block = file.read_block(region, &mdlg, 0, DIALOGUE_LINE_SIZE)?;
+        for l in block.as_chunks::<DIALOGUE_LINE_SIZE>().0 {
+            let variants = file.read_block(region, l, 4, DIALOGUE_VARIANT_SIZE)?;
+            let variants = variants
+                .as_chunks::<DIALOGUE_VARIANT_SIZE>()
+                .0
+                .iter()
+                .map(|v| (u32_at(v, 0), DatumIndex(u32_at(v, 8))))
+                .collect::<Vec<_>>();
+            lines.push((u32_at(l, 0), variants));
+        }
+    }
+    // Names are string ids, which only the scenario's map resolves.
+    let map = &set.map;
+    let sid = |id| map.string_id(id).unwrap_or_default().to_string();
+    Ok(lines
+        .into_iter()
+        .map(|(name, variants)| DialogueLine {
+            name: sid(name),
+            variants: variants
+                .into_iter()
+                .map(|(d, sound)| DialogueVariant {
+                    designation: sid(d),
+                    sound,
+                })
+                .collect(),
+        })
+        .collect())
 }
 
 /// What kind of switch a control is.

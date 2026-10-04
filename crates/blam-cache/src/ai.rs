@@ -22,6 +22,9 @@ const CHARACTER_PALETTE_SIZE: usize = 0x8;
 
 const CHAR_PARENT: usize = 0x4;
 const CHAR_UNIT: usize = 0xC;
+/// The character's variants, each with the three-letter designator its
+/// mission dialogue is recorded under.
+const CHAR_VARIANTS: usize = 0x2C;
 const CHAR_GENERAL: usize = 0x34;
 const CHAR_VITALITY: usize = 0x3C;
 const CHAR_PERCEPTION: usize = 0x4C;
@@ -29,6 +32,7 @@ const CHAR_CHARGE: usize = 0x7C;
 const CHAR_WEAPONS: usize = 0xCC;
 const CHAR_GRENADES: usize = 0xDC;
 const GENERAL_SIZE: usize = 0xC;
+const VARIANT_SIZE: usize = 0xC;
 const VITALITY_SIZE: usize = 0x70;
 const PERCEPTION_SIZE: usize = 0x34;
 const CHARGE_SIZE: usize = 0x40;
@@ -180,6 +184,9 @@ pub struct Character {
     /// How close it goes to melee, and how likely it is to (per second).
     pub melee_range: f32,
     pub melee_chance: f32,
+    /// The designators of the voices it speaks mission dialogue in
+    /// ("jon", "nrl"...).
+    pub voices: Vec<String>,
 }
 
 /// The character's type, from its general properties.
@@ -475,6 +482,7 @@ pub fn unit_seat_mappings(set: &mut MapSet) -> Result<Vec<(DatumIndex, u32)>> {
 struct CharacterBlocks {
     parent: Option<DatumIndex>,
     unit: Option<DatumIndex>,
+    variants: Vec<u8>,
     general: Vec<u8>,
     vitality: Vec<u8>,
     perception: Vec<u8>,
@@ -504,6 +512,7 @@ fn character_blocks(set: &mut MapSet, tag: DatumIndex) -> Result<(String, Charac
         CharacterBlocks {
             parent: tag_ref(&d, CHAR_PARENT),
             unit: tag_ref(&d, CHAR_UNIT),
+            variants: file.read_block(region, &d, CHAR_VARIANTS, VARIANT_SIZE)?,
             general: file.read_block(region, &d, CHAR_GENERAL, GENERAL_SIZE)?,
             vitality: file.read_block(region, &d, CHAR_VITALITY, VITALITY_SIZE)?,
             perception: file.read_block(region, &d, CHAR_PERCEPTION, PERCEPTION_SIZE)?,
@@ -537,6 +546,7 @@ pub fn read_character(set: &mut MapSet, tag: DatumIndex) -> Result<Character> {
         if own.weapons.is_empty() {
             own.firing = up.firing.clone();
         }
+        fill(&mut own.variants, up.variants);
         fill(&mut own.general, up.general);
         fill(&mut own.vitality, up.vitality);
         fill(&mut own.perception, up.perception);
@@ -599,5 +609,14 @@ pub fn read_character(set: &mut MapSet, tag: DatumIndex) -> Result<Character> {
         grenades,
         melee_range,
         melee_chance,
+        voices: own
+            .variants
+            .as_chunks::<VARIANT_SIZE>()
+            .0
+            .iter()
+            .filter_map(|v| set.map.string_id(u32_at(v, 8)))
+            .filter(|d| !d.is_empty())
+            .map(str::to_string)
+            .collect(),
     })
 }

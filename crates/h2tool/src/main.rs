@@ -50,6 +50,7 @@ fn main() -> ExitCode {
         Some("lightmap") if args.len() >= 2 => lightmap_dump(&args[1]),
         Some("objects") if args.len() >= 2 => objects(&args[1]),
         Some("squads") if args.len() >= 2 => squads(&args[1]),
+        Some("dialogue") if args.len() >= 2 => dialogue(&args[1]),
         Some("scripts") if args.len() >= 2 => scripts(&args[1]),
         Some("mission") if args.len() >= 2 => mission(&args[1]),
         Some("text") if args.len() >= 2 => text(&args[1], args.get(2).map(String::as_str)),
@@ -921,8 +922,8 @@ fn squads(path: &str) -> Res {
                     .map(|w| name(&set, w))
                     .unwrap_or_default();
                 println!(
-                    "character {i} {} ({:?}) unit {unit} weapon {weapon}",
-                    ch.name, ch.kind
+                    "character {i} {} ({:?}) unit {unit} weapon {weapon} voices {:?}",
+                    ch.name, ch.kind, ch.voices
                 );
                 println!("    {:?}", ch.vitality);
                 println!("    {:?}", ch.perception);
@@ -975,6 +976,59 @@ fn squads(path: &str) -> Res {
                 if l.asleep { " asleep" } else { "" },
                 if l.always { " always" } else { "" },
                 if l.hidden { " hidden" } else { "" },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn dialogue(path: &str) -> Res {
+    use blam_cache::{scenario, MapSet};
+    let mut set = MapSet::open(path)?;
+    for line in scenario::mission_dialogue(&mut set)? {
+        let variants: Vec<String> = line
+            .variants
+            .iter()
+            .map(|v| {
+                let sound = set
+                    .locate(v.sound)
+                    .map(|(_, t)| t.name)
+                    .unwrap_or_else(|| format!("{:08x}", v.sound.0));
+                format!("{} {sound}", v.designation)
+            })
+            .collect();
+        println!("{}: {}", line.name, variants.join(", "));
+    }
+    let triggers = blam_cache::orders::ai_triggers(&mut set)?;
+    let scenes = blam_cache::orders::mission_scenes(&mut set)?;
+    let sid = |id: u32| set.map.string_id(id).unwrap_or("?").to_string();
+    for sc in scenes {
+        let conditions: Vec<String> = sc
+            .conditions
+            .iter()
+            .map(|(combine, refs)| {
+                let names: Vec<String> = refs
+                    .iter()
+                    .map(|r| {
+                        let n = triggers.get(r.trigger as usize).map_or("?", |t| &t.name);
+                        format!("{}{n}", if r.not { "not " } else { "" })
+                    })
+                    .collect();
+                format!("{combine:?}({})", names.join(", "))
+            })
+            .collect();
+        println!(
+            "scene {}{} when {}",
+            sid(sc.name),
+            if sc.repeats { " (repeats)" } else { "" },
+            conditions.join(" and ")
+        );
+        for r in &sc.roles {
+            println!(
+                "    role {} group {} voices {:?}",
+                sid(r.name),
+                r.group,
+                r.voices
             );
         }
     }

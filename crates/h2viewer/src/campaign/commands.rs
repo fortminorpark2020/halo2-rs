@@ -41,8 +41,11 @@ const STATUS_NAMES: [&str; 10] = [
 
 #[derive(Debug, Default)]
 pub(super) struct Commands {
-    /// The actor the script running now commands.
+    /// The actor the script running now commands, and the one it runs
+    /// for (the same, unless a scene's script has switched to another
+    /// of its cast).
     pub current: Option<usize>,
+    pub runner: Option<usize>,
     /// Command scripts to start (actor, script, queued) and actors whose
     /// scripts to stop, once this tick's scripts have run.
     pub starts: Vec<(usize, usize, bool)>,
@@ -94,6 +97,11 @@ pub(super) struct Flying {
 }
 
 impl Commands {
+    /// Whether an actor is running a command script.
+    pub(super) fn commanding(&self, actor: usize) -> bool {
+        self.actors.contains_key(&actor)
+    }
+
     /// What a command script has a pilot do.
     pub(super) fn flying(&self, actor: usize) -> Flying {
         let c = self.actors.get(&actor);

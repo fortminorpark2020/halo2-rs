@@ -218,7 +218,7 @@ impl Ctx<'_> {
                 continue;
             };
             if let Some((combine, refs)) = &order.secondary_trigger {
-                let on = self.triggers_hold(vm, *combine, refs, s);
+                let on = self.triggers_hold(Some(&mut *vm), *combine, refs, s);
                 if on != so.secondary {
                     if let Some(x) = self.st.orders.squads.get_mut(&s) {
                         x.secondary = on;
@@ -229,7 +229,7 @@ impl Ctx<'_> {
             let ending = so.ending.or_else(|| {
                 let k = (0..order.endings.len()).find(|&k| {
                     let e = &order.endings[k];
-                    self.triggers_hold(vm, e.combine, &e.triggers, s)
+                    self.triggers_hold(Some(&mut *vm), e.combine, &e.triggers, s)
                 })?;
                 Some((k, 0.0))
             });
@@ -256,9 +256,12 @@ impl Ctx<'_> {
         }
     }
 
-    fn triggers_hold(
+    /// Whether a set of AI triggers holds for a squad. Without the script
+    /// machine (inside a script's call), triggers that ask a script don't
+    /// hold.
+    pub(super) fn triggers_hold(
         &mut self,
-        vm: &mut Vm,
+        mut vm: Option<&mut Vm>,
         combine: Combine,
         refs: &[TriggerRef],
         squad: usize,
@@ -268,13 +271,13 @@ impl Ctx<'_> {
         }
         let values: Vec<bool> = refs
             .iter()
-            .map(|r| self.trigger(vm, r.trigger, squad) != r.not)
+            .map(|r| self.trigger(vm.as_deref_mut(), r.trigger, squad) != r.not)
             .collect();
         combine.holds(values.into_iter())
     }
 
     /// Whether an AI trigger holds, for a squad.
-    pub(super) fn trigger(&mut self, vm: &mut Vm, trigger: u16, squad: usize) -> bool {
+    pub(super) fn trigger(&mut self, mut vm: Option<&mut Vm>, trigger: u16, squad: usize) -> bool {
         let scene = self.scene;
         let Some(t) = scene.ai.triggers.get(trigger as usize) else {
             return false;
@@ -289,7 +292,7 @@ impl Ctx<'_> {
         let values: Vec<bool> = t
             .conditions
             .iter()
-            .map(|c| self.condition(vm, c, squad) != c.not)
+            .map(|c| self.condition(vm.as_deref_mut(), c, squad) != c.not)
             .collect();
         let on = !values.is_empty() && t.combine.holds(values.into_iter());
         if on && t.latch {
@@ -310,7 +313,7 @@ impl Ctx<'_> {
         }
     }
 
-    fn condition(&mut self, vm: &mut Vm, c: &Condition, squad: usize) -> bool {
+    fn condition(&mut self, vm: Option<&mut Vm>, c: &Condition, squad: usize) -> bool {
         let who = self.about(c, squad);
         let actors: Vec<usize> = (0..self.game.players.len())
             .filter(|&i| {
@@ -354,7 +357,10 @@ impl Ctx<'_> {
             }
             Rule::ScriptTrue | Rule::ScriptFalse => {
                 let k = self.static_script(&c.script);
-                let v = k.is_some_and(|k| vm.call(&self.scene.ai.scripts, k, self).truthy());
+                let v = match (k, vm) {
+                    (Some(k), Some(vm)) => vm.call(&self.scene.ai.scripts, k, self).truthy(),
+                    _ => false,
+                };
                 v == (c.rule == Rule::ScriptTrue)
             }
             Rule::PlayerInVolume => in_volume(false),

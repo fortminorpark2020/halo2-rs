@@ -24,6 +24,10 @@ const SCNR_SCRIPTING_DATA: usize = 0x1D8;
 const SCRIPTING_DATA_SIZE: usize = 0x80;
 const POINT_SET_SIZE: usize = 0x30;
 const POINT_SIZE: usize = 0x3C;
+const SCNR_MISSION_SCENES: usize = 0x170;
+const SCENE_SIZE: usize = 0x18;
+const SCENE_ROLE_SIZE: usize = 0x10;
+const ROLE_VARIANT_SIZE: usize = 0x4;
 
 /// A named point scripts send actors to (`cs_go_to`) or look at.
 #[derive(Debug, Clone, PartialEq)]
@@ -301,6 +305,71 @@ fn area_refs(b: &[u8]) -> Vec<(u16, u16)> {
         .iter()
         .filter_map(|a| Some((index(a, 4)?, index(a, 6)?)))
         .collect()
+}
+
+/// A little scene scripts stage (`ai_scene`): actors who fit its roles
+/// act it out with a command script (Marines chatting, Johnson greeting
+/// the player), once its triggers hold.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MissionScene {
+    /// Its name, a string id scripts name it by.
+    pub name: u32,
+    /// It can play more than once.
+    pub repeats: bool,
+    /// The trigger sets that must all hold for it to start.
+    pub conditions: Vec<(Combine, Vec<TriggerRef>)>,
+    pub roles: Vec<SceneRole>,
+}
+
+/// A part in a scene: its name (a string id the command script switches
+/// to it by), which of the scene's groups of actors plays it (0-2), and
+/// the voices (dialogue designators) that can, if only some can.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneRole {
+    pub name: u32,
+    pub group: u16,
+    pub voices: Vec<String>,
+}
+
+pub fn mission_scenes(set: &mut MapSet) -> Result<Vec<MissionScene>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let scenes = map.read_block(meta, &data, SCNR_MISSION_SCENES, SCENE_SIZE)?;
+    let mut out = Vec::new();
+    for sc in scenes.as_chunks::<SCENE_SIZE>().0 {
+        let mut conditions = Vec::new();
+        let sets = map.read_block(meta, sc, 0x8, SET_TRIGGER_SIZE)?;
+        for t in sets.as_chunks::<SET_TRIGGER_SIZE>().0 {
+            conditions.push((
+                Combine::from_number(i16_at(t, 0)),
+                trigger_refs(&map.read_block(meta, t, 4, TRIGGER_REF_SIZE)?),
+            ));
+        }
+        let mut roles = Vec::new();
+        let block = map.read_block(meta, sc, 0x10, SCENE_ROLE_SIZE)?;
+        for r in block.as_chunks::<SCENE_ROLE_SIZE>().0 {
+            let voices = map.read_block(meta, r, 0x8, ROLE_VARIANT_SIZE)?;
+            roles.push(SceneRole {
+                name: u32_at(r, 0),
+                group: i16_at(r, 4).max(0) as u16,
+                voices: voices
+                    .as_chunks::<ROLE_VARIANT_SIZE>()
+                    .0
+                    .iter()
+                    .filter_map(|v| map.string_id(u32_at(v, 0)))
+                    .map(str::to_string)
+                    .collect(),
+            });
+        }
+        out.push(MissionScene {
+            name: u32_at(sc, 0),
+            repeats: u32_at(sc, 4) & 1 != 0,
+            conditions,
+            roles,
+        });
+    }
+    Ok(out)
 }
 
 /// The scenario's orders, in block order (squads and scripts name them by

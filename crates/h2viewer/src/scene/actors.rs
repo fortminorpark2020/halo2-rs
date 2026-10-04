@@ -70,6 +70,17 @@ pub struct CampaignAi {
     pub sounds: HashMap<u32, usize>,
     /// The music and loops scripts start, by tag.
     pub loops: HashMap<u32, ScriptLoop>,
+    /// The mission dialogue lines scripts have actors say, by the string
+    /// id scripts name them with: each voice's designator and its sound
+    /// (in `Scene::sounds`).
+    pub lines: HashMap<u32, Vec<(String, usize)>>,
+    /// Each character's voices (dialogue designators).
+    pub voices: Vec<Vec<String>>,
+    /// The little scenes scripts stage with actors who fit their roles.
+    pub scenes: Vec<orders::MissionScene>,
+    /// The AI triggers scripts test by name, by the value scripts name
+    /// each with.
+    pub trigger_names: HashMap<u32, u16>,
 }
 
 /// A title scripts put on screen: its text, where (top, left, bottom,
@@ -228,6 +239,10 @@ impl Loader {
             println!("warning: AI triggers: {e}");
             Vec::new()
         });
+        out.scenes = orders::mission_scenes(set).unwrap_or_else(|e| {
+            println!("warning: mission scenes: {e}");
+            Vec::new()
+        });
         out.point_sets = orders::point_sets(set).unwrap_or_else(|e| {
             println!("warning: point sets: {e}");
             Vec::new()
@@ -251,6 +266,19 @@ impl Loader {
                 e.kind == script::NodeKind::Value && e.value_type == script::value_type::STRING_ID
             })
             .map(|e| (e.value, out.scripts.text(e.text).to_string()))
+            .collect();
+        let triggers: HashMap<&str, u16> = out
+            .triggers
+            .iter()
+            .enumerate()
+            .map(|(k, t)| (t.name.as_str(), k as u16))
+            .collect();
+        out.trigger_names = out
+            .scripts
+            .expressions
+            .iter()
+            .filter(|e| e.kind == script::NodeKind::Value)
+            .filter_map(|e| Some((e.value, *triggers.get(out.scripts.text(e.text))?)))
             .collect();
         out.volumes = scenario::trigger_volumes(set)
             .unwrap_or_default()
@@ -295,6 +323,7 @@ impl Loader {
             .map(|&k| (k, scenario::placements(set, k).unwrap_or_default()))
             .collect();
         self.script_sounds(out);
+        self.dialogue_lines(out);
         let set = &mut self.set;
         let names = scenario::object_names(set).unwrap_or_default();
         out.object_names = names.iter().map(|n| n.name.clone()).collect();
@@ -317,6 +346,31 @@ impl Loader {
                 scenario::machine(set, p.object).ok()
             })
             .collect();
+    }
+
+    /// The mission dialogue lines the scripts name, with every voice's
+    /// recording.
+    fn dialogue_lines(&mut self, out: &mut CampaignAi) {
+        let lines = scenario::mission_dialogue(&mut self.set).unwrap_or_else(|e| {
+            println!("warning: mission dialogue: {e}");
+            Vec::new()
+        });
+        let named: HashMap<&str, u32> = out
+            .string_ids
+            .iter()
+            .map(|(&id, name)| (name.as_str(), id))
+            .collect();
+        for line in lines {
+            let Some(&id) = named.get(line.name.as_str()) else {
+                continue;
+            };
+            let voices = line
+                .variants
+                .iter()
+                .filter_map(|v| Some((v.designation.clone(), self.sound(v.sound)?)))
+                .collect();
+            out.lines.insert(id, voices);
+        }
     }
 
     /// The dialogue and music the scripts play.
@@ -433,6 +487,7 @@ impl Loader {
             out.colors.push(rank_colors(&c.name, c.kind));
             out.legendary_accuracy.push(legendary);
             out.characters.push(def);
+            out.voices.push(c.voices.clone());
             let body = c.unit.and_then(|u| {
                 if let Some(k) = units.iter().position(|&x| x == u) {
                     return Some(k);

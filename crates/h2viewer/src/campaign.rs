@@ -14,6 +14,7 @@ use h2sim::{Bot, Game, World};
 use std::collections::{HashMap, HashSet};
 
 mod commands;
+mod dialogue;
 mod orders;
 mod vehicles;
 
@@ -323,6 +324,8 @@ struct State {
     commands: commands::Commands,
     /// Actors getting in and out of vehicles.
     rides: vehicles::Rides,
+    /// Scenes actors are playing out.
+    scenes: dialogue::Scenes,
     difficulty: u8,
     won: bool,
     /// Say what the scripts do (H2_SCRIPT_LOG).
@@ -523,6 +526,7 @@ impl Mission {
         self.vm.tick(&scene.ai.scripts, &mut ctx);
         ctx.follow_orders(&mut self.vm, dt);
         ctx.run_commands(&mut self.vm, dt);
+        ctx.run_scenes(dt);
         ctx.run_vehicles(world, dt);
     }
 
@@ -1126,7 +1130,10 @@ impl Ctx<'_> {
 
 impl Host for Ctx<'_> {
     fn set_actor(&mut self, actor: Option<u32>) {
-        self.st.commands.current = actor.map(|a| a as usize);
+        let runner = actor.map(|a| a as usize);
+        self.st.commands.runner = runner;
+        self.st.commands.current =
+            runner.map(|r| self.st.scenes.switched.get(&r).copied().unwrap_or(r));
     }
 
     fn engine_global(&mut self, name: &str) -> Option<Value> {
@@ -1138,6 +1145,9 @@ impl Host for Ctx<'_> {
     }
 
     fn call(&mut self, function: &str, args: &[Value], _returns: u16) -> Option<Value> {
+        if let Some(v) = self.dialogue_call(function, args) {
+            return Some(v);
+        }
         if let Some(v) = self.command_call(function, args) {
             return Some(v);
         }
