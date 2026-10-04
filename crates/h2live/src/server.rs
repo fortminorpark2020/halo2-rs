@@ -204,6 +204,7 @@ impl Server {
         self.pcs.iter().filter(|pc| pc.account.is_some()).count()
     }
 
+    /// The account with this id, as the server keeps it.
     pub fn account(&self, id: u64) -> Option<&Account> {
         self.accounts.get(&id)
     }

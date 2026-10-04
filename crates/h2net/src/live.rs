@@ -504,7 +504,7 @@ fn read_guests(r: &mut Reader) -> Result<u8, Malformed> {
     Some(r.u8()?).filter(|&g| g <= MAX_GUESTS).ok_or(Malformed)
 }
 
-/// `items.len()` as a byte (the lists sent never hold more).
+/// A list's length, `n`, as a byte (the lists sent never hold more).
 fn count(w: &mut Writer, n: usize) {
     w.u8(n.min(255) as u8);
 }

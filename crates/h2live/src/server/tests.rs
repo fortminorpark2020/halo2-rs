@@ -598,7 +598,16 @@ fn the_server_keeps_its_limits() {
     w.run(2.0);
     assert_eq!(w.server.connections(), before);
 
-    // Relay legs count too, and wait 20 seconds for their other end.
+    // A relay leg says which it is before anything else.
+    let (server_end, mut leg) = Connection::pair();
+    w.server.accept(server_end, Route::Link, ip(6), w.now);
+    ToServer::Ping(1).send(&mut leg);
+    leg.flush().unwrap();
+    assert_eq!(w.server.connections(), before + 1);
+    w.step();
+    assert_eq!(w.server.connections(), before);
+
+    // Legs count too, and wait 20 seconds for their other end.
     let mut legs = Vec::new();
     while w.server.connections() < MAX_CONNECTIONS {
         let (server_end, mut pc_end) = Connection::pair();
