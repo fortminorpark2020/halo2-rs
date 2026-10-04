@@ -2,6 +2,7 @@
 
 use glam::Vec3;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const CELL: f32 = 1.0;
 /// Triangles spanning more grid cells than this (a map's floors and walls
@@ -63,7 +64,14 @@ pub struct World {
     large: Vec<u32>,
     pub min: Vec3,
     pub max: Vec3,
+    /// Each triangle's door (`LEVEL` for the level's own).
+    owner: Vec<u16>,
+    /// Each door: shut (it blocks) or open.
+    shut: Vec<AtomicBool>,
 }
+
+/// The owner of the level's own triangles.
+const LEVEL: u16 = u16::MAX;
 
 /// Triangles by the cubes of space their bounds overlap.
 struct Grid {
@@ -207,19 +215,68 @@ impl World {
             }
         }
         World {
+            owner: vec![LEVEL; triangles.len()],
             triangles,
             grid,
             coarse,
             large,
             min,
             max,
+            shut: Vec::new(),
+        }
+    }
+
+    /// Add a door (shut): triangles that block until it opens.
+    pub fn add_door(&mut self, triangles: &[[Vec3; 3]]) -> usize {
+        let door = self.shut.len();
+        self.shut.push(AtomicBool::new(true));
+        for &[a, b, c] in triangles {
+            let n = (b - a).cross(c - a);
+            if n.length_squared() < 1e-12 {
+                continue;
+            }
+            let id = self.triangles.len() as u32;
+            self.triangles.push(Triangle {
+                a,
+                b,
+                c,
+                normal: n.normalize(),
+            });
+            self.owner.push(door as u16);
+            let lo = a.min(b).min(c);
+            let hi = a.max(b).max(c);
+            if self.grid.count(lo, hi) <= LARGE {
+                self.grid.insert(id, lo, hi);
+            } else if self.coarse.count(lo, hi) <= LARGE {
+                self.coarse.insert(id, lo, hi);
+            } else {
+                self.large.push(id);
+            }
+        }
+        door
+    }
+
+    /// Shut a door (it blocks) or open it.
+    pub fn set_door(&self, door: usize, shut: bool) {
+        if let Some(d) = self.shut.get(door) {
+            d.store(shut, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether a triangle blocks: the level's do, a door's while shut.
+    fn solid(&self, id: u32) -> bool {
+        match self.owner[id as usize] {
+            LEVEL => true,
+            d => self.shut[d as usize].load(Ordering::Relaxed),
         }
     }
 
     pub fn floors(&self, min_up: f32) -> impl Iterator<Item = [Vec3; 3]> + '_ {
         self.triangles
             .iter()
-            .filter(move |t| t.normal.z >= min_up)
+            .zip(&self.owner)
+            .filter(move |(t, &o)| o == LEVEL && t.normal.z >= min_up)
+            .map(|(t, _)| t)
             .map(|t| [t.a, t.b, t.c])
     }
 
@@ -250,6 +307,9 @@ impl World {
         let pad = Vec3::splat(radius);
         self.candidates(p0.min(p1) - pad, p0.max(p1) + pad, &mut ids);
         for id in ids {
+            if !self.solid(id) {
+                continue;
+            }
             let t = &self.triangles[id as usize];
             let (on_seg, on_tri) = closest_segment_triangle(p0, p1, t);
             let d = on_seg - on_tri;
@@ -285,6 +345,9 @@ impl World {
     pub fn raycast_hit(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<(f32, Vec3)> {
         let mut best: Hit = None;
         let test = |id: u32, best: &mut Hit| {
+            if !self.solid(id) {
+                return;
+            }
             let t = &self.triangles[id as usize];
             if let Some(d) = ray_triangle(origin, dir, t) {
                 if d <= max && best.is_none_or(|b| d < b.0) {
@@ -509,6 +572,33 @@ mod tests {
             &mut c,
         );
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn doors_block_only_while_shut() {
+        let mut w = floor();
+        // A door across x = 2, from the floor up.
+        let (a, b, c, d) = (
+            Vec3::new(2.0, -1.0, 0.0),
+            Vec3::new(2.0, 1.0, 0.0),
+            Vec3::new(2.0, 1.0, 2.0),
+            Vec3::new(2.0, -1.0, 2.0),
+        );
+        let door = w.add_door(&[[a, b, c], [a, c, d]]);
+        let floors = w.floors(0.7).count();
+        let ray = |w: &World| w.raycast(Vec3::new(0.0, 0.0, 1.0), Vec3::X, 5.0);
+        let touching = |w: &World| {
+            let mut out = Vec::new();
+            let p = Vec3::new(1.9, 0.0, 0.5);
+            w.capsule_contacts(p, p + Vec3::Z * 0.5, 0.2, &mut out);
+            out.iter().any(|c| c.normal.x < -0.9)
+        };
+        assert_eq!(ray(&w), Some(2.0));
+        assert!(touching(&w));
+        w.set_door(door, false);
+        assert_eq!(ray(&w), None);
+        assert!(!touching(&w));
+        assert_eq!(floors, w.floors(0.7).count(), "doors aren't floors");
     }
 
     #[test]

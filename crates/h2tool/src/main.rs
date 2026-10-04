@@ -714,8 +714,25 @@ fn mission(path: &str) -> Res {
     for (i, g) in ai::squad_groups(&mut set)?.iter().enumerate() {
         println!("group {i} {} parent {:?}", g.name, g.parent);
     }
-    for (i, n) in scenario::object_names(&mut set)?.iter().enumerate() {
+    let names = scenario::object_names(&mut set)?;
+    for (i, n) in names.iter().enumerate() {
         println!("name {i} {} {:?} {:?}", n.name, n.kind, n.index);
+    }
+    let machines = scenario::placements(&mut set, scenario::PlacedKind::Machine)?;
+    for (i, m) in machines.iter().enumerate() {
+        let tag = set
+            .locate(m.object)
+            .map(|(_, t)| t.name)
+            .unwrap_or_default();
+        let mach = scenario::machine(&mut set, m.object).unwrap_or_default();
+        let name = m
+            .name
+            .and_then(|n| names.get(n as usize))
+            .map_or("", |n| n.name.as_str());
+        println!(
+            "machine {i} {name} {tag} at {:?} auto {} device {:x} machine {:x} {:?}",
+            m.position, m.automatic, m.device_flags, m.machine_flags, mach
+        );
     }
     Ok(())
 }

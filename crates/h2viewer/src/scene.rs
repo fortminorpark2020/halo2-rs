@@ -506,6 +506,33 @@ pub struct SceneObject {
     pub transform: Mat4,
     /// Baked light under the object (see `probe::LevelLight::at`).
     pub light: Option<[f32; 3]>,
+    /// The name scripts know it by.
+    pub name: Option<u16>,
+    /// In the level from the start (otherwise a script creates it).
+    pub automatic: bool,
+    /// It's a door (index into `Scene::doors`).
+    pub door: Option<usize>,
+}
+
+/// A door in a campaign level: it opens for whoever comes near, unless
+/// it's locked until a script opens it.
+pub struct Door {
+    pub name: Option<u16>,
+    /// In the level from the start (otherwise a script creates it).
+    pub placed: bool,
+    pub position: Vec3,
+    /// Open from the start.
+    pub open: bool,
+    /// Opens by itself for someone near (scripts can change that).
+    pub automatic: bool,
+    /// Shuts again once no one's near.
+    pub closes: bool,
+    /// Has power (an unpowered door stays as it is).
+    pub powered: bool,
+    /// Seconds to open or shut.
+    pub time: f32,
+    /// Its shape in the world, to block the way while shut.
+    pub triangles: Vec<[Vec3; 3]>,
 }
 
 /// A multiplayer item spawn: a weapon or grenades lying on the map.
@@ -603,6 +630,8 @@ pub struct Scene {
     /// projectile tags.
     pub grenades: [GrenadeAssets; 2],
     pub objects: Vec<SceneObject>,
+    /// A campaign level's doors.
+    pub doors: Vec<Door>,
     pub items: Vec<MapItem>,
     /// What picking up a power-up or an ammo pack sounds like.
     pub item_sounds: Vec<(ItemKind, Option<usize>)>,
@@ -1381,6 +1410,43 @@ impl Loader {
     }
 
     /// The mesh of an object tag's render model, loaded once.
+    /// A placed machine as a door, if it is one (lifts, racks and the
+    /// like aren't).
+    fn door(&mut self, p: &scenario::Placement, mesh: &MeshData, transform: Mat4) -> Option<Door> {
+        let name = self.set.locate(p.object)?.1.name;
+        let leaf = name.rsplit('\\').next().unwrap_or(&name);
+        if !leaf.contains("door") {
+            return None;
+        }
+        let machine = scenario::machine(&mut self.set, p.object).unwrap_or_default();
+        let triangles = mesh
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|t| {
+                t.map(|i| {
+                    transform.transform_point3(Vec3::from(mesh.vertices[i as usize].position))
+                })
+            })
+            .collect();
+        Some(Door {
+            name: p.name,
+            placed: p.automatic,
+            position: Vec3::from(p.position),
+            open: p.device_flags & 1 != 0,
+            automatic: p.machine_flags & 1 == 0,
+            closes: p.machine_flags & (1 << 5) == 0,
+            powered: p.device_flags & 2 == 0,
+            time: if machine.position_time > 0.0 {
+                machine.position_time
+            } else {
+                1.0
+            },
+            triangles,
+        })
+    }
+
     fn object_mesh(&mut self, object: DatumIndex, meshes: &mut Vec<MeshData>) -> Option<usize> {
         if let Some(&m) = self.mesh_of_object.get(&object) {
             return m;
@@ -1628,7 +1694,7 @@ impl Scene {
         let mut objects = Vec::new();
         // Campaign maps also place doors, crates and switches; scripts make
         // the rest when their time comes.
-        let placed = if campaign {
+        let placed: Vec<(PlacedKind, scenario::Placement)> = if campaign {
             [
                 PlacedKind::Scenery,
                 PlacedKind::Machine,
@@ -1636,22 +1702,41 @@ impl Scene {
                 PlacedKind::Crate,
             ]
             .iter()
-            .flat_map(|&k| scenario::placements(&mut loader.set, k).unwrap_or_default())
-            .filter(|p| p.automatic)
+            .flat_map(|&k| {
+                let placed = scenario::placements(&mut loader.set, k).unwrap_or_default();
+                placed.into_iter().map(move |p| (k, p))
+            })
             .collect()
         } else {
-            scenario::scenery(&mut loader.set).unwrap_or_default()
+            let scenery = scenario::scenery(&mut loader.set).unwrap_or_default();
+            scenery
+                .into_iter()
+                .filter(|p| p.automatic)
+                .map(|p| (PlacedKind::Scenery, p))
+                .collect()
         };
-        for p in placed {
-            if let Some(mesh) = loader.object_mesh(p.object, &mut meshes) {
-                let light =
-                    level_light.at(&loader.textures, Vec3::from(p.position) + Vec3::Z * 0.2);
-                objects.push(SceneObject {
-                    mesh,
-                    transform: placement_matrix(p.position, p.rotation, p.scale),
-                    light,
+        let mut doors = Vec::new();
+        for (kind, p) in placed {
+            let Some(mesh) = loader.object_mesh(p.object, &mut meshes) else {
+                continue;
+            };
+            let light = level_light.at(&loader.textures, Vec3::from(p.position) + Vec3::Z * 0.2);
+            let transform = placement_matrix(p.position, p.rotation, p.scale);
+            let door = (kind == PlacedKind::Machine)
+                .then(|| loader.door(&p, &meshes[mesh], transform))
+                .flatten()
+                .map(|d| {
+                    doors.push(d);
+                    doors.len() - 1
                 });
-            }
+            objects.push(SceneObject {
+                mesh,
+                transform,
+                light,
+                name: p.name,
+                automatic: p.automatic,
+                door,
+            });
         }
         let mut items = Vec::new();
         let mut item_sounds: Vec<(ItemKind, Option<usize>)> = Vec::new();
@@ -1916,6 +2001,7 @@ impl Scene {
             sky,
             grenades,
             objects,
+            doors,
             items,
             item_sounds,
             overshield_time,

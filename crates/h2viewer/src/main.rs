@@ -295,10 +295,12 @@ fn load_level(path: &Path) -> Result<Level, String> {
     );
     if !scene.ai.squads.is_empty() {
         println!(
-            "{} squads, {} characters, {} actor bodies",
+            "{} squads, {} characters, {} actor bodies, {} scripts, {} doors",
             scene.ai.squads.len(),
             scene.ai.characters.len(),
-            scene.ai.bodies.len()
+            scene.ai.bodies.len(),
+            scene.ai.scripts.scripts.len(),
+            scene.doors.len()
         );
     }
     // H2_LIST_WEAPONS=1: each weapon's crosshair range and HUD pieces.
@@ -341,7 +343,7 @@ fn load_level(path: &Path) -> Result<Level, String> {
             );
         }
     }
-    let world = World::new(&scene.collision.positions, &scene.collision.indices);
+    let mut world = World::new(&scene.collision.positions, &scene.collision.indices);
     let mut spots: Vec<Vec3> = level_spawns(&scene).iter().map(|s| s.0).collect();
     spots.extend(scene.items.iter().map(|i| i.position));
     spots.extend(objective::objective_points(&scene));
@@ -352,6 +354,12 @@ fn load_level(path: &Path) -> Result<Level, String> {
         &kill_zones(&scene),
         &objective::teleporters(&scene),
     );
+    // Doors block the way while shut (bots' routes go through them: they
+    // open as bots come).
+    for d in &scene.doors {
+        let k = world.add_door(&d.triangles);
+        world.set_door(k, !d.open);
+    }
     println!(
         "bot routes: {} points, {} links, {} through teleporters ({:.1?})",
         nav.points.len(),
@@ -522,7 +530,7 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         let t = tick as f32 * TICK;
         if let Some(m) = &mut mission {
             let (bsp, placed) = (m.bsp(), game.players.len());
-            m.step(&level.scene, &mut game, &mut bots);
+            m.step(&level.scene, &level.world, &mut game, &mut bots);
             if m.bsp() != bsp {
                 println!("{t:6.1} into bsp {}", m.bsp());
             }
@@ -1003,7 +1011,7 @@ impl App {
             self.game.step(&self.world, &commands);
             h2sim::bot::alert_actors(&mut self.bots, &self.game, &self.game.events);
             if let Some(m) = &mut self.mission {
-                m.step(&self.scene, &mut self.game, &mut self.bots);
+                m.step(&self.scene, &self.world, &mut self.game, &mut self.bots);
             }
             if !ticked {
                 for l in &mut self.locals {
@@ -1468,7 +1476,14 @@ impl App {
             emblem: None,
             fx: Fx::default(),
         }];
-        for o in &scene.objects {
+        for (k, o) in scene.objects.iter().enumerate() {
+            let shown = match &self.mission {
+                Some(m) => m.shows(scene, k),
+                None => o.automatic,
+            };
+            if !shown {
+                continue;
+            }
             world.push(DrawCall {
                 mesh: o.mesh,
                 model: o.transform,

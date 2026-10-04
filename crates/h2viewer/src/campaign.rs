@@ -8,13 +8,17 @@ use glam::Vec3;
 use h2sim::bot::ActorMind;
 use h2sim::game::ActorSpawn;
 use h2sim::script::{Host, Obj, Value, Vm};
-use h2sim::{Bot, Game};
+use h2sim::{Bot, Game, World};
 use std::collections::HashMap;
 
 /// Seconds a machine takes to open when its tag doesn't say.
 const MACHINE_TIME: f32 = 1.5;
 /// How far an actor told to see someone knows where they are.
 const SEE_RANGE: f32 = 60.0;
+/// A door opens for anyone within this distance of its middle.
+const DOOR_REACH: f32 = 3.0;
+/// The middle of a door, above where it's placed.
+const DOOR_MIDDLE: f32 = 1.0;
 
 /// The team of a squad that says which side it's on.
 fn squad_team(team: AiTeam) -> Option<u8> {
@@ -146,6 +150,9 @@ struct State {
     /// The structure BSP the players are in.
     bsp: u16,
     devices: HashMap<u16, Device>,
+    /// The level's doors (`Scene::doors`), and which name each has.
+    doors: Vec<Device>,
+    door_named: HashMap<u16, usize>,
     device_groups: HashMap<u16, f32>,
     /// Named objects scripts created (true) or destroyed (false).
     created: HashMap<u16, bool>,
@@ -179,6 +186,22 @@ impl Mission {
             bsp: start_bsp(scene, game),
             difficulty,
             log,
+            doors: scene
+                .doors
+                .iter()
+                .map(|d| {
+                    let at = if d.open { 1.0 } else { 0.0 };
+                    Device {
+                        position: at,
+                        target: at,
+                        power: if d.powered { 1.0 } else { 0.0 },
+                        automatic: d.automatic,
+                    }
+                })
+                .collect(),
+            door_named: (0..scene.doors.len())
+                .filter_map(|k| Some((scene.doors[k].name?, k)))
+                .collect(),
             ..State::default()
         };
         let mut ctx = Ctx {
@@ -202,8 +225,15 @@ impl Mission {
     }
 
     /// One game tick: the players may cross into another part of the
-    /// level, machines move, and every other tick the scripts run.
-    pub fn step(&mut self, scene: &Scene, game: &mut Game, bots: &mut Vec<(usize, Bot)>) {
+    /// level, doors and machines move, and every other tick the scripts
+    /// run.
+    pub fn step(
+        &mut self,
+        scene: &Scene,
+        world: &World,
+        game: &mut Game,
+        bots: &mut Vec<(usize, Bot)>,
+    ) {
         self.ticks += 1;
         if self.ticks % 2 == 1 {
             return;
@@ -217,7 +247,19 @@ impl Mission {
         };
         ctx.follow_bsp();
         ctx.move_devices(dt);
+        ctx.move_doors(world, dt);
         self.vm.tick(&scene.ai.scripts, &mut ctx);
+    }
+
+    /// Whether one of the scene's objects is in the level as it is now
+    /// (scripts create and destroy some; open doors are out of the way).
+    pub fn shows(&self, scene: &Scene, object: usize) -> bool {
+        let Some(o) = scene.objects.get(object) else {
+            return false;
+        };
+        self.state.exists(o.name, o.automatic)
+            && o.door
+                .is_none_or(|d| self.state.doors.get(d).is_none_or(|d| d.position < 0.5))
     }
 
     /// The mission's last script said it's won.
@@ -228,6 +270,15 @@ impl Mission {
     /// The structure BSP the players are in.
     pub fn bsp(&self) -> u16 {
         self.state.bsp
+    }
+}
+
+impl State {
+    /// Whether an object is in the level: as placed, unless a script made
+    /// or destroyed it.
+    fn exists(&self, name: Option<u16>, automatic: bool) -> bool {
+        name.and_then(|n| self.created.get(&n).copied())
+            .unwrap_or(automatic)
     }
 }
 
@@ -390,11 +441,48 @@ impl Ctx<'_> {
         }
     }
 
+    /// Doors open for whoever's near, unless locked, and shut again
+    /// after; shut ones block the way.
+    fn move_doors(&mut self, world: &World, dt: f32) {
+        let scene = self.scene;
+        for (k, door) in scene.doors.iter().enumerate() {
+            let middle = door.position + Vec3::Z * DOOR_MIDDLE;
+            let near = || {
+                self.game.players.iter().any(|p| {
+                    p.alive && (p.body.position + Vec3::Z * 0.5).distance(middle) < DOOR_REACH
+                })
+            };
+            let exists = self.st.exists(door.name, door.placed);
+            let d = &mut self.st.doors[k];
+            if d.automatic && d.power > 0.0 && exists {
+                if near() {
+                    d.target = 1.0;
+                } else if door.closes {
+                    d.target = 0.0;
+                }
+            }
+            let was_shut = d.position < 0.5;
+            if d.power > 0.0 {
+                let step = dt / door.time.max(0.05);
+                d.position += (d.target - d.position).clamp(-step, step);
+            }
+            let shut = d.position < 0.5;
+            if self.st.log && shut != was_shut {
+                let what = if shut { "shuts" } else { "opens" };
+                println!("door {k} at {:.1} {what}", door.position);
+            }
+            world.set_door(k, exists && shut);
+        }
+    }
+
     fn device(&mut self, v: Option<&Value>) -> Option<&mut Device> {
         let name = match v?.objects().first()? {
             Obj::Name(n) => *n,
             Obj::Unit(_) => return None,
         };
+        if let Some(&k) = self.st.door_named.get(&name) {
+            return self.st.doors.get_mut(k);
+        }
         Some(self.st.devices.entry(name).or_default())
     }
 

@@ -86,6 +86,11 @@ pub struct Placement {
     pub automatic: bool,
     /// The model variant to show (vehicles, bipeds, weapons and scenery).
     pub variant: String,
+    /// Machines: their device flags (bit 0 initially open, 1 initially
+    /// off) and machine flags (bit 0 doesn't operate automatically, 5
+    /// doesn't close automatically).
+    pub device_flags: u32,
+    pub machine_flags: u32,
 }
 
 /// An object name scripts use, and the instance it names.
@@ -230,6 +235,16 @@ pub fn placements(set: &mut MapSet, kind: PlacedKind) -> Result<Vec<Placement>> 
                         .to_string()
                 } else {
                     String::new()
+                },
+                device_flags: if kind == PlacedKind::Machine {
+                    u32_at(e, 0x38)
+                } else {
+                    0
+                },
+                machine_flags: if kind == PlacedKind::Machine {
+                    u32_at(e, 0x3C)
+                } else {
+                    0
                 },
             }
         })
