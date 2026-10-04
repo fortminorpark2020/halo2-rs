@@ -833,6 +833,12 @@ fn mission(path: &str) -> Res {
     for s in scenario::bsp_switches(&mut set)? {
         println!("bsp switch volume {} from {} to {}", s.0, s.1, s.2);
     }
+    for (i, f) in scenario::cutscene_flags(&mut set)?.iter().enumerate() {
+        println!(
+            "flag {i} {} at {:?} facing {:?}",
+            f.name, f.position, f.facing
+        );
+    }
     for (i, g) in ai::squad_groups(&mut set)?.iter().enumerate() {
         println!("group {i} {} parent {:?}", g.name, g.parent);
     }

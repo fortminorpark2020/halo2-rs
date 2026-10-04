@@ -13,6 +13,7 @@ use h2sim::script::{Host, Obj, Value, Vm};
 use h2sim::{Bot, Game, World};
 use std::collections::{HashMap, HashSet};
 
+mod cinematic;
 mod commands;
 mod dialogue;
 mod orders;
@@ -326,6 +327,13 @@ struct State {
     rides: vehicles::Rides,
     /// Scenes actors are playing out.
     scenes: dialogue::Scenes,
+    /// The scripts have taken the players' controls away.
+    input_off: bool,
+    /// Players the scripts turned to face a new way (teleporting them),
+    /// for their views to follow.
+    turns: Vec<(usize, f32)>,
+    /// Objects the scripts hid.
+    hidden: HashSet<Obj>,
     difficulty: u8,
     won: bool,
     /// Say what the scripts do (H2_SCRIPT_LOG).
@@ -536,9 +544,30 @@ impl Mission {
         let Some(o) = scene.objects.get(object) else {
             return false;
         };
-        self.state.exists(o.name, o.automatic)
+        let hidden = o
+            .name
+            .is_some_and(|n| self.state.hidden.contains(&Obj::Name(n)));
+        !hidden
+            && self.state.exists(o.name, o.automatic)
             && o.door
                 .is_none_or(|d| self.state.doors.get(d).is_none_or(|d| d.position < 0.5))
+    }
+
+    /// Whether the players have their controls (the scripts take them
+    /// away for cutscenes).
+    pub fn input_enabled(&self) -> bool {
+        !self.state.input_off
+    }
+
+    /// Players the scripts turned to face a new way since last asked:
+    /// their views turn with them.
+    pub fn take_turns(&mut self) -> Vec<(usize, f32)> {
+        std::mem::take(&mut self.state.turns)
+    }
+
+    /// Whether the scripts hid a player or actor.
+    pub fn hides(&self, player: usize) -> bool {
+        self.state.hidden.contains(&Obj::Unit(player))
     }
 
     /// The objectives the mission has given so far, and whether each is
@@ -1146,6 +1175,9 @@ impl Host for Ctx<'_> {
 
     fn call(&mut self, function: &str, args: &[Value], _returns: u16) -> Option<Value> {
         if let Some(v) = self.dialogue_call(function, args) {
+            return Some(v);
+        }
+        if let Some(v) = self.cinematic_call(function, args) {
             return Some(v);
         }
         if let Some(v) = self.command_call(function, args) {

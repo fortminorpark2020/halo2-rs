@@ -12,6 +12,8 @@ const SCNR_NETGAME_FLAGS: usize = 0x118;
 const SCNR_BSP_SWITCHES: usize = 0x130;
 const BSP_SWITCH_SIZE: usize = 0xE;
 const SCNR_DEVICE_GROUPS: usize = 0xA0;
+const SCNR_CUTSCENE_FLAGS: usize = 0x1E0;
+const CUTSCENE_FLAG_SIZE: usize = 0x38;
 const SCNR_CUTSCENE_TITLES: usize = 0x1F0;
 const CUTSCENE_TITLE_SIZE: usize = 0x24;
 /// The string lists of the chapter titles and of the objectives.
@@ -502,6 +504,32 @@ pub fn device_groups(set: &mut MapSet) -> Result<Vec<DeviceGroup>> {
             name: ascii(&g[..0x20]),
             initial: f32_at(g, 0x20),
             once: u32_at(g, 0x24) & 1 != 0,
+        })
+        .collect())
+}
+
+/// A point scripts teleport things to and cutscenes play relative to:
+/// its name, where it is and which way it faces (yaw and pitch, radians).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CutsceneFlag {
+    pub name: String,
+    pub position: [f32; 3],
+    pub facing: [f32; 2],
+}
+
+pub fn cutscene_flags(set: &mut MapSet) -> Result<Vec<CutsceneFlag>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let flags = map.read_block(meta, &data, SCNR_CUTSCENE_FLAGS, CUTSCENE_FLAG_SIZE)?;
+    Ok(flags
+        .as_chunks::<CUTSCENE_FLAG_SIZE>()
+        .0
+        .iter()
+        .map(|f| CutsceneFlag {
+            name: ascii(&f[4..0x24]),
+            position: [f32_at(f, 0x24), f32_at(f, 0x28), f32_at(f, 0x2C)],
+            facing: [f32_at(f, 0x30), f32_at(f, 0x34)],
         })
         .collect())
 }

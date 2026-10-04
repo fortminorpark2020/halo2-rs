@@ -24,7 +24,7 @@ const ENGINE_GLOBAL: u32 = 0x8000;
 /// Something in the level a script names: an object placed in the
 /// scenario (by its name's index), or a unit in play (an index into the
 /// game's players).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Obj {
     Name(u16),
     Unit(usize),

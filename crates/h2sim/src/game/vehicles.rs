@@ -288,6 +288,20 @@ impl Game {
         }
     }
 
+    /// Move player `i` to `position` facing `yaw` at once, out of any
+    /// seat (a script teleporting them).
+    pub fn move_player(&mut self, i: usize, position: Vec3, yaw: f32) {
+        if i >= self.players.len() {
+            return;
+        }
+        self.leave_seat(i);
+        let p = &mut self.players[i];
+        p.body.position = position;
+        p.body.velocity = Vec3::ZERO;
+        p.yaw = yaw;
+        p.pitch = 0.0;
+    }
+
     /// Put vehicle `v` in the level at `position` facing `yaw`, new and
     /// empty (a script placing it).
     pub fn place_vehicle(&mut self, v: usize, position: Vec3, yaw: f32) {

@@ -58,6 +58,9 @@ pub struct CampaignAi {
     /// The names scripts give placed objects, and where each is placed.
     pub object_names: Vec<String>,
     pub name_positions: Vec<Option<Vec3>>,
+    /// The cutscene flags scripts teleport things to: where each is and
+    /// which way it faces (yaw).
+    pub flags: Vec<(Vec3, f32)>,
     /// Each named machine (door, lift): how it moves.
     pub machines: Vec<Option<scenario::Machine>>,
     /// The device groups switches and scripts set.
@@ -294,6 +297,11 @@ impl Loader {
             })
             .collect();
         out.bsp_switches = scenario::bsp_switches(set).unwrap_or_default();
+        out.flags = scenario::cutscene_flags(set)
+            .unwrap_or_default()
+            .iter()
+            .map(|f| (Vec3::from(f.position), f.facing[0]))
+            .collect();
         out.device_groups = scenario::device_groups(set).unwrap_or_default();
         let table = text::language_table(set).unwrap_or_default();
         let (titles, objectives) =

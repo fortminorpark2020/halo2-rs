@@ -1110,9 +1110,11 @@ impl App {
                 fire_held: self.fire_held,
                 zoom_held: self.zoom_held,
             };
+            let controls = self.mission.as_ref().is_none_or(|m| m.input_enabled());
             for l in &self.locals {
-                commands[l.player] = if self.menu_open {
-                    // Standing still while the menu is up.
+                commands[l.player] = if self.menu_open || !controls {
+                    // Standing still while the menu is up (or a cutscene
+                    // has the controls).
                     l.command(None, None)
                 } else {
                     let pad = l.pad.and_then(|id| self.pads.state(id));
@@ -1127,6 +1129,12 @@ impl App {
             h2sim::bot::alert_actors(&mut self.bots, &self.game, &self.game.events);
             if let Some(m) = &mut self.mission {
                 m.step(&self.scene, &self.world, &mut self.game, &mut self.bots);
+                for (player, yaw) in m.take_turns() {
+                    for l in self.locals.iter_mut().filter(|l| l.player == player) {
+                        l.camera.yaw = yaw;
+                        l.camera.pitch = 0.0;
+                    }
+                }
                 let sounds = m.take_sounds();
                 if !sounds.is_empty() {
                     let listeners = self.listeners();
@@ -1704,6 +1712,9 @@ impl App {
         let Some(Some(pose)) = self.body_poses.get(player) else {
             return Vec::new();
         };
+        if self.mission.as_ref().is_some_and(|m| m.hides(player)) {
+            return Vec::new();
+        }
         let p = &self.game.players[player];
         let light = self
             .scene
