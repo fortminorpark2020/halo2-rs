@@ -8,7 +8,9 @@ description = "LAN games: hosting, joining and finding games on the local networ
 [dependencies]
 h2sim = { path = "../h2sim" }
 flate2 = "1"
+httparse = "1"
 socket2 = "0.6"
+tungstenite = "0.30"
 
 [dev-dependencies]
 glam = "0.33"

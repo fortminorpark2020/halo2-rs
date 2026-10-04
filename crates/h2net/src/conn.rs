@@ -1,22 +1,24 @@
 //! Messages between two PCs, each a kind and a body: length-prefixed over
-//! a non-blocking TCP connection, or handed straight across between the two
-//! ends of a pair in this process (for tests).
+//! a non-blocking TCP connection, one to a WebSocket message (online), or
+//! handed straight across between the two ends of a pair in this process
+//! (for tests).
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::{Duration, Instant};
+use tungstenite::WebSocket;
 
 /// Larger messages mean a broken or hostile peer.
 pub(crate) const MAX_MESSAGE: usize = 1 << 20;
 /// A peer that falls this far behind is dropped.
-const MAX_BACKLOG: usize = 8 << 20;
+pub(crate) const MAX_BACKLOG: usize = 8 << 20;
 /// Messages on their way between the two ends of a pair, as a socket's
 /// buffer would hold them; more wait at the sending end.
 const PAIR_BUFFER: usize = 64;
 
-type Message = (u8, Vec<u8>);
+pub(crate) type Message = (u8, Vec<u8>);
 
 /// A connection to another PC.
 pub struct Connection {
@@ -39,6 +41,17 @@ enum Link {
         /// Messages the other end has no room for yet, and their size.
         outbox: VecDeque<Message>,
         queued: usize,
+    },
+    /// Each message a WebSocket message: the kind, then the body.
+    Ws {
+        socket: Box<WebSocket<TcpStream>>,
+        /// Messages not given to tungstenite yet, and their size. It gets
+        /// them once it has written out all it had, so what it holds is
+        /// never more than it was last given.
+        outbox: VecDeque<Vec<u8>>,
+        queued: usize,
+        /// The size of what it was last given, while some may be left.
+        handed: usize,
     },
 }
 
@@ -69,6 +82,18 @@ impl Connection {
             })
         };
         (end(a.0, b.1), end(b.0, a.1))
+    }
+
+    /// A WebSocket, its handshake done (see `dial` and `accept`).
+    pub(crate) fn ws(socket: WebSocket<TcpStream>) -> io::Result<Connection> {
+        socket.get_ref().set_nonblocking(true)?;
+        socket.get_ref().set_nodelay(true)?;
+        Ok(Connection::over(Link::Ws {
+            socket: Box::new(socket),
+            outbox: VecDeque::new(),
+            queued: 0,
+            handed: 0,
+        }))
     }
 
     fn over(link: Link) -> Connection {
@@ -105,6 +130,13 @@ impl Connection {
                 *queued += body.len() + 1;
                 outbox.push_back((kind, body.to_vec()));
             }
+            Link::Ws { outbox, queued, .. } => {
+                let mut m = Vec::with_capacity(body.len() + 1);
+                m.push(kind);
+                m.extend_from_slice(body);
+                *queued += m.len();
+                outbox.push_back(m);
+            }
         }
     }
 
@@ -113,6 +145,7 @@ impl Connection {
         match &self.link {
             Link::Tcp { outbox, .. } => outbox.len(),
             Link::Memory { queued, .. } => *queued,
+            Link::Ws { queued, handed, .. } => queued + handed,
         }
     }
 
@@ -127,6 +160,12 @@ impl Connection {
             Link::Memory {
                 tx, outbox, queued, ..
             } => hand_over(tx, outbox, queued),
+            Link::Ws {
+                socket,
+                outbox,
+                queued,
+                handed,
+            } => write_ws(socket, outbox, queued, handed),
         };
         if let Some(why) = gone {
             return self.close(&why);
@@ -165,6 +204,7 @@ impl Connection {
                     Err(TryRecvError::Disconnected) => break Some("connection closed".into()),
                 }
             },
+            Link::Ws { socket, .. } => read_ws(socket, &mut out),
         };
         if !out.is_empty() {
             self.heard = Instant::now();
@@ -247,4 +287,66 @@ fn hand_over(
         }
     }
     None
+}
+
+/// Give tungstenite the messages waiting once it has written out all it
+/// had, and write out as much as the network takes now. Why the connection
+/// is gone, if it is.
+fn write_ws(
+    socket: &mut WebSocket<TcpStream>,
+    outbox: &mut VecDeque<Vec<u8>>,
+    queued: &mut usize,
+    handed: &mut usize,
+) -> Option<String> {
+    loop {
+        match socket.flush() {
+            Ok(()) => *handed = 0,
+            Err(e) => return ws_gone(e),
+        }
+        if outbox.is_empty() {
+            return None;
+        }
+        *handed = std::mem::take(queued);
+        for m in outbox.drain(..) {
+            // What the network doesn't take now, tungstenite keeps.
+            let m = tungstenite::Message::Binary(m.into());
+            if let Some(why) = socket.write(m).err().and_then(ws_gone) {
+                return Some(why);
+            }
+        }
+    }
+}
+
+/// Read the messages that have arrived. Why the connection is gone, if it
+/// is.
+fn read_ws(socket: &mut WebSocket<TcpStream>, out: &mut Vec<Message>) -> Option<String> {
+    use tungstenite::Message as Ws;
+    loop {
+        match socket.read() {
+            Ok(Ws::Binary(m)) if !m.is_empty() => out.push((m[0], m[1..].to_vec())),
+            // tungstenite answers pings itself.
+            Ok(Ws::Ping(_) | Ws::Pong(_)) => {}
+            Ok(Ws::Close(_)) => return Some("connection closed".into()),
+            Ok(_) => return Some("bad message".into()),
+            Err(e) => return ws_gone(e),
+        }
+    }
+}
+
+/// Why a WebSocket is gone, from what went wrong with it. None if nothing
+/// did: it just can't go on until the network has more for it, or takes
+/// more.
+fn ws_gone(e: tungstenite::Error) -> Option<String> {
+    use io::ErrorKind::{Interrupted, WouldBlock};
+    use tungstenite::error::{Error, ProtocolError};
+    match e {
+        Error::Io(e) if matches!(e.kind(), WouldBlock | Interrupted) => None,
+        Error::ConnectionClosed
+        | Error::AlreadyClosed
+        | Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+            Some("connection closed".into())
+        }
+        Error::Capacity(_) => Some("bad message".into()),
+        e => Some(e.to_string()),
+    }
 }

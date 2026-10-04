@@ -290,8 +290,23 @@ fn joined_pcs_wait_in_the_lobby_between_games() {
     assert!(!host.is_remote(mine[0]));
 }
 
-// The same over connections in memory, as online games join through the
-// service (no ports at all), and a host on any free port.
+// The same over connections in memory and over WebSockets, as online games
+// join through the service (no ports of their own), and a host on any free
+// port.
+
+/// The two ends of a WebSocket over loopback: the end a server took (a
+/// host's, say, with the service in between), and the end that dialed it.
+fn ws_pair() -> (Connection, Connection) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/link", listener.local_addr().unwrap());
+    let dialing = dial(&url, Duration::from_secs(5));
+    let (stream, _) = listener.accept().unwrap();
+    let Ok(Request::WebSocket(taken, path)) = accept(stream) else {
+        panic!("no WebSocket");
+    };
+    assert_eq!(path, "/link");
+    (taken, dialing.recv().unwrap().unwrap())
+}
 
 /// An online host and a PC joining it, verified as `who`.
 fn online(
@@ -302,8 +317,20 @@ fn online(
     me: (&str, Look),
     who: Verified,
 ) -> (Host, Client) {
+    online_over(Connection::pair(), map, cg, client_map, teams, me, who)
+}
+
+/// The same over `pair`: the host's end, then the PC's.
+fn online_over(
+    (a, b): (Connection, Connection),
+    map: &str,
+    cg: &h2sim::Game,
+    client_map: &str,
+    teams: &[u8],
+    me: (&str, Look),
+    who: Verified,
+) -> (Host, Client) {
     let mut host = Host::online(map);
-    let (a, b) = Connection::pair();
     host.add_connection(a, who);
     let client = Client::over(b, cg, client_map, teams, me);
     (host, client)
@@ -320,6 +347,15 @@ fn verified(gamertag: &str, team: u8) -> Verified {
 
 #[test]
 fn a_pc_joined_online_plays_in_the_hosts_game() {
+    plays_in_the_hosts_game(Connection::pair());
+}
+
+#[test]
+fn a_pc_joined_by_websocket_plays_in_the_hosts_game() {
+    plays_in_the_hosts_game(ws_pair());
+}
+
+fn plays_in_the_hosts_game(pair: (Connection, Connection)) {
     let world = floor();
     let mut hg = game();
     let me = hg.add_player();
@@ -333,7 +369,8 @@ fn a_pc_joined_online_plays_in_the_hosts_game() {
             colors: [17, 0, 9],
         },
     };
-    let (mut host, mut client) = online(
+    let (mut host, mut client) = online_over(
+        pair,
         "testmap",
         &cg,
         "testmap",
@@ -391,32 +428,46 @@ fn a_pc_joined_online_plays_in_the_hosts_game() {
         // Ticks a tick apart: online, the game goes out every other one.
         std::thread::sleep(Duration::from_secs_f32(h2sim::game::TICK));
     }
-    // The last tick goes with the next snapshot.
-    std::thread::sleep(Duration::from_millis(40));
-    host.send(&hg, &[], false);
-    client.poll(&mut cg);
     assert!(hg.players[mine].body.position.x > start.x + 0.3);
     assert!(shots > 0);
-    let joined = cg.players[mine].body.position;
-    assert_eq!(joined, hg.players[mine].body.position);
+    // The last tick goes with the next snapshot.
+    std::thread::sleep(Duration::from_millis(40));
+    let there = hg.players[mine].body.position;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, _, cg| {
+        cg.players[mine].body.position == there
+    });
 
     // Leaving hands the Spartan back to the host.
     drop(client);
-    let events = host.poll(&mut hg, 16);
-    let Some(HostEvent::Left { players, .. }) = events.first() else {
-        panic!("{events:?}");
+    let start = Instant::now();
+    let players = loop {
+        if let Some(HostEvent::Left { players, .. }) = host.poll(&mut hg, 16).first() {
+            break players.clone();
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "still there");
+        std::thread::sleep(Duration::from_millis(2));
     };
-    assert_eq!(players, &vec![mine]);
+    assert_eq!(players, vec![mine]);
     assert!(!host.is_remote(mine));
 }
 
 #[test]
 fn online_taps_between_ticks_are_not_lost() {
+    taps_between_ticks_are_not_lost_over(Connection::pair());
+}
+
+#[test]
+fn websocket_taps_between_ticks_are_not_lost() {
+    taps_between_ticks_are_not_lost_over(ws_pair());
+}
+
+fn taps_between_ticks_are_not_lost_over(pair: (Connection, Connection)) {
     let mut hg = game();
     hg.add_player();
     let mut cg = game();
     let who = verified("TESTER", ANY_TEAM);
-    let (mut host, mut client) = online("testmap", &cg, "testmap", &[ANY_TEAM], me(), who);
+    let (mut host, mut client) =
+        online_over(pair, "testmap", &cg, "testmap", &[ANY_TEAM], me(), who);
     let mut mine = None;
     pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
         if let Some(ClientEvent::Welcomed { players, .. }) = ce.first() {
@@ -431,6 +482,8 @@ fn online_taps_between_ticks_are_not_lost() {
     };
     client.send_commands(&[(mine, tap)]);
     client.send_commands(&[(mine, Command::default())]);
+    // Once they've arrived (at once, in memory).
+    std::thread::sleep(Duration::from_millis(20));
     host.poll(&mut hg, 16);
     // Pressed for one tick, then released.
     assert_eq!(host.command(mine), Some(tap));
@@ -439,11 +492,21 @@ fn online_taps_between_ticks_are_not_lost() {
 
 #[test]
 fn an_online_pc_on_another_map_is_turned_away() {
+    a_pc_on_another_map_is_turned_away_over(Connection::pair());
+}
+
+#[test]
+fn a_websocket_pc_on_another_map_is_turned_away() {
+    a_pc_on_another_map_is_turned_away_over(ws_pair());
+}
+
+fn a_pc_on_another_map_is_turned_away_over(pair: (Connection, Connection)) {
     let mut hg = game();
     hg.add_player();
     let mut cg = game();
     let who = verified("TESTER", ANY_TEAM);
-    let (mut host, mut client) = online("lockout", &cg, "midship", &[ANY_TEAM], me(), who);
+    let (mut host, mut client) =
+        online_over(pair, "lockout", &cg, "midship", &[ANY_TEAM], me(), who);
     let mut refused = None;
     pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
         if let Some(ClientEvent::Refused(why)) = ce.first() {
@@ -489,6 +552,15 @@ fn games_on_any_port_can_be_found_and_joined() {
 
 #[test]
 fn online_pcs_wait_in_the_lobby_between_games() {
+    pcs_wait_in_the_lobby_between_games_over(Connection::pair());
+}
+
+#[test]
+fn websocket_pcs_wait_in_the_lobby_between_games() {
+    pcs_wait_in_the_lobby_between_games_over(ws_pair());
+}
+
+fn pcs_wait_in_the_lobby_between_games_over((a, b): (Connection, Connection)) {
     let mut hg = game();
     hg.add_player();
     let mut host = Host::online("lockout");
@@ -510,7 +582,6 @@ fn online_pcs_wait_in_the_lobby_between_games() {
     // Any map will do for the lobby. The service put them on team 0,
     // whatever they'd like.
     let mut cg = game();
-    let (a, b) = Connection::pair();
     host.add_connection(a, verified("BLUE TEAM", 0));
     let mut client = Client::over(b, &cg, "midship", &[ANY_TEAM, 1], me());
     let mut arrived = false;
@@ -1019,25 +1090,37 @@ fn a_pc_behind_misses_snapshots_but_not_what_happened() {
     assert!(g.client.snapshots < 1050);
 }
 
-#[test]
-fn a_pc_behind_deep_buffers_misses_snapshots() {
-    // Online, the game can pile up on its way (in the network's buffers, a
-    // relay's) while the host's own outbox stays empty.
+/// The two ends of a TCP connection over loopback: the end a listener
+/// took, and the end that connected to it.
+fn tcp_pair() -> (Connection, Connection) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let joining = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (taken, _) = listener.accept().unwrap();
+    let tcp = |s| Connection::tcp(s).unwrap();
+    (tcp(taken), tcp(joining))
+}
+
+#[test]
+fn a_pc_behind_deep_buffers_misses_snapshots() {
+    behind_deep_buffers(tcp_pair());
+}
+
+#[test]
+fn a_websocket_pc_behind_deep_buffers_misses_snapshots() {
+    behind_deep_buffers(ws_pair());
+}
+
+fn behind_deep_buffers((taken, joining): (Connection, Connection)) {
+    // Online, the game can pile up on its way (in the network's buffers, a
+    // relay's) while the host's own outbox stays empty.
     let world = floor();
     let mut hg = game();
     let shooter = hg.add_player();
     let mut host = Host::online("testmap");
     host.set_rate(0);
-    host.add_connection(
-        Connection::tcp(taken).unwrap(),
-        verified("TESTER", ANY_TEAM),
-    );
+    host.add_connection(taken, verified("TESTER", ANY_TEAM));
     let mut cg = game();
-    let conn = Connection::tcp(joining).unwrap();
-    let mut client = Client::over(conn, &cg, "testmap", &[ANY_TEAM], me());
+    let mut client = Client::over(joining, &cg, "testmap", &[ANY_TEAM], me());
     let mut welcomed = false;
     pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, cg| {
         welcomed |= matches!(ce.first(), Some(ClientEvent::Welcomed { .. }));
@@ -1220,4 +1303,174 @@ fn a_game_under_lag_goes_on() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(got, made);
+}
+
+// WebSockets: dialing a server, what a server takes, and the limits.
+
+#[test]
+fn dialing_where_no_server_listens_fails_at_once() {
+    // A port nothing listens on (any more).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/live", listener.local_addr().unwrap());
+    drop(listener);
+    let start = Instant::now();
+    let dialing = dial(&url, Duration::from_secs(10));
+    // The game goes on meanwhile.
+    assert!(start.elapsed() < Duration::from_millis(100));
+    let Err(why) = dialing.recv_timeout(Duration::from_secs(2)).unwrap() else {
+        panic!("connected");
+    };
+    assert!(why.starts_with("couldn't connect to 127.0.0.1: "), "{why}");
+}
+
+#[test]
+fn dialing_a_bad_address_fails() {
+    for (url, expected) in [
+        ("lockout", "not a server address: lockout"),
+        (
+            "http://example.com/live",
+            "not a server address: http://example.com/live",
+        ),
+        (
+            "ws://no-such-host.invalid/live",
+            "couldn't find no-such-host.invalid",
+        ),
+    ] {
+        let Err(why) = dial(url, Duration::from_secs(5)).recv().unwrap() else {
+            panic!("{url} connected");
+        };
+        assert_eq!(why, expected);
+    }
+}
+
+#[test]
+fn dialing_a_server_that_never_answers_gives_up_in_time() {
+    // The system takes the connection for it, but it says nothing.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/live", listener.local_addr().unwrap());
+    let start = Instant::now();
+    let Err(why) = dial(&url, SHORT).recv().unwrap() else {
+        panic!("connected");
+    };
+    assert_eq!(why, "127.0.0.1 took too long to answer");
+    let took = start.elapsed();
+    assert!(took >= SHORT && took < SHORT * 3, "{took:?}");
+}
+
+#[test]
+fn dialing_a_web_server_that_isnt_a_game_server_fails() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/live", listener.local_addr().unwrap());
+    let dialing = dial(&url, Duration::from_secs(5));
+    let (mut stream, _) = listener.accept().unwrap();
+    std::io::Read::read(&mut stream, &mut [0; 4096]).unwrap();
+    reply(stream, "404 Not Found", "").unwrap();
+    let Err(why) = dialing.recv().unwrap() else {
+        panic!("connected");
+    };
+    assert_eq!(why, "127.0.0.1 isn't a game server (404 Not Found)");
+}
+
+/// Wait while `from` sends what it has until `to` has had `n` messages, or
+/// its connection fails (why, then).
+fn deliver(
+    from: &mut Connection,
+    to: &mut Connection,
+    n: usize,
+) -> Result<Vec<conn::Message>, String> {
+    let mut got = Vec::new();
+    let start = Instant::now();
+    while got.len() < n {
+        let _ = from.flush();
+        got.extend(to.receive()?);
+        assert!(start.elapsed() < Duration::from_secs(5), "still waiting");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Ok(got)
+}
+
+#[test]
+fn servers_answer_web_requests_and_take_websockets() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    // A browser, or a health check.
+    let browser = std::thread::spawn(move || {
+        let mut s = std::net::TcpStream::connect(address).unwrap();
+        s.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut answer = String::new();
+        s.read_to_string(&mut answer).unwrap();
+        answer
+    });
+    let (stream, _) = listener.accept().unwrap();
+    let Ok(Request::Http(stream, path)) = accept(stream) else {
+        panic!("no web request");
+    };
+    assert_eq!(path, "/health");
+    reply(stream, "200 OK", "3 PLAYERS ONLINE").unwrap();
+    let answer = browser.join().unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+    assert!(answer.ends_with("\r\n\r\n3 PLAYERS ONLINE"), "{answer}");
+
+    // A game, on the same port.
+    let dialing = dial(&format!("ws://{address}/live"), Duration::from_secs(5));
+    let (stream, _) = listener.accept().unwrap();
+    let Ok(Request::WebSocket(mut taken, path)) = accept(stream) else {
+        panic!("no WebSocket");
+    };
+    assert_eq!(path, "/live");
+    let mut dialed = dialing.recv().unwrap().unwrap();
+    dialed.send(7, b"hello");
+    let got = deliver(&mut dialed, &mut taken, 1);
+    assert_eq!(got, Ok(vec![(7, b"hello".to_vec())]));
+
+    // Something else altogether.
+    let mut s = std::net::TcpStream::connect(address).unwrap();
+    s.write_all(b"H2RS\x16\0\0\0lockout\r\n\r\n").unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    assert_eq!(accept(stream).err().as_deref(), Some("not a web request"));
+}
+
+#[test]
+fn the_largest_messages_arrive_over_tcp() {
+    the_largest_messages_arrive(tcp_pair());
+}
+
+#[test]
+fn the_largest_messages_arrive_by_websocket() {
+    the_largest_messages_arrive(ws_pair());
+}
+
+/// Messages up to a mebibyte (kind and body) arrive whole, both ways; a
+/// larger one means a broken or hostile PC, and the end of the connection.
+fn the_largest_messages_arrive((mut a, mut b): (Connection, Connection)) {
+    let largest: Vec<u8> = (0..conn::MAX_MESSAGE - 1).map(|i| i as u8).collect();
+    a.send(9, &largest);
+    a.send(1, &[]);
+    let got = deliver(&mut a, &mut b, 2);
+    assert!(got == Ok(vec![(9, largest.clone()), (1, Vec::new())]));
+    b.send(9, &largest);
+    assert!(deliver(&mut b, &mut a, 1) == Ok(vec![(9, largest)]));
+    a.send(9, &vec![0; conn::MAX_MESSAGE]);
+    assert_eq!(deliver(&mut a, &mut b, 1), Err("bad message".into()));
+}
+
+#[test]
+fn a_websocket_that_takes_nothing_is_too_slow() {
+    let (mut taken, _dialed) = ws_pair();
+    // The PC never reads: the network holds what it can, then what's
+    // waiting to go grows past the limit.
+    let chunk = vec![0; 64 << 10];
+    let mut sent = 0;
+    let why = loop {
+        taken.send(1, &chunk);
+        sent += chunk.len() + 1;
+        if let Err(why) = taken.flush() {
+            break why;
+        }
+        assert!(sent < 256 << 20, "{sent} bytes sent");
+    };
+    assert_eq!(why, "connection too slow");
+    assert!(sent > conn::MAX_BACKLOG, "{sent} bytes sent");
 }

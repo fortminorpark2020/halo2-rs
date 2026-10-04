@@ -10,7 +10,8 @@
 //! Online games are the same, over connections the online service hands
 //! the host and the joining PC (`Host::add_connection`, `Client::over`),
 //! with the game sent 30 times a second rather than after every tick, and
-//! mostly as how it changed since the last.
+//! mostly as how it changed since the last. Those connections are
+//! WebSockets: PCs `dial` the service, and it `accept`s them.
 
 mod client;
 mod conn;
@@ -18,6 +19,7 @@ mod delta;
 mod discovery;
 mod host;
 mod lobby;
+mod ws;
 
 use std::time::{Duration, Instant};
 
@@ -26,6 +28,7 @@ pub use conn::Connection;
 pub use discovery::{local_ip, Browser, LanGame};
 pub use host::{Host, HostEvent, Verified};
 pub use lobby::{Lobby, LobbyPlayer};
+pub use ws::{accept, dial, reply, Request};
 
 /// Bumped whenever the messages change; PCs on different versions can't play.
 pub const PROTOCOL: u32 = 22;
