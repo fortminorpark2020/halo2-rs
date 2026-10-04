@@ -592,6 +592,8 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
     let free_at: Option<f32> = std::env::var("H2_SIM_FREE")
         .ok()
         .and_then(|v| v.parse().ok());
+    // H2_SIM_GOD=1: the player can't be hurt (to test a whole level).
+    let god = std::env::var_os("H2_SIM_GOD").is_some();
     // H2_SIM_SKIP=<seconds>: skip cutscenes from then on.
     let skip_at: Option<f32> = std::env::var("H2_SIM_SKIP")
         .ok()
@@ -612,10 +614,17 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         if step == Some(None) {
             commands[0].action = true;
         }
+        if god {
+            let p = &mut game.players[0];
+            (p.health, p.shield) = (p.full.health, p.full.shield);
+        }
         game.step(&level.world, &commands);
         h2sim::bot::alert_actors(&mut bots, &game, &game.events);
         match step {
             Some(Some(at)) => {
+                if game.players[0].seat.is_some() {
+                    game.exit(&level.world, 0);
+                }
                 game.players[0].body.position = at;
                 game.players[0].body.velocity = Vec3::ZERO;
                 println!("{t:6.1} player moves to {at}");
@@ -1243,6 +1252,10 @@ impl App {
                     for l in &mut self.locals {
                         l.message(hint.clone());
                     }
+                }
+                let nav_points = m.nav_points(&self.scene, &self.game);
+                for l in &mut self.locals {
+                    l.nav_points.clone_from(&nav_points);
                 }
                 let effects = m.take_effects();
                 let sounds = m.take_sounds();

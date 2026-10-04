@@ -446,13 +446,19 @@ impl World {
         Some(self.active.load(Ordering::Relaxed)).filter(|&g| g != ANY)
     }
 
-    /// Whether part `group` of the level has a floor under `p`, within
-    /// `reach`.
+    /// Whether one part of the level (its BSP) has a floor under `p`
+    /// within `reach`.
     pub fn floor_in_group(&self, group: u16, p: Vec3, reach: f32) -> bool {
+        self.floor_below(Some(group), p, reach).is_some()
+    }
+
+    /// How far under `p` the nearest floor of the level is, within
+    /// `reach`: of one part of it, or (`None`) of any part, active or not.
+    pub fn floor_below(&self, group: Option<u16>, p: Vec3, reach: f32) -> Option<f32> {
         let mut best: Hit = None;
         let test = |id: u32, best: &mut Hit| {
             let i = id as usize;
-            if self.owner[i] != LEVEL || self.group[i] != group {
+            if self.owner[i] != LEVEL || group.is_some_and(|g| self.group[i] != g) {
                 return;
             }
             if let Some(d) = ray_triangle(p, Vec3::NEG_Z, &self.triangles[i]) {
@@ -466,7 +472,7 @@ impl World {
         }
         self.coarse.walk(p, Vec3::NEG_Z, reach, &mut best, test);
         self.grid.walk(p, Vec3::NEG_Z, reach, &mut best, test);
-        best.is_some()
+        best.map(|b| b.0)
     }
 
     pub fn floors(&self, min_up: f32) -> impl Iterator<Item = [Vec3; 3]> + '_ {
@@ -876,6 +882,7 @@ mod tests {
         w.set_group(Some(1));
         assert_eq!(ray(&w), Some(1.0));
         assert!(!w.floor_in_group(0, Vec3::new(2.0, 0.0, 1.0), 3.0));
+        assert_eq!(w.floor_below(None, Vec3::new(2.0, 0.0, 1.0), 3.0), None);
     }
 
     #[test]

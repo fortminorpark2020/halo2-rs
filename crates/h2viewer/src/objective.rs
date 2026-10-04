@@ -252,6 +252,8 @@ fn glow([r, g, b]: [f32; 3], alpha: f32) -> [f32; 4] {
 }
 
 const NEUTRAL_GLOW: [f32; 3] = [1.0, 0.85, 0.4];
+/// The arrows over where a mission sends the players.
+const NAV_POINT: [f32; 3] = [0.9, 0.7, 0.2];
 
 /// The colour of a side holding something: their team's, or in free-for-all
 /// the player's armour.
@@ -505,6 +507,14 @@ impl LocalPlayer {
                     });
                 }
             }
+        }
+        // The mission's waypoints.
+        for &at in &self.nav_points {
+            marks.push(Mark {
+                at,
+                color: NAV_POINT,
+                icon: None,
+            });
         }
         let view_proj = self
             .camera

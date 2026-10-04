@@ -38,6 +38,10 @@ const MIDDLE: f32 = 0.4;
 /// into may be (they may be in a vehicle), and under actors it keeps.
 const HUMAN_FLOOR: f32 = 6.0;
 const ACTOR_FLOOR: f32 = 4.0;
+/// How far up a flier may be over the floor of its BSP.
+const FLIER_FLOOR: f32 = 15.0;
+/// Floors of two BSPs this close in height are the same floor.
+const SAME_FLOOR: f32 = 0.3;
 /// A switch with no device group calls the nearest lift this close.
 const CALL_REACH: f32 = 10.0;
 
@@ -337,6 +341,9 @@ struct State {
     effects: Vec<(EffectLook, Vec3)>,
     /// Tips for the players ("press V for active camouflage").
     hints: Vec<String>,
+    /// Waypoints the scripts show the players: over an object or a
+    /// cutscene flag, so high above it.
+    nav_points: Vec<(NavPoint, f32)>,
     /// The structure BSP the players are in.
     bsp: u16,
     /// The BSP from before a cutscene, to go back to if the players are
@@ -781,6 +788,21 @@ impl Mission {
         std::mem::take(&mut self.state.hints)
     }
 
+    /// Where the scripts' waypoints are now.
+    pub fn nav_points(&self, scene: &Scene, game: &Game) -> Vec<Vec3> {
+        self.state
+            .nav_points
+            .iter()
+            .filter_map(|&(to, up)| {
+                let at = match to {
+                    NavPoint::Object(o) => object_position(&self.state, scene, game, o)?,
+                    NavPoint::Flag(at) => at,
+                };
+                Some(at + Vec3::Z * up)
+            })
+            .collect()
+    }
+
     /// The mission's last script said it's won.
     pub fn won(&self) -> bool {
         self.state.won
@@ -867,6 +889,36 @@ fn in_group(mut at: Option<u16>, g: u16, parents: &[Option<u16>]) -> bool {
 }
 
 /// What the scripts work with while they run.
+/// What a waypoint is over.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum NavPoint {
+    Object(Obj),
+    Flag(Vec3),
+}
+
+/// Where an object is, if it's in the level.
+fn object_position(st: &State, scene: &Scene, game: &Game, o: Obj) -> Option<Vec3> {
+    match o {
+        Obj::Unit(i) => game
+            .players
+            .get(i)
+            .filter(|p| p.alive)
+            .map(|p| p.body.position),
+        Obj::Vehicle(v) => game
+            .vehicles
+            .get(v)
+            .filter(|veh| !veh.destroyed)
+            .map(|veh| veh.origin(&game.vehicle_defs[veh.def])),
+        Obj::Name(n) => {
+            if st.created.get(&n) == Some(&false) {
+                return None;
+            }
+            let placed = scene.ai.name_positions.get(n as usize).copied().flatten()?;
+            Some(st.moved(n).transform_point3(placed))
+        }
+    }
+}
+
 struct Ctx<'a> {
     st: &'a mut State,
     scene: &'a Scene,
@@ -973,33 +1025,7 @@ impl Ctx<'_> {
 
     /// Where an object is, if it's in the level.
     fn position(&self, o: Obj) -> Option<Vec3> {
-        match o {
-            Obj::Unit(i) => self
-                .game
-                .players
-                .get(i)
-                .filter(|p| p.alive)
-                .map(|p| p.body.position),
-            Obj::Vehicle(v) => self
-                .game
-                .vehicles
-                .get(v)
-                .filter(|veh| !veh.destroyed)
-                .map(|veh| veh.origin(&self.game.vehicle_defs[veh.def])),
-            Obj::Name(n) => {
-                if self.st.created.get(&n) == Some(&false) {
-                    return None;
-                }
-                let placed = self
-                    .scene
-                    .ai
-                    .name_positions
-                    .get(n as usize)
-                    .copied()
-                    .flatten()?;
-                Some(self.st.moved(n).transform_point3(placed))
-            }
-        }
+        object_position(self.st, self.scene, self.game, o)
     }
 
     fn in_volume(&self, volume: &Value, o: Obj) -> bool {
@@ -1038,9 +1064,24 @@ impl Ctx<'_> {
     /// level does. Actors it leaves with nothing to stand on are gone from
     /// the level, as in the original.
     fn follow_collision(&mut self, world: &World) {
+        // In a BSP: on a lift, or over its floor, the nearest one there is
+        // (where two BSPs overlap, both have it). A flier may be well up.
         let stands = |bsp: u16, p: &h2sim::game::Spartan, reach: f32| {
             let feet = p.body.position + Vec3::Z * 0.5;
-            world.floor_in_group(bsp, feet, reach) || world.mover_under(feet, reach).is_some()
+            let reach = if p.body.biped.flying {
+                FLIER_FLOOR
+            } else {
+                reach
+            };
+            if world.mover_under(feet, reach).is_some() {
+                return true;
+            }
+            let Some(own) = world.floor_below(Some(bsp), feet, reach) else {
+                return false;
+            };
+            world
+                .floor_below(None, feet, reach)
+                .is_none_or(|any| own <= any + SAME_FLOOR)
         };
         let humans: Vec<usize> = self
             .humans()
@@ -1062,17 +1103,18 @@ impl Ctx<'_> {
             }
         }
         let bsp = self.st.bsp;
-        if world.group() == Some(bsp) {
-            return;
-        }
         if !all_stand(bsp) {
-            // Until they do, all of the level is there.
+            // Until they do (and when they step off it onto another's
+            // floor), all of the level is there.
             if world.group().is_some() {
                 world.set_group(None);
                 if self.st.log {
                     println!("collision of every bsp");
                 }
             }
+            return;
+        }
+        if world.group() == Some(bsp) {
             return;
         }
         world.set_group(Some(bsp));
@@ -1700,6 +1742,49 @@ impl Host for Ctx<'_> {
             | "weapon_enable_warthog_chaingun_light"
             | "pvs_set_object"
             | "pvs_clear" => Value::Void,
+            // Waypoints: (type, team or unit, object or flag, how high
+            // above it); taking one away names the object or flag.
+            "activate_team_nav_point_object" | "activate_nav_point_object" => {
+                let up = num(3);
+                for &o in arg(2).objects() {
+                    let to = NavPoint::Object(o);
+                    if self.st.log {
+                        println!("waypoint over {o:?} at {:?}", self.position(o));
+                    }
+                    self.st.nav_points.retain(|n| n.0 != to);
+                    self.st.nav_points.push((to, up));
+                }
+                Value::Void
+            }
+            "activate_team_nav_point_flag" | "activate_nav_point_flag" => {
+                let flag = arg(2)
+                    .index()
+                    .and_then(|f| self.scene.ai.flags.get(f as usize));
+                if let Some(&(at, _)) = flag {
+                    let to = NavPoint::Flag(at);
+                    self.st.nav_points.retain(|n| n.0 != to);
+                    self.st.nav_points.push((to, num(3)));
+                }
+                Value::Void
+            }
+            "deactivate_team_nav_point_object" | "deactivate_nav_point_object" => {
+                let gone: Vec<NavPoint> = arg(1)
+                    .objects()
+                    .iter()
+                    .map(|&o| NavPoint::Object(o))
+                    .collect();
+                self.st.nav_points.retain(|n| !gone.contains(&n.0));
+                Value::Void
+            }
+            "deactivate_team_nav_point_flag" | "deactivate_nav_point_flag" => {
+                let flag = arg(1)
+                    .index()
+                    .and_then(|f| self.scene.ai.flags.get(f as usize));
+                if let Some(&(at, _)) = flag {
+                    self.st.nav_points.retain(|n| n.0 != NavPoint::Flag(at));
+                }
+                Value::Void
+            }
             // Taught in the Arbiter's first mission.
             "player_training_activate_stealth" => {
                 self.st
@@ -1742,6 +1827,19 @@ impl Host for Ctx<'_> {
                 for i in self.actors(&arg(0)) {
                     if let Some(a) = &mut self.game.players[i].actor {
                         a.immortal = on;
+                    }
+                }
+                Value::Void
+            }
+            "ai_set_blind" | "ai_suppress_combat" => {
+                let (actors, on) = (self.actors(&arg(0)), arg(1).truthy());
+                for (i, b) in self.bots.iter_mut() {
+                    if let (true, Some(mind)) = (actors.contains(i), &mut b.actor) {
+                        if function == "ai_set_blind" {
+                            mind.blind = on;
+                        } else {
+                            mind.peaceful = on;
+                        }
                     }
                 }
                 Value::Void

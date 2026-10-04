@@ -369,6 +369,8 @@ pub struct LocalPlayer {
     pub friends_seen: Vec<usize>,
     /// The player under the crosshair right now, and how far.
     pub aimed_at: Option<(usize, f32)>,
+    /// Where the mission's waypoints point.
+    pub nav_points: Vec<Vec3>,
 }
 
 impl LocalPlayer {
@@ -397,6 +399,7 @@ impl LocalPlayer {
             tagged: None,
             friends_seen: Vec::new(),
             aimed_at: None,
+            nav_points: Vec::new(),
         }
     }
 

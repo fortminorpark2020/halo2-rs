@@ -73,6 +73,9 @@ pub struct ActorMind {
     pub follows: bool,
     /// What a command script has it do.
     pub scripted: Option<Scripted>,
+    /// Sees no one (`ai_set_blind`), or won't fight (`ai_suppress_combat`).
+    pub blind: bool,
+    pub peaceful: bool,
     /// The firing position it's fighting from, how long it's been there
     /// or getting there, and how long it stays.
     fight_at: Option<Vec3>,
@@ -94,6 +97,8 @@ impl ActorMind {
             area: Vec::new(),
             follows: true,
             scripted: None,
+            blind: false,
+            peaceful: false,
             fight_at: None,
             held: 0.0,
             stay: 0.0,
@@ -115,7 +120,7 @@ impl Bot {
     /// it's already alert or the enemy is close. Keeps to the one it's
     /// fighting while it can see them.
     pub(super) fn actor_target(&self, game: &Game, world: &World, me: usize) -> Option<usize> {
-        let a = self.actor.as_ref()?;
+        let a = self.actor.as_ref().filter(|a| !a.blind && !a.peaceful)?;
         let p = &game.players[me];
         let eye = p.eye();
         let alert = self.target.is_some() || a.alert.is_some();

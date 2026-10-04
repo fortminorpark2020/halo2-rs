@@ -251,6 +251,54 @@ impl Ctx<'_> {
                 }
                 Value::Void
             }
+            // Each of a squad's actors gets into the nearest of the
+            // squad's own vehicles (its turrets, say).
+            "ai_enter_squad_vehicles" => {
+                for s in self.squads(&arg(0)) {
+                    let own: Vec<usize> = self
+                        .scene
+                        .vehicles
+                        .squad_vehicles
+                        .iter()
+                        .filter(|(k, _)| k.0 as usize == s)
+                        .map(|(_, &v)| v)
+                        .filter(|&v| self.game.vehicles.get(v).is_some_and(|w| !w.destroyed))
+                        .collect();
+                    let crew: Vec<usize> = self
+                        .bots
+                        .iter()
+                        .filter(|(i, b)| {
+                            let p = &self.game.players[*i];
+                            b.actor.as_ref().is_some_and(|a| a.squad as usize == s)
+                                && p.alive
+                                && p.seat.is_none()
+                                && !self.st.rides.boarding.contains_key(i)
+                        })
+                        .map(|(i, _)| *i)
+                        .collect();
+                    let mut taken: Vec<usize> = Vec::new();
+                    for i in crew {
+                        let at = self.game.players[i].body.position;
+                        let far = |v: usize| {
+                            let w = &self.game.vehicles[v];
+                            w.origin(&self.game.vehicle_defs[w.def]).distance(at)
+                        };
+                        let free = own.iter().copied().filter(|v| !taken.contains(v));
+                        let Some(v) = free.min_by(|&a, &b| far(a).total_cmp(&far(b))) else {
+                            break;
+                        };
+                        taken.push(v);
+                        let seats = self.named_seats(v, None);
+                        let b = Boarding {
+                            vehicle: v,
+                            seats,
+                            time: 0.0,
+                        };
+                        self.st.rides.boarding.insert(i, b);
+                    }
+                }
+                Value::Void
+            }
             "ai_vehicle_exit" => {
                 for i in self.actors(&arg(0)) {
                     self.st.rides.boarding.remove(&i);
