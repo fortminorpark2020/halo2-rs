@@ -514,6 +514,8 @@ pub struct Command {
     pub switch_weapon: bool,
     pub throw_grenade: bool,
     pub switch_grenade: bool,
+    /// The flashlight button: the Arbiter's active camouflage.
+    pub vision: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -574,6 +576,8 @@ pub struct Spartan {
     overshield_charge: f32,
     /// Seconds of active camouflage left.
     pub camo: f32,
+    /// Seconds until the Arbiter's own camouflage can come on again.
+    pub camo_recharge: f32,
     /// How much firing and getting hurt give a camouflaged player away (0-1).
     pub reveal: f32,
     /// Came out of a teleporter and hasn't stepped off its pad yet (so a
@@ -1086,6 +1090,7 @@ impl Game {
             since_damage: f32::INFINITY,
             overshield_charge: 0.0,
             camo: 0.0,
+            camo_recharge: 0.0,
             reveal: 0.0,
             teleported: false,
             alive: true,
@@ -1262,6 +1267,9 @@ impl Game {
         }
 
         self.press_switch(i, cmd.switch_weapon, last.switch_weapon, dt);
+        if pressed(cmd.vision, last.vision) {
+            self.toggle_own_camo(i);
+        }
         if pressed(cmd.switch_grenade, last.switch_grenade) {
             let p = &mut self.players[i];
             p.grenade = match p.grenade {
@@ -1715,6 +1723,7 @@ impl Game {
         p.shield = 0.0;
         p.overshield_charge = 0.0;
         p.camo = 0.0;
+        p.camo_recharge = 0.0;
         p.respawn_in = respawn;
         p.deaths += 1;
         p.spree = 0;

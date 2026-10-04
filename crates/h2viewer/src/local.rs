@@ -278,6 +278,7 @@ pub struct Taps {
     pub switch_weapon: bool,
     pub throw_grenade: bool,
     pub switch_grenade: bool,
+    pub vision: bool,
 }
 
 /// What a player's first person view should react to this frame.
@@ -470,6 +471,7 @@ impl LocalPlayer {
         cmd.switch_weapon = t.switch_weapon;
         cmd.throw_grenade = t.throw_grenade;
         cmd.switch_grenade = t.switch_grenade;
+        cmd.vision = t.vision;
         if let Some(k) = keyboard {
             let held = |c: KeyCode| k.keys.contains(&c);
             let axis =

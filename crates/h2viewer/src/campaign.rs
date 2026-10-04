@@ -332,6 +332,8 @@ struct State {
     sounds: Vec<MissionSound>,
     /// Effects the scripts set off, and where.
     effects: Vec<(EffectLook, Vec3)>,
+    /// Tips for the players ("press V for active camouflage").
+    hints: Vec<String>,
     /// The structure BSP the players are in.
     bsp: u16,
     /// The BSP from before a cutscene, to go back to if the players are
@@ -768,6 +770,11 @@ impl Mission {
     /// The effects the scripts set off since last asked, and where.
     pub fn take_effects(&mut self) -> Vec<(EffectLook, Vec3)> {
         std::mem::take(&mut self.state.effects)
+    }
+
+    /// Tips the scripts gave the players since last asked.
+    pub fn take_hints(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.state.hints)
     }
 
     /// The mission's last script said it's won.
@@ -1673,6 +1680,8 @@ impl Host for Ctx<'_> {
                 Value::Void
             }
             "ai_renew"
+            | "object_set_deleted_when_deactivated"
+            | "player_training_activate_flashlight"
             | "ai_disposable"
             | "ai_dialogue_enable"
             | "data_mine_set_mission_segment"
@@ -1683,6 +1692,43 @@ impl Host for Ctx<'_> {
             | "weapon_enable_warthog_chaingun_light"
             | "pvs_set_object"
             | "pvs_clear" => Value::Void,
+            // Taught in the Arbiter's first mission.
+            "player_training_activate_stealth" => {
+                self.st
+                    .hints
+                    .push("PRESS V (LB) FOR ACTIVE CAMOUFLAGE".into());
+                Value::Void
+            }
+            "cheat_active_camouflage_by_player" => {
+                let on = arg(1).truthy();
+                let humans = self.humans();
+                if let Some(&i) = humans.get(num(0).max(0.0) as usize) {
+                    self.game.players[i].camo = if on { 10.0 } else { 0.0 };
+                }
+                Value::Void
+            }
+            // Actors scripts protect a while (they can still be hurt).
+            "object_cannot_take_damage" | "object_can_take_damage" => {
+                let on = function == "object_cannot_take_damage";
+                for &o in objects(0) {
+                    let Some(i) = self.unit(o) else { continue };
+                    if let Some(a) = &mut self.game.players[i].actor {
+                        a.immortal = on;
+                    }
+                }
+                Value::Void
+            }
+            "unit_kill" | "unit_kill_silent" => {
+                for &o in objects(0) {
+                    if let Some(i) = self
+                        .unit(o)
+                        .filter(|&i| self.game.players[i].actor.is_some())
+                    {
+                        self.game.kill_actor(i);
+                    }
+                }
+                Value::Void
+            }
             "ai_cannot_die" => {
                 let on = arg(1).truthy();
                 for i in self.actors(&arg(0)) {

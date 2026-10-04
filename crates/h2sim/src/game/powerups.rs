@@ -39,8 +39,42 @@ pub(super) fn step(p: &mut Spartan, rules: &Rules, dt: f32) {
         let drain = rules.shield * OVERSHIELD_LAYERS / rules.overshield_time.max(1.0);
         p.shield = (p.shield - drain * dt).max(rules.shield);
     }
+    let had_camo = p.camo > 0.0;
     p.camo = (p.camo - dt).max(0.0);
+    if had_camo && p.camo == 0.0 && p.camo_recharge < 0.0 {
+        // The Arbiter's own ran out.
+        p.camo_recharge = OWN_CAMO_RECHARGE;
+    }
+    if p.camo == 0.0 {
+        p.camo_recharge = (p.camo_recharge - dt).max(0.0);
+    }
     p.reveal = (p.reveal - REVEAL_FADE * dt).max(0.0);
+}
+
+/// The Arbiter's own active camouflage: seconds it lasts, and seconds
+/// before it can come on again after.
+const OWN_CAMO_TIME: f32 = 10.0;
+const OWN_CAMO_RECHARGE: f32 = 5.0;
+
+impl Game {
+    /// The flashlight button: in the Arbiter's missions it turns his own
+    /// active camouflage on (once it has recharged) or off.
+    pub(super) fn toggle_own_camo(&mut self, i: usize) {
+        let campaign = self.rules.game_type == crate::GameType::Campaign;
+        let p = &mut self.players[i];
+        if !campaign || !p.look.elite || p.actor.is_some() || !p.alive {
+            return;
+        }
+        if p.camo_recharge < 0.0 {
+            // On: off again, recharging.
+            p.camo = 0.0;
+            p.camo_recharge = OWN_CAMO_RECHARGE;
+        } else if p.camo_recharge == 0.0 && p.camo == 0.0 {
+            p.camo = OWN_CAMO_TIME;
+            // Negative while it's his own (not a power-up's).
+            p.camo_recharge = -1.0;
+        }
+    }
 }
 
 impl Spartan {
@@ -141,6 +175,43 @@ mod tests {
             let commands = vec![Command::default(); g.players.len()];
             g.step(&world, &commands);
         }
+    }
+
+    #[test]
+    fn the_arbiter_turns_his_own_camouflage_on_and_off() {
+        let mut g = game();
+        g.rules.game_type = crate::GameType::Campaign;
+        g.add_player();
+        g.players[0].look.elite = true;
+        let world = floor();
+        let press = |g: &mut Game| {
+            let cmd = Command {
+                vision: true,
+                ..Command::default()
+            };
+            g.step(&world, &[cmd]);
+            g.step(&world, &[Command::default()]);
+        };
+        press(&mut g);
+        assert!(g.players[0].camo > 9.0);
+        run(&mut g, 1.0);
+        press(&mut g);
+        assert_eq!(g.players[0].camo, 0.0, "off again");
+        press(&mut g);
+        assert_eq!(g.players[0].camo, 0.0, "still recharging");
+        run(&mut g, OWN_CAMO_RECHARGE + 0.1);
+        press(&mut g);
+        assert!(g.players[0].camo > 9.0);
+        // Running out recharges too.
+        run(&mut g, OWN_CAMO_TIME);
+        assert_eq!(g.players[0].camo, 0.0);
+        press(&mut g);
+        assert_eq!(g.players[0].camo, 0.0);
+        // The Master Chief has a flashlight instead.
+        g.players[0].look.elite = false;
+        run(&mut g, OWN_CAMO_RECHARGE + 0.1);
+        press(&mut g);
+        assert_eq!(g.players[0].camo, 0.0);
     }
 
     #[test]

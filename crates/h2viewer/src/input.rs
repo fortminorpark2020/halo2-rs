@@ -39,6 +39,8 @@ pub enum PadPress {
     SwitchWeapon,
     Grenade,
     SwitchGrenade,
+    /// The flashlight: the Arbiter's active camouflage.
+    Vision,
     Zoom,
     /// Start: join as another splitscreen player, or pause.
     Join,
@@ -126,7 +128,8 @@ impl Pads {
                     Button::West => Some(PadPress::Reload),
                     Button::North => Some(PadPress::SwitchWeapon),
                     Button::LeftTrigger2 => Some(PadPress::Grenade),
-                    Button::LeftTrigger | Button::RightTrigger => Some(PadPress::SwitchGrenade),
+                    Button::LeftTrigger => Some(PadPress::Vision),
+                    Button::RightTrigger => Some(PadPress::SwitchGrenade),
                     Button::RightThumb => Some(PadPress::Zoom),
                     Button::Start => Some(PadPress::Join),
                     Button::Select => Some(PadPress::Leave),

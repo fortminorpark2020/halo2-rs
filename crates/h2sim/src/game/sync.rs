@@ -161,6 +161,7 @@ impl Command {
             self.switch_weapon,
             self.throw_grenade,
             self.switch_grenade,
+            self.vision,
         ];
         w.u16(
             flags
@@ -194,6 +195,7 @@ impl Command {
             switch_weapon: f(7),
             throw_grenade: f(8),
             switch_grenade: f(9),
+            vision: f(10),
         })
     }
 
@@ -210,6 +212,7 @@ impl Command {
         self.switch_weapon |= other.switch_weapon;
         self.throw_grenade |= other.throw_grenade;
         self.switch_grenade |= other.switch_grenade;
+        self.vision |= other.vision;
         self
     }
 }

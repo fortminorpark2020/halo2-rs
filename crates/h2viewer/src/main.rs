@@ -10,8 +10,9 @@
 //! In a game, keyboard and mouse: click to capture the mouse, WASD move,
 //! Space jump, Ctrl/C crouch, left mouse fire, right mouse / Z zoom, R
 //! reload, F melee, G / middle mouse throw a grenade, X switch grenades, E
-//! pick up (hold to swap weapons), Q / mouse wheel switch weapon, hold Tab
-//! for the scoreboard, B add a bot, 1-9 take any weapon (testing), ` toggles
+//! pick up (hold to swap weapons), Q / mouse wheel switch weapon, V (left
+//! bumper) the Arbiter's active camouflage, hold Tab for the scoreboard, B
+//! add a bot, 1-9 take any weapon (testing), ` toggles
 //! walking / flying (fly: Space/C up/down, Shift fast), Esc the pause menu.
 //!
 //! Vehicles: hold E (X on a controller) by one to drive, gun or ride, and
@@ -1050,6 +1051,7 @@ impl App {
                     PadPress::SwitchWeapon => t.switch_weapon = true,
                     PadPress::Grenade => t.throw_grenade = true,
                     PadPress::SwitchGrenade => t.switch_grenade = true,
+                    PadPress::Vision => t.vision = true,
                     PadPress::Zoom => t.zoom = true,
                     _ => {}
                 }
@@ -1198,6 +1200,11 @@ impl App {
                     }
                 }
                 self.body_gestures.extend(m.take_gestures());
+                for hint in m.take_hints() {
+                    for l in &mut self.locals {
+                        l.message(hint.clone());
+                    }
+                }
                 let effects = m.take_effects();
                 let sounds = m.take_sounds();
                 if !sounds.is_empty() {
@@ -2317,6 +2324,7 @@ impl App {
             KeyCode::KeyR => l.taps.reload = true,
             KeyCode::KeyG => l.taps.throw_grenade = true,
             KeyCode::KeyX => l.taps.switch_grenade = true,
+            KeyCode::KeyV => l.taps.vision = true,
             KeyCode::Digit1
             | KeyCode::Digit2
             | KeyCode::Digit3
