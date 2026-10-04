@@ -696,6 +696,9 @@ dependencies = [
 [[package]]
 name = "h2live"
 version = "0.1.0"
+dependencies = [
+ "h2sim",
+]
 
 [[package]]
 name = "h2net"

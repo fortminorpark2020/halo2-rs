@@ -6,3 +6,4 @@ license.workspace = true
 description = "Online play, like Halo 2 on Xbox Live: levels, playlists and matchmaking"
 
 [dependencies]
+h2sim = { path = "../h2sim" }

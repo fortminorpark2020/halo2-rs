@@ -1,0 +1,93 @@
+# The matchmaking playlists: Halo 2's launch playlists, as far as this game
+# can play them. A playlists.txt in the server's data folder replaces all of
+# them; copy this file there to start from it. The format is described at
+# the top of crates/h2live/src/playlists.rs.
+
+playlist 0 ffa Rumble Pit
+ranked yes
+humans 3 8
+party 1
+guests no
+bots none
+variant slayer default 25 600
+variant slayer rockets 25 600
+variant slayer shotguns 25 600
+variant oddball default 100 720
+variant king default 100 720
+maps lockout cyclotron ascension midship warlock deltatap gemini elongation
+maps backwash foundation
+
+playlist 1 head_to_head Head to Head
+ranked yes
+humans 2 2
+party 1
+guests no
+bots none
+variant slayer default 15 600
+variant slayer swords 15 600
+maps lockout midship warlock cyclotron gemini elongation
+
+playlist 2 double_team Double Team
+ranked yes
+humans 4 4
+party 2
+guests no
+bots none
+variant team_slayer default 25 600
+variant team_slayer rockets 25 600
+variant team_slayer shotguns 25 600
+variant team_oddball default 120 600
+maps lockout midship warlock ascension gemini elongation cyclotron
+
+playlist 3 team_slayer Team Slayer
+ranked yes
+humans 4 8
+party 4
+guests no
+bots even
+variant team_slayer default 50 720
+variant team_slayer swat 50 720
+maps lockout midship ascension zanzibar headlong coagulation beavercreek
+maps colossus turf foundation
+
+playlist 4 small_team Team Skirmish
+ranked yes
+humans 4 8
+party 2
+guests no
+bots even
+variant ctf default 3 900
+variant assault default 3 900
+variant team_king default 150 720
+variant team_oddball default 150 720
+variant territories default 300 900
+maps beavercreek midship colossus turf zanzibar ascension backwash deltatap
+
+playlist 5 big_team Big Team Battle
+ranked no
+humans 2 16
+party 8
+guests yes
+bots fill 12
+variant ctf default 3 900
+variant assault default 3 900
+variant territories default 300 900
+variant team_slayer default 75 900
+maps coagulation waterworks headlong zanzibar containment triplicate
+maps burial_mounds turf dune
+
+playlist 6 small_team_unranked Team Training
+ranked no
+humans 2 8
+party 8
+guests yes
+bots fill 8
+variant team_slayer default 50 720
+variant team_slayer swat 50 720
+variant ctf default 3 900
+variant assault default 3 900
+variant team_king default 150 720
+variant team_oddball default 150 720
+variant territories default 300 900
+maps lockout midship ascension zanzibar headlong coagulation beavercreek
+maps colossus turf foundation backwash deltatap
