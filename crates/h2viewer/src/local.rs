@@ -13,7 +13,7 @@ use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use h2sim::game::{GrenadeKind, Look, Spartan, VehicleAction, TICK};
 use h2sim::vehicle::{SeatDef, SeatRole};
-use h2sim::{Command, Game, WeaponState, World};
+use h2sim::{Command, Game, GameType, WeaponState, World};
 use std::collections::HashSet;
 use winit::keyboard::KeyCode;
 
@@ -185,10 +185,12 @@ pub fn team_hud_color(team: u8) -> [f32; 4] {
     [[1.0, 0.3, 0.25, 1.0], [0.35, 0.55, 1.0, 1.0]][team.min(1) as usize]
 }
 
-/// Armour colours in this game: their own, or their team's in team games.
+/// Armour colours in this game: their own, or their team's in team games
+/// (the campaign has no team colours).
 pub fn player_colors(game: &Game, player: usize) -> [[f32; 3]; 2] {
+    let campaign = game.rules.game_type == GameType::Campaign;
     match game.players.get(player) {
-        Some(p) if game.rules.game_type.teams() => {
+        Some(p) if game.rules.game_type.teams() && !campaign => {
             let c = TEAM_COLORS[p.team.min(1) as usize];
             [c, c.map(|v| v * 0.6)]
         }
@@ -977,7 +979,8 @@ impl LocalPlayer {
             hb.text(font, [w * 0.5, 64.0 * s], 8.0 * s, notice, hud::BLUE);
         }
         // Your score (your team's in team games), and the best of the
-        // others under it.
+        // others under it. The campaign keeps no score.
+        let campaign = game.rules.game_type == GameType::Campaign;
         let teams = game.rules.game_type.teams();
         let (mine, best_other, colors) = if teams {
             let enemy = 1 - me.team.min(1);
@@ -994,14 +997,16 @@ impl LocalPlayer {
             (me.score, best, [hud::BLUE, hud::DIM_BLUE])
         };
         let timed = game.rules.game_type.timed();
-        hb.text(
-            font,
-            [w - 40.0 * s, h - 52.0 * s],
-            14.0 * s,
-            &score_text(mine, timed),
-            colors[0],
-        );
-        if let Some(k) = best_other {
+        if !campaign {
+            hb.text(
+                font,
+                [w - 40.0 * s, h - 52.0 * s],
+                14.0 * s,
+                &score_text(mine, timed),
+                colors[0],
+            );
+        }
+        if let Some(k) = best_other.filter(|_| !campaign) {
             hb.text(
                 font,
                 [w - 40.0 * s, h - 34.0 * s],

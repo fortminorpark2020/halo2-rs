@@ -64,6 +64,9 @@ fn press(p: PadPress) -> Press {
     }
 }
 
+/// The profile colour of the Master Chief's armour.
+const CHIEF_OLIVE: u8 = 5;
+
 pub fn bot_for(player: usize) -> (usize, Bot) {
     (player, Bot::new(player as u32 * 7919 + 13))
 }
@@ -85,6 +88,7 @@ impl App {
         };
         let ctx = menu::Context {
             maps: &self.maps,
+            missions: &self.missions,
             lan: &self.lan_games,
             seats: &seats,
             local: self.seats.len(),
@@ -130,6 +134,7 @@ impl App {
         match action {
             Action::None => {}
             Action::Start => self.start_selected(),
+            Action::Mission(i) => self.start_mission(i),
             Action::Join(game) => self.join_game(&game),
             Action::SaveProfile => self.menu.profile.save(),
             Action::Resume => {
@@ -314,6 +319,36 @@ impl App {
         }
     }
 
+    /// Play a campaign mission, loading it first if it isn't loaded.
+    fn start_mission(&mut self, i: usize) {
+        let Some(mission) = self.missions.get(i).cloned() else {
+            return;
+        };
+        self.campaign = true;
+        if mission.path == self.map_path {
+            self.start_campaign();
+        } else {
+            self.begin_load(mission.path, Then::Campaign);
+        }
+    }
+
+    /// Play the loaded mission: the people here, alone together against
+    /// the Covenant (not open to the network).
+    pub(crate) fn start_campaign(&mut self) {
+        self.net = Net::Offline;
+        for seat in &mut self.seats {
+            seat.team = 0;
+        }
+        self.seat_players(0, &GameOptions::default());
+        // The Master Chief in his own olive armour, whatever the profile.
+        for l in &self.locals {
+            let mut look = self.game.players[l.player].look;
+            look.elite = false;
+            look.colors = [CHIEF_OLIVE; 2];
+            self.game.set_look(l.player, look);
+        }
+    }
+
     fn join_game(&mut self, game: &LanGame) {
         if game.map.eq_ignore_ascii_case(&self.map_name) {
             self.begin_join(game);
@@ -368,12 +403,14 @@ impl App {
                 self.install(level);
                 match loading.then {
                     Then::Play => self.start_game(),
+                    Then::Campaign => self.start_campaign(),
                     Then::Join(game) => self.begin_join(&game),
                     Then::Rejoin => self.rejoin_host(),
                 }
             }
             Err(e) => {
                 println!("couldn't load the map: {e}");
+                self.campaign = false;
                 let why = format!("COULDN'T LOAD {}", loading.title);
                 if matches!(loading.then, Then::Rejoin) {
                     self.drop_out(why);
@@ -401,13 +438,16 @@ impl App {
         self.focus = level_focus(&self.scene.collision);
         let here = MapChoice::new(&self.map_path);
         self.map_name = here.name.clone();
-        self.menu.settings.map = match self.maps.iter().position(|m| m.path == here.path) {
-            Some(i) => i,
-            None => {
-                self.maps.push(here);
-                self.maps.len() - 1
-            }
-        };
+        // A mission isn't one of the lobby's maps.
+        if self.scene.campaign.is_none() {
+            self.menu.settings.map = match self.maps.iter().position(|m| m.path == here.path) {
+                Some(i) => i,
+                None => {
+                    self.maps.push(here);
+                    self.maps.len() - 1
+                }
+            };
+        }
         self.reset_match();
         self.game = self.fresh_game(&self.menu.settings.options);
     }
@@ -415,6 +455,9 @@ impl App {
     /// A game with no one in it yet, under the lobby's settings and
     /// `options`.
     fn fresh_game(&self, options: &GameOptions) -> Game {
+        if self.campaign && self.scene.campaign.is_some() {
+            return crate::campaign_game(&self.scene);
+        }
         let settings = &self.menu.settings;
         new_game(
             &self.scene,
@@ -595,11 +638,16 @@ impl App {
                 self.seats = seats;
             }
         }
+        let mission = std::mem::take(&mut self.campaign);
         self.reset_match();
         self.game = self.fresh_game(&self.menu.settings.options);
         self.mode = Mode::Menu;
         self.menu_open = false;
-        self.menu.show(Screen::Lobby);
+        self.menu.show(if mission {
+            Screen::Campaign
+        } else {
+            Screen::Lobby
+        });
         self.set_capture(false);
     }
 

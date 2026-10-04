@@ -629,31 +629,19 @@ impl Loader {
     }
 
     /// The map's vehicles: each kind, and where each one appears (with
-    /// its own copy of the meshes to pose).
+    /// its own copy of the meshes to pose). Multiplayer maps place them as
+    /// vehicle collections that come back once destroyed; campaign missions
+    /// place each one, for good.
     pub(super) fn vehicles(
         &mut self,
+        campaign: bool,
         weapons: &mut Vec<WeaponAssets>,
         meshes: &mut Vec<MeshData>,
     ) -> Vehicles {
         let mut out = Vehicles::default();
-        let vehc = GroupTag::parse("vehc").expect("a group tag");
         let mut kinds: HashMap<(DatumIndex, String), Option<usize>> = HashMap::new();
         let mut templates: Vec<(MeshData, Option<MeshData>)> = Vec::new();
-        for spawn in scenario::netgame_equipment(&mut self.set).unwrap_or_default() {
-            let is_vehicle = self
-                .set
-                .locate(spawn.collection)
-                .is_some_and(|(_, t)| t.group == vehc);
-            if !is_vehicle {
-                continue;
-            }
-            let Some((_, vehi, variant)) =
-                vehicle::vehicle_collection(&mut self.set, spawn.collection)
-                    .ok()
-                    .and_then(|c| c.into_iter().next())
-            else {
-                continue;
-            };
+        for (vehi, variant, position, yaw, respawn) in self.vehicle_spawns(campaign) {
             let key = (vehi, variant.clone());
             let kind = match kinds.get(&key) {
                 Some(&k) => k,
@@ -681,13 +669,47 @@ impl Loader {
             out.meshes.push((body, turret));
             out.spawns.push(VehicleSpawn {
                 def: kind,
-                position: Vec3::from(spawn.position) + Vec3::Z * 0.05,
-                yaw: spawn.rotation[0],
-                respawn: match spawn.respawn_seconds {
-                    0 => 30.0,
-                    s => s as f32,
-                },
+                position: Vec3::from(position) + Vec3::Z * 0.05,
+                yaw,
+                respawn,
             });
+        }
+        out
+    }
+
+    /// Where vehicles appear: (vehicle, variant, position, yaw, seconds
+    /// before one comes back).
+    fn vehicle_spawns(&mut self, campaign: bool) -> Vec<(DatumIndex, String, [f32; 3], f32, f32)> {
+        if campaign {
+            return scenario::placements(&mut self.set, scenario::PlacedKind::Vehicle)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|p| p.automatic && p.object != DatumIndex::NONE)
+                .map(|p| (p.object, p.variant, p.position, p.rotation[0], 1e9))
+                .collect();
+        }
+        let vehc = GroupTag::parse("vehc").expect("a group tag");
+        let mut out = Vec::new();
+        for spawn in scenario::netgame_equipment(&mut self.set).unwrap_or_default() {
+            let is_vehicle = self
+                .set
+                .locate(spawn.collection)
+                .is_some_and(|(_, t)| t.group == vehc);
+            if !is_vehicle {
+                continue;
+            }
+            let Some((_, vehi, variant)) =
+                vehicle::vehicle_collection(&mut self.set, spawn.collection)
+                    .ok()
+                    .and_then(|c| c.into_iter().next())
+            else {
+                continue;
+            };
+            let respawn = match spawn.respawn_seconds {
+                0 => 30.0,
+                s => s as f32,
+            };
+            out.push((vehi, variant, spawn.position, spawn.rotation[0], respawn));
         }
         out
     }

@@ -13,6 +13,7 @@ use blam_cache::lightmap::{self, InstanceLighting};
 use blam_cache::model::{self, RenderModel};
 use blam_cache::physics::{self, BipedPhysics, PlayerMovement};
 use blam_cache::render::{LevelGeometry, Section, SectionOwner};
+use blam_cache::scenario::PlacedKind;
 use blam_cache::shader::{self, Blend};
 use blam_cache::{
     render, scenario, sound, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp,
@@ -625,6 +626,8 @@ pub struct Scene {
     pub falling: Option<FallingDamage>,
     /// The map's vehicles, and their guns (in `weapons`).
     pub vehicles: Vehicles,
+    /// A campaign mission's start, on campaign maps.
+    pub campaign: Option<CampaignStart>,
 }
 
 /// Capture the Flag's flag: carried in hand like a weapon, with a cloth
@@ -651,6 +654,96 @@ const BOMB: &str = "objects\\weapons\\multiplayer\\assault_bomb\\assault_bomb";
 const FLAG_STAND: &str = "objects\\multi\\flag_base\\flag_base";
 
 /// Multiplayer weapons, in switching order.
+/// What players start a campaign mission with.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CampaignStart {
+    /// In `Scene::weapons`, the one in hand first.
+    pub weapons: Vec<usize>,
+    pub frags: u8,
+    pub plasmas: u8,
+}
+
+/// An item lying in the level: a weapon, grenades, a power-up or ammo.
+struct ItemPlacement {
+    item: DatumIndex,
+    position: [f32; 3],
+    rotation: [f32; 3],
+    /// Seconds before it's back once taken.
+    respawn: f32,
+}
+
+/// Campaign items never come back once taken.
+const NEVER: f32 = 1e9;
+
+/// The items lying in a level: multiplayer maps' item spawns (a
+/// collection of several, like any power-up, gives each spot one of them
+/// in turn, the same on every PC), or the weapons and equipment a campaign
+/// mission places at its start.
+fn item_spawns(set: &mut MapSet, campaign: bool) -> Vec<ItemPlacement> {
+    if campaign {
+        return [PlacedKind::Weapon, PlacedKind::Equipment]
+            .iter()
+            .flat_map(|&k| scenario::placements(set, k).unwrap_or_default())
+            .filter(|p| p.automatic && p.object != DatumIndex::NONE)
+            .map(|p| ItemPlacement {
+                item: p.object,
+                position: p.position,
+                rotation: p.rotation,
+                respawn: NEVER,
+            })
+            .collect();
+    }
+    let equipment = scenario::netgame_equipment(set).unwrap_or_default();
+    let mut out = Vec::new();
+    for (k, spawn) in equipment.into_iter().enumerate() {
+        let collection = scenario::item_collection(set, spawn.collection);
+        let Some((_, item)) = collection
+            .ok()
+            .and_then(|c| c.get(k % c.len().max(1)).copied())
+        else {
+            continue;
+        };
+        out.push(ItemPlacement {
+            item,
+            position: spawn.position,
+            rotation: spawn.rotation,
+            respawn: match spawn.respawn_seconds {
+                0 => 30.0,
+                s => s as f32,
+            },
+        });
+    }
+    out
+}
+
+/// What players start a mission with: the first of its starting profiles
+/// that gives a weapon (the others are for cutscenes and later scripts).
+fn campaign_start(set: &mut MapSet, weapons: &[WeaponAssets]) -> CampaignStart {
+    let profiles = scenario::starting_profiles(set).unwrap_or_default();
+    let Some(p) = profiles
+        .iter()
+        .find(|p| p.primary.is_some())
+        .or(profiles.first())
+    else {
+        return CampaignStart::default();
+    };
+    let index = |w: Option<scenario::StartingWeapon>| {
+        let w = w?;
+        weapons.iter().position(|a| a.tag == w.weapon)
+    };
+    CampaignStart {
+        weapons: [index(p.primary), index(p.secondary)]
+            .into_iter()
+            .flatten()
+            .collect(),
+        frags: p.frags,
+        plasmas: p.plasmas,
+    }
+}
+
+/// The campaign's Master Chief (multiplayer maps have their own).
+const CAMPAIGN_SPARTAN: &str = "objects\\characters\\masterchief\\masterchief";
+
 const WEAPONS: &[&str] = &[
     "objects\\weapons\\rifle\\battle_rifle\\battle_rifle",
     "objects\\weapons\\rifle\\smg\\smg",
@@ -1464,7 +1557,10 @@ impl Scene {
         let sky = loader.sky(&mut meshes);
         let arms = loader.arms(SPARTAN_ARMS, &mut meshes);
         let elite_arms = loader.arms(ELITE_ARMS, &mut meshes);
-        let body = loader.body(SPARTAN, ["right_hand", "left_hand"], &mut meshes);
+        let campaign = loader.set.map.header.map_type == blam_cache::MapType::Campaign;
+        let body = loader
+            .body(SPARTAN, ["right_hand", "left_hand"], &mut meshes)
+            .or_else(|| loader.body(CAMPAIGN_SPARTAN, ["right_hand", "left_hand"], &mut meshes));
         let elite = loader.body(ELITE, ["right_hand_elite", "left_hand_elite"], &mut meshes);
         let skeletons = [&arms, &elite_arms].map(|a| a.as_ref().map(|a| &a.skeleton));
         let weapons = WEAPONS
@@ -1484,7 +1580,23 @@ impl Scene {
         let falling = loader.falling();
         let level_light = LevelLight::new(&meshes[0]);
         let mut objects = Vec::new();
-        for p in scenario::scenery(&mut loader.set).unwrap_or_default() {
+        // Campaign maps also place doors, crates and switches; scripts make
+        // the rest when their time comes.
+        let placed = if campaign {
+            [
+                PlacedKind::Scenery,
+                PlacedKind::Machine,
+                PlacedKind::Control,
+                PlacedKind::Crate,
+            ]
+            .iter()
+            .flat_map(|&k| scenario::placements(&mut loader.set, k).unwrap_or_default())
+            .filter(|p| p.automatic)
+            .collect()
+        } else {
+            scenario::scenery(&mut loader.set).unwrap_or_default()
+        };
+        for p in placed {
             if let Some(mesh) = loader.object_mesh(p.object, &mut meshes) {
                 let light =
                     level_light.at(&loader.textures, Vec3::from(p.position) + Vec3::Z * 0.2);
@@ -1507,17 +1619,8 @@ impl Scene {
                 packs.push((eqip, w, rounds as u32));
             }
         }
-        let equipment = scenario::netgame_equipment(&mut loader.set).unwrap_or_default();
-        for (k, spawn) in equipment.into_iter().enumerate() {
-            // A collection of several (any power-up) gives each spot one of
-            // them in turn, the same on every PC.
-            let collection = scenario::item_collection(&mut loader.set, spawn.collection);
-            let Some((_, item)) = collection
-                .ok()
-                .and_then(|c| c.get(k % c.len().max(1)).copied())
-            else {
-                continue;
-            };
+        for spawn in item_spawns(&mut loader.set, campaign) {
+            let item = spawn.item;
             let name = loader
                 .set
                 .locate(item)
@@ -1585,14 +1688,12 @@ impl Scene {
                     placement_matrix(spawn.position, spawn.rotation, 1.0)
                 },
                 position: Vec3::from(spawn.position),
-                respawn_seconds: match spawn.respawn_seconds {
-                    0 => 30.0,
-                    s => s as f32,
-                },
+                respawn_seconds: spawn.respawn,
                 light,
             });
         }
-        let vehicles = loader.vehicles(&mut weapons, &mut meshes);
+        let vehicles = loader.vehicles(campaign, &mut weapons, &mut meshes);
+        let campaign = campaign.then(|| campaign_start(&mut loader.set, &weapons));
         let grenades = ["frag_grenade", "plasma_grenade"].map(|g| {
             let name = format!("objects\\weapons\\grenade\\{g}\\{g}");
             GrenadeAssets {
@@ -1746,6 +1847,7 @@ impl Scene {
             println!("warning: {} textures couldn't be decoded", loader.failures);
         }
         Ok(Scene {
+            campaign,
             textures: loader.textures,
             materials: loader.materials,
             meshes,

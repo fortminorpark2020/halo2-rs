@@ -242,6 +242,9 @@ pub enum GameType {
     Territories,
     /// Red against blue; carry your bomb into the enemy base and arm it.
     Assault,
+    /// A campaign mission: the players (alone or side by side) against
+    /// the Covenant. Not played over the network.
+    Campaign,
 }
 
 impl GameType {
@@ -268,6 +271,7 @@ impl GameType {
                 | GameType::TeamOddball
                 | GameType::Territories
                 | GameType::Assault
+                | GameType::Campaign
         )
     }
 

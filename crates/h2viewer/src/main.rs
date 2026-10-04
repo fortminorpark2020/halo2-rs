@@ -236,6 +236,22 @@ fn new_game(
     game
 }
 
+/// A campaign mission on the scene's level, with no one in it yet: the
+/// players start with what the mission gives them.
+fn campaign_game(scene: &Scene) -> Game {
+    let mut game = new_game(
+        scene,
+        GameType::Campaign,
+        0,
+        &options::GameOptions::default(),
+    );
+    let start = scene.campaign.clone().unwrap_or_default();
+    game.rules.starting_weapons = start.weapons;
+    game.rules.starting_frags = start.frags;
+    game.rules.starting_plasmas = start.plasmas;
+    game
+}
+
 /// The places on the level that kill.
 fn kill_zones(scene: &Scene) -> Vec<KillZone> {
     scene
@@ -559,6 +575,8 @@ struct Loading {
 /// What to do once a map has loaded.
 enum Then {
     Play,
+    /// Play a campaign mission.
+    Campaign,
     Join(h2net::LanGame),
     /// Join the game the host we're with started.
     Rejoin,
@@ -640,6 +658,10 @@ struct App {
     /// The menu is up over a game (paused, or the carnage report).
     menu_open: bool,
     maps: Vec<MapChoice>,
+    /// The campaign missions in the maps folder.
+    missions: Vec<MapChoice>,
+    /// Playing (or loading) a campaign mission rather than multiplayer.
+    campaign: bool,
     /// The maps' pictures, for the lobby.
     map_pictures: Vec<blam_cache::bitmap::Image>,
     /// The emblem atlases, uploaded with the window.
@@ -1925,6 +1947,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
     });
     let mut maps = path.parent().map(menu::find_maps).unwrap_or_default();
+    let missions = path.parent().map(menu::find_missions).unwrap_or_default();
     let map_pictures = path
         .parent()
         .map(|dir| mapinfo::describe_maps(dir, &mut maps))
@@ -2016,6 +2039,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         menu: Menu::new(settings, profile::Profile::load()),
         menu_open: false,
         maps,
+        missions,
+        campaign: false,
         map_pictures,
         emblem_art,
         loading: None,
@@ -2041,6 +2066,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // a game at once (for testing).
     if let Some(address) = env("H2_JOIN") {
         app.join_address(&address);
+    } else if env("H2_PLAY").is_some() && menu::is_mission(&app.map_path) {
+        app.campaign = true;
+        app.start_campaign();
     } else if env("H2_PLAY").is_some() {
         app.start_game();
     }

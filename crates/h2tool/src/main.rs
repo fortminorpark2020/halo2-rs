@@ -615,13 +615,34 @@ fn objects(path: &str) -> Res {
             .map(|(_, t)| format!("{} {}", t.group, t.name))
             .unwrap_or_else(|| format!("{:08x}", d.0))
     };
-    for p in scenario::scenery(&mut set)? {
+    let names = scenario::object_names(&mut set).unwrap_or_default();
+    for kind in scenario::PlacedKind::ALL {
+        for (k, p) in scenario::placements(&mut set, kind)?.iter().enumerate() {
+            let called = p
+                .name
+                .and_then(|n| names.get(n as usize))
+                .map_or("", |n| n.name.as_str());
+            let auto = if p.automatic { "" } else { " (by script)" };
+            println!(
+                "{kind:?} {k} {:<70} {called} at {:7.2?} rot {:5.2?} scale {}{auto}",
+                name(&set, p.object),
+                p.position,
+                p.rotation,
+                p.scale
+            );
+        }
+    }
+    for p in scenario::starting_profiles(&mut set).unwrap_or_default() {
+        let weapon = |w: Option<scenario::StartingWeapon>| {
+            w.map(|w| format!("{} {:?}/{:?}", name(&set, w.weapon), w.loaded, w.total))
+        };
         println!(
-            "scenery {:<70} at {:7.2?} rot {:5.2?} scale {}",
-            name(&set, p.object),
-            p.position,
-            p.rotation,
-            p.scale
+            "starting profile {:?}: {:?} {:?} frags {} plasmas {}",
+            p.name,
+            weapon(p.primary),
+            weapon(p.secondary),
+            p.frags,
+            p.plasmas
         );
     }
     for i in scenario::netgame_equipment(&mut set)? {

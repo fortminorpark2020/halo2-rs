@@ -1,5 +1,5 @@
-//! Halo 2 style menus, drawn over the map: the main menu, the multiplayer
-//! lobby, the system link browser, the player profile, the pause menu and
+//! Halo 2 style menus, drawn over the map: the main menu, the campaign's
+//! missions, the multiplayer lobby, the system link browser, the player profile, the pause menu and
 //! the post-game carnage report. Keyboard, mouse and controllers all work
 //! them.
 
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Main,
+    Campaign,
     Lobby,
     /// The lobby's game options.
     Options,
@@ -69,10 +70,33 @@ const MAP_TITLES: &[(&str, &str)] = &[
     ("zanzibar", "ZANZIBAR"),
 ];
 
+/// Halo 2's campaign missions' files and names, in story order.
+const MISSION_TITLES: &[(&str, &str)] = &[
+    ("00a_introduction", "THE HERETIC"),
+    ("01a_tutorial", "THE ARMORY"),
+    ("01b_spacestation", "CAIRO STATION"),
+    ("03a_oldmombasa", "OUTSKIRTS"),
+    ("03b_newmombasa", "METROPOLIS"),
+    ("04a_gasgiant", "THE ARBITER"),
+    ("04b_floodlab", "THE ORACLE"),
+    ("05a_deltaapproach", "DELTA HALO"),
+    ("05b_deltatowers", "REGRET"),
+    ("06a_sentinelwalls", "SACRED ICON"),
+    ("06b_floodzone", "QUARANTINE ZONE"),
+    ("07a_highcharity", "GRAVEMIND"),
+    ("07b_forerunnership", "HIGH CHARITY"),
+    ("08a_deltacliffs", "UPRISING"),
+    ("08b_deltacontrol", "THE GREAT JOURNEY"),
+];
+
+/// The campaign's difficulties.
+pub const DIFFICULTIES: [&str; 4] = ["EASY", "NORMAL", "HEROIC", "LEGENDARY"];
+
 pub fn map_title(name: &str) -> String {
     let name = name.to_lowercase();
     MAP_TITLES
         .iter()
+        .chain(MISSION_TITLES)
         .find(|m| m.0 == name)
         .map_or_else(|| name.replace('_', " ").to_uppercase(), |m| m.1.into())
 }
@@ -97,30 +121,49 @@ impl MapChoice {
 /// (add-on maps), by name.
 pub fn find_maps(dir: &Path) -> Vec<MapChoice> {
     let dlc = dir.parent().map(|p| p.join("dlc"));
-    let mut maps = maps_in(dir);
+    let mut maps = maps_in(dir, blam_cache::MapType::Multiplayer);
     if let Some(dlc) = dlc.filter(|d| d.as_path() != dir) {
-        maps.extend(maps_in(&dlc));
+        maps.extend(maps_in(&dlc, blam_cache::MapType::Multiplayer));
     }
     maps.sort_by(|a, b| a.title.cmp(&b.title));
     maps
 }
 
-fn maps_in(dir: &Path) -> Vec<MapChoice> {
+/// The campaign missions in a folder, in story order.
+pub fn find_missions(dir: &Path) -> Vec<MapChoice> {
+    let mut missions = maps_in(dir, blam_cache::MapType::Campaign);
+    let order = |m: &MapChoice| {
+        MISSION_TITLES
+            .iter()
+            .position(|t| t.0 == m.name)
+            .unwrap_or(MISSION_TITLES.len())
+    };
+    missions.sort_by(|a, b| order(a).cmp(&order(b)).then(a.name.cmp(&b.name)));
+    missions
+}
+
+/// Whether a map file is a campaign mission.
+pub fn is_mission(path: &Path) -> bool {
+    map_type(path) == Some(blam_cache::MapType::Campaign)
+}
+
+fn map_type(path: &Path) -> Option<blam_cache::MapType> {
     use std::io::Read;
+    let mut head = vec![0u8; 0x800];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .ok()?;
+    blam_cache::Header::parse(&head).ok().map(|h| h.map_type)
+}
+
+fn maps_in(dir: &Path, kind: blam_cache::MapType) -> Vec<MapChoice> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("map")))
-        .filter(|p| {
-            let mut head = vec![0u8; 0x800];
-            std::fs::File::open(p)
-                .and_then(|mut f| f.read_exact(&mut head))
-                .is_ok()
-                && blam_cache::Header::parse(&head)
-                    .is_ok_and(|h| h.map_type == blam_cache::MapType::Multiplayer)
-        })
+        .filter(|p| map_type(p) == Some(kind))
         .map(|p| MapChoice::new(&p))
         .collect()
 }
@@ -222,6 +265,8 @@ pub enum Action {
     None,
     /// Start a game with the lobby's settings.
     Start,
+    /// Play a campaign mission (one of `Context::missions`).
+    Mission(usize),
     Join(LanGame),
     /// The player changed their profile: keep it.
     SaveProfile,
@@ -263,6 +308,7 @@ pub enum Sound {
 /// What the game knows that the menus show.
 pub struct Context<'a> {
     pub maps: &'a [MapChoice],
+    pub missions: &'a [MapChoice],
     pub lan: &'a [LanGame],
     /// Everyone in the lobby.
     pub seats: &'a [SeatInfo],
@@ -277,6 +323,10 @@ pub struct Context<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Row {
+    Campaign,
+    Difficulty,
+    Mission(usize),
+    NoMissions,
     Multiplayer,
     SystemLink,
     Profile,
@@ -317,7 +367,7 @@ enum Row {
 
 impl Row {
     fn selectable(self) -> bool {
-        !matches!(self, Row::Searching | Row::Waiting)
+        !matches!(self, Row::Searching | Row::Waiting | Row::NoMissions)
     }
 
     /// A profile setting stepped with left and right.
@@ -346,6 +396,8 @@ pub struct Menu {
     pub profile: Profile,
     /// Typing a new gamertag.
     pub editing: bool,
+    /// The campaign's difficulty, in `DIFFICULTIES`.
+    pub difficulty: usize,
 }
 
 /// Layout, in Halo 2's 640x480 screen units.
@@ -438,6 +490,7 @@ impl Menu {
             sound: None,
             profile,
             editing: false,
+            difficulty: 1,
         }
     }
 
@@ -449,6 +502,7 @@ impl Menu {
     fn title(&self) -> &'static str {
         match self.screen {
             Screen::Main => "HALO 2",
+            Screen::Campaign => "CAMPAIGN",
             Screen::Lobby => "MULTIPLAYER",
             Screen::Options => "GAME OPTIONS",
             Screen::SystemLink => "SYSTEM LINK",
@@ -460,7 +514,17 @@ impl Menu {
 
     fn rows(&self, ctx: &Context) -> Vec<Row> {
         match self.screen {
-            Screen::Main => vec![Row::Multiplayer, Row::SystemLink, Row::Profile, Row::Quit],
+            Screen::Main => vec![
+                Row::Campaign,
+                Row::Multiplayer,
+                Row::SystemLink,
+                Row::Profile,
+                Row::Quit,
+            ],
+            Screen::Campaign if ctx.missions.is_empty() => vec![Row::Difficulty, Row::NoMissions],
+            Screen::Campaign => std::iter::once(Row::Difficulty)
+                .chain((0..ctx.missions.len()).map(Row::Mission))
+                .collect(),
             Screen::Profile => vec![
                 Row::Name,
                 Row::Model,
@@ -524,6 +588,18 @@ impl Menu {
             }
         }
         match row {
+            Row::Campaign => ("CAMPAIGN".into(), None),
+            Row::Difficulty => (
+                "DIFFICULTY".into(),
+                Some(DIFFICULTIES[self.difficulty.min(3)].into()),
+            ),
+            Row::Mission(i) => (
+                ctx.missions
+                    .get(i)
+                    .map_or_else(String::new, |m| m.title.clone()),
+                None,
+            ),
+            Row::NoMissions => ("NO CAMPAIGN MAPS FOUND".into(), None),
             Row::Multiplayer => ("MULTIPLAYER".into(), None),
             Row::SystemLink => ("SYSTEM LINK".into(), None),
             Row::Profile => ("PLAYER PROFILE".into(), None),
@@ -731,6 +807,7 @@ impl Menu {
         };
         let s = &mut self.settings;
         match row {
+            Row::Difficulty => self.difficulty = cycle(self.difficulty, DIFFICULTIES.len()),
             Row::Map => s.map = cycle(s.map, ctx.maps.len()),
             Row::Score => s.score = cycle(s.score, scores(s.game_type()).0.len()),
             Row::Bots => s.bots = cycle(s.bots, MAX_BOTS + 1),
@@ -791,6 +868,18 @@ impl Menu {
             Action::None
         };
         match row {
+            Row::Campaign => forward(self, Screen::Campaign),
+            Row::Difficulty => {
+                if self.adjust(row, 1, ctx) {
+                    self.sound = Some(Sound::Cursor);
+                }
+                Action::None
+            }
+            Row::Mission(i) => {
+                self.sound = Some(Sound::Advance);
+                Action::Mission(i)
+            }
+            Row::NoMissions => Action::None,
             Row::Multiplayer => forward(self, Screen::Lobby),
             Row::SystemLink => forward(self, Screen::SystemLink),
             Row::Profile => forward(self, Screen::Profile),
@@ -924,7 +1013,12 @@ impl Menu {
             Screen::Main => Action::None,
             Screen::Profile => {
                 self.show(Screen::Main);
-                self.cursor = 2;
+                self.cursor = 3;
+                self.sound = Some(Sound::Back);
+                Action::None
+            }
+            Screen::Campaign => {
+                self.show(Screen::Main);
                 self.sound = Some(Sound::Back);
                 Action::None
             }
@@ -938,7 +1032,7 @@ impl Menu {
                 let from = self.screen;
                 self.show(Screen::Main);
                 // Back on the item that led here.
-                self.cursor = (from == Screen::SystemLink) as usize;
+                self.cursor = 1 + (from == Screen::SystemLink) as usize;
                 self.sound = Some(Sound::Back);
                 Action::None
             }
@@ -1034,6 +1128,7 @@ impl Menu {
         // Darken behind the menu so it reads over any map.
         match self.screen {
             Screen::Main
+            | Screen::Campaign
             | Screen::Lobby
             | Screen::Options
             | Screen::SystemLink
@@ -1406,6 +1501,7 @@ mod tests {
     fn ctx<'a>(maps: &'a [MapChoice], lan: &'a [LanGame]) -> Context<'a> {
         Context {
             maps,
+            missions: &[],
             lan,
             seats: Vec::leak(vec![SeatInfo {
                 name: "JOHN".into(),
@@ -1451,6 +1547,7 @@ mod tests {
             },
             Profile::default(),
         );
+        m.input(Input::Down, &c);
         assert_eq!(m.input(Input::Select, &c), Action::None);
         assert_eq!(m.screen, Screen::Lobby);
         m.input(Input::Down, &c);
@@ -1483,8 +1580,39 @@ mod tests {
         assert_eq!(m.sound, Some(Sound::Advance));
         assert_eq!(m.input(Input::Back, &c), Action::None);
         assert_eq!(m.screen, Screen::Main);
+        assert_eq!(m.rows(&c)[m.cursor], Row::Multiplayer);
+        m.input(Input::Up, &c);
         m.input(Input::Up, &c);
         assert_eq!(m.input(Input::Select, &c), Action::Quit);
+    }
+
+    #[test]
+    fn the_campaign_picks_a_difficulty_and_a_mission() {
+        let maps = maps();
+        let missions: Vec<MapChoice> = ["01b_spacestation", "01a_tutorial"]
+            .iter()
+            .map(|n| MapChoice::new(Path::new(&format!("{n}.map"))))
+            .collect();
+        let c = Context {
+            missions: &missions,
+            ..ctx(&maps, &[])
+        };
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.screen, Screen::Campaign);
+        assert_eq!(m.label(Row::Difficulty, &c).1.as_deref(), Some("NORMAL"));
+        m.input(Input::Right, &c);
+        m.input(Input::Right, &c);
+        assert_eq!(m.label(Row::Difficulty, &c).1.as_deref(), Some("LEGENDARY"));
+        m.input(Input::Down, &c);
+        m.input(Input::Down, &c);
+        assert_eq!(m.label(Row::Mission(1), &c).0, "THE ARMORY");
+        assert_eq!(m.input(Input::Select, &c), Action::Mission(1));
+        m.input(Input::Back, &c);
+        assert_eq!(m.screen, Screen::Main);
+        // No folder, no missions.
+        let dir = std::env::temp_dir();
+        assert!(find_missions(&dir.join("no such folder")).is_empty());
     }
 
     #[test]
