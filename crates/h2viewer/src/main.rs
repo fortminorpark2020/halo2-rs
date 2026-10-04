@@ -1118,6 +1118,8 @@ struct App {
     /// (H2_WEAPON).
     start_pos: Option<PlayerSpawn>,
     start_weapon: Option<usize>,
+    /// For testing (H2_AUTOPILOT=1): a bot plays player one.
+    autopilot: Option<Bot>,
 }
 
 impl App {
@@ -1399,6 +1401,9 @@ impl App {
             for (i, bot) in &mut self.bots {
                 commands[*i] = bot.think(&self.game, &self.world, &self.nav, *i);
             }
+            if let Some((i, command)) = self.autopilot_command() {
+                commands[i] = command;
+            }
             self.remote_commands(&mut commands);
             self.game.step(&self.world, &commands);
             h2sim::bot::alert_actors(&mut self.bots, &self.game, &self.game.events);
@@ -1457,6 +1462,20 @@ impl App {
             self.handle_events();
         }
         self.send_to_joined(ticked);
+    }
+
+    /// For testing (H2_AUTOPILOT=1): player one's controls from a bot, the
+    /// view following where it looks.
+    fn autopilot_command(&mut self) -> Option<(usize, Command)> {
+        let bot = self.autopilot.as_mut()?;
+        let l = self.locals.first_mut()?;
+        if l.player >= self.game.players.len() || self.mission.is_some() {
+            return None;
+        }
+        let command = bot.think(&self.game, &self.world, &self.nav, l.player);
+        l.camera.yaw = command.yaw;
+        l.camera.pitch = command.pitch;
+        Some((l.player, command))
     }
 
     /// Where each view hears from.
@@ -2722,6 +2741,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         keyboard_used: false,
         start_pos,
         start_weapon: env("H2_WEAPON").and_then(|v| v.parse().ok()),
+        // H2_AUTOPILOT=1: a bot plays player one (for testing).
+        autopilot: env("H2_AUTOPILOT").map(|_| Bot::new(4099)),
     };
     app.level_changed();
     // H2_SPLIT=<n> starts with n people in splitscreen (for testing).
@@ -2740,6 +2761,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         app.start_campaign();
     } else if env("H2_PLAY").is_some() {
         app.start_game();
+    }
+    // H2_LIVE_AUTO=search:<playlist key> goes online at once, then searches
+    // that playlist by itself (for testing).
+    if env("H2_LIVE_AUTO").is_some() {
+        app.menu.show(Screen::Live);
+        app.go_online();
     }
     // H2_CAM="x y z yaw pitch" (degrees): look from there with a free
     // camera (for testing).

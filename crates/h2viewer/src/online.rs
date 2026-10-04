@@ -41,6 +41,9 @@ const DIAL_WAIT: Duration = Duration::from_secs(90);
 const WAKING: f64 = 5.0;
 /// Longest a relay leg's connection may take.
 const LEG_WAIT: Duration = Duration::from_secs(20);
+/// For testing (H2_LIVE_AUTO): seconds the party stays in its lobby before
+/// it searches again by itself.
+const AUTO_WAIT: f64 = 10.0;
 /// Shown when the service turned down our gamertag.
 const TAKEN: &str = "THAT GAMERTAG IS TAKEN. TYPE ANOTHER, THEN SIGN IN";
 /// Most made-up players an in-game service has.
@@ -409,6 +412,10 @@ pub struct Online {
     /// A service run in the game, for testing.
     test: Option<TestService>,
     pub text: LiveText,
+    /// For testing (H2_LIVE_AUTO=search:<key>): the playlist the party
+    /// searches by itself, and when it was last busy.
+    auto: Option<String>,
+    idle: f64,
 }
 
 enum Link {
@@ -479,6 +486,10 @@ impl Online {
             legs: Vec::new(),
             test: None,
             text,
+            auto: std::env::var("H2_LIVE_AUTO")
+                .ok()
+                .and_then(|v| Some(v.strip_prefix("search:")?.to_string())),
+            idle: 0.0,
         }
     }
 
@@ -864,6 +875,31 @@ impl App {
             _ => {}
         }
         self.update_match();
+        self.auto_search(now);
+    }
+
+    /// For testing (H2_LIVE_AUTO=search:<key>): lead the party into that
+    /// playlist's searches, each time it's been back in its lobby a while.
+    fn auto_search(&mut self, now: f64) {
+        let Some(key) = &self.online.auto else {
+            return;
+        };
+        let here = self.menu.screen == Screen::Live && self.loading.is_none();
+        let view = self.online.view(now).filter(|_| here);
+        let lobby = |v: &OnlineView| v.party().is_some_and(|p| p.activity == Activity::Lobby);
+        let ready =
+            view.filter(|v| v.leads() && v.search.is_none() && v.game.is_none() && lobby(v));
+        let playlist =
+            ready.and_then(|v| v.playlists().iter().find(|p| p.key == *key).map(|p| p.id));
+        let Some(id) = playlist else {
+            self.online.idle = now;
+            return;
+        };
+        if now - self.online.idle >= AUTO_WAIT {
+            self.online.idle = now;
+            self.menu.show(Screen::Matchmaking);
+            self.ask_live(Action::Search(Some(id)));
+        }
     }
 
     /// Carry out a menu action for the online service.

@@ -322,7 +322,7 @@ impl App {
             fire_held: self.fire_held,
             zoom_held: self.zoom_held,
         };
-        let commands: Vec<(usize, Command)> = self
+        let mut commands: Vec<(usize, Command)> = self
             .locals
             .iter()
             .map(|l| {
@@ -333,6 +333,11 @@ impl App {
                 (l.player, l.command(l.keyboard.then_some(&keyboard), pad))
             })
             .collect();
+        if let Some((p, command)) = self.autopilot_command() {
+            for c in commands.iter_mut().filter(|c| c.0 == p) {
+                c.1 = command;
+            }
+        }
         if let Net::Joined { client, .. } = &mut self.net {
             client.send_commands(&commands);
         }

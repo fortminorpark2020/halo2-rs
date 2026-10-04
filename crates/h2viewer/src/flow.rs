@@ -561,6 +561,10 @@ impl App {
         self.game_over = None;
         self.sound.reset();
         self.music_voice = None;
+        // A new game is new ground for the autopilot (testing).
+        if let Some(bot) = &mut self.autopilot {
+            *bot = Bot::new(4099);
+        }
     }
 
     /// A fresh game for the people here; `bots` computer players join them.
