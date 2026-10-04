@@ -1179,6 +1179,21 @@ fn a_pc_that_never_catches_up_is_dropped() {
     assert_eq!(reason, "connection too slow");
 }
 
+#[test]
+fn messages_put_back_come_again_before_the_end_goes() {
+    let (mut a, mut b) = Connection::pair();
+    for kind in [1, 2, 3] {
+        a.send(kind, &[kind]);
+    }
+    a.flush().unwrap();
+    drop(a);
+    let mut got = b.receive().unwrap();
+    assert_eq!(got.len(), 3);
+    b.put_back(got.split_off(1));
+    assert_eq!(b.receive().unwrap(), vec![(2, vec![2]), (3, vec![3])]);
+    assert!(b.receive().is_err());
+}
+
 // Under lag, as over the internet: every message 100-200 ms late.
 
 /// Timeouts for games under lag: ten heartbeats, against messages up to a

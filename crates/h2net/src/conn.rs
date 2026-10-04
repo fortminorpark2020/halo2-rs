@@ -25,6 +25,8 @@ pub(crate) type Message = (u8, Vec<u8>);
 pub struct Connection {
     link: Link,
     closed: Option<String>,
+    /// Messages put back after they were received, to be received again.
+    back: Vec<Message>,
     /// When we last sent something, and last heard something.
     sent: Instant,
     heard: Instant,
@@ -101,6 +103,7 @@ impl Connection {
         Connection {
             link,
             closed: None,
+            back: Vec::new(),
             sent: Instant::now(),
             heard: Instant::now(),
         }
@@ -142,7 +145,7 @@ impl Connection {
     }
 
     /// Bytes sent that the network (or the other end) hasn't taken yet.
-    fn backlog(&self) -> usize {
+    pub fn backlog(&self) -> usize {
         match &self.link {
             Link::Tcp { outbox, .. } => outbox.len(),
             Link::Memory { queued, .. } => *queued,
@@ -186,10 +189,14 @@ impl Connection {
     /// arrived before the connection closed are still returned; the error
     /// comes with the next call.
     pub fn receive(&mut self) -> Result<Vec<Message>, String> {
+        let mut out = std::mem::take(&mut self.back);
         if let Some(why) = &self.closed {
-            return Err(why.clone());
+            return if out.is_empty() {
+                Err(why.clone())
+            } else {
+                Ok(out)
+            };
         }
-        let mut out = Vec::new();
         let ended = match &mut self.link {
             Link::Tcp { stream, inbox, .. } => {
                 let ended = read_in(stream, inbox);
@@ -217,6 +224,14 @@ impl Connection {
             }
         }
         Ok(out)
+    }
+
+    /// Give back `messages`, the last of those `receive` returned: the next
+    /// `receive` returns them first. (A relay leg reads the server's word
+    /// that it's linked, and leaves what came after it for the game.)
+    pub fn put_back(&mut self, mut messages: Vec<Message>) {
+        messages.append(&mut self.back);
+        self.back = messages;
     }
 }
 
