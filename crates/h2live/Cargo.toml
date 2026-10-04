@@ -3,7 +3,11 @@ name = "h2live"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Online play, like Halo 2 on Xbox Live: levels, playlists and matchmaking"
+description = "Online play, like Halo 2 on Xbox Live: accounts, parties, levels, playlists and matchmaking"
 
 [dependencies]
 h2sim = { path = "../h2sim" }
+h2net = { path = "../h2net" }
+ed25519-dalek = "2"
+sha2 = "0.10"
+getrandom = "0.3"

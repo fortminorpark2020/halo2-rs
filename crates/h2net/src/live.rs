@@ -46,12 +46,12 @@ pub const SIGNED_IN_ELSEWHERE: &str = "SIGNED IN ON ANOTHER PC";
 
 /// Longest names (gamertags, maps, keys, presets) and text (reasons,
 /// notices), in bytes.
-const MAX_NAME: usize = 64;
+pub const MAX_NAME: usize = 64;
 const MAX_TEXT: usize = 1024;
 /// Longest stat card, in bytes.
-const MAX_CARD: usize = 8 << 10;
+pub const MAX_CARD: usize = 8 << 10;
 /// Most maps a PC can list.
-const MAX_MAPS: usize = 1024;
+pub const MAX_MAPS: usize = 1024;
 /// Most players in a match or its results.
 const MAX_PLAYERS: usize = 16;
 /// Most players an ONLINE list holds.
