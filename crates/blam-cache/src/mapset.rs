@@ -53,10 +53,17 @@ pub enum Source {
 }
 
 impl MapSet {
-    /// Open `path` and the shared maps next to it (missing shared maps are tolerated).
+    /// Open `path` and the shared maps next to it, or in the `maps` folder
+    /// beside its own (add-on maps sit in a `dlc` folder there). Missing
+    /// shared maps are tolerated.
     pub fn open(path: impl AsRef<Path>) -> Result<MapSet> {
         let path = path.as_ref();
-        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let own = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let beside = own.parent().map(|p| p.join("maps"));
+        let dir = match beside {
+            Some(b) if !own.join("shared.map").exists() && b.join("shared.map").exists() => b,
+            _ => own,
+        };
         let map = CacheFile::open(path)?;
         let same = |name: &str| {
             path.file_name()

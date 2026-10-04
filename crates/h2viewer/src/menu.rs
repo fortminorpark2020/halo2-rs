@@ -84,13 +84,24 @@ impl MapChoice {
     }
 }
 
-/// The multiplayer maps in a folder, by name.
+/// The multiplayer maps in a folder and in the `dlc` folder beside it
+/// (add-on maps), by name.
 pub fn find_maps(dir: &Path) -> Vec<MapChoice> {
+    let dlc = dir.parent().map(|p| p.join("dlc"));
+    let mut maps = maps_in(dir);
+    if let Some(dlc) = dlc.filter(|d| d.as_path() != dir) {
+        maps.extend(maps_in(&dlc));
+    }
+    maps.sort_by(|a, b| a.title.cmp(&b.title));
+    maps
+}
+
+fn maps_in(dir: &Path) -> Vec<MapChoice> {
     use std::io::Read;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut maps: Vec<MapChoice> = entries
+    entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("map")))
         .filter(|p| {
@@ -102,9 +113,7 @@ pub fn find_maps(dir: &Path) -> Vec<MapChoice> {
                     .is_ok_and(|h| h.map_type == blam_cache::MapType::Multiplayer)
         })
         .map(|p| MapChoice::new(&p))
-        .collect();
-    maps.sort_by(|a, b| a.title.cmp(&b.title));
-    maps
+        .collect()
 }
 
 /// Kills to win the lobby offers; 0 plays on without end.
