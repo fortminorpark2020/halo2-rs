@@ -340,6 +340,9 @@ pub struct Rules {
     /// Points to win (in Slayer a kill is one, a suicide or betrayal takes
     /// one away; in CTF a capture is one); 0 plays forever.
     pub score_to_win: u32,
+    /// Seconds of play before time runs out and the best score wins (a tie
+    /// for it is a draw); 0 for no time limit.
+    pub time_limit: u32,
     /// The flag, the ball and the bomb, as weapons carried in hand
     /// (indexes into the weapon list).
     pub flag_weapon: Option<usize>,
@@ -451,6 +454,7 @@ impl Default for Rules {
             headshot_weapons: Vec::new(),
             lunge_weapons: Vec::new(),
             score_to_win: 25,
+            time_limit: 0,
             flag_weapon: None,
             ball_weapon: None,
             bomb_weapon: None,
@@ -882,7 +886,8 @@ pub struct Game {
     pub biped: BipedPhysics,
     pub time: f64,
     pub events: Vec<Event>,
-    /// The player who won (in team games, whose kill won it).
+    /// The player who won (in team games, whose kill won it, or the team's
+    /// best when time ran out). After a draw both stay `None`.
     pub winner: Option<usize>,
     pub winning_team: Option<u8>,
     /// Campaign: the kinds of actor the mission has.
@@ -1062,6 +1067,19 @@ impl Game {
         }
     }
 
+    /// Seconds of play left before time runs out, in a game with a time
+    /// limit.
+    pub fn time_left(&self) -> Option<f64> {
+        let limit = self.rules.time_limit;
+        (limit > 0).then(|| (limit as f64 - self.time).max(0.0))
+    }
+
+    /// The game has ended: someone reached the score to win, or time ran
+    /// out (a draw if no one was ahead).
+    pub fn over(&self) -> bool {
+        self.winner.is_some() || self.time_left() == Some(0.0)
+    }
+
     fn fresh_spartan(&self, position: Vec3, yaw: f32) -> Spartan {
         let weapons = self
             .rules
@@ -1180,9 +1198,14 @@ impl Game {
     /// Advance one tick; `commands[i]` drives player i.
     pub fn step(&mut self, world: &World, commands: &[Command]) {
         let dt = TICK;
+        // Once the game is over, everything stands still.
+        let over = self.over();
         self.time += dt as f64;
-        // Once someone has won, everything stands still.
-        if self.winner.is_some() {
+        if over {
+            return;
+        }
+        if self.time_left() == Some(0.0) {
+            self.time_up();
             return;
         }
         for i in 0..self.players.len() {
@@ -1810,6 +1833,36 @@ impl Game {
         }
     }
 
+    /// Time ran out: the best score wins, a player's or (in team games) a
+    /// team's. A tie for the best is a draw, with no winner.
+    fn time_up(&mut self) {
+        let teams = self.rules.game_type.teams();
+        // Teams with someone on them, or players, and their scores.
+        let sides: Vec<(usize, i32)> = if teams {
+            (0..TEAMS)
+                .filter(|&t| self.players.iter().any(|p| p.team == t))
+                .map(|t| (t as usize, self.team_score(t)))
+                .collect()
+        } else {
+            self.players.iter().map(|p| p.score).enumerate().collect()
+        };
+        let top = sides.iter().map(|s| s.1).max();
+        let mut best = sides.iter().filter(|s| Some(s.1) == top);
+        let (Some(&(side, _)), None) = (best.next(), best.next()) else {
+            return;
+        };
+        if !teams {
+            self.winner = Some(side);
+            return;
+        }
+        let team = side as u8;
+        self.winning_team = Some(team);
+        // The team's best player stands for it, the first of equals.
+        self.winner = (0..self.players.len())
+            .filter(|&i| self.players[i].team == team)
+            .max_by_key(|&i| (self.players[i].score, std::cmp::Reverse(i)));
+    }
+
     /// Who leads: players, or in team games teams (by team number). No one
     /// leads until someone scores.
     fn leaders(&self) -> Vec<usize> {
@@ -2220,6 +2273,78 @@ pub(crate) mod tests {
         }
         assert_eq!(g.players[0].body.position, before);
         assert!(!g.players[1].alive, "no respawning after the end");
+    }
+
+    #[test]
+    fn the_best_score_wins_when_time_runs_out() {
+        let world = floor();
+        let mut g = game();
+        assert_eq!(g.time_left(), None, "no time limit unless set");
+        g.rules.time_limit = 2;
+        duel(&mut g);
+        g.add_player();
+        g.players[1].score = 3;
+        g.players[2].score = 2;
+        let idle = [Command::default(); 3];
+        for _ in 0..119 {
+            g.step(&world, &idle);
+        }
+        assert!(!g.over());
+        assert!(g.time_left().is_some_and(|t| t > 0.0 && t < 0.1));
+        g.step(&world, &idle);
+        assert!(g.over());
+        assert_eq!(g.time_left(), Some(0.0));
+        assert_eq!((g.winner, g.winning_team), (Some(1), None));
+    }
+
+    #[test]
+    fn a_tie_when_time_runs_out_is_a_draw() {
+        let world = floor();
+        let mut g = game();
+        g.rules.time_limit = 1;
+        duel(&mut g);
+        g.players[0].score = 4;
+        g.players[1].score = 4;
+        let run = Command {
+            movement: glam::Vec2::X,
+            ..Command::default()
+        };
+        for _ in 0..60 {
+            g.step(&world, &[run, Command::default()]);
+        }
+        assert!(g.over());
+        assert_eq!((g.winner, g.winning_team), (None, None));
+        // Over with no winner, it stands still all the same.
+        let before = g.players[0].body.position;
+        for _ in 0..30 {
+            g.step(&world, &[run, Command::default()]);
+        }
+        assert_eq!(g.players[0].body.position, before);
+        assert_eq!(g.winner, None);
+    }
+
+    #[test]
+    fn teams_win_or_draw_on_time() {
+        let world = floor();
+        // Red is players 0 and 2, blue 1 and 3.
+        let finish = |scores: [i32; 4]| {
+            let mut g = team_game(4);
+            g.rules.time_limit = 1;
+            for (p, s) in g.players.iter_mut().zip(scores) {
+                p.score = s;
+            }
+            for _ in 0..60 {
+                g.step(&world, &[Command::default(); 4]);
+            }
+            assert!(g.over());
+            (g.winning_team, g.winner)
+        };
+        // Red wins 3 to 2; its best player stands for it.
+        assert_eq!(finish([1, 2, 2, 0]), (Some(0), Some(2)));
+        // Blue wins, though a red player has the best score of all.
+        assert_eq!(finish([5, 3, -4, 3]), (Some(1), Some(1)));
+        // Level at 2 each: a draw.
+        assert_eq!(finish([1, 2, 1, 0]), (None, None));
     }
 
     fn team_game(players: usize) -> Game {

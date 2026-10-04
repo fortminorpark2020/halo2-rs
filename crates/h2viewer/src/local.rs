@@ -1020,6 +1020,17 @@ impl LocalPlayer {
                 colors[1],
             );
         }
+        // The time left over the scores, down to 0:00 if time runs out
+        // (gone once someone reaches the score).
+        if let Some(left) = game.time_left().filter(|&t| t == 0.0 || !game.over()) {
+            hb.text(
+                font,
+                [w - 40.0 * s, h - 70.0 * s],
+                10.0 * s,
+                &score_text(left.ceil() as i32, true),
+                hud::BLUE,
+            );
+        }
         self.name_tags(&mut hb, scene, game, (w, h));
         self.objective_waypoints(&mut hb, scene, game, (w, h));
         if let Some(text) = self.objective_prompt(game) {
@@ -1031,12 +1042,13 @@ impl LocalPlayer {
                 hud::BLUE,
             );
         }
-        if let Some(winner) = game.winner {
-            let text = match game.winning_team {
-                Some(t) if t == me.team => "YOUR TEAM WINS".to_string(),
-                Some(t) => format!("{} TEAM WINS", TEAM_NAMES[t.min(1) as usize]),
-                None if winner == self.player => "YOU WIN".to_string(),
-                None => format!("{} WINS", player_name(game, self.player, winner)),
+        if game.over() {
+            let text = match (game.winning_team, game.winner) {
+                (Some(t), _) if t == me.team => "YOUR TEAM WINS".to_string(),
+                (Some(t), _) => format!("{} TEAM WINS", TEAM_NAMES[t.min(1) as usize]),
+                (None, Some(w)) if w == self.player => "YOU WIN".to_string(),
+                (None, Some(w)) => format!("{} WINS", player_name(game, self.player, w)),
+                (None, None) => "DRAW".to_string(),
             };
             hb.text(font, [w * 0.5, h * 0.3], 20.0 * s, &text, hud::BLUE);
         }

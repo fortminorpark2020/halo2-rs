@@ -842,7 +842,7 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
                 _ => {}
             }
         }
-        if game.winner.is_some() {
+        if game.over() {
             println!("{t:6.1} game over");
             break;
         }
@@ -2599,13 +2599,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(0);
     // H2_VARIANT=swat, rockets, snipers, swords or shotguns: those game
     // options (for testing).
-    let options = env("H2_VARIANT")
+    let mut options = env("H2_VARIANT")
         .and_then(|v| {
             let all = options::presets();
             all.into_iter().find(|p| p.0.eq_ignore_ascii_case(&v))
         })
         .map(|p| p.1)
         .unwrap_or_default();
+    // H2_TIME_LIMIT=<seconds>: games end after that long (for testing).
+    if let Some(t) = env("H2_TIME_LIMIT").and_then(|v| v.parse().ok()) {
+        options.time_limit = t;
+    }
     let settings = Settings {
         game_type,
         map: 0,

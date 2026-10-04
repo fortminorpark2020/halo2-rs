@@ -637,6 +637,8 @@ impl Game {
         w.index(self.winner);
         w.u8(self.rules.game_type as u8);
         w.u32(self.rules.score_to_win);
+        // With `time`, how long is left to play.
+        w.u32(self.rules.time_limit);
         self.rules.options.write(w);
         w.u8(self.winning_team.unwrap_or(u8::MAX));
         w.u16(self.item_timers.len() as u16);
@@ -777,6 +779,7 @@ impl Game {
         let winner = r.index()?;
         self.rules.game_type = *GameType::ALL.get(r.u8()? as usize).ok_or(Malformed)?;
         self.rules.score_to_win = r.u32()?;
+        self.rules.time_limit = r.u32()?;
         // The host's options, set up here the first time they arrive.
         let options = super::Options::read(r, weapons)?;
         if options != self.rules.options {
@@ -1121,6 +1124,37 @@ mod tests {
             assert_eq!(Event::read(&mut r, 2, 0, 0), Ok(*e));
         }
         assert!(r.at_end());
+    }
+
+    #[test]
+    fn joined_pcs_follow_the_clock_to_a_draw() {
+        let world = floor();
+        let mut host = game();
+        host.rules.time_limit = 1;
+        host.add_player();
+        host.add_player();
+        let mut joined = game();
+        let send = |host: &Game, joined: &mut Game| {
+            let mut w = Writer::default();
+            host.write_state(&mut w);
+            joined.read_state(&mut Reader::new(&w.0)).unwrap();
+        };
+        for _ in 0..30 {
+            host.step(&world, &[Command::default(); 2]);
+        }
+        send(&host, &mut joined);
+        assert_eq!(joined.rules.time_limit, 1);
+        assert_eq!(joined.time_left(), host.time_left());
+        assert!(joined.time_left().is_some_and(|t| (t - 0.5).abs() < 0.01));
+        assert!(!joined.over());
+        // Time runs out at 0 all: over, with no winner.
+        for _ in 0..30 {
+            host.step(&world, &[Command::default(); 2]);
+        }
+        send(&host, &mut joined);
+        assert!(host.over() && joined.over());
+        assert_eq!(joined.time_left(), Some(0.0));
+        assert_eq!((joined.winner, joined.winning_team), (None, None));
     }
 
     #[test]

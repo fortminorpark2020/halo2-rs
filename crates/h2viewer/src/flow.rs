@@ -81,6 +81,7 @@ impl App {
     /// Run `f` with the menu and what it shows.
     pub(crate) fn with_menu<R>(&mut self, f: impl FnOnce(&mut Menu, &menu::Context) -> R) -> R {
         let scores = self.score_lines();
+        let outcome = self.outcome();
         let seats = self.lobby_seats();
         let joined = self.joined();
         let host_lobby = match &self.net {
@@ -99,6 +100,7 @@ impl App {
             seats: &seats,
             local: self.seats.len(),
             scores: &scores,
+            outcome: outcome.as_deref(),
             joined,
             host_lobby,
             objectives: &objectives,
@@ -304,6 +306,19 @@ impl App {
             lines.extend(mine);
         }
         lines
+    }
+
+    /// How the game ended, once it has: who won, or a draw.
+    fn outcome(&self) -> Option<String> {
+        let game = &self.game;
+        if !game.over() {
+            return None;
+        }
+        Some(match (game.winning_team, game.winner) {
+            (Some(t), _) => format!("{} TEAM WINS", TEAM_NAMES[t.min(1) as usize]),
+            (None, Some(w)) => format!("{} WINS", crate::local::player_name(game, usize::MAX, w)),
+            (None, None) => "DRAW".into(),
+        })
     }
 
     pub(crate) fn open_menu(&mut self, screen: Screen) {
@@ -736,7 +751,7 @@ impl App {
         }
     }
 
-    /// Hold up the carnage report a little after someone wins.
+    /// Hold up the carnage report a little after the game ends.
     pub(crate) fn check_game_over(&mut self, dt: f32) {
         // A mission won: on to the next one, as in the story; after the
         // last one here, say so and go back to the missions.
@@ -760,7 +775,7 @@ impl App {
             }
             return;
         }
-        if self.game.winner.is_none() {
+        if !self.game.over() {
             return;
         }
         let t = self.game_over.get_or_insert(0.0);

@@ -68,7 +68,7 @@ pub struct Soundscape {
     /// Seconds until the announcer is free to speak.
     speaking: f32,
     announced_start: bool,
-    announced_winner: bool,
+    announced_over: bool,
     /// Per local player: the respawn countdown's whole second last ticked.
     respawn_ticks: Vec<(usize, u32)>,
     /// Per vehicle: its engine and boost loops while someone drives.
@@ -136,7 +136,7 @@ impl Soundscape {
             announcer: VecDeque::new(),
             speaking: 0.0,
             announced_start: false,
-            announced_winner: false,
+            announced_over: false,
             respawn_ticks: Vec::new(),
             engines: Vec::new(),
             rounds: Vec::new(),
@@ -153,7 +153,7 @@ impl Soundscape {
         self.announcer.clear();
         self.speaking = 0.0;
         self.announced_start = false;
-        self.announced_winner = false;
+        self.announced_over = false;
         self.respawn_ticks.clear();
         self.engines.clear();
         self.rounds.clear();
@@ -629,9 +629,9 @@ impl Soundscape {
                 .unwrap_or(0);
             self.announce(a.game_names[kind]);
         }
-        if game.winner.is_some() != self.announced_winner {
-            self.announced_winner = game.winner.is_some();
-            if self.announced_winner {
+        if game.over() != self.announced_over {
+            self.announced_over = game.over();
+            if self.announced_over {
                 self.announce(a.game_over);
             }
         }

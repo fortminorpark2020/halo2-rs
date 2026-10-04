@@ -1,7 +1,7 @@
 //! The lobby's game options: Halo 2's game variant settings (the weapons
 //! on the map, what players start with, shields, the motion sensor,
-//! vehicles, respawning and friendly fire) and some of its built-in
-//! variants.
+//! vehicles, respawning, friendly fire and the time limit) and some of its
+//! built-in variants.
 
 use crate::scene::Scene;
 use h2sim::game::{MapWeapons, Options, Rules};
@@ -27,6 +27,9 @@ pub const WEAPONS: [(&str, &str); 15] = [
 
 /// Respawn times offered, in seconds; the first is Halo 2's usual.
 pub const RESPAWN_TIMES: [u32; 6] = [5, 0, 3, 10, 15, 30];
+
+/// Time limits offered, in seconds; 0 plays until someone reaches the score.
+pub const TIME_LIMITS: [u32; 7] = [0, 300, 600, 900, 1200, 1500, 1800];
 
 /// What the map's weapon spots hold, or a starting weapon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -81,6 +84,9 @@ pub struct GameOptions {
     /// In `RESPAWN_TIMES`.
     pub respawn: usize,
     pub friendly_fire: bool,
+    /// Seconds of play before the game ends on time; 0 for none. Any
+    /// variant can have one.
+    pub time_limit: u32,
 }
 
 impl Default for GameOptions {
@@ -95,6 +101,7 @@ impl Default for GameOptions {
             vehicles: true,
             respawn: 0,
             friendly_fire: true,
+            time_limit: 0,
         }
     }
 }
@@ -131,9 +138,14 @@ pub fn presets() -> [(&'static str, GameOptions); 6] {
 }
 
 impl GameOptions {
-    /// The built-in variant these options are, if any.
+    /// The built-in variant these options are, if any (whatever the time
+    /// limit).
     pub fn preset(&self) -> Option<usize> {
-        presets().iter().position(|(_, o)| o == self)
+        let untimed = GameOptions {
+            time_limit: 0,
+            ..self.clone()
+        };
+        presets().iter().position(|(_, o)| *o == untimed)
     }
 
     pub fn respawn_seconds(&self) -> u32 {
@@ -168,6 +180,7 @@ impl GameOptions {
             starting_plasmas: grenades(base.starting_plasmas),
             respawn_time: self.respawn_seconds() as f32,
             friendly_fire: self.friendly_fire,
+            time_limit: self.time_limit,
             ..base
         }
     }
@@ -222,5 +235,11 @@ mod tests {
             ..GameOptions::default()
         };
         assert_eq!(custom.preset(), None);
+        // A time limit doesn't make a variant custom.
+        let timed = GameOptions {
+            time_limit: 600,
+            ..swat.clone()
+        };
+        assert_eq!(timed.preset(), Some(1));
     }
 }

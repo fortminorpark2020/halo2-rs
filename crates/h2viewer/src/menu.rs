@@ -5,7 +5,7 @@
 
 use crate::gpu::hud_mode;
 use crate::hud::HudBuilder;
-use crate::options::{presets, GameOptions, RESPAWN_TIMES};
+use crate::options::{presets, GameOptions, RESPAWN_TIMES, TIME_LIMITS};
 use crate::profile::{color_name, Profile};
 use h2net::{LanGame, Lobby};
 use h2sim::game::{
@@ -315,6 +315,8 @@ pub struct Context<'a> {
     /// How many people play at this PC.
     pub local: usize,
     pub scores: &'a [ScoreLine],
+    /// How the game ended (who won, or a draw), for the carnage report.
+    pub outcome: Option<&'a str>,
     /// Playing in another PC's game.
     pub joined: bool,
     /// Joined: the host's lobby, while waiting there for its next game.
@@ -356,6 +358,7 @@ enum Row {
     Vehicles,
     Respawn,
     FriendlyFire,
+    TimeLimit,
     StartGame,
     Join(usize),
     Searching,
@@ -561,6 +564,7 @@ impl Menu {
                 Row::Vehicles,
                 Row::Respawn,
                 Row::FriendlyFire,
+                Row::TimeLimit,
             ],
             Screen::SystemLink if ctx.lan.is_empty() => vec![Row::Searching],
             Screen::SystemLink => (0..ctx.lan.len().min(8)).map(Row::Join).collect(),
@@ -696,6 +700,14 @@ impl Menu {
                 "FRIENDLY FIRE".into(),
                 Some(on_off(s.options.friendly_fire)),
             ),
+            Row::TimeLimit => (
+                "TIME LIMIT".into(),
+                Some(match s.options.time_limit {
+                    0 => "NONE".into(),
+                    n if n % 60 == 0 => format!("{} MINUTES", n / 60),
+                    n => format!("{n} SECONDS"),
+                }),
+            ),
             Row::StartGame => ("START GAME".into(), None),
             Row::Join(i) => {
                 let g = &ctx.lan[i];
@@ -819,7 +831,10 @@ impl Menu {
                     None if step > 0 => 0,
                     None => all.len() - 1,
                 };
-                s.options = all[next].1.clone();
+                s.options = GameOptions {
+                    time_limit: s.options.time_limit,
+                    ..all[next].1.clone()
+                };
             }
             Row::MapWeapons => s.options.map_weapons = s.options.map_weapons.step(step),
             Row::StartPrimary => s.options.primary = s.options.primary.step(step),
@@ -830,6 +845,10 @@ impl Menu {
             Row::Vehicles => s.options.vehicles ^= true,
             Row::Respawn => s.options.respawn = cycle(s.options.respawn, RESPAWN_TIMES.len()),
             Row::FriendlyFire => s.options.friendly_fire ^= true,
+            Row::TimeLimit => {
+                let at = TIME_LIMITS.iter().position(|&t| t == s.options.time_limit);
+                s.options.time_limit = TIME_LIMITS[cycle(at.unwrap_or(0), TIME_LIMITS.len())];
+            }
             Row::Model => self.profile.look.elite = !self.profile.look.elite,
             Row::Primary | Row::Secondary => {
                 let c = &mut self.profile.look.colors[(row == Row::Secondary) as usize];
@@ -899,7 +918,8 @@ impl Menu {
             | Row::Radar
             | Row::Vehicles
             | Row::Respawn
-            | Row::FriendlyFire => {
+            | Row::FriendlyFire
+            | Row::TimeLimit => {
                 if self.adjust(row, 1, ctx) {
                     self.sound = Some(Sound::Cursor);
                 }
@@ -1046,9 +1066,9 @@ impl Menu {
 
     fn row_rect(&self, k: usize) -> [f32; 4] {
         let wide = matches!(self.screen, Screen::SystemLink | Screen::Options);
-        // The game options' ten rows sit closer to fit above the hint.
+        // The game options' eleven rows sit closer to fit above the hint.
         let step = if self.screen == Screen::Options {
-            ROW_STEP - 3.0
+            ROW_STEP - 4.0
         } else {
             ROW_STEP
         };
@@ -1168,6 +1188,11 @@ impl Menu {
         hb.quad(white, rule, [0.0; 4], HIGHLIGHT, hud_mode::PLAIN, 0.0);
 
         if self.screen == Screen::PostGame {
+            if let Some(outcome) = ctx.outcome {
+                let width = outcome.chars().count() as f32 * 14.0 * crate::font::ASPECT;
+                let at = f.at(ROW_X + 490.0 - width, 60.0);
+                hb.text_left(font, at, 14.0 * s, outcome, TEXT);
+            }
             draw_scores(hb, font, white, &f, 104.0, ctx.scores);
         }
         let rows = self.rows(ctx);
@@ -1556,6 +1581,7 @@ mod tests {
             }]),
             local: 1,
             scores: &[],
+            outcome: None,
             joined: false,
             host_lobby: None,
             objectives: &[],
@@ -1618,6 +1644,20 @@ mod tests {
         m.input(Input::Right, &c);
         assert_ne!(m.settings.options.primary, presets()[1].1.primary);
         assert_eq!(m.label(Row::Variant, &c).1.as_deref(), Some("CUSTOM"));
+        // The time limit, last, goes with whichever variant.
+        m.input(Input::Up, &c);
+        m.input(Input::Up, &c);
+        m.input(Input::Up, &c);
+        assert_eq!(m.label(Row::TimeLimit, &c).1.as_deref(), Some("NONE"));
+        m.input(Input::Right, &c);
+        m.input(Input::Right, &c);
+        assert_eq!(m.settings.options.time_limit, 600);
+        assert_eq!(m.label(Row::TimeLimit, &c).1.as_deref(), Some("10 MINUTES"));
+        m.input(Input::Down, &c);
+        m.input(Input::Right, &c);
+        m.input(Input::Right, &c);
+        assert_eq!(m.label(Row::Variant, &c).1.as_deref(), Some("SWAT"));
+        assert_eq!(m.settings.options.time_limit, 600);
         m.input(Input::Back, &c);
         assert_eq!(m.screen, Screen::Lobby);
         m.input(Input::Down, &c);
