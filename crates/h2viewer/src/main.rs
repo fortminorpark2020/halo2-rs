@@ -497,14 +497,20 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             (i, Bot::new(i as u32 * 7919 + 13 + seed * 104_729))
         })
         .collect();
+    // The mission's scripts place its squads as the player gets to them
+    // (H2_SQUADS=<names> places those at the start too, "all" for every
+    // one).
+    let mut mission =
+        campaign.then(|| campaign::Mission::new(&level.scene, &mut game, &mut bots, 1));
     if let (true, Ok(names)) = (campaign, std::env::var("H2_SQUADS")) {
         for s in campaign::squads_named(&level.scene, &names) {
-            let placed = campaign::place_squad(&mut game, &level.scene, s, 1, 0);
+            let placed = campaign::place_squad(&mut game, &level.scene, s, 1, 0, None);
             let name = &level.scene.ai.squads[s].name;
             println!("placed {name}: {} actors", placed.len());
             bots.extend(placed.into_iter().filter_map(|(i, b)| Some((i, b?))));
         }
     }
+    let mut won = false;
     let mut kills_with = std::collections::HashMap::<String, u32>::new();
     for tick in 0..(seconds / TICK) as usize {
         let mut commands = vec![Command::default(); game.players.len()];
@@ -514,6 +520,20 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         game.step(&level.world, &commands);
         h2sim::bot::alert_actors(&mut bots, &game, &game.events);
         let t = tick as f32 * TICK;
+        if let Some(m) = &mut mission {
+            let (bsp, placed) = (m.bsp(), game.players.len());
+            m.step(&level.scene, &mut game, &mut bots);
+            if m.bsp() != bsp {
+                println!("{t:6.1} into bsp {}", m.bsp());
+            }
+            if game.players.len() != placed {
+                println!("{t:6.1} {} actors in the level", game.players.len() - 1);
+            }
+            if m.won() && !won {
+                won = true;
+                println!("{t:6.1} mission complete");
+            }
+        }
         for e in std::mem::take(&mut game.events) {
             match e {
                 Event::Killed { killer, victim, .. } => {
@@ -693,6 +713,8 @@ struct App {
     missions: Vec<MapChoice>,
     /// Playing (or loading) a campaign mission rather than multiplayer.
     campaign: bool,
+    /// The mission in play: its scripts and what they've done.
+    mission: Option<campaign::Mission>,
     /// The maps' pictures, for the lobby.
     map_pictures: Vec<blam_cache::bitmap::Image>,
     /// The emblem atlases, uploaded with the window.
@@ -980,6 +1002,9 @@ impl App {
             self.remote_commands(&mut commands);
             self.game.step(&self.world, &commands);
             h2sim::bot::alert_actors(&mut self.bots, &self.game, &self.game.events);
+            if let Some(m) = &mut self.mission {
+                m.step(&self.scene, &mut self.game, &mut self.bots);
+            }
             if !ticked {
                 for l in &mut self.locals {
                     l.taps = Taps::default();
@@ -1237,8 +1262,10 @@ impl App {
         let mut used: HashMap<BodyKind, usize> = HashMap::new();
         for i in order {
             let p = &self.game.players[i];
-            // Out of sight anyway.
-            if p.body.position.distance_squared(eye) > BODY_RANGE * BODY_RANGE {
+            // Out of sight anyway, or taken out of the level.
+            if p.body.position.distance_squared(eye) > BODY_RANGE * BODY_RANGE
+                || p.actor.is_some_and(|a| a.gone)
+            {
                 self.body_poses[i] = None;
                 continue;
             }
@@ -2009,6 +2036,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             position: [n[0], n[1], n[2]],
             facing: n[3].to_radians(),
             team: 8,
+            // Unknown: the mission works it out.
+            bsp: u16::MAX,
             game_types: [12, 0, 0, 0],
         })
     });
@@ -2107,6 +2136,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         maps,
         missions,
         campaign: false,
+        mission: None,
         map_pictures,
         emblem_art,
         loading: None,

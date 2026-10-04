@@ -50,6 +50,8 @@ fn main() -> ExitCode {
         Some("lightmap") if args.len() >= 2 => lightmap_dump(&args[1]),
         Some("objects") if args.len() >= 2 => objects(&args[1]),
         Some("squads") if args.len() >= 2 => squads(&args[1]),
+        Some("scripts") if args.len() >= 2 => scripts(&args[1]),
+        Some("mission") if args.len() >= 2 => mission(&args[1]),
         Some("sound") if args.len() >= 3 => {
             sound(&args[1], &args[2], args.get(3).map(String::as_str))
         }
@@ -659,6 +661,61 @@ fn objects(path: &str) -> Res {
             i.position,
             i.respawn_seconds
         );
+    }
+    Ok(())
+}
+
+fn scripts(path: &str) -> Res {
+    use blam_cache::{script, MapSet};
+    let mut set = MapSet::open(path)?;
+    let s = script::scripts(&mut set)?;
+    println!(
+        "{} scripts, {} globals, {} expressions, {} bytes of text",
+        s.scripts.len(),
+        s.globals.len(),
+        s.expressions.len(),
+        s.strings.len()
+    );
+    for g in &s.globals {
+        let init = g.init.map(|i| s.source(i, 8)).unwrap_or_default();
+        println!("(global {} {} {init})", g.value_type, g.name);
+    }
+    for sc in &s.scripts {
+        let body = sc.root.map(|i| s.source(i, 64)).unwrap_or_default();
+        println!("(script {:?} {} {body})", sc.kind, sc.name);
+    }
+    Ok(())
+}
+
+fn mission(path: &str) -> Res {
+    use blam_cache::{ai, scenario, MapSet};
+    let mut set = MapSet::open(path)?;
+    for (i, bsp) in set.map.structure_bsps()?.iter().enumerate() {
+        let mesh = set.map.bsp_collision_mesh(bsp)?;
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for p in &mesh.positions {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        println!("bsp {i} {lo:?} .. {hi:?}");
+    }
+    for (i, t) in scenario::trigger_volumes(&mut set)?.iter().enumerate() {
+        let v = &t.volume;
+        println!(
+            "volume {i} {} at {:?} extents {:?} forward {:?} up {:?}",
+            t.name, v.position, v.extents, v.forward, v.up
+        );
+    }
+    for s in scenario::bsp_switches(&mut set)? {
+        println!("bsp switch volume {} from {} to {}", s.0, s.1, s.2);
+    }
+    for (i, g) in ai::squad_groups(&mut set)?.iter().enumerate() {
+        println!("group {i} {} parent {:?}", g.name, g.parent);
+    }
+    for (i, n) in scenario::object_names(&mut set)?.iter().enumerate() {
+        println!("name {i} {} {:?} {:?}", n.name, n.kind, n.index);
     }
     Ok(())
 }

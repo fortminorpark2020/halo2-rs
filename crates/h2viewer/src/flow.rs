@@ -348,7 +348,14 @@ impl App {
             look.colors = [CHIEF_OLIVE; 2];
             self.game.set_look(l.player, look);
         }
-        // H2_SQUADS=<names>: place those squads at the start.
+        let difficulty = self.menu.difficulty as u8;
+        self.mission = Some(campaign::Mission::new(
+            &self.scene,
+            &mut self.game,
+            &mut self.bots,
+            difficulty,
+        ));
+        // H2_SQUADS=<names>: place those squads at the start too.
         if let Ok(names) = std::env::var("H2_SQUADS") {
             let squads = campaign::squads_named(&self.scene, &names);
             self.place_squads(&squads);
@@ -359,7 +366,7 @@ impl App {
     pub(crate) fn place_squads(&mut self, squads: &[usize]) {
         let difficulty = self.menu.difficulty as u8;
         for &s in squads {
-            let placed = campaign::place_squad(&mut self.game, &self.scene, s, difficulty, 0);
+            let placed = campaign::place_squad(&mut self.game, &self.scene, s, difficulty, 0, None);
             self.bots
                 .retain(|(i, _)| !placed.iter().any(|(j, _)| j == i));
             self.bots
@@ -488,6 +495,7 @@ impl App {
     /// Clear away the last game: its players, effects and sounds.
     fn reset_match(&mut self) {
         self.bots.clear();
+        self.mission = None;
         self.locals.clear();
         self.effects = crate::Effects::new();
         self.bodies.clear();
@@ -717,6 +725,18 @@ impl App {
 
     /// Hold up the carnage report a little after someone wins.
     pub(crate) fn check_game_over(&mut self, dt: f32) {
+        // A mission won: say so, then back to the missions.
+        if self.mission.as_ref().is_some_and(|m| m.won()) {
+            if self.game_over.is_none() {
+                self.announce("MISSION COMPLETE");
+            }
+            let t = self.game_over.get_or_insert(0.0);
+            *t += dt;
+            if *t >= crate::GAME_OVER_DELAY {
+                self.back_to_lobby();
+            }
+            return;
+        }
         if self.game.winner.is_none() {
             return;
         }

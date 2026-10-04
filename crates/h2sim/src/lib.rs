@@ -5,6 +5,7 @@ pub mod collision;
 pub mod game;
 pub mod nav;
 pub mod player;
+pub mod script;
 pub mod testing;
 pub mod vehicle;
 pub mod weapon;

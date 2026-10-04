@@ -9,6 +9,8 @@ const SCNR_OBJECT_NAMES: usize = 0x48;
 const SCNR_STARTING_PROFILES: usize = 0xF8;
 const SCNR_TRIGGER_VOLUMES: usize = 0x108;
 const SCNR_NETGAME_FLAGS: usize = 0x118;
+const SCNR_BSP_SWITCHES: usize = 0x130;
+const BSP_SWITCH_SIZE: usize = 0xE;
 const SCNR_NETGAME_EQUIPMENT: usize = 0x120;
 const NETGAME_FLAG_SIZE: usize = 0x20;
 const TRIGGER_VOLUME_SIZE: usize = 0x44;
@@ -354,6 +356,55 @@ pub fn kill_volumes(set: &mut MapSet) -> Result<Vec<KillVolume>> {
         .collect())
 }
 
+/// A named box scripts test for who's inside (and bring the mission on
+/// when the player walks in).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriggerVolume {
+    pub name: String,
+    pub volume: KillVolume,
+}
+
+/// Every trigger volume, in block order (scripts know them by index).
+pub fn trigger_volumes(set: &mut MapSet) -> Result<Vec<TriggerVolume>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let entries = map.read_block(meta, &data, SCNR_TRIGGER_VOLUMES, TRIGGER_VOLUME_SIZE)?;
+    let v3 = |e: &[u8], at: usize| [f32_at(e, at), f32_at(e, at + 4), f32_at(e, at + 8)];
+    Ok(entries
+        .as_chunks::<TRIGGER_VOLUME_SIZE>()
+        .0
+        .iter()
+        .map(|e| TriggerVolume {
+            name: map.string_id(u32_at(e, 0)).unwrap_or_default().to_string(),
+            volume: KillVolume {
+                forward: v3(e, 0xC),
+                up: v3(e, 0x18),
+                position: v3(e, 0x24),
+                extents: v3(e, 0x30),
+            },
+        })
+        .collect())
+}
+
+/// Where walking into a trigger volume moves the game from one structure
+/// BSP to another: (volume, from, to).
+pub fn bsp_switches(set: &mut MapSet) -> Result<Vec<(u16, u16, u16)>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let entries = map.read_block(meta, &data, SCNR_BSP_SWITCHES, BSP_SWITCH_SIZE)?;
+    Ok(entries
+        .as_chunks::<BSP_SWITCH_SIZE>()
+        .0
+        .iter()
+        .filter_map(|e| {
+            let n = |o: usize| u16::try_from(i16_at(e, o)).ok();
+            Some((n(0)?, n(2)?, n(4)?))
+        })
+        .collect())
+}
+
 /// The scenario's multiplayer item spawns.
 pub fn netgame_equipment(set: &mut MapSet) -> Result<Vec<NetgameItem>> {
     let data = scenario_data(set)?;
@@ -387,4 +438,31 @@ pub fn item_collection(set: &mut MapSet, itmc: DatumIndex) -> Result<Vec<(f32, D
         .map(|e| (f32_at(e, 0), DatumIndex(u32_at(e, 8))))
         .filter(|(_, d)| *d != DatumIndex::NONE)
         .collect())
+}
+
+/// How a machine (a door, a lift) moves, from its `mach` tag.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Machine {
+    /// Seconds to go from closed to open.
+    pub position_time: f32,
+    /// 0 door, 1 platform, 2 gear.
+    pub kind: u16,
+    /// Opens by itself for someone this close (doors that open
+    /// automatically).
+    pub activation_radius: f32,
+    /// Seconds a door stays open.
+    pub door_open_time: f32,
+}
+
+pub fn machine(set: &mut MapSet, tag: DatumIndex) -> Result<Machine> {
+    let (_, _, data) = set.tag_data(tag)?;
+    if data.len() < 0x124 {
+        return Err(Error::Corrupt("machine tag too small".into()));
+    }
+    Ok(Machine {
+        position_time: f32_at(&data, 0xC8),
+        kind: i16_at(&data, 0x11C) as u16,
+        activation_radius: f32_at(&data, 0x118),
+        door_open_time: f32_at(&data, 0x120),
+    })
 }

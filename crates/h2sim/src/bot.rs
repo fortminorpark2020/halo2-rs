@@ -180,6 +180,11 @@ impl Bot {
     }
 
     /// What the bot is up to, for testing.
+    /// In a fight: has someone to shoot at, or knows of an enemy.
+    pub fn fighting(&self) -> bool {
+        self.target.is_some() || self.actor.as_ref().is_some_and(|a| a.alert.is_some())
+    }
+
     pub fn describe(&self) -> String {
         format!(
             "route {} heading {:?} target {:?} stuck {:.1} blocked {} {}",

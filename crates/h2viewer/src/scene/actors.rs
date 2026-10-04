@@ -1,12 +1,17 @@
 //! Campaign actors from the map's tags: each character's body, how tough
 //! it is and how it fights (`char`), the squads the mission places
-//! (`scnr`), and the weapons they carry.
+//! (`scnr`), and the weapons they carry. And the mission's scripts, with
+//! the trigger volumes and named objects they work with.
 
 use super::{Arms2, Body, Loader, MeshData, WeaponAssets};
 use blam_cache::ai::{self, Character, CharacterKind, Squad};
 use blam_cache::physics::{self, BipedPhysics};
+use blam_cache::scenario::{self, PlacedKind};
+use blam_cache::script::{self, Scripts};
 use blam_cache::DatumIndex;
+use glam::Vec3;
 use h2sim::game::{CharacterDef, GrenadeKind, Mind, Side, Vitality};
+use h2sim::KillZone;
 
 /// Mesh copies of each actor body: how many of one kind show at once.
 pub const ACTOR_BODIES: usize = 16;
@@ -26,6 +31,19 @@ pub struct CampaignAi {
     pub squads: Vec<Squad>,
     /// The scenario's weapon palette, as weapon indices.
     pub weapons: Vec<Option<usize>>,
+    /// Each squad group's parent group.
+    pub group_parents: Vec<Option<u16>>,
+    pub scripts: Scripts,
+    /// Trigger volumes, by index.
+    pub volumes: Vec<KillZone>,
+    /// Walking into a volume moves the game from one structure BSP to
+    /// another: (volume, from, to).
+    pub bsp_switches: Vec<(u16, u16, u16)>,
+    /// The names scripts give placed objects, and where each is placed.
+    pub object_names: Vec<String>,
+    pub name_positions: Vec<Option<Vec3>>,
+    /// Each named machine (door, lift): how it moves.
+    pub machines: Vec<Option<scenario::Machine>>,
 }
 
 /// Which side a kind of character fights on.
@@ -137,6 +155,59 @@ fn character_def(
 }
 
 impl Loader {
+    /// The mission's scripts and what they name.
+    fn mission_scripts(&mut self, out: &mut CampaignAi) {
+        let set = &mut self.set;
+        out.scripts = script::scripts(set).unwrap_or_else(|e| {
+            println!("warning: scripts: {e}");
+            Scripts::default()
+        });
+        out.group_parents = ai::squad_groups(set)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|g| g.parent)
+            .collect();
+        out.volumes = scenario::trigger_volumes(set)
+            .unwrap_or_default()
+            .iter()
+            .map(|t| {
+                let v = &t.volume;
+                KillZone::new(
+                    v.position.into(),
+                    v.forward.into(),
+                    v.up.into(),
+                    v.extents.into(),
+                )
+            })
+            .collect();
+        out.bsp_switches = scenario::bsp_switches(set).unwrap_or_default();
+        let placed: Vec<(PlacedKind, Vec<scenario::Placement>)> = PlacedKind::ALL
+            .iter()
+            .map(|&k| (k, scenario::placements(set, k).unwrap_or_default()))
+            .collect();
+        let names = scenario::object_names(set).unwrap_or_default();
+        out.object_names = names.iter().map(|n| n.name.clone()).collect();
+        out.name_positions = names
+            .iter()
+            .map(|n| {
+                let (_, list) = placed.iter().find(|(k, _)| Some(*k) == n.kind)?;
+                let p = list.get(n.index? as usize)?;
+                Some(Vec3::from(p.position))
+            })
+            .collect();
+        out.machines = names
+            .iter()
+            .map(|n| {
+                if n.kind != Some(PlacedKind::Machine) {
+                    return None;
+                }
+                let (_, list) = placed.iter().find(|(k, _)| *k == PlacedKind::Machine)?;
+                let p = list.get(n.index? as usize)?;
+                scenario::machine(set, p.object).ok()
+            })
+            .collect();
+    }
+
     /// A weapon by tag: one already loaded, else loaded now.
     fn weapon_by_tag(
         &mut self,
@@ -169,6 +240,7 @@ impl Loader {
             }),
             ..CampaignAi::default()
         };
+        self.mission_scripts(&mut out);
         let palette = ai::weapon_palette(&mut self.set).unwrap_or_default();
         out.weapons = palette
             .iter()

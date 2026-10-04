@@ -544,6 +544,10 @@ pub struct Actor {
     pub character: usize,
     /// The scenario squad it was placed with.
     pub squad: u16,
+    /// Can be hurt but not killed (a script says so).
+    pub immortal: bool,
+    /// Taken out of the level by a script (not dead: there's no body).
+    pub gone: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1658,6 +1662,9 @@ impl Game {
         } else {
             rest
         };
+        if p.actor.is_some_and(|a| a.immortal) {
+            p.health = p.health.max(1.0);
+        }
         self.events.push(Event::Damaged {
             player: victim,
             amount,

@@ -7,7 +7,9 @@ use crate::mapset::MapSet;
 use crate::{f32_at, i16_at, u32_at, DatumIndex, Error, Result};
 
 const SCNR_WEAPON_PALETTE: usize = 0x98;
+const SCNR_SQUAD_GROUPS: usize = 0x158;
 const SCNR_SQUADS: usize = 0x160;
+const SQUAD_GROUP_SIZE: usize = 0x24;
 const SCNR_CHARACTER_PALETTE: usize = 0x178;
 const SQUAD_SIZE: usize = 0x74;
 const SQUAD_LOCATIONS: usize = 0x48;
@@ -77,6 +79,8 @@ impl AiTeam {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Squad {
     pub name: String,
+    /// The squad group it's in.
+    pub group: Option<u16>,
     pub team: AiTeam,
     /// In the level from the start (otherwise a script places it).
     pub initially_placed: bool,
@@ -302,6 +306,7 @@ pub fn squads(set: &mut MapSet) -> Result<Vec<Squad>> {
         let flags = u32_at(e, 0x20);
         out.push(Squad {
             name: ascii(&e[..0x20]),
+            group: index(e, 0x26),
             team: AiTeam::from_number(i16_at(e, 0x24) as u16),
             initially_placed: flags & SQUAD_INITIALLY_PLACED != 0,
             blind: flags & SQUAD_BLIND != 0,
@@ -316,6 +321,29 @@ pub fn squads(set: &mut MapSet) -> Result<Vec<Squad>> {
         });
     }
     Ok(out)
+}
+
+/// A group of squads (and of other groups) scripts handle together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SquadGroup {
+    pub name: String,
+    pub parent: Option<u16>,
+}
+
+pub fn squad_groups(set: &mut MapSet) -> Result<Vec<SquadGroup>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let groups = map.read_block(meta, &data, SCNR_SQUAD_GROUPS, SQUAD_GROUP_SIZE)?;
+    Ok(groups
+        .as_chunks::<SQUAD_GROUP_SIZE>()
+        .0
+        .iter()
+        .map(|g| SquadGroup {
+            name: ascii(&g[..0x20]),
+            parent: index(g, 0x20),
+        })
+        .collect())
 }
 
 /// The characters squads are made of (`char` tags).

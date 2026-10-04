@@ -231,6 +231,8 @@ pub struct PlayerSpawn {
     pub facing: f32,
     /// 0 red, 1 blue ... 8 neutral.
     pub team: u16,
+    /// The structure BSP it's in (campaign levels have several).
+    pub bsp: u16,
     /// Game types the spawn is for (0 none, 1 CTF, 2 Slayer ... 12 all).
     pub game_types: [u16; 4],
 }
@@ -501,6 +503,7 @@ impl<R: Read + Seek> CacheFile<R> {
                 position: [f32_at(e, 0), f32_at(e, 4), f32_at(e, 8)],
                 facing: f32_at(e, 0xC),
                 team: i16_at(e, 0x10) as u16,
+                bsp: i16_at(e, 0x12) as u16,
                 game_types: [0x14, 0x16, 0x18, 0x1A].map(|o| i16_at(e, o) as u16),
             })
             .collect())
@@ -616,6 +619,7 @@ pub mod model;
 pub mod physics;
 pub mod render;
 pub mod scenario;
+pub mod script;
 pub mod shader;
 pub mod sound;
 pub mod vehicle;

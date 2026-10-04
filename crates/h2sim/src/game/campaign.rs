@@ -139,6 +139,8 @@ impl Game {
         s.actor = Some(Actor {
             character: spawn.character,
             squad: spawn.squad,
+            immortal: false,
+            gone: false,
         });
         s.weapons = [spawn.weapon.or(def.weapon), spawn.secondary]
             .into_iter()
@@ -184,6 +186,43 @@ impl Game {
             .iter()
             .filter(|p| p.alive && p.actor.is_some_and(|a| a.squad == squad))
             .count()
+    }
+
+    /// Take an actor out of the level without a fight (no body, no kill).
+    pub fn erase_actor(&mut self, i: usize) {
+        if self
+            .players
+            .get(i)
+            .is_none_or(|p| p.actor.is_none() || !p.alive)
+        {
+            return;
+        }
+        self.leave_seat(i);
+        let p = &mut self.players[i];
+        p.alive = false;
+        p.health = 0.0;
+        p.shield = 0.0;
+        p.respawn_in = 0.0;
+        if let Some(a) = &mut p.actor {
+            a.gone = true;
+        }
+    }
+
+    /// Kill an actor where it stands.
+    pub fn kill_actor(&mut self, i: usize) {
+        if self
+            .players
+            .get(i)
+            .is_some_and(|p| p.actor.is_some() && p.alive)
+        {
+            self.kill(i, None, false);
+        }
+    }
+
+    /// Bring the next checkpoint on as soon as it's safe (a script's
+    /// `game_save`).
+    pub fn request_checkpoint(&mut self) {
+        self.since_checkpoint = CHECKPOINT_EVERY;
     }
 
     /// How long a dead actor lies before its slot is reused.
