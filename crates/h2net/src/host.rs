@@ -158,6 +158,14 @@ fn seat(game: &Game, player: usize) -> (usize, Command, Command) {
     (player, still, Command::default())
 }
 
+/// Add a player to `game` on `team` (`ANY_TEAM`: the smaller one).
+fn add_player(game: &mut Game, team: u8) -> usize {
+    match team {
+        ANY_TEAM => game.add_player(),
+        t => game.add_player_on(t),
+    }
+}
+
 /// What a joining PC said about itself.
 struct Hello {
     /// The map the joining PC has loaded, and how many weapons and item
@@ -486,9 +494,15 @@ impl Host {
                         teams,
                         ..
                     } = hello;
-                    let (name, teams) = match &r.verified {
-                        Some(v) => (v.gamertag.clone(), vec![v.team; teams.len()]),
-                        None => (name, teams),
+                    // Online, they're who the service says: known by that
+                    // gamertag (not their PC's name), all on its team.
+                    let (computer, name, teams) = match &r.verified {
+                        Some(v) => (
+                            r.computer.clone(),
+                            v.gamertag.clone(),
+                            vec![v.team; teams.len()],
+                        ),
+                        None => (computer, name, teams),
                     };
                     let arriving = !r.welcomed;
                     r.computer = computer.clone();
@@ -514,13 +528,7 @@ impl Host {
                         let _ = r.conn.flush();
                         return Err("game full".into());
                     }
-                    let players: Vec<usize> = teams
-                        .iter()
-                        .map(|&t| match t {
-                            ANY_TEAM => game.add_player(),
-                            t => game.add_player_on(t),
-                        })
-                        .collect();
+                    let players: Vec<usize> = teams.iter().map(|&t| add_player(game, t)).collect();
                     for (k, &p) in players.iter().enumerate() {
                         game.set_name(p, &guest_name(&name, k));
                         game.set_look(p, look.guest(k));
@@ -551,7 +559,9 @@ impl Host {
                 }
                 kind::ADD_LOCAL if r.in_game => {
                     if game.players.len() < max_players && r.players.len() < 4 {
-                        let p = game.add_player();
+                        // Online, on the team the service gave that PC.
+                        let team = r.verified.as_ref().map_or(ANY_TEAM, |v| v.team);
+                        let p = add_player(game, team);
                         game.set_name(p, &guest_name(&r.name, r.players.len()));
                         game.set_look(p, r.look.guest(r.players.len()));
                         r.players.push(seat(game, p));

@@ -580,6 +580,46 @@ fn online_pcs_wait_in_the_lobby_between_games() {
     assert!(!host.is_remote(mine[0]));
 }
 
+#[test]
+fn online_pcs_are_who_the_service_says() {
+    // A team game with the host on one team and two on the other.
+    let mut hg = game();
+    hg.rules.game_type = h2sim::GameType::TeamSlayer;
+    hg.add_player_on(0);
+    hg.add_player_on(1);
+    hg.add_player_on(1);
+    let mut cg = game();
+    let who = verified("RED", 1);
+    let (mut host, mut client) = online("testmap", &cg, "testmap", &[ANY_TEAM], me(), who);
+    let mut joined = None;
+    let mut mine = None;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |he, ce, _| {
+        if let Some(HostEvent::Joined { computer, .. }) = he.first() {
+            joined = Some(computer.clone());
+        }
+        if let Some(ClientEvent::Welcomed { players, .. }) = ce.first() {
+            mine = Some(players[0]);
+        }
+        joined.is_some() && mine.is_some()
+    });
+    // Known by their gamertag, not whatever their PC is called.
+    assert_eq!(joined.as_deref(), Some("RED"));
+    assert_eq!(hg.players[mine.unwrap()].team, 1);
+    // Someone else there starts playing: on the same team, though the
+    // other is smaller.
+    client.add_local();
+    let mut added = None;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        if let Some(ClientEvent::Added(p)) = ce.first() {
+            added = Some(*p);
+        }
+        added.is_some()
+    });
+    let added = added.unwrap();
+    assert_eq!(hg.players[added].team, 1);
+    assert_eq!(hg.players[added].name, "RED(1)");
+}
+
 // Heartbeats, with a short timeout instead of the real ten seconds.
 
 const SHORT: Duration = Duration::from_millis(300);
