@@ -274,11 +274,22 @@ impl Vm {
         let n = scripts.expressions.len();
         let mut forms = vec![None; n];
         let mut args = vec![Vec::new(); n];
+        // Calls of scripts by name (some aren't marked as script calls).
+        let by_name: std::collections::HashMap<&str, u16> = scripts
+            .scripts
+            .iter()
+            .enumerate()
+            .map(|(k, s)| (s.name.as_str(), k as u16))
+            .collect();
         for (i, e) in scripts.expressions.iter().enumerate() {
             let i16 = i as u16;
             match e.kind {
                 NodeKind::Call => {
-                    forms[i] = Some(form_of(scripts.function_name(i16)));
+                    let name = scripts.function_name(i16);
+                    forms[i] = Some(match form_of(name) {
+                        Form::Host => by_name.get(name).map_or(Form::Host, |&k| Form::Script(k)),
+                        f => f,
+                    });
                     args[i] = scripts.arguments(i16);
                 }
                 NodeKind::ScriptCall => {
@@ -376,6 +387,9 @@ impl Vm {
     /// Evaluate an expression to its value at once (globals' starting
     /// values); one that sleeps gives its type's default.
     fn evaluate(&mut self, scripts: &Scripts, node: u16, host: &mut dyn Host) -> Value {
+        if let Some(v) = leaf(&self.globals, scripts, node) {
+            return v;
+        }
         let t = self.threads.len();
         self.threads.push(Thread {
             script: u16::MAX,
@@ -411,23 +425,12 @@ impl Vm {
                         ret = Some(Value::Void);
                         continue;
                     };
+                    if let Some(v) = leaf(&self.globals, scripts, node) {
+                        ret = Some(v);
+                        continue;
+                    }
                     match e.kind {
-                        // Strings are known by where their text is.
-                        NodeKind::Value if e.value_type == vt::STRING => {
-                            ret = Some(Value::Handle(e.text))
-                        }
-                        NodeKind::Value => ret = Some(literal(e.value_type, e.value)),
-                        NodeKind::Global => {
-                            let k = e.value & 0xFFFF;
-                            ret = Some(if k & ENGINE_GLOBAL != 0 {
-                                default_value(e.value_type)
-                            } else {
-                                self.globals
-                                    .get(k as usize)
-                                    .cloned()
-                                    .unwrap_or_else(|| default_value(e.value_type))
-                            });
-                        }
+                        NodeKind::Value | NodeKind::Global => {}
                         NodeKind::Call | NodeKind::ScriptCall => {
                             if th.stack.len() >= MAX_DEPTH {
                                 if self.log {
@@ -791,6 +794,28 @@ impl Vm {
     }
 }
 
+/// The value of a node that's no call: a literal or a global.
+fn leaf(globals: &[Value], scripts: &Scripts, node: u16) -> Option<Value> {
+    let e = scripts.expression(node)?;
+    Some(match e.kind {
+        // Strings are known by where their text is.
+        NodeKind::Value if e.value_type == vt::STRING => Value::Handle(e.text),
+        NodeKind::Value => literal(e.value_type, e.value),
+        NodeKind::Global => {
+            let k = e.value & 0xFFFF;
+            if k & ENGINE_GLOBAL != 0 {
+                default_value(e.value_type)
+            } else {
+                globals
+                    .get(k as usize)
+                    .cloned()
+                    .unwrap_or_else(|| default_value(e.value_type))
+            }
+        }
+        NodeKind::Call | NodeKind::ScriptCall => return None,
+    })
+}
+
 fn xorshift(state: &mut u32) -> u32 {
     *state ^= *state << 13;
     *state ^= *state >> 17;
@@ -1056,6 +1081,29 @@ mod tests {
         }
         assert_eq!(host.calls.len(), 4, "every tick");
         assert_eq!(host.calls[0].1, vec![Value::Real(6.0)]);
+    }
+
+    #[test]
+    fn globals_start_with_their_literal_and_global_values() {
+        let mut b = Builder::default();
+        let thirty = b.short(30);
+        let seconds = b.global(0);
+        b.s.globals.push(Global {
+            name: "seconds".into(),
+            value_type: vt::SHORT,
+            init: Some(thirty),
+        });
+        b.s.globals.push(Global {
+            name: "copy".into(),
+            value_type: vt::SHORT,
+            init: Some(seconds),
+        });
+        let s = b.s;
+        let mut host = Probe::default();
+        let vm = Vm::new(&s, &mut host);
+        assert_eq!(vm.global(&s, "seconds").map(Value::num), Some(30.0));
+        assert_eq!(vm.global(&s, "copy").map(Value::num), Some(30.0));
+        assert!(host.calls.is_empty(), "literals are not calls");
     }
 
     #[test]

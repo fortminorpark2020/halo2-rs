@@ -3,12 +3,13 @@
 //! its own camera; the nearest one wins), and the announcer calling out
 //! medals and the lead for the players at this PC.
 
-use crate::audio::Audio;
-use crate::scene::Scene;
+use crate::audio::{Audio, Clip};
+use crate::scene::{Scene, SoundAsset};
 use glam::Vec3;
 use h2sim::game::{Event, FlagEvent, GrenadeKind, HillEvent, LeadChange, Medal};
 use h2sim::{Game, GameType, ItemKind};
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 /// One view's ears.
 pub struct Listener {
@@ -32,6 +33,11 @@ const ANNOUNCER_GAP: f32 = 0.15;
 /// Menu sounds, over the music.
 const UI_VOLUME: f32 = 1.6;
 const ANNOUNCER_VOLUME: f32 = 1.4;
+/// Mission dialogue, and the mission's music.
+const DIALOGUE_VOLUME: f32 = 1.5;
+const MISSION_MUSIC_VOLUME: f32 = 0.6;
+/// Seconds music fades out over when a script stops it.
+const MUSIC_FADE: f32 = 2.0;
 /// The respawn countdown ticks over its last seconds.
 const RESPAWN_TICKS: u32 = 3;
 
@@ -70,6 +76,9 @@ pub struct Soundscape {
     /// Rounds in flight with a sound of their own (a rocket's roar): the
     /// weapon, where the round was last frame, and its loop.
     rounds: Vec<(usize, Vec3, u64)>,
+    /// Mission lines playing (sound, voice), and its music (tag, voice).
+    lines: Vec<(usize, u64)>,
+    loops: Vec<(u32, u64)>,
 }
 
 /// Volume at distance `d` for a sound carrying over `range`.
@@ -131,6 +140,8 @@ impl Soundscape {
             respawn_ticks: Vec::new(),
             engines: Vec::new(),
             rounds: Vec::new(),
+            lines: Vec::new(),
+            loops: Vec::new(),
         }
     }
 
@@ -146,6 +157,81 @@ impl Soundscape {
         self.respawn_ticks.clear();
         self.engines.clear();
         self.rounds.clear();
+        self.lines.clear();
+        self.loops.clear();
+    }
+
+    /// A mission's dialogue and music, as its scripts call for them.
+    pub fn mission(
+        &mut self,
+        scene: &Scene,
+        sound: crate::campaign::MissionSound,
+        listeners: &[Listener],
+    ) {
+        use crate::campaign::MissionSound;
+        let clip = |s: Option<usize>| -> Option<(Arc<Clip>, &SoundAsset)> {
+            let asset = scene.sounds.get(s?)?;
+            Some((asset.clips.first()?.clone(), asset))
+        };
+        match sound {
+            MissionSound::Line { sound, at, gain } => {
+                let Some((line, asset)) = clip(Some(sound)) else {
+                    return;
+                };
+                let g = asset.gain * gain * DIALOGUE_VOLUME;
+                // Said by someone: heard from where they are, but never
+                // too faint to follow.
+                let gains = match at {
+                    Some(at) => {
+                        placed(asset.distance, at, None, listeners).map(|v| v.max(0.35) * g)
+                    }
+                    None => [g, g],
+                };
+                let voice = self.audio.play(&line, gains, 1.0, false);
+                self.lines.retain(|(s, _)| *s != sound);
+                self.lines.push((sound, voice));
+            }
+            MissionSound::StopLine(sound) => {
+                for (_, voice) in self.lines.iter().filter(|(s, _)| *s == sound) {
+                    self.audio.stop(*voice);
+                }
+                self.lines.retain(|(s, _)| *s != sound);
+            }
+            MissionSound::StartLoop(tag) => {
+                if self.loops.iter().any(|(t, _)| *t == tag) {
+                    return;
+                }
+                let Some(music) = scene.ai.loops.get(&tag) else {
+                    return;
+                };
+                let repeat: Vec<Arc<Clip>> = music
+                    .repeat
+                    .and_then(|s| scene.sounds.get(s))
+                    .map(|a| a.clips.clone())
+                    .unwrap_or_default();
+                let Some(first) = clip(music.start)
+                    .map(|c| c.0)
+                    .or_else(|| repeat.first().cloned())
+                else {
+                    return;
+                };
+                let then = if music.once { &[][..] } else { &repeat[..] };
+                let voice = self
+                    .audio
+                    .play_music(&first, then, music.gain * MISSION_MUSIC_VOLUME);
+                self.loops.push((tag, voice));
+            }
+            MissionSound::StopLoop(tag) => {
+                for (_, voice) in self.loops.iter().filter(|(t, _)| *t == tag) {
+                    self.audio.fade_out(*voice, MUSIC_FADE);
+                }
+                self.loops.retain(|(t, _)| *t != tag);
+                if let Some((end, _)) = scene.ai.loops.get(&tag).and_then(|m| clip(m.end)) {
+                    let g = scene.ai.loops[&tag].gain * MISSION_MUSIC_VOLUME;
+                    self.audio.play(&end, [g, g], 1.0, false);
+                }
+            }
+        }
     }
 
     /// A menu sound.

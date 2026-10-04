@@ -541,6 +541,11 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
                 won = true;
                 println!("{t:6.1} mission complete");
             }
+            for s in m.take_sounds() {
+                if std::env::var_os("H2_SCRIPT_LOG").is_some() {
+                    println!("{t:6.1} {s:?}");
+                }
+            }
         }
         for e in std::mem::take(&mut game.events) {
             match e {
@@ -1012,6 +1017,13 @@ impl App {
             h2sim::bot::alert_actors(&mut self.bots, &self.game, &self.game.events);
             if let Some(m) = &mut self.mission {
                 m.step(&self.scene, &self.world, &mut self.game, &mut self.bots);
+                let sounds = m.take_sounds();
+                if !sounds.is_empty() {
+                    let listeners = self.listeners();
+                    for s in sounds {
+                        self.sound.mission(&self.scene, s, &listeners);
+                    }
+                }
             }
             if !ticked {
                 for l in &mut self.locals {

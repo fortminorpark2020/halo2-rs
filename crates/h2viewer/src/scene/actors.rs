@@ -12,6 +12,7 @@ use blam_cache::DatumIndex;
 use glam::Vec3;
 use h2sim::game::{CharacterDef, GrenadeKind, Mind, Side, Vitality};
 use h2sim::KillZone;
+use std::collections::HashMap;
 
 /// Mesh copies of each actor body: how many of one kind show at once.
 pub const ACTOR_BODIES: usize = 16;
@@ -44,6 +45,23 @@ pub struct CampaignAi {
     pub name_positions: Vec<Option<Vec3>>,
     /// Each named machine (door, lift): how it moves.
     pub machines: Vec<Option<scenario::Machine>>,
+    /// The sounds scripts play (dialogue), by tag: in `Scene::sounds`.
+    pub sounds: HashMap<u32, usize>,
+    /// The music and loops scripts start, by tag.
+    pub loops: HashMap<u32, ScriptLoop>,
+}
+
+/// Music (or another looping sound) a script starts: its opening, the
+/// part that loops, and its ending, in `Scene::sounds`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScriptLoop {
+    pub start: Option<usize>,
+    pub repeat: Option<usize>,
+    pub end: Option<usize>,
+    /// Linear gain.
+    pub gain: f32,
+    /// Plays once rather than looping.
+    pub once: bool,
 }
 
 /// Which side a kind of character fights on.
@@ -185,6 +203,8 @@ impl Loader {
             .iter()
             .map(|&k| (k, scenario::placements(set, k).unwrap_or_default()))
             .collect();
+        self.script_sounds(out);
+        let set = &mut self.set;
         let names = scenario::object_names(set).unwrap_or_default();
         out.object_names = names.iter().map(|n| n.name.clone()).collect();
         out.name_positions = names
@@ -206,6 +226,55 @@ impl Loader {
                 scenario::machine(set, p.object).ok()
             })
             .collect();
+    }
+
+    /// The dialogue and music the scripts play.
+    fn script_sounds(&mut self, out: &mut CampaignAi) {
+        let tags: Vec<(u16, u32)> = out
+            .scripts
+            .expressions
+            .iter()
+            .filter(|e| {
+                e.kind == script::NodeKind::Value
+                    && matches!(
+                        e.value_type,
+                        script::value_type::SOUND | script::value_type::LOOPING_SOUND
+                    )
+            })
+            .map(|e| (e.value_type, e.value))
+            .collect();
+        for (kind, tag) in tags {
+            let datum = DatumIndex(tag);
+            if datum == DatumIndex::NONE {
+                continue;
+            }
+            if kind == script::value_type::SOUND {
+                if out.sounds.contains_key(&tag) {
+                    continue;
+                }
+                if let Some(s) = self.sound(datum) {
+                    out.sounds.insert(tag, s);
+                }
+                continue;
+            }
+            if out.loops.contains_key(&tag) {
+                continue;
+            }
+            let Ok(l) = blam_cache::sound::looping_sound(&mut self.set, datum) else {
+                continue;
+            };
+            let Some(t) = l.tracks.first().copied() else {
+                continue;
+            };
+            let looped = ScriptLoop {
+                start: t.start.and_then(|s| self.sound(s)),
+                repeat: t.repeat.and_then(|s| self.sound(s)),
+                end: t.end.and_then(|s| self.sound(s)),
+                gain: 10f32.powf(t.gain / 20.0),
+                once: l.once,
+            };
+            out.loops.insert(tag, looped);
+        }
     }
 
     /// A weapon by tag: one already loaded, else loaded now.

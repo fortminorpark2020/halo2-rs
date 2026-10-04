@@ -256,6 +256,54 @@ pub fn effect_sounds(set: &mut MapSet, effect: DatumIndex) -> Result<Vec<DatumIn
     Ok(out)
 }
 
+/// A looping sound's (`lsnd`) tracks: music, or a hum that goes on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LoopingSound {
+    /// Played once, then stops (not a loop).
+    pub once: bool,
+    pub tracks: Vec<Track>,
+}
+
+/// One track of a looping sound: a start, the loop, and an end.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Track {
+    /// Decibels.
+    pub gain: f32,
+    pub start: Option<DatumIndex>,
+    pub repeat: Option<DatumIndex>,
+    pub end: Option<DatumIndex>,
+}
+
+const LSND_TRACKS: usize = 0x1C;
+const TRACK_SIZE: usize = 0x58;
+
+pub fn looping_sound(set: &mut MapSet, lsnd: DatumIndex) -> Result<LoopingSound> {
+    let (src, tag, d) = set.tag_data(lsnd)?;
+    if tag.group != GroupTag::parse("lsnd").expect("valid group") {
+        return Err(Error::Corrupt("not a looping sound".into()));
+    }
+    let file = set.get(src);
+    let region = file.meta_region();
+    let tracks = file.read_block(region, &d, LSND_TRACKS, TRACK_SIZE)?;
+    let sound = |t: &[u8], at: usize| {
+        Some(DatumIndex(u32_at(t, at + 4))).filter(|d| *d != DatumIndex::NONE)
+    };
+    Ok(LoopingSound {
+        once: u32_at(&d, 0) & 2 != 0,
+        tracks: tracks
+            .as_chunks::<TRACK_SIZE>()
+            .0
+            .iter()
+            .map(|t| Track {
+                gain: f32_at(t, 0x8),
+                start: sound(t, 0x14),
+                repeat: sound(t, 0x1C),
+                end: sound(t, 0x24),
+            })
+            .collect(),
+    })
+}
+
 /// DirectShow's MEDIATYPE_Audio and FORMAT_WaveFormatEx.
 const MEDIATYPE_AUDIO: [u8; 16] = *b"auds\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71";
 const FORMAT_WAVE_FORMAT_EX: [u8; 16] = [

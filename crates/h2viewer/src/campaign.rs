@@ -4,6 +4,7 @@
 
 use crate::scene::Scene;
 use blam_cache::ai::AiTeam;
+use blam_cache::script::value_type;
 use glam::Vec3;
 use h2sim::bot::ActorMind;
 use h2sim::game::ActorSpawn;
@@ -144,9 +145,27 @@ impl Default for Device {
     }
 }
 
+/// A sound a script plays or stops (dialogue, music).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MissionSound {
+    /// A line (in `Scene::sounds`), from where someone stands or over the
+    /// radio.
+    Line {
+        sound: usize,
+        at: Option<Vec3>,
+        gain: f32,
+    },
+    StopLine(usize),
+    /// Music or another looping sound, by tag (`CampaignAi::loops`).
+    StartLoop(u32),
+    StopLoop(u32),
+}
+
 /// The level as the mission's scripts have left it.
 #[derive(Default)]
 struct State {
+    /// Sounds to play, for whoever's listening.
+    sounds: Vec<MissionSound>,
     /// The structure BSP the players are in.
     bsp: u16,
     devices: HashMap<u16, Device>,
@@ -260,6 +279,11 @@ impl Mission {
         self.state.exists(o.name, o.automatic)
             && o.door
                 .is_none_or(|d| self.state.doors.get(d).is_none_or(|d| d.position < 0.5))
+    }
+
+    /// The sounds the scripts played since last asked.
+    pub fn take_sounds(&mut self) -> Vec<MissionSound> {
+        std::mem::take(&mut self.state.sounds)
     }
 
     /// The mission's last script said it's won.
@@ -749,6 +773,56 @@ impl Host for Ctx<'_> {
                 let made = !function.starts_with("object_destroy");
                 for n in self.names_containing(&arg(0)) {
                     self.st.created.insert(n, made);
+                }
+                Value::Void
+            }
+            // Dialogue and music.
+            "sound_impulse_start" | "sound_impulse_start_effect" => {
+                if let Some(&sound) = arg(0).handle().and_then(|t| self.scene.ai.sounds.get(&t)) {
+                    if self.st.log {
+                        let tag = arg(0).handle();
+                        let scripts = &self.scene.ai.scripts;
+                        let name = scripts
+                            .expressions
+                            .iter()
+                            .find(|e| Some(e.value) == tag && e.value_type == value_type::SOUND)
+                            .map_or("?", |e| scripts.text(e.text));
+                        println!("script: says {name}");
+                    }
+                    let at = objects(1).first().and_then(|&o| self.position(o));
+                    let gain = if args.len() > 2 { num(2) } else { 1.0 };
+                    self.st.sounds.push(MissionSound::Line { sound, at, gain });
+                }
+                Value::Void
+            }
+            "sound_impulse_stop" => {
+                if let Some(&sound) = arg(0).handle().and_then(|t| self.scene.ai.sounds.get(&t)) {
+                    self.st.sounds.push(MissionSound::StopLine(sound));
+                }
+                Value::Void
+            }
+            // Ticks a line lasts.
+            "sound_impulse_language_time" | "sound_impulse_time" => {
+                let clip = arg(0)
+                    .handle()
+                    .and_then(|t| self.scene.ai.sounds.get(&t))
+                    .and_then(|&s| self.scene.sounds.get(s))
+                    .and_then(|s| s.clips.first());
+                let seconds = clip.map_or(0.0, |c| c.duration());
+                Value::Real((seconds * h2sim::script::TICKS_PER_SECOND as f32).round())
+            }
+            "sound_looping_start" => {
+                if let Some(tag) = arg(0)
+                    .handle()
+                    .filter(|t| self.scene.ai.loops.contains_key(t))
+                {
+                    self.st.sounds.push(MissionSound::StartLoop(tag));
+                }
+                Value::Void
+            }
+            "sound_looping_stop" => {
+                if let Some(tag) = arg(0).handle() {
+                    self.st.sounds.push(MissionSound::StopLoop(tag));
                 }
                 Value::Void
             }

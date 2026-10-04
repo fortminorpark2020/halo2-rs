@@ -28,9 +28,13 @@ pub mod value_type {
     pub const STRING: u16 = 0x09;
     pub const SCRIPT: u16 = 0x0A;
     pub const TRIGGER_VOLUME: u16 = 0x0D;
+    pub const CUTSCENE_FLAG: u16 = 0x0E;
     pub const DEVICE_GROUP: u16 = 0x12;
     pub const AI: u16 = 0x13;
     pub const STARTING_PROFILE: u16 = 0x18;
+    pub const STRUCTURE_BSP: u16 = 0x1A;
+    pub const SOUND: u16 = 0x20;
+    pub const LOOPING_SOUND: u16 = 0x23;
     pub const GAME_DIFFICULTY: u16 = 0x2C;
     pub const TEAM: u16 = 0x2D;
     pub const OBJECT: u16 = 0x32;
