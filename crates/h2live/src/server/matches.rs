@@ -6,13 +6,19 @@
 //! starts (GO) when all have come, or 20 seconds on: a PC that hasn't come
 //! by then is left out of it. When the game ends each PC says how it saw it
 //! end (RESULT). If at least half of the joined PCs that answer within 30
-//! seconds saw it as the host did, levels change as `levels` says, and
-//! everyone hears how (MATCH_OVER).
+//! seconds of the end (the host's result, or half of theirs) saw it as the
+//! host did, levels change as `levels` says, and everyone hears how
+//! (MATCH_OVER). The host's word alone isn't enough: unless every joined
+//! PC left the game, at least one must have answered.
 //!
 //! A host that leaves ends the match: it doesn't count for anyone, except
-//! as a loss for the host if it quit or its link to the server died. A
-//! player who quits a game in progress loses it as `levels` says: last in
-//! free-for-all, with their team otherwise.
+//! as a loss for the host if it quit or its link to the server died. Joined
+//! PCs saying they lost the host end it too, if at least half of them say
+//! so and the relay saw it go. A player who quits a game in progress (or
+//! says it lost a host that was there) loses it as `levels` says: last in
+//! free-for-all, with their team otherwise. Leaving once the game is over
+//! (after one's own result, or the host's) isn't quitting. A game that
+//! runs five minutes past its time limit is given up on.
 //!
 //! Parties play custom games too: the leader hosts on a map everyone has,
 //! and every member is linked to them, those who join later as well. They
@@ -22,7 +28,7 @@ use super::Server;
 use crate::card;
 use crate::levels::{self, Finish, Placed, Rank, MAX_LEVEL};
 use crate::matchmaker::{self, Event, Member, Seat, Ticket};
-use crate::store::{self, GameRecord, RecordedPlayer, Stats};
+use crate::store::{self, Counted, GameRecord, RecordedPlayer, Stats};
 use h2net::live::{
     Activity, MatchInfo, MatchOver, MatchPlayer, PlayerResult, SearchStatus, Stage, ToPc,
     QUICKMATCH,
@@ -31,9 +37,13 @@ use h2net::ANY_TEAM;
 
 /// Seconds from HOSTING to GO at the latest, for PCs slow to link.
 const LINK_WAIT: f64 = 20.0;
-/// Seconds after the first PC reports (a result, or the host lost) that
-/// the others have to send their results.
+/// Seconds after the game ends (see `Match::over_by_results`) that
+/// everyone has to send their results.
 const RESULTS_WAIT: f64 = 30.0;
+/// Seconds after GO that a game is given up on: this long past its time
+/// limit, or this long if it has none.
+const OVERTIME: f64 = 300.0;
+const NO_TIME_LIMIT: f64 = 3600.0;
 /// PLAYLISTS go at most this often (seconds) as the counts in them change.
 const PLAYLISTS_EVERY: f64 = 5.0;
 /// A PC whose round trips to the server aren't known yet counts as this
@@ -49,6 +59,8 @@ const HOST_LEFT: &str = "THE HOST LEFT. THE GAME DIDN'T COUNT.";
 const HOST_QUIT: &str = "YOU QUIT AS HOST. IT COUNTS AS A LOSS.";
 const DISPUTED: &str = "THE RESULTS DIDN'T AGREE. THE GAME DIDN'T COUNT.";
 const NO_RESULT: &str = "THE HOST SENT NO RESULT. THE GAME DIDN'T COUNT.";
+const UNCONFIRMED: &str = "NO ONE CONFIRMED THE RESULT. THE GAME DIDN'T COUNT.";
+const NEVER_ENDED: &str = "THE GAME NEVER ENDED. IT DIDN'T COUNT.";
 const NO_OPPONENTS: &str = "NO ONE PLAYED AGAINST YOU. THE GAME DIDN'T COUNT.";
 const NO_HOST: &str = "NO ONE COULD HOST THE GAME.";
 const NOT_JOINED: &str = "YOU DIDN'T JOIN THE GAME.";
@@ -59,27 +71,32 @@ pub(super) struct Match {
     pub(super) info: MatchInfo,
     /// Every PC in it, as the matchmaker seated them.
     pub(super) seats: Vec<Seat>,
-    /// When the host said it's hosting.
+    /// When the host said it's hosting, and when the game started (GO).
     hosting: Option<f64>,
-    /// The game started (GO).
-    started: bool,
+    started: Option<f64>,
     /// Joining PCs whose link to the host came.
     linked: Vec<u64>,
     /// PCs out of it before the game started, who were told it didn't
     /// count for them.
     pub(super) out: Vec<u64>,
-    /// PCs that quit the game in progress, and joining PCs that lost the
-    /// host.
+    /// PCs that quit the game in progress, and joining PCs that said they
+    /// lost the host.
     quit: Vec<u64>,
     lost_host: Vec<u64>,
+    /// PCs that left once the game was over for them (they or the host had
+    /// said how it ended): they're rated as the results say.
+    left_at_end: Vec<u64>,
+    /// Joining PCs whose relay link to the host broke on the host's side.
+    host_dropped: Vec<u64>,
     /// The host quit, through its menu or because its link to the server
     /// died.
     host_quit: bool,
     /// Why it can't count for anyone, if it can't.
     void: Option<&'static str>,
-    /// Each PC's RESULT, and when the first PC reported.
+    /// Each PC's RESULT, and when the game ended (as the host, or half
+    /// the joining PCs still in it, said).
     results: Vec<(u64, Vec<PlayerResult>)>,
-    first_report: Option<f64>,
+    ended: Option<f64>,
 }
 
 impl Match {
@@ -88,15 +105,17 @@ impl Match {
             info,
             seats,
             hosting: None,
-            started: false,
+            started: None,
             linked: Vec::new(),
             out: Vec::new(),
             quit: Vec::new(),
             lost_host: Vec::new(),
+            left_at_end: Vec::new(),
+            host_dropped: Vec::new(),
             host_quit: false,
             void: None,
             results: Vec::new(),
-            first_report: None,
+            ended: None,
         }
     }
 
@@ -115,17 +134,50 @@ impl Match {
         self.results.iter().any(|(a, _)| *a == account)
     }
 
-    /// Everyone in the game has had their say: a result, or they're gone.
-    fn all_in(&self) -> bool {
-        let gone = |a: u64| self.quit.contains(&a) || self.lost_host.contains(&a);
-        (self.host_quit || self.reported(self.info.host))
-            && self.joiners().all(|a| self.reported(a) || gone(a))
+    /// `account` left the game in progress: it quit, or said it lost the
+    /// host.
+    fn left(&self, account: u64) -> bool {
+        self.quit.contains(&account) || self.lost_host.contains(&account)
     }
 
-    /// At least half the joining PCs lost the host: it's gone.
+    /// `account` left the game, before its end or after.
+    fn gone(&self, account: u64) -> bool {
+        self.left(account) || self.left_at_end.contains(&account)
+    }
+
+    /// The game is over, as the host or at least half the joining PCs
+    /// still in it say. (One PC's word isn't enough to end it for the
+    /// others.)
+    fn over_by_results(&self) -> bool {
+        let staying: Vec<u64> = self.joiners().filter(|&a| !self.left(a)).collect();
+        let reported = staying.iter().filter(|&&a| self.reported(a)).count();
+        self.reported(self.info.host) || !staying.is_empty() && reported * 2 >= staying.len()
+    }
+
+    /// Everyone in the game has had their say: a result, or they're gone.
+    fn all_in(&self) -> bool {
+        (self.host_quit || self.reported(self.info.host))
+            && self.joiners().all(|a| self.reported(a) || self.gone(a))
+    }
+
+    /// At least half the joining PCs lost the host, and their links to it
+    /// broke on its side: it's gone.
     fn lost_the_host(&self) -> bool {
         let joiners = self.joiners().count();
-        self.started && joiners > 0 && self.lost_host.len() * 2 >= joiners
+        let lost = self
+            .lost_host
+            .iter()
+            .filter(|a| self.host_dropped.contains(a));
+        self.started.is_some() && joiners > 0 && lost.count() * 2 >= joiners
+    }
+
+    /// The game has run too long by `now`.
+    fn too_long(&self, now: f64) -> bool {
+        let longest = match self.info.time_limit {
+            0 => NO_TIME_LIMIT,
+            limit => f64::from(limit) + OVERTIME,
+        };
+        self.started.is_some_and(|t| now >= t + longest)
     }
 }
 
@@ -171,8 +223,9 @@ impl Server {
     /// `account` is in a match that isn't over for it: about to start, or
     /// playing, or waiting for the others' results.
     fn busy(&self, account: u64) -> bool {
-        let gone = |m: &Match| m.quit.contains(&account) || m.lost_host.contains(&account);
-        self.matches.iter().any(|m| m.has(account) && !gone(m))
+        self.matches
+            .iter()
+            .any(|m| m.has(account) && !m.gone(account))
     }
 
     /// `me`, leading their party, starts it searching `playlist` (or
@@ -182,7 +235,7 @@ impl Server {
             return;
         };
         if !matches!(party.activity, Activity::Lobby | Activity::Searching) {
-            return;
+            return self.notice(me, STILL_PLAYING);
         }
         let (members, previous_map) = (party.members.clone(), party.previous_map.clone());
         if members.iter().any(|&a| self.busy(a)) {
@@ -425,21 +478,30 @@ impl Server {
         }
     }
 
-    /// `me` says how match `id` ended (the first time only).
+    /// `me` says how match `id` ended (the first time only, and only if
+    /// it was there at the end).
     pub(super) fn result(&mut self, me: u64, id: u64, players: Vec<PlayerResult>) {
         if let Some(m) = self.matches.iter_mut().find(|m| m.info.id == id) {
-            if m.started && m.has(me) && !m.reported(me) {
+            if m.started.is_some() && m.has(me) && !m.reported(me) && !m.gone(me) {
                 m.results.push((me, players));
             }
         }
     }
 
-    /// `me` left match `id` before its end: it quit, or lost the host.
+    /// `me` left match `id`: it quit, or lost the host.
     pub(super) fn left_match(&mut self, me: u64, id: u64, host_lost: bool) {
         if let Some(k) = self.matches.iter().position(|m| m.info.id == id) {
-            if self.matches[k].has(me) {
+            if self.matches[k].has(me) && !self.matches[k].gone(me) {
                 self.leave(k, me, host_lost);
             }
+        }
+    }
+
+    /// The relay link from `joiner` to the host of match `id` broke on the
+    /// host's side.
+    pub(super) fn host_dropped(&mut self, id: u64, joiner: u64) {
+        if let Some(m) = self.matches.iter_mut().find(|m| m.info.id == id) {
+            m.host_dropped.push(joiner);
         }
     }
 
@@ -448,8 +510,7 @@ impl Server {
     pub(super) fn gone(&mut self, account: u64) {
         for k in 0..self.matches.len() {
             let m = &self.matches[k];
-            let gone = m.quit.contains(&account) || m.lost_host.contains(&account);
-            if m.has(account) && !gone {
+            if m.has(account) && !m.gone(account) {
                 self.leave(k, account, false);
             }
         }
@@ -458,9 +519,12 @@ impl Server {
     /// `account` left match `k`, having lost the host if `host_lost`.
     fn leave(&mut self, k: usize, account: u64, host_lost: bool) {
         let m = &mut self.matches[k];
-        if account == m.info.host && m.hosting.is_some() {
+        if m.reported(account) || m.reported(m.info.host) {
+            // The game was over: what it's worth is up to the results.
+            m.left_at_end.push(account);
+        } else if account == m.info.host && m.hosting.is_some() {
             m.host_quit = true;
-        } else if !m.started {
+        } else if m.started.is_none() {
             // It's out, unrated. (If it was asked to host, the next is
             // asked; see `run_matches`.)
             self.leave_early(k, account);
@@ -521,9 +585,11 @@ impl Server {
         while k < self.matches.len() {
             let m = &mut self.matches[k];
             let id = m.info.id;
-            let reported = !m.results.is_empty() || !m.lost_host.is_empty();
-            if reported && m.first_report.is_none() {
-                m.first_report = Some(now);
+            if m.ended.is_none() && m.over_by_results() {
+                m.ended = Some(now);
+            }
+            if m.void.is_none() && m.too_long(now) {
+                m.void = Some(NEVER_ENDED);
             }
             if m.hosting.is_none() && m.void.is_none() && m.out.contains(&m.info.host) {
                 let next = self.matchmaker.host_failed(id, now);
@@ -532,18 +598,18 @@ impl Server {
             }
             let m = &self.matches[k];
             let all_linked = m.joiners().all(|a| m.linked.contains(&a));
-            if !m.started
+            if m.started.is_none()
                 && m.hosting
                     .is_some_and(|t| all_linked || now >= t + LINK_WAIT)
             {
-                self.go(k);
+                self.go(k, now);
             }
             let m = &self.matches[k];
             let over = m.void.is_some()
                 || m.host_quit
                 || m.lost_the_host()
-                || m.started && m.all_in()
-                || m.first_report.is_some_and(|t| now >= t + RESULTS_WAIT);
+                || m.started.is_some() && m.all_in()
+                || m.ended.is_some_and(|t| now >= t + RESULTS_WAIT);
             if over {
                 self.end(k, now);
             } else {
@@ -553,14 +619,14 @@ impl Server {
     }
 
     /// Start match `k`'s game, without PCs that aren't linked to the host.
-    fn go(&mut self, k: usize) {
+    fn go(&mut self, k: usize, now: f64) {
         let m = &self.matches[k];
         let late: Vec<u64> = m.joiners().filter(|a| !m.linked.contains(a)).collect();
         for account in late {
             self.leave_early(k, account);
         }
         let m = &mut self.matches[k];
-        m.started = true;
+        m.started = Some(now);
         let (id, players) = (m.info.id, m.seats.clone());
         for s in players {
             if self.matches[k].has(s.account) {
@@ -585,32 +651,38 @@ impl Server {
             .filter(|s| m.has(s.account))
             .copied()
             .collect();
-        let left = |a: u64| m.quit.contains(&a) || m.lost_host.contains(&a);
+        // Who left the game in progress (the host too, if it quit).
+        let left = |a: u64| m.left(a) || m.host_quit && a == host;
         let host_result = m.results.iter().find(|(a, _)| *a == host);
 
         // The players the game is worth something to, as they finished,
         // and the XP each won or lost.
         let mut placed: Vec<(u64, Placed)> = Vec::new();
         let mut xp: Vec<(u64, i32)> = Vec::new();
-        let mut counted = false;
+        let mut counted = Counted::No;
         let reason = if let Some(why) = m.void {
             why
         } else if m.host_quit || m.lost_the_host() {
             self.matchmaker.host_left(host);
-            if m.host_quit && m.started && m.info.ranked {
+            if m.host_quit && m.started.is_some() && m.info.ranked {
                 // The host comes last.
-                let game: Vec<Placed> = seats
+                placed = seats
                     .iter()
-                    .map(|s| Placed {
-                        level: s.effective,
-                        team: s.team,
-                        place: u8::from(s.account == host),
-                        bot: false,
+                    .map(|s| {
+                        let p = Placed {
+                            level: s.effective,
+                            team: s.team,
+                            place: u8::from(s.account == host),
+                            bot: false,
+                        };
+                        (s.account, p)
                     })
                     .collect();
+                let game: Vec<Placed> = placed.iter().map(|(_, p)| *p).collect();
                 let changes = levels::xp_changes(&game, teams);
-                let mine = seats.iter().zip(changes).find(|(s, _)| s.account == host);
-                xp.extend(mine.map(|(s, change)| (s.account, change)));
+                let mine = placed.iter().zip(changes).find(|((a, _), _)| *a == host);
+                xp.extend(mine.map(|((a, _), change)| (*a, change)));
+                counted = Counted::HostLoss;
             }
             HOST_LEFT
         } else if let Some((_, result)) = host_result {
@@ -629,7 +701,7 @@ impl Server {
                 .map(|(_, r)| Finish {
                     team: 0,
                     score: r.score,
-                    left: r.left || left(r.account),
+                    left: r.left || m.left(r.account),
                 })
                 .collect();
             let places = if teams {
@@ -657,9 +729,14 @@ impl Server {
                 .map(|(_, r)| r)
                 .collect();
             let agreeing = reports.iter().filter(|r| agrees(result, r)).count();
+            // Unless every joined PC left the game, one must have
+            // answered.
+            let staying = m.joiners().filter(|&a| !m.left(a)).count();
+            let confirmed = !reports.is_empty() || staying == 0;
             let game: Vec<Placed> = placed.iter().map(|(_, p)| *p).collect();
-            counted = levels::counts(m.info.ranked, true, agreeing, reports.len(), &game, teams);
-            if counted {
+            let counts = levels::counts(m.info.ranked, true, agreeing, reports.len(), &game, teams);
+            if counts && confirmed {
+                counted = Counted::Yes;
                 let changes = levels::xp_changes(&game, teams);
                 xp = placed.iter().map(|(a, _)| *a).zip(changes).collect();
             }
@@ -667,7 +744,9 @@ impl Server {
                 ""
             } else if agreeing * 2 < reports.len() {
                 DISPUTED
-            } else if !counted {
+            } else if !confirmed {
+                UNCONFIRMED
+            } else if !counts {
                 NO_OPPONENTS
             } else {
                 ""
@@ -747,7 +826,11 @@ impl Server {
         let bytes = self.relayed.remove(&id).unwrap_or(0);
         println!(
             "live: match {id:016x} is over{}{}, {bytes} bytes relayed",
-            if counted { ", counted" } else { "" },
+            match counted {
+                Counted::No => "",
+                Counted::Yes => ", counted",
+                Counted::HostLoss => ", a loss for its host",
+            },
             if reason.is_empty() {
                 String::new()
             } else {
@@ -760,7 +843,7 @@ impl Server {
             let mine = ranks.iter().find(|r| r.0 == s.account);
             let reason = match mine {
                 Some(_) if s.account == host && m.host_quit => HOST_QUIT,
-                None if counted => NOT_JOINED,
+                None if counted == Counted::Yes => NOT_JOINED,
                 _ => reason,
             };
             let over = MatchOver {

@@ -4,7 +4,8 @@
 use super::*;
 use crate::client::{results, RelayLeg};
 use crate::levels::{min_xp, Placed};
-use h2net::live::{LinkInfo, MatchInfo, MatchOver, Stage, QUICKMATCH};
+use crate::store::RecordedPlayer;
+use h2net::live::{LinkInfo, MatchInfo, MatchOver, PlayerResult, Stage, QUICKMATCH};
 use h2net::{Client, ClientEvent, Host, HostEvent, Lobby, Verified};
 use h2sim::testing::{floor, game};
 use h2sim::{Bot, Command, Game, GameType, NavGraph};
@@ -49,6 +50,10 @@ struct Gamer {
     wont_host: bool,
     wont_link: bool,
     lies: bool,
+    /// Its game stands still (a long one, say), and it keeps its result
+    /// to itself for now.
+    paused: bool,
+    holds_result: bool,
     /// The match it's in (MATCH).
     info: Option<MatchInfo>,
     /// The custom game it's in: its leader and map (CUSTOM_OPEN).
@@ -343,6 +348,7 @@ impl Arena {
             ..
         } = self;
         let g = &mut gamers[i];
+        let paused = g.paused;
         let mut k = 0;
         while k < g.legs.len() {
             match g.legs[k].poll() {
@@ -398,7 +404,7 @@ impl Arena {
                     _ => {}
                 }
             }
-            if h.started && !h.game.over() {
+            if h.started && !h.game.over() && !paused {
                 h.tick(floor, nav);
             }
             if h.started && h.game.over() {
@@ -429,7 +435,7 @@ impl Arena {
         let Some(id) = g.info.as_ref().map(|m| m.id) else {
             return;
         };
-        if g.reported {
+        if g.reported || g.holds_result {
             return;
         }
         if g.joined.as_ref().is_some_and(|j| j.lost) {
@@ -502,6 +508,23 @@ impl Arena {
         g.legs.clear();
     }
 
+    /// PC `i`, joined to its match's host, loses it (its link to the host
+    /// fell behind, say).
+    fn lose_host(&mut self, i: usize) {
+        let id = self.gamers[i].info.as_ref().unwrap().id;
+        self.send(
+            i,
+            ToServer::LeftMatch {
+                id,
+                host_lost: true,
+            },
+        );
+        let g = &mut self.gamers[i];
+        g.reported = true;
+        g.joined = None;
+        g.legs.clear();
+    }
+
     /// Run until everyone in match `info` has heard it's over.
     fn finish(&mut self, info: &MatchInfo) {
         let id = info.id;
@@ -531,6 +554,34 @@ impl Arena {
 
     fn games_log(&self) -> String {
         std::fs::read_to_string(self.w.data.0.join("games.log")).unwrap_or_default()
+    }
+
+    /// Match `id` as games.log has it: whether it counted, and its
+    /// players.
+    fn logged(&self, id: u64) -> (u8, Vec<RecordedPlayer>) {
+        let log = self.games_log();
+        let line = log
+            .lines()
+            .find(|l| l.split(' ').nth(1) == Some(&id.to_string()));
+        let words: Vec<&str> = line.unwrap().split(' ').collect();
+        let players = words[6..].iter().map(|p| {
+            let f: Vec<&str> = p.split(':').collect();
+            RecordedPlayer {
+                account: u64::from_str_radix(f[0], 16).unwrap(),
+                team: f[1].parse().unwrap(),
+                place: f[2].parse().unwrap(),
+                left: f[3] == "1",
+                old: Rank {
+                    xp: f[4].parse().unwrap(),
+                    level: f[6].parse().unwrap(),
+                },
+                new: Rank {
+                    xp: f[5].parse().unwrap(),
+                    level: f[7].parse().unwrap(),
+                },
+            }
+        });
+        (words[5].parse().unwrap(), players.collect())
     }
 
     /// The latest link PC `i` was given to `peer` (an account).
@@ -658,6 +709,27 @@ const LEVELS: [u8; 4] = [10, 12, 8, 9];
 const ALPHA_DELTA_WIN: [(u32, u8); 4] = [(1000, 11), (1032, 11), (676, 8), (907, 10)];
 const BRAVO_CHARLIE_WIN: [(u32, u8); 4] = [(860, 10), (1182, 12), (812, 9), (767, 9)];
 
+/// Whether Alpha and Delta won a Double Team match at `LEVELS` (by
+/// Alpha's XP), and everyone's XP and level after it as the tables say.
+fn double_team_after(a: &Arena) -> (bool, [(u32, u8); 4]) {
+    let alpha_won = a.rank(0, "double_team").xp > min_xp(LEVELS[0]);
+    if alpha_won {
+        (true, ALPHA_DELTA_WIN)
+    } else {
+        (false, BRAVO_CHARLIE_WIN)
+    }
+}
+
+/// Assert that everyone's Double Team XP and level moved as the tables
+/// say, for whichever team won.
+fn assert_double_team_counted(a: &Arena) {
+    let (_, expected) = double_team_after(a);
+    for (i, &(xp, level)) in expected.iter().enumerate() {
+        let rank = a.rank(i, "double_team");
+        assert_eq!(rank, Rank { xp, level }, "{}", GAMERTAGS[i]);
+    }
+}
+
 #[test]
 fn four_players_play_double_team_through_the_relay() {
     let mut a = Arena::new("double-team", 4, Some(("double_team", &LEVELS)));
@@ -721,19 +793,9 @@ fn four_players_play_double_team_through_the_relay() {
     assert!(a.w.now - ended < 1.0);
 
     // Levels moved as the tables say, for whichever team won.
-    let alpha_won = a.rank(0, "double_team").xp > min_xp(LEVELS[0]);
-    let expected = if alpha_won {
-        ALPHA_DELTA_WIN
-    } else {
-        BRAVO_CHARLIE_WIN
-    };
-    for (i, &(xp, level)) in expected.iter().enumerate() {
-        assert_eq!(
-            a.rank(i, "double_team"),
-            Rank { xp, level },
-            "{}",
-            GAMERTAGS[i]
-        );
+    assert_double_team_counted(&a);
+    let (alpha_won, expected) = double_team_after(&a);
+    for (i, &(_, level)) in expected.iter().enumerate() {
         let over = a.over(i, m.id);
         assert!(over.counted);
         assert_eq!(over.reason, "");
@@ -826,7 +888,16 @@ fn a_host_that_quits_voids_the_match_and_loses_it() {
     assert!(over.counted);
     assert_eq!(over.reason, "YOU QUIT AS HOST. IT COUNTS AS A LOSS.");
     assert_eq!(over.levels, [(DOUBLE_TEAM, LEVELS[host], rank.level)]);
-    assert!(a.games_log().contains(&format!(" {} double_team ", m.id)));
+    // The log says it counted only as the host's loss: the host last,
+    // having left, and everyone else as they were.
+    let (counted, players) = a.logged(m.id);
+    assert_eq!(counted, 2);
+    for p in players {
+        let host = p.account == m.host;
+        assert_eq!((p.place, p.left), (u8::from(host), host));
+        let old = after(LEVELS[a.pc(p.account)], 0);
+        assert_eq!((p.old, p.new), (old, if host { rank } else { old }));
+    }
 
     // It's asked to host last next time.
     a.until(5.0, |a| {
@@ -1152,6 +1223,231 @@ fn the_relay_drops_a_link_that_falls_behind_and_legs_left_waiting() {
     assert!(matches!(leg.poll(), Ok(None)));
     a.run(2.0);
     assert!(leg.poll().is_err());
+}
+
+#[test]
+fn a_player_who_quits_a_team_game_shares_their_teams_result() {
+    let mut a = Arena::new("team-quitter", 4, Some(("double_team", &LEVELS)));
+    a.search(DOUBLE_TEAM);
+    let m = a.formed();
+    a.playing(&m, 4);
+    let quitter = (0..4).find(|&i| a.id(i) != m.host).unwrap();
+    a.quit(quitter);
+    a.finish(&m);
+    // Their Spartan played on for the team, and the levels move as if
+    // they had stayed.
+    assert_double_team_counted(&a);
+    assert!((0..4).all(|i| a.over(i, m.id).counted));
+    let (counted, players) = a.logged(m.id);
+    assert_eq!(counted, 1);
+    for p in players {
+        assert_eq!(p.left, p.account == a.id(quitter));
+    }
+}
+
+#[test]
+fn one_pc_losing_the_host_doesnt_end_the_game_for_the_others() {
+    let mut a = Arena::new("lost-host-alone", 4, Some(("double_team", &LEVELS)));
+    a.search(DOUBLE_TEAM);
+    let m = a.formed();
+    a.playing(&m, 4);
+    let host = a.pc(m.host);
+    // One joined PC loses the host (its link fell behind, say). The others
+    // play on, in a long game.
+    let lost = (0..4).find(|&i| i != host).unwrap();
+    a.lose_host(lost);
+    a.gamers[host].paused = true;
+    a.run(40.0);
+    assert!(a.gamers.iter().all(|g| g.over.is_empty()));
+    a.gamers[host].paused = false;
+    a.finish(&m);
+    // It counts, and the PC that lost the host left the game: in a team
+    // game, it shares its team's result.
+    assert_double_team_counted(&a);
+    assert!(a.over(lost, m.id).counted);
+    let (_, players) = a.logged(m.id);
+    for p in players {
+        assert_eq!(p.left, p.account == a.id(lost));
+    }
+}
+
+#[test]
+fn saying_the_host_was_lost_doesnt_void_a_game_it_wasnt() {
+    // Rumble Pit, all at level 10. One of the two joined PCs says it lost
+    // the host, which plays on.
+    let mut a = Arena::new("false-host-lost", 3, Some(("ffa", &[10, 10, 10])));
+    a.search(RUMBLE_PIT);
+    let m = a.formed();
+    a.playing(&m, 3);
+    let claims = (0..3).find(|&i| a.id(i) != m.host).unwrap();
+    a.lose_host(claims);
+    a.finish(&m);
+    // It counts, and they left it: last, with a loss to each of the
+    // others (-100 at 40%).
+    assert!((0..3).all(|i| a.over(i, m.id).counted));
+    assert_eq!(a.rank(claims, "ffa"), after(10, -40));
+}
+
+#[test]
+fn a_host_whose_game_drops_off_the_relay_voids_the_match() {
+    let mut a = Arena::new("host-unlinked", 4, Some(("double_team", &LEVELS)));
+    a.search(DOUBLE_TEAM);
+    let m = a.formed();
+    a.playing(&m, 4);
+    // The host's game closes (it crashed, say) while its PC stays signed
+    // in: everyone joined to it loses it.
+    let host = a.pc(m.host);
+    a.gamers[host].hosted = None;
+    a.gamers[host].reported = true;
+    a.finish(&m);
+    for (i, &level) in LEVELS.iter().enumerate() {
+        let over = a.over(i, m.id);
+        assert!(!over.counted);
+        assert_eq!(over.reason, "THE HOST LEFT. THE GAME DIDN'T COUNT.");
+        // The host didn't quit, so it loses nothing either.
+        assert_eq!(a.rank(i, "double_team"), after(level, 0));
+    }
+}
+
+#[test]
+fn leaving_once_the_game_is_over_isnt_quitting() {
+    // Rumble Pit, all at level 10, with one PC slow to say how it ended.
+    let mut a = Arena::new("left-after", 3, Some(("ffa", &[10, 10, 10])));
+    a.search(RUMBLE_PIT);
+    let m = a.formed();
+    let host = a.pc(m.host);
+    let joiners: Vec<usize> = (0..3).filter(|&i| i != host).collect();
+    let (early, slow) = (joiners[0], joiners[1]);
+    a.gamers[slow].holds_result = true;
+    a.until(120.0, |a| {
+        a.gamers[host].reported && a.gamers[early].reported
+    });
+    // Having said how it went, the host's PC dies, and the other closes
+    // the game.
+    a.w.frozen.push(host);
+    let left = ToServer::LeftMatch {
+        id: m.id,
+        host_lost: false,
+    };
+    a.send(early, left);
+    a.run(16.0);
+    assert!(a.gamers[early].over.is_empty());
+    a.gamers[slow].holds_result = false;
+    a.until(5.0, |a| !a.gamers[slow].over.is_empty());
+    // It counts as they played it, with no one leaving.
+    assert!(a.over(slow, m.id).counted);
+    assert!(a.over(early, m.id).counted);
+    let (counted, players) = a.logged(m.id);
+    assert_eq!(counted, 1);
+    let game: Vec<Placed> = players
+        .iter()
+        .map(|p| Placed {
+            level: 10,
+            team: 0,
+            place: p.place,
+            bot: false,
+        })
+        .collect();
+    let changes = crate::levels::xp_changes(&game, false);
+    for (p, change) in players.iter().zip(changes) {
+        assert!(!p.left);
+        assert_eq!(p.new, after(10, change));
+        let stats = a.w.server.account(p.account).unwrap().stats("ffa");
+        assert_eq!(stats.unwrap().games, 11);
+    }
+}
+
+#[test]
+fn the_hosts_result_alone_doesnt_count() {
+    let mut a = Arena::new("host-alone", 4, Some(("double_team", &LEVELS)));
+    a.search(DOUBLE_TEAM);
+    let m = a.formed();
+    let host = a.pc(m.host);
+    a.until(30.0, |a| a.hosted(host).is_some_and(|h| h.started));
+    // As the game starts, the host says its team won, and its game stands
+    // still: no one else has anything to say yet.
+    let mine = m.players.iter().find(|p| p.account == m.host).unwrap().team;
+    let players = made_up_result(&m, mine);
+    a.send(host, ToServer::Result { id: m.id, players });
+    a.gamers[host].reported = true;
+    a.gamers[host].paused = true;
+    a.finish(&m);
+    for (i, &level) in LEVELS.iter().enumerate() {
+        let over = a.over(i, m.id);
+        assert!(!over.counted);
+        assert_eq!(
+            over.reason,
+            "NO ONE CONFIRMED THE RESULT. THE GAME DIDN'T COUNT."
+        );
+        assert_eq!(a.rank(i, "double_team"), after(level, 0));
+    }
+}
+
+/// A result for match `m` saying the team `winners` won.
+fn made_up_result(m: &MatchInfo, winners: u8) -> Vec<PlayerResult> {
+    m.players
+        .iter()
+        .map(|p| PlayerResult {
+            account: p.account,
+            team: p.team,
+            place: u8::from(p.team != winners),
+            score: 0,
+            kills: 0,
+            deaths: 0,
+            left: false,
+        })
+        .collect()
+}
+
+#[test]
+fn one_pcs_early_result_doesnt_end_the_game() {
+    let mut a = Arena::new("early-result", 4, Some(("double_team", &LEVELS)));
+    a.search(DOUBLE_TEAM);
+    let m = a.formed();
+    let host = a.pc(m.host);
+    a.until(30.0, |a| a.hosted(host).is_some_and(|h| h.started));
+    // As the game starts, one joined PC says how it ended. The game goes
+    // on, a long one.
+    let early = (0..4).find(|&i| i != host).unwrap();
+    let players = made_up_result(&m, 0);
+    a.send(early, ToServer::Result { id: m.id, players });
+    a.gamers[early].reported = true;
+    a.gamers[host].paused = true;
+    a.run(40.0);
+    assert!(a.gamers.iter().all(|g| g.over.is_empty()));
+    // At its end the others agree with the host, and it counts.
+    a.gamers[host].paused = false;
+    a.finish(&m);
+    assert!((0..4).all(|i| a.over(i, m.id).counted));
+    assert_double_team_counted(&a);
+}
+
+#[test]
+fn a_match_no_one_finishes_is_given_up_on() {
+    let mut a = Arena::new("never-ends", 4, Some(("double_team", &LEVELS)));
+    a.search(DOUBLE_TEAM);
+    let m = a.formed();
+    // The host's game stalls as it starts, but every PC stays signed in.
+    let host = a.pc(m.host);
+    a.until(30.0, |a| a.hosted(host).is_some_and(|h| h.started));
+    let started = a.w.now;
+    a.gamers[host].paused = true;
+    // A leader searching meanwhile is told why it can't.
+    a.send(0, ToServer::Search(DOUBLE_TEAM));
+    a.until(5.0, |a| !a.w.notices(0).is_empty());
+    assert_eq!(a.w.notices(0), ["SOMEONE IN YOUR PARTY IS STILL IN A GAME"]);
+    // Five minutes past its ten-minute time limit, it's over.
+    a.until(1000.0, |a| a.gamers.iter().all(|g| !g.over.is_empty()));
+    assert!((900.0..901.0).contains(&(a.w.now - started)));
+    for (i, &level) in LEVELS.iter().enumerate() {
+        let over = a.over(i, m.id);
+        assert!(!over.counted);
+        assert_eq!(over.reason, "THE GAME NEVER ENDED. IT DIDN'T COUNT.");
+        assert_eq!(a.rank(i, "double_team"), after(level, 0));
+    }
+    a.until(5.0, |a| {
+        (0..4).all(|i| a.w.party(i).activity == Activity::Lobby)
+    });
 }
 
 #[test]

@@ -20,6 +20,9 @@ const MAX_BEHIND: usize = 2 << 20;
 /// Legs one address can have waiting at once: enough for a host with 15
 /// PCs joining it and a few more PCs behind the same router.
 pub(super) const LEGS_WAITING: usize = 32;
+/// A host's end that sent nothing for this long (seconds) has gone: its
+/// game sends something every second while it runs.
+const HOST_QUIET: f64 = 5.0;
 
 /// A relay leg, waiting for its other end.
 pub(super) struct Leg {
@@ -50,6 +53,8 @@ pub(super) struct Link {
     /// accounts at the ends (the host's first).
     id: u64,
     accounts: [u64; 2],
+    /// When something last came from each end.
+    heard: [f64; 2],
 }
 
 /// A link given out (LINK) whose legs haven't both come.
@@ -166,14 +171,14 @@ impl Server {
             } else {
                 (b, a)
             };
-            self.join(token, host.conn, joiner.conn);
+            self.join(token, host.conn, joiner.conn, now);
             k = 0;
         }
     }
 
     /// Both legs of the link `token` names are here: tell them, and start
     /// passing what each sends to the other.
-    fn join(&mut self, token: [u8; 16], host: Connection, joiner: Connection) {
+    fn join(&mut self, token: [u8; 16], host: Connection, joiner: Connection, now: f64) {
         let Some(t) = self.tokens.get(&token).copied() else {
             return;
         };
@@ -190,23 +195,30 @@ impl Server {
             ends,
             id: t.id,
             accounts: t.accounts,
+            heard: [now; 2],
         });
         self.linked(t.id, t.accounts[1]);
     }
 
     /// Pass on what each end of each link sent, counting the bytes. A link
-    /// is dropped when an end goes, or falls too far behind.
+    /// is dropped when an end goes, or falls too far behind; if that's the
+    /// host's end (or it had gone quiet), the match hears the joining PC
+    /// lost the host.
     pub(super) fn relay(&mut self, now: f64) {
         let mut dropped = Vec::new();
         let mut k = 0;
         while k < self.links.len() {
             let link = &mut self.links[k];
-            let mut open = true;
+            // The end that broke the link, if one did.
+            let mut broke = None;
             for from in 0..2 {
                 let Ok(messages) = link.ends[from].receive() else {
-                    open = false;
+                    broke = Some(from);
                     break;
                 };
+                if !messages.is_empty() {
+                    link.heard[from] = now;
+                }
                 let bytes: usize = messages.iter().map(|(_, body)| 1 + body.len()).sum();
                 if let Some(relayed) = self.relayed.get_mut(&link.id) {
                     *relayed += bytes as u64;
@@ -215,17 +227,22 @@ impl Server {
                     link.ends[1 - from].send(kind, &body);
                 }
             }
-            for end in &mut link.ends {
-                open &= end.flush().is_ok() && end.backlog() <= MAX_BEHIND;
+            for (i, end) in link.ends.iter_mut().enumerate() {
+                let open = end.flush().is_ok() && end.backlog() <= MAX_BEHIND;
+                if !open && broke.is_none() {
+                    broke = Some(i);
+                }
             }
-            if open {
-                k += 1;
-            } else {
-                dropped.push(self.links.remove(k));
+            match broke {
+                None => k += 1,
+                Some(end) => dropped.push((self.links.remove(k), end)),
             }
         }
-        // What's left to send still goes, for a moment.
-        for link in dropped {
+        for (link, end) in dropped {
+            if end == 0 || now - link.heard[0] >= HOST_QUIET {
+                self.host_dropped(link.id, link.accounts[1]);
+            }
+            // What's left to send still goes, for a moment.
             for end in link.ends {
                 self.linger(end, now);
             }

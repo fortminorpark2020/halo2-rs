@@ -22,6 +22,10 @@
 //!
 //! with each player as
 //! `<id>:<team>:<place>:<left>:<old xp>:<new xp>:<old level>:<new level>`.
+//! `<counted>` is 1 if the match changed everyone's levels and 0 if it
+//! changed none. It's 2 if it counted only as a loss for its host, who
+//! quit: then the host is in place 1, having left, and everyone else in
+//! place 0, their levels as they were.
 
 use crate::levels::{Rank, MAX_LEVEL, MAX_XP};
 use crate::playlists::GAME_TYPES;
@@ -246,9 +250,19 @@ pub struct GameRecord {
     pub playlist: String,
     pub map: String,
     pub game_type: GameType,
-    /// It changed levels.
-    pub counted: bool,
+    pub counted: Counted,
     pub players: Vec<RecordedPlayer>,
+}
+
+/// What a match did to levels (games.log's `<counted>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Counted {
+    /// Nothing (0).
+    No,
+    /// It changed everyone's (1).
+    Yes,
+    /// It was only a loss for its host, who quit (2).
+    HostLoss,
 }
 
 /// A player in a recorded match, and their rank in its playlist before
@@ -429,7 +443,7 @@ mod tests {
             playlist: "double_team".into(),
             map: "lockout".into(),
             game_type: GameType::TeamSlayer,
-            counted: true,
+            counted: Counted::Yes,
             players: vec![
                 RecordedPlayer {
                     account: 0xab,
@@ -454,6 +468,7 @@ mod tests {
             &log,
             &GameRecord {
                 id: 8,
+                counted: Counted::HostLoss,
                 ..game.clone()
             },
         )
@@ -465,7 +480,7 @@ mod tests {
             "1700000100 7 double_team lockout team_slayer 1 \
              00000000000000ab:1:0:0:900:978:10:10 00000000000000cd:0:1:1:0:0:1:1"
         );
-        assert!(lines[1].starts_with("1700000100 8 "));
+        assert!(lines[1].starts_with("1700000100 8 double_team lockout team_slayer 2 "));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

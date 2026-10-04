@@ -408,7 +408,8 @@ pub struct MatchOver {
     pub reason: String,
     /// The PC's new stat card.
     pub card: String,
-    /// Each playlist whose level changed: its id, the old level and the new.
+    /// Each playlist the game was rated in (none if it didn't count for
+    /// this PC): its id, the old level and the new.
     pub levels: Vec<(u8, u8, u8)>,
 }
 
