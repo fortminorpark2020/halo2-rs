@@ -1,16 +1,16 @@
 //! LAN games, like Halo 2's system link: one PC hosts and runs the game,
 //! others join over the local network. Joined PCs send their players'
 //! controls every tick; the host sends back the state of the game and what
-//! happened in it after every tick, mostly as how it changed since the last.
-//! Games announce themselves on the network so other PCs can list and join
-//! them without typing addresses.
+//! happened in it after every tick. Games announce themselves on the
+//! network so other PCs can list and join them without typing addresses.
 //!
 //! PCs stay together between games: they wait in the host's lobby, and
 //! when the host starts a game they load its map and join it.
 //!
 //! Online games are the same, over connections the online service hands
 //! the host and the joining PC (`Host::add_connection`, `Client::over`),
-//! with the game sent 30 times a second rather than after every tick.
+//! with the game sent 30 times a second rather than after every tick, and
+//! mostly as how it changed since the last.
 
 mod client;
 mod conn;

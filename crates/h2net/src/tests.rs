@@ -827,6 +827,58 @@ fn state(game: &h2sim::Game) -> Vec<u8> {
     w.0
 }
 
+/// The size of a whole snapshot of `game` with `events`.
+fn whole(game: &h2sim::Game, events: &[Event]) -> u64 {
+    let mut w = h2sim::game::Writer::default();
+    for e in events {
+        e.write(&mut w);
+    }
+    (4 + state(game).len() + 2 + w.0.len()) as u64
+}
+
+#[test]
+fn lan_hosts_send_the_whole_game_every_tick() {
+    let world = floor();
+    let mut hg = game();
+    let shooter = hg.add_player();
+    let mut host = Host::bind("testmap", 32, "127.0.0.1:0".parse().unwrap(), false).unwrap();
+    let mut cg = game();
+    let mut client = Client::connect(address(&host), &cg, "testmap", &[ANY_TEAM], me()).unwrap();
+    let mut welcomed = false;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, cg| {
+        welcomed |= matches!(ce.first(), Some(ClientEvent::Welcomed { .. }));
+        welcomed && cg.players.len() == 2
+    });
+    // The joined PC stops reading for a while: on a LAN it still gets
+    // every tick's game, whole, as before online play.
+    let (sent, snapshots) = (host.sent(), client.snapshots);
+    let (mut size, mut made) = (0, 0);
+    for k in 0..200 {
+        assert!(host.poll(&mut hg, 16).is_empty());
+        let mut commands = vec![Command::default(); hg.players.len()];
+        commands[shooter].fire = k % 2 == 0;
+        hg.step(&world, &commands);
+        let events = std::mem::take(&mut hg.events);
+        size += whole(&hg, &events);
+        made += events.len();
+        host.send(&hg, &events, true);
+        client.keep_alive();
+    }
+    assert_eq!(host.sent() - sent, size);
+    let mut got = 0;
+    let start = Instant::now();
+    while client.snapshots < snapshots + 200 {
+        let (ce, events) = client.poll(&mut cg);
+        assert!(ce.is_empty(), "{ce:?}");
+        got += events.len();
+        assert!(start.elapsed() < Duration::from_secs(5), "still waiting");
+    }
+    assert_eq!(client.snapshots, snapshots + 200);
+    assert!(made > 0);
+    assert_eq!(got, made);
+    assert_eq!(state(&cg), state(&hg));
+}
+
 /// Bots playing on the test floor: a host with `bots` of them, and a PC
 /// joined to it (whose player a bot on the host plays too).
 struct BotGame {

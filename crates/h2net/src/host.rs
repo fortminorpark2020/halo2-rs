@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Snapshots a second in online games, whose links are slower than a LAN.
 const ONLINE_RATE: u32 = 30;
-/// A PC with this much still waiting to go to it is behind: it misses
-/// snapshots (but not what happened in them) until it catches up.
+/// Online, a PC with this much still waiting to go to it is behind: it
+/// misses snapshots (but not what happened in them) until it catches up.
 const BEHIND: usize = 32 << 10;
 
 /// Things the host's game should show or act on.
@@ -124,6 +124,10 @@ pub struct Host {
     computer: String,
     /// The lobby, while there's no game on.
     lobby: Option<Lobby>,
+    /// PCs join through the online service: the game goes to them mostly
+    /// as how it changed, and one that falls behind misses some. On a LAN
+    /// it goes whole every time.
+    online: bool,
     /// Joined PCs not heard from for this long are dropped.
     timeout: Duration,
     /// When the next snapshot may go, whether the game ran since the last,
@@ -276,9 +280,11 @@ impl Host {
     }
 
     /// Host a game online: no listening and no announcing, PCs join only
-    /// through `add_connection`. Snapshots go 30 times a second.
+    /// through `add_connection`. Snapshots go 30 times a second, mostly
+    /// as how the game changed.
     pub fn online(map: &str) -> Host {
         let mut host = Host::unbound(map);
+        host.online = true;
         host.set_rate(ONLINE_RATE);
         host
     }
@@ -292,6 +298,7 @@ impl Host {
             map: map.to_string(),
             computer: crate::computer_name(),
             lobby: None,
+            online: false,
             timeout: crate::TIMEOUT,
             snapshots: Pace::new(0.0),
             changed: false,
@@ -645,8 +652,8 @@ impl Host {
         game.write_state(&mut w);
         let state = w.0;
         let body = snapshot(&state, &events);
-        // PCs that got the last snapshot get how this one differs; others
-        // (just joined, or behind) get all of it.
+        // Online, PCs that got the last snapshot get how this one differs;
+        // others (just joined, or behind) get all of it.
         let mut delta = None;
         for r in &mut self.remotes {
             if !r.in_game || !(due || r.fresh) {
@@ -654,14 +661,14 @@ impl Host {
             }
             // A failure shows up as a departure on the next poll.
             let _ = r.conn.flush();
-            if r.conn.backlog() > BEHIND {
+            if self.online && r.conn.backlog() > BEHIND {
                 r.missed.extend_from_slice(&events);
                 r.has = None;
                 r.behind.get_or_insert_with(Instant::now);
                 continue;
             }
             let mine;
-            let (kind, message, shared) = if due && r.has == Some(prev) {
+            let (kind, message, shared) = if self.online && due && r.has == Some(prev) {
                 let d = delta.get_or_insert_with(|| {
                     let mut w = Writer::default();
                     w.u32(self.seq);
