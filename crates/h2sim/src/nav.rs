@@ -36,6 +36,10 @@ const HEADROOM: f32 = 0.75;
 const ELBOW_ROOM: f32 = 0.3;
 /// What going through a teleporter costs a route, as a walking distance.
 const HOP_COST: f32 = 1.0;
+/// Pathfinding edges shorter than this are too narrow to pass.
+const MIN_EDGE: f32 = 0.1;
+/// Points of two structure BSPs this close are joined.
+const JOIN: f32 = 1.0;
 
 #[derive(Debug, Clone, Default)]
 pub struct NavGraph {
@@ -278,6 +282,73 @@ impl NavGraph {
         .keep_reachable(first_spot)
     }
 
+    /// A graph over a level's own pathfinding mesh (campaign levels have
+    /// one): the middle of each sector, and of each edge between two
+    /// sectors, joined to the others around the same sector (sectors are
+    /// convex, so the way between them is clear). Sectors are numbered in
+    /// `sectors` with the group (structure BSP) each is in: points of
+    /// different groups that meet are joined too.
+    pub fn from_sectors(
+        sectors: &[(u16, Vec<Vec3>)],
+        edges: &[(usize, usize, Vec3, Vec3)],
+    ) -> NavGraph {
+        let mut points = Vec::new();
+        let mut group = Vec::new();
+        let mut around: Vec<Vec<usize>> = vec![Vec::new(); sectors.len()];
+        for (k, (g, corners)) in sectors.iter().enumerate() {
+            if corners.is_empty() {
+                continue;
+            }
+            let middle = corners.iter().copied().sum::<Vec3>() / corners.len() as f32;
+            around[k].push(points.len());
+            points.push(middle);
+            group.push(*g);
+        }
+        for &(a, b, p, q) in edges {
+            if a >= sectors.len() || b >= sectors.len() || p.distance(q) < MIN_EDGE {
+                continue;
+            }
+            around[a].push(points.len());
+            around[b].push(points.len());
+            points.push((p + q) / 2.0);
+            group.push(sectors[a].0);
+        }
+        let mut links = vec![Vec::new(); points.len()];
+        for ring in &around {
+            for &i in ring {
+                links[i].extend(ring.iter().copied().filter(|&j| j != i));
+            }
+        }
+        // Where one structure BSP meets the next.
+        let key = |p: Vec3| ((p.x / JOIN).floor() as i32, (p.y / JOIN).floor() as i32);
+        let mut buckets: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+        for (i, &p) in points.iter().enumerate() {
+            buckets.entry(key(p)).or_default().push(i);
+        }
+        for (i, &a) in points.iter().enumerate() {
+            let (x, y) = key(a);
+            for bx in x - 1..=x + 1 {
+                for by in y - 1..=y + 1 {
+                    for &j in buckets.get(&(bx, by)).map_or(&[][..], Vec::as_slice) {
+                        let b = points[j];
+                        if group[i] != group[j]
+                            && a.truncate().distance(b.truncate()) < JOIN
+                            && (a.z - b.z).abs() < MAX_RISE * 2.0
+                            && !links[i].contains(&j)
+                        {
+                            links[i].push(j);
+                        }
+                    }
+                }
+            }
+        }
+        NavGraph {
+            points,
+            links,
+            hops: Vec::new(),
+        }
+    }
+
     /// Only the points the spots lead to (points from `first_spot` on)
     /// that can get back to the level's main area (its largest group of
     /// points that all reach each other and take in a spot: not a roof),
@@ -402,18 +473,23 @@ impl NavGraph {
 
     /// The closest point reachable in a straight line from `p`.
     pub fn nearest(&self, world: &World, p: Vec3) -> Option<usize> {
-        let mut order: Vec<usize> = (0..self.points.len()).collect();
-        order.sort_by(|&a, &b| {
-            self.points[a]
-                .distance_squared(p)
-                .total_cmp(&self.points[b].distance_squared(p))
-        });
+        let mut order: Vec<(f32, usize)> = self
+            .points
+            .iter()
+            .enumerate()
+            .map(|(i, q)| (q.distance_squared(p), i))
+            .collect();
+        let near = order.len().min(8);
+        if near < order.len() {
+            order.select_nth_unstable_by(near, |a, b| a.0.total_cmp(&b.0));
+        }
+        order.truncate(near);
+        order.sort_by(|a, b| a.0.total_cmp(&b.0));
         order
             .iter()
-            .take(8)
-            .copied()
+            .map(|o| o.1)
             .find(|&i| walkable(world, p, self.points[i]))
-            .or(order.first().copied())
+            .or(order.first().map(|o| o.1))
     }
 
     /// Shortest route between two points (A*), including both ends.
@@ -537,6 +613,45 @@ pub(crate) mod tests {
             Vec3::new(2.0, 2.0, 0.0),
             Vec3::new(8.0, 2.0, 0.0)
         ));
+    }
+
+    #[test]
+    fn sector_graphs_join_sectors_by_their_edges_and_bsps_where_they_meet() {
+        let square = |x: f32| {
+            vec![
+                Vec3::new(x, 0.0, 0.0),
+                Vec3::new(x + 4.0, 0.0, 0.0),
+                Vec3::new(x + 4.0, 4.0, 0.0),
+                Vec3::new(x, 4.0, 0.0),
+            ]
+        };
+        // Two squares sharing the edge at x = 4, and a third (another BSP)
+        // starting where the second ends; a fourth nobody reaches.
+        let sectors = [
+            (0, square(0.0)),
+            (0, square(4.0)),
+            (1, square(8.0)),
+            (1, square(40.0)),
+        ];
+        let edges = [
+            (0, 1, Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 4.0, 0.0)),
+            (1, 2, Vec3::new(8.0, 0.0, 0.0), Vec3::new(8.0, 0.0, 0.0)),
+        ];
+        let g = NavGraph::from_sectors(&sectors, &edges);
+        // Four middles and one edge (the other is too narrow).
+        assert_eq!(g.points.len(), 5);
+        assert!(g.points[4].abs_diff_eq(Vec3::new(4.0, 2.0, 0.0), 1e-5));
+        let route = g.path(0, 1).unwrap();
+        assert_eq!(route, vec![0, 4, 1]);
+        assert!(
+            g.path(1, 2).is_none(),
+            "the middles of two BSPs aren't close"
+        );
+        assert!(g.path(0, 3).is_none());
+        // Where the BSPs' points meet, they're joined.
+        let sectors = [(0, square(0.0)), (1, square(0.2))];
+        let g = NavGraph::from_sectors(&sectors, &[]);
+        assert!(g.path(0, 1).is_some());
     }
 
     #[test]

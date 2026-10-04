@@ -350,12 +350,17 @@ fn load_level(path: &Path) -> Result<Level, String> {
     spots.extend(scene.items.iter().map(|i| i.position));
     spots.extend(objective::objective_points(&scene));
     let started = Instant::now();
-    let nav = NavGraph::for_level(
-        &world,
-        &spots,
-        &kill_zones(&scene),
-        &objective::teleporters(&scene),
-    );
+    // Campaign levels come with the AI's own map of where it can walk.
+    let nav = if scene.nav_mesh.edges.is_empty() {
+        NavGraph::for_level(
+            &world,
+            &spots,
+            &kill_zones(&scene),
+            &objective::teleporters(&scene),
+        )
+    } else {
+        NavGraph::from_sectors(&scene.nav_mesh.sectors, &scene.nav_mesh.edges)
+    };
     // Doors block the way while shut (bots' routes go through them: they
     // open as bots come).
     for d in &scene.doors {

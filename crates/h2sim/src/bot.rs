@@ -122,6 +122,13 @@ fn wrap(a: f32) -> f32 {
     (a + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI
 }
 
+/// A direction on the ground as movement (strafe, forward) for someone
+/// facing `yaw`.
+fn local(yaw: f32, dir: Vec2) -> Vec2 {
+    let (s, c) = yaw.sin_cos();
+    Vec2::new(dir.x * s - dir.y * c, dir.x * c + dir.y * s)
+}
+
 impl Bot {
     /// Where to point `def` to hit player `q` from `eye`: where they'll
     /// be when its rounds get there, and higher for rounds that fall.
@@ -181,6 +188,11 @@ impl Bot {
 
     /// What the bot is up to, for testing.
     /// In a fight: has someone to shoot at, or knows of an enemy.
+    /// Who it's fighting, if anyone.
+    pub fn target(&self) -> Option<usize> {
+        self.target
+    }
+
     pub fn fighting(&self) -> bool {
         self.target.is_some() || self.actor.as_ref().is_some_and(|a| a.alert.is_some())
     }
@@ -559,6 +571,17 @@ impl Bot {
                 0.0
             };
             cmd.movement = Vec2::new(self.strafe, fwd);
+            // An actor with an area fights from its firing positions.
+            if !charging {
+                if let Some(at) = self.actor_position(game, world, me, t, dt) {
+                    let to = (at - feet).truncate();
+                    cmd.movement = if to.length() < ARRIVED {
+                        Vec2::ZERO
+                    } else {
+                        local(self.yaw, to.normalize())
+                    };
+                }
+            }
             if self.held_empty(game, me) {
                 cmd.reload = true;
             }
@@ -640,9 +663,7 @@ impl Bot {
             let to = (goal - feet).truncate();
             self.turn_to(to.y.atan2(to.x), 0.0, dt);
             // Walk toward the goal whichever way the bot faces.
-            let (s, c) = self.yaw.sin_cos();
-            let dir = to.normalize_or_zero();
-            cmd.movement = Vec2::new(dir.x * s - dir.y * c, dir.x * c + dir.y * s);
+            cmd.movement = local(self.yaw, to.normalize_or_zero());
         }
         // An enemy's vehicle in reach: board it.
         boarding |= matches!(game.vehicle_action(me), Some(VehicleAction::Hijack { .. }));

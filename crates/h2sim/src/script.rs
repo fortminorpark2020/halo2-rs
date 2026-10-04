@@ -384,6 +384,15 @@ impl Vm {
         self.now += 1;
     }
 
+    /// Run a static script at once for its value (orders' triggers ask
+    /// some); one that sleeps gives its type's default.
+    pub fn call(&mut self, scripts: &Scripts, script: usize, host: &mut dyn Host) -> Value {
+        match scripts.scripts.get(script).and_then(|s| s.root) {
+            Some(root) => self.evaluate(scripts, root, host),
+            None => Value::Void,
+        }
+    }
+
     /// Evaluate an expression to its value at once (globals' starting
     /// values); one that sleeps gives its type's default.
     fn evaluate(&mut self, scripts: &Scripts, node: u16, host: &mut dyn Host) -> Value {

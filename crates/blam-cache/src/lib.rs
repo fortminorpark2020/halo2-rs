@@ -616,6 +616,8 @@ pub mod hud;
 pub mod lightmap;
 pub mod mapset;
 pub mod model;
+pub mod orders;
+pub mod pathfinding;
 pub mod physics;
 pub mod render;
 pub mod scenario;

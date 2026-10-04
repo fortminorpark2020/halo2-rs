@@ -53,6 +53,8 @@ fn main() -> ExitCode {
         Some("scripts") if args.len() >= 2 => scripts(&args[1]),
         Some("mission") if args.len() >= 2 => mission(&args[1]),
         Some("text") if args.len() >= 2 => text(&args[1], args.get(2).map(String::as_str)),
+        Some("paths") if args.len() >= 2 => paths(&args[1]),
+        Some("orders") if args.len() >= 2 => orders(&args[1]),
         Some("sound") if args.len() >= 3 => {
             sound(&args[1], &args[2], args.get(3).map(String::as_str))
         }
@@ -98,6 +100,124 @@ fn main() -> ExitCode {
 }
 
 type Res = Result<(), Box<dyn std::error::Error>>;
+
+/// The mission's zones, orders and AI triggers.
+fn orders(path: &str) -> Res {
+    use blam_cache::orders;
+    let mut set = blam_cache::MapSet::open(std::path::Path::new(path))?;
+    let zones = orders::zones(&mut set)?;
+    for (z, zone) in zones.iter().enumerate() {
+        println!(
+            "zone {z} {}: {} firing positions ({} moving)",
+            zone.name,
+            zone.firing_positions.len(),
+            zone.firing_positions.iter().filter(|f| f.moving).count()
+        );
+        for (a, area) in zone.areas.iter().enumerate() {
+            println!(
+                "  area {a} {} at {:.1?}: {} positions",
+                area.name,
+                area.position,
+                zone.in_area(a as u16).count()
+            );
+        }
+    }
+    let area_name = |&(z, a): &(u16, u16)| {
+        let zone = zones.get(z as usize);
+        format!(
+            "{}/{}",
+            zone.map_or("?", |z| z.name.as_str()),
+            zone.and_then(|z| z.areas.get(a as usize))
+                .map_or("?", |a| a.name.as_str())
+        )
+    };
+    let triggers = orders::ai_triggers(&mut set)?;
+    let trigger_name = |t: &orders::TriggerRef| {
+        let name = triggers
+            .get(t.trigger as usize)
+            .map_or("?", |t| t.name.as_str());
+        if t.not {
+            format!("!{name}")
+        } else {
+            name.to_string()
+        }
+    };
+    let all = orders::orders(&mut set)?;
+    for (o, order) in all.iter().enumerate() {
+        println!(
+            "order {o} {} flags {:#x}: {:?}",
+            order.name,
+            order.flags,
+            order.primary.iter().map(area_name).collect::<Vec<_>>()
+        );
+        if !order.secondary.is_empty() {
+            println!(
+                "  secondary {:?} when {:?}",
+                order.secondary.iter().map(area_name).collect::<Vec<_>>(),
+                order
+                    .secondary_trigger
+                    .as_ref()
+                    .map(|(c, t)| (c, t.iter().map(trigger_name).collect::<Vec<_>>()))
+            );
+        }
+        for e in &order.endings {
+            println!(
+                "  -> {:?} after {:.1}s when {:?} {:?}",
+                e.next.and_then(|n| all.get(n as usize)).map(|o| &o.name),
+                e.delay,
+                e.combine,
+                e.triggers.iter().map(trigger_name).collect::<Vec<_>>()
+            );
+        }
+    }
+    for (t, trigger) in triggers.iter().enumerate() {
+        println!(
+            "trigger {t} {} {:?}{}",
+            trigger.name,
+            trigger.combine,
+            if trigger.latch { " latched" } else { "" }
+        );
+        for c in &trigger.conditions {
+            println!(
+                "  {}{:?} squad {:?} group {:?} a {} x {} volume {:?} {}",
+                if c.not { "not " } else { "" },
+                c.rule,
+                c.squad,
+                c.group,
+                c.a,
+                c.x,
+                c.volume,
+                c.script
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Each BSP's pathfinding sectors: how many walk, and a few polygons.
+fn paths(path: &str) -> Res {
+    let mut map = CacheFile::open(path)?;
+    for (b, bsp) in map.structure_bsps()?.iter().enumerate() {
+        let p = map.bsp_pathfinding(bsp)?;
+        let walkable = p
+            .sectors
+            .iter()
+            .filter(|s| s.flags & blam_cache::pathfinding::SECTOR_WALKABLE != 0)
+            .count();
+        println!(
+            "bsp {b}: {} sectors ({walkable} walkable), {} links, {} vertices",
+            p.sectors.len(),
+            p.links.len(),
+            p.vertices.len()
+        );
+        println!("  object sectors: {:?}", p.object_sectors);
+        for s in (0..p.sectors.len()).step_by((p.sectors.len() / 6).max(1)) {
+            let poly = p.polygon(s);
+            println!("  sector {s} flags {:#x}: {poly:.1?}", p.sectors[s].flags);
+        }
+    }
+    Ok(())
+}
 
 fn info(path: &str) -> Res {
     let mut map = CacheFile::open(path)?;

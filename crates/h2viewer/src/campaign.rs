@@ -13,6 +13,8 @@ use h2sim::script::{Host, Obj, Value, Vm};
 use h2sim::{Bot, Game, World};
 use std::collections::{HashMap, HashSet};
 
+mod orders;
+
 /// Seconds a machine takes to open when its tag doesn't say.
 const MACHINE_TIME: f32 = 1.5;
 /// How far an actor told to see someone knows where they are.
@@ -273,6 +275,8 @@ struct State {
     created: HashMap<u16, bool>,
     /// Actors the scripts placed in each squad.
     placed: HashMap<usize, u32>,
+    /// Each squad's orders.
+    orders: orders::Orders,
     difficulty: u8,
     won: bool,
     /// Say what the scripts do (H2_SCRIPT_LOG).
@@ -463,6 +467,7 @@ impl Mission {
         ctx.move_devices(dt);
         ctx.move_doors(world, dt);
         self.vm.tick(&scene.ai.scripts, &mut ctx);
+        ctx.follow_orders(&mut self.vm, dt);
     }
 
     /// Whether one of the scene's objects is in the level as it is now
@@ -664,6 +669,7 @@ impl Ctx<'_> {
             .retain(|(i, _)| !placed.iter().any(|(j, _)| j == i));
         self.bots
             .extend(placed.into_iter().filter_map(|(i, b)| Some((i, b?))));
+        self.start_orders(squad);
     }
 
     /// The squads an `ai` value means: a squad, or every squad in a group.
@@ -955,15 +961,24 @@ impl Ctx<'_> {
     /// The vitality left of the actors placed in an `ai`'s squads, from 1
     /// (all fresh) to 0 (all dead).
     fn strength(&self, ai: &Value) -> f32 {
-        let squads = self.squads(ai);
+        self.squads_strength(&self.squads(ai))
+    }
+
+    /// How much of some squads' placed actors' health and shields is
+    /// left (0-1).
+    fn squads_strength(&self, squads: &[usize]) -> f32 {
         let placed: u32 = squads.iter().filter_map(|s| self.st.placed.get(s)).sum();
         if placed == 0 {
             return 0.0;
         }
-        let left: f32 = self
-            .actors(ai)
-            .iter()
-            .map(|&i| {
+        let left: f32 = (0..self.game.players.len())
+            .filter(|&i| {
+                let p = &self.game.players[i];
+                p.alive
+                    && p.actor
+                        .is_some_and(|a| squads.contains(&(a.squad as usize)))
+            })
+            .map(|i| {
                 let p = &self.game.players[i];
                 let full = (p.full.health + p.full.shield).max(1.0);
                 ((p.health + p.shield) / full).clamp(0.0, 1.0)
@@ -1178,6 +1193,18 @@ impl Host for Ctx<'_> {
                     if let Some(a) = &mut self.game.players[i].actor {
                         a.immortal = on;
                     }
+                }
+                Value::Void
+            }
+            "ai_set_orders" => {
+                let squads = self.squads(&arg(0));
+                self.set_order(&squads, arg(1).index());
+                Value::Void
+            }
+            "ai_migrate" => {
+                let actors = self.actors(&arg(0));
+                if let Some(&to) = self.squads(&arg(1)).first() {
+                    self.migrate(&actors, to);
                 }
                 Value::Void
             }

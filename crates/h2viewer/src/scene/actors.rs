@@ -5,6 +5,7 @@
 
 use super::{Arms2, Body, Loader, MeshData, WeaponAssets};
 use blam_cache::ai::{self, Character, CharacterKind, Squad};
+use blam_cache::orders;
 use blam_cache::physics::{self, BipedPhysics};
 use blam_cache::scenario::{self, PlacedKind};
 use blam_cache::script::{self, Scripts};
@@ -32,8 +33,15 @@ pub struct CampaignAi {
     pub squads: Vec<Squad>,
     /// The scenario's weapon palette, as weapon indices.
     pub weapons: Vec<Option<usize>>,
-    /// Each squad group's parent group.
+    /// Each squad group's parent group, and the order its squads start
+    /// with.
     pub group_parents: Vec<Option<u16>>,
+    pub group_orders: Vec<Option<u16>>,
+    /// Where squads go (firing positions in zones' areas), the orders
+    /// sending them there, and the triggers that end orders.
+    pub zones: Vec<orders::Zone>,
+    pub orders: Vec<orders::Order>,
+    pub triggers: Vec<orders::AiTrigger>,
     pub scripts: Scripts,
     /// Trigger volumes, by index.
     pub volumes: Vec<KillZone>,
@@ -198,11 +206,21 @@ impl Loader {
             println!("warning: scripts: {e}");
             Scripts::default()
         });
-        out.group_parents = ai::squad_groups(set)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|g| g.parent)
-            .collect();
+        let groups = ai::squad_groups(set).unwrap_or_default();
+        out.group_parents = groups.iter().map(|g| g.parent).collect();
+        out.group_orders = groups.iter().map(|g| g.order).collect();
+        out.zones = orders::zones(set).unwrap_or_else(|e| {
+            println!("warning: zones: {e}");
+            Vec::new()
+        });
+        out.orders = orders::orders(set).unwrap_or_else(|e| {
+            println!("warning: orders: {e}");
+            Vec::new()
+        });
+        out.triggers = orders::ai_triggers(set).unwrap_or_else(|e| {
+            println!("warning: AI triggers: {e}");
+            Vec::new()
+        });
         out.volumes = scenario::trigger_volumes(set)
             .unwrap_or_default()
             .iter()

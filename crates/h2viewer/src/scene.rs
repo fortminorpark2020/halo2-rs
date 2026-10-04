@@ -11,6 +11,7 @@ use blam_cache::geometry::Mesh;
 use blam_cache::hud::{self, Anchor};
 use blam_cache::lightmap::{self, InstanceLighting};
 use blam_cache::model::{self, RenderModel};
+use blam_cache::pathfinding;
 use blam_cache::physics::{self, BipedPhysics, PlayerMovement};
 use blam_cache::render::{LevelGeometry, Section, SectionOwner};
 use blam_cache::scenario::PlacedKind;
@@ -619,6 +620,8 @@ pub struct Scene {
     pub spawns: Vec<PlayerSpawn>,
     /// Collision geometry, used for walking, shooting and framing.
     pub collision: Mesh,
+    /// The level's own map of where the AI can walk (campaign levels).
+    pub nav_mesh: NavMesh,
     pub movement: PlayerMovement,
     pub biped: BipedPhysics,
     /// Weapons the player can switch between; the Battle Rifle first.
@@ -703,6 +706,52 @@ const BOMB: &str = "objects\\weapons\\multiplayer\\assault_bomb\\assault_bomb";
 const FLAG_STAND: &str = "objects\\multi\\flag_base\\flag_base";
 
 /// Multiplayer weapons, in switching order.
+/// The walkable sectors of a level's pathfinding data (by structure BSP),
+/// and the edges between two of them.
+#[derive(Debug, Clone, Default)]
+pub struct NavMesh {
+    pub sectors: Vec<(u16, Vec<Vec3>)>,
+    pub edges: Vec<(usize, usize, Vec3, Vec3)>,
+}
+
+impl NavMesh {
+    fn add(&mut self, bsp: u16, p: &pathfinding::Pathfinding) {
+        let on_object = |s: usize| {
+            p.object_sectors
+                .iter()
+                .any(|&(a, b)| (a as usize..=b as usize).contains(&s))
+        };
+        let walkable = |s: usize| {
+            p.sectors
+                .get(s)
+                .is_some_and(|x| x.flags & pathfinding::SECTOR_WALKABLE != 0)
+                && !on_object(s)
+        };
+        let base = self.sectors.len();
+        self.sectors.extend((0..p.sectors.len()).map(|s| {
+            let corners = if walkable(s) {
+                p.polygon(s).into_iter().map(Vec3::from).collect()
+            } else {
+                Vec::new()
+            };
+            (bsp, corners)
+        }));
+        let vertex = |v: u16| p.vertices.get(v as usize).copied().map(Vec3::from);
+        for l in &p.links {
+            let (Some(a), Some(b)) = (l.left, l.right) else {
+                continue;
+            };
+            let (a, b) = (a as usize, b as usize);
+            if !walkable(a) || !walkable(b) {
+                continue;
+            }
+            if let (Some(v), Some(w)) = (vertex(l.vertices.0), vertex(l.vertices.1)) {
+                self.edges.push((base + a, base + b, v, w));
+            }
+        }
+    }
+}
+
 /// What players start a campaign mission with.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CampaignStart {
@@ -1611,8 +1660,12 @@ impl Scene {
         }
         let bsps = set.map.structure_bsps()?;
         let mut collision = Mesh::default();
-        for bsp in &bsps {
+        let mut nav_mesh = NavMesh::default();
+        for (b, bsp) in bsps.iter().enumerate() {
             collision.append(&set.map.bsp_collision_mesh(bsp)?);
+            if let Ok(p) = set.map.bsp_pathfinding(bsp) {
+                nav_mesh.add(b as u16, &p);
+            }
         }
         let spawns = set.map.player_spawns().unwrap_or_default();
         let movement = physics::player_movement(&mut set).unwrap_or_default();
@@ -2007,6 +2060,7 @@ impl Scene {
             hud_textures: loader.hud_textures,
             spawns,
             collision,
+            nav_mesh,
             movement,
             biped,
             weapons,

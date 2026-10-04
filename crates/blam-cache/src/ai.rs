@@ -97,6 +97,9 @@ pub struct Squad {
     pub weapon: Option<u16>,
     pub secondary: Option<u16>,
     pub vehicle: Option<u16>,
+    /// The zone and the order (`orders::orders`) it starts with.
+    pub zone: Option<u16>,
+    pub order: Option<u16>,
     pub locations: Vec<StartingLocation>,
 }
 
@@ -248,7 +251,7 @@ pub struct CharacterGrenades {
     pub count: (u16, u16),
 }
 
-fn scenario_data(set: &mut MapSet) -> Result<Vec<u8>> {
+pub(crate) fn scenario_data(set: &mut MapSet) -> Result<Vec<u8>> {
     let map = &mut set.map;
     let scnr = map
         .tag(map.scenario)
@@ -257,12 +260,12 @@ fn scenario_data(set: &mut MapSet) -> Result<Vec<u8>> {
     map.read_tag_data(&scnr)
 }
 
-fn ascii(b: &[u8]) -> String {
+pub(crate) fn ascii(b: &[u8]) -> String {
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     String::from_utf8_lossy(&b[..end]).into_owned()
 }
 
-fn index(b: &[u8], o: usize) -> Option<u16> {
+pub(crate) fn index(b: &[u8], o: usize) -> Option<u16> {
     u16::try_from(i16_at(b, o)).ok()
 }
 
@@ -317,6 +320,8 @@ pub fn squads(set: &mut MapSet) -> Result<Vec<Squad>> {
             character: index(e, 0x36),
             weapon: index(e, 0x3C),
             secondary: index(e, 0x3E),
+            zone: index(e, 0x38),
+            order: index(e, 0x42),
             locations,
         });
     }
@@ -328,6 +333,8 @@ pub fn squads(set: &mut MapSet) -> Result<Vec<Squad>> {
 pub struct SquadGroup {
     pub name: String,
     pub parent: Option<u16>,
+    /// The order its squads start with when they don't have their own.
+    pub order: Option<u16>,
 }
 
 pub fn squad_groups(set: &mut MapSet) -> Result<Vec<SquadGroup>> {
@@ -342,6 +349,7 @@ pub fn squad_groups(set: &mut MapSet) -> Result<Vec<SquadGroup>> {
         .map(|g| SquadGroup {
             name: ascii(&g[..0x20]),
             parent: index(g, 0x20),
+            order: index(g, 0x22),
         })
         .collect())
 }

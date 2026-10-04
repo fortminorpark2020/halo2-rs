@@ -10,6 +10,16 @@ use crate::collision::World;
 use crate::game::{Event, Game, Mind};
 use glam::{Vec2, Vec3};
 
+/// Seconds an actor fighting from a firing position stays there before it
+/// thinks about moving, and longest it tries to get to one.
+const HOLD: (f32, f32) = (2.0, 5.0);
+const GIVE_UP: f32 = 6.0;
+/// Firing positions an actor weighs up each time it moves.
+const TRIES: usize = 6;
+/// What a firing position that can't see the enemy, or can't be walked to
+/// straight, costs against one that can (in metres of range or walking).
+const BLIND: f32 = 20.0;
+const BLOCKED: f32 = 40.0;
 /// Seconds an actor keeps looking for an enemy it lost sight of.
 const SEARCH_TIME: f32 = 20.0;
 /// How far squadmates hear each other call out an enemy, and how far
@@ -43,6 +53,16 @@ pub struct ActorMind {
     pub following: Option<usize>,
     /// Where it last knew of an enemy, and how long ago.
     pub alert: Option<(Vec3, f32)>,
+    /// The firing positions its orders give it to fight from (none: it
+    /// fights wherever it is).
+    pub area: Vec<Vec3>,
+    /// Goes along with players it meets (unless its orders keep it put).
+    pub follows: bool,
+    /// The firing position it's fighting from, how long it's been there
+    /// or getting there, and how long it stays.
+    fight_at: Option<Vec3>,
+    held: f32,
+    stay: f32,
     wobble: f32,
 }
 
@@ -56,6 +76,11 @@ impl ActorMind {
             ally,
             following: None,
             alert: None,
+            area: Vec::new(),
+            follows: true,
+            fight_at: None,
+            held: 0.0,
+            stay: 0.0,
             wobble: 0.0,
         }
     }
@@ -147,6 +172,70 @@ impl Bot {
         (fwd, false)
     }
 
+    /// Where an actor fighting `target` goes: a firing position in its area
+    /// that sees them from about the range it likes, without far to walk.
+    /// It stays a while once there. `None` for an actor with no area.
+    pub(super) fn actor_position(
+        &mut self,
+        game: &Game,
+        world: &World,
+        me: usize,
+        target: usize,
+        dt: f32,
+    ) -> Option<Vec3> {
+        let p = &game.players[me];
+        let feet = p.body.position;
+        let eye = p.eye() - feet;
+        let enemy = game.players[target].eye();
+        let n = self.actor.as_ref().map_or(0, |a| a.area.len());
+        if n == 0 {
+            return None;
+        }
+        // A few of a big area's positions, or all of a small one's.
+        let picks: Vec<usize> = if n <= TRIES {
+            (0..n).collect()
+        } else {
+            (0..TRIES)
+                .map(|_| (self.random() * n as f32) as usize % n)
+                .collect()
+        };
+        let stay = HOLD.0 + (HOLD.1 - HOLD.0) * self.random();
+        let a = self.actor.as_mut()?;
+        a.held += dt;
+        if let Some(at) = a.fight_at {
+            let there = (at - feet).truncate().length() < AT_POST;
+            if there && a.held < a.stay || !there && a.held < GIVE_UP {
+                return Some(at);
+            }
+        }
+        let (near, far) = a.mind.combat_range;
+        let want = (near + far) / 2.0;
+        let cost = |at: Vec3| {
+            let from = at + eye;
+            let to = enemy - from;
+            let d = to.length();
+            let blind = world.raycast(from, to / d.max(1e-4), d).is_some();
+            let walk = at - feet;
+            let w = walk.length();
+            let blocked = w > AT_POST && world.raycast(feet + Vec3::Z * 0.3, walk / w, w).is_some();
+            (d - want).abs()
+                + w * 0.5
+                + if blind { BLIND } else { 0.0 }
+                + if blocked { BLOCKED } else { 0.0 }
+        };
+        let best = picks
+            .iter()
+            .map(|&k| a.area[k])
+            .chain(a.fight_at)
+            .map(|at| (cost(at), at))
+            .min_by(|x, y| x.0.total_cmp(&y.0))
+            .map(|(_, at)| at);
+        a.fight_at = best;
+        a.held = 0.0;
+        a.stay = stay;
+        best
+    }
+
     /// Whether to throw a grenade at someone `dist` away now.
     pub(super) fn actor_grenade(&mut self, dist: f32, dt: f32) -> bool {
         let Some(m) = self.actor.as_ref().map(|a| a.mind) else {
@@ -178,14 +267,24 @@ impl Bot {
         let a = self.actor.as_mut()?;
         if let Some((at, age)) = &mut a.alert {
             *age += dt;
-            if *age > SEARCH_TIME || (*at - feet).truncate().length() < 1.5 {
+            // Held to an area, it looks from the part of it nearest.
+            let look = a
+                .area
+                .iter()
+                .min_by(|p, q| p.distance_squared(*at).total_cmp(&q.distance_squared(*at)))
+                .copied()
+                .unwrap_or(*at);
+            if *age > SEARCH_TIME || (look - feet).truncate().length() < 1.5 {
                 a.alert = None;
             } else {
-                return Some(*at);
+                return Some(look);
             }
         }
+        if !a.follows {
+            a.following = None;
+        }
         // Allies take up with a player who comes close.
-        if a.ally && a.following.is_none_or(|f| !game.players[f].alive) {
+        if a.ally && a.follows && a.following.is_none_or(|f| !game.players[f].alive) {
             a.following = (0..game.players.len()).find(|&j| {
                 let q = &game.players[j];
                 q.actor.is_none()
@@ -370,6 +469,25 @@ mod tests {
             far.target.is_some() || far.actor.as_ref().unwrap().alert.is_some(),
             "its squadmate hears about it"
         );
+    }
+
+    #[test]
+    fn actors_fight_from_the_firing_position_at_the_range_they_like() {
+        // Facing +x with the player 10 in front: of its area's firing
+        // positions, the one 5 from the player is best.
+        let (mut g, mut bots) = mission(&[Vec3::new(10.0, 0.0, 0.0)]);
+        g.players[0].body.position = Vec3::new(20.0, 0.0, 0.0);
+        g.players[0].health = 1e9;
+        let area = [
+            Vec3::new(15.0, 0.0, 0.0),
+            Vec3::new(10.0, 8.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+        ];
+        bots[0].1.actor.as_mut().unwrap().area = area.to_vec();
+        let fired = run(&mut g, &mut bots, 6.0);
+        assert!(fired);
+        let at = g.players[bots[0].0].body.position;
+        assert!(at.distance(area[0]) < 1.0, "at {at}");
     }
 
     #[test]
