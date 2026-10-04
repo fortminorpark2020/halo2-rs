@@ -94,6 +94,8 @@ pub struct Fx {
 pub const MENU_TEXTURES: usize = 1 << 16;
 /// And the emblem atlases from here (see `emblem::load`).
 pub const EMBLEM_TEXTURES: usize = 1 << 17;
+/// And the rank icon atlases from here (see `rank::load`).
+pub const RANK_TEXTURES: usize = 1 << 18;
 
 pub struct HudBatch {
     pub texture: usize,
@@ -482,6 +484,7 @@ pub struct Gpu {
     /// numbered from [`MENU_TEXTURES`] in HUD batches.
     menu_textures: Vec<wgpu::BindGroup>,
     emblem_textures: Vec<wgpu::BindGroup>,
+    rank_textures: Vec<wgpu::BindGroup>,
     effects_texture: wgpu::BindGroup,
     meshes: Vec<GpuMesh>,
     depth: wgpu::TextureView,
@@ -938,6 +941,7 @@ impl Gpu {
             hud_textures: Vec::new(),
             menu_textures: Vec::new(),
             emblem_textures: Vec::new(),
+            rank_textures: Vec::new(),
             effects_texture,
             meshes: Vec::new(),
             depth,
@@ -1070,6 +1074,18 @@ impl Gpu {
             .collect();
     }
 
+    /// The rank icons, in their own colours (sRGB, unlike the masks and
+    /// HUD art).
+    pub fn set_rank_textures(&mut self, images: &[Image]) {
+        self.rank_textures = images
+            .iter()
+            .map(|img| {
+                let (device, queue) = (&self.device, &self.queue);
+                upload_texture(device, queue, &self.texture_layout, &self.clamp, img, true)
+            })
+            .collect();
+    }
+
     /// The emblem pictures armour shows, or a stand-in until they load.
     fn armour_emblems(&self) -> &wgpu::BindGroup {
         self.emblem_textures
@@ -1078,6 +1094,9 @@ impl Gpu {
     }
 
     fn hud_texture(&self, texture: usize) -> Option<&wgpu::BindGroup> {
+        if let Some(k) = texture.checked_sub(RANK_TEXTURES) {
+            return self.rank_textures.get(k);
+        }
         if let Some(k) = texture.checked_sub(EMBLEM_TEXTURES) {
             return self.emblem_textures.get(k);
         }

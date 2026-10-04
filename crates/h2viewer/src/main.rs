@@ -45,6 +45,7 @@ mod objective;
 mod options;
 mod probe;
 mod profile;
+mod rank;
 mod rig;
 mod scene;
 mod soundscape;
@@ -1087,6 +1088,8 @@ struct App {
     map_pictures: Vec<blam_cache::bitmap::Image>,
     /// The emblem atlases, uploaded with the window.
     emblem_art: Vec<blam_cache::bitmap::Image>,
+    /// The rank icon atlases, uploaded with the window.
+    rank_art: Vec<blam_cache::bitmap::Image>,
     loading: Option<Loading>,
     /// Seconds the menus have been up, for the camera circling the map.
     menu_time: f32,
@@ -2304,6 +2307,7 @@ impl ApplicationHandler for App {
             Ok(mut g) => {
                 g.set_menu_textures(&self.map_pictures);
                 g.set_emblem_textures(&self.emblem_art);
+                g.set_rank_textures(&self.rank_art);
                 self.gpu = Some(g);
             }
             Err(e) => {
@@ -2587,6 +2591,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(|dir| mapinfo::describe_maps(dir, &mut maps))
         .unwrap_or_default();
     let emblem_art = path.parent().and_then(emblem::load).unwrap_or_default();
+    let rank_art = path.parent().and_then(rank::load).unwrap_or_default();
     // Three computer opponents (H2_BOTS=<n> for another number).
     let bots = env("H2_BOTS")
         .and_then(|v| v.parse().ok())
@@ -2683,6 +2688,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         mission: None,
         map_pictures,
         emblem_art,
+        rank_art,
         loading: None,
         menu_time: 0.0,
         game_over: None,

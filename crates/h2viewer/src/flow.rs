@@ -251,6 +251,7 @@ impl App {
                     "KEYBOARD"
                 },
                 team: s.team,
+                level: crate::rank::test_level(k),
             })
             .collect()
     }
@@ -269,6 +270,7 @@ impl App {
                 deaths: p.deaths,
                 color: player_colors(game, i)[0],
                 emblem: Some(p.look.emblem),
+                level: crate::rank::test_level(i),
                 local: self.locals.iter().any(|l| l.player == i),
                 header: false,
             }
@@ -295,6 +297,7 @@ impl App {
                 deaths: members().map(|p| p.deaths).sum(),
                 color: TEAM_COLORS[t as usize],
                 emblem: None,
+                level: None,
                 local: false,
                 header: true,
             });

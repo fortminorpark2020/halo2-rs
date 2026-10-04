@@ -134,6 +134,8 @@ impl App {
                     look: look.guest(k),
                     how: "SYSTEM LINK",
                     team,
+                    // Listed after the people here.
+                    level: crate::rank::test_level(self.seats.len() + seats.len()),
                 });
             }
         }
@@ -149,11 +151,13 @@ impl App {
             return lobby
                 .players
                 .iter()
-                .map(|p| SeatInfo {
+                .enumerate()
+                .map(|(k, p)| SeatInfo {
                     name: p.name.clone(),
                     look: p.look,
                     how: if p.remote { "SYSTEM LINK" } else { "HOST" },
                     team: p.team,
+                    level: crate::rank::test_level(k),
                 })
                 .collect();
         }

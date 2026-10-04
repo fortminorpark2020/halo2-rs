@@ -239,6 +239,8 @@ pub struct ScoreLine {
     pub color: [f32; 3],
     /// A player's emblem (team lines have none).
     pub emblem: Option<Emblem>,
+    /// A player's level, 1 to 50, when known (online).
+    pub level: Option<u8>,
     /// Someone playing at this PC.
     pub local: bool,
     pub header: bool,
@@ -254,6 +256,8 @@ pub struct SeatInfo {
     /// Their team, or `NO_TEAM` until the game puts them on one.
     pub team: u8,
     pub look: Look,
+    /// Their level, 1 to 50, when known (online).
+    pub level: Option<u8>,
 }
 
 /// A player in the lobby whose team the game will choose.
@@ -1364,6 +1368,11 @@ impl Menu {
             crate::emblem::draw(hb, badge, seat.look.emblem);
             let line = format!("{}  {how}", seat.name);
             hb.text_left(font, f.at(x + 21.0, y), 9.0 * s, &line, TEXT);
+            // Their rank, at the end of the line.
+            if let Some(level) = seat.level {
+                let icon = f.rect([x + PANEL_W - 13.0, y - 2.0, x + PANEL_W, y + 11.0]);
+                crate::rank::draw(hb, icon, level);
+            }
             y += 16.0;
         }
         if bots > 0 {
@@ -1462,7 +1471,8 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 const MAX_SCORE_LINES: usize = 18;
 
 /// The scoreboard, best first, its top at `top` (screen units). Places go
-/// to teams when there are team totals, otherwise to players.
+/// to teams when there are team totals, otherwise to players. Levels show
+/// when there are any.
 fn draw_scores(
     hb: &mut HudBuilder,
     font: usize,
@@ -1479,12 +1489,18 @@ fn draw_scores(
         ROW_X + 360.0,
         ROW_X + 430.0,
     ];
+    // Rank icons centred under LEVEL, between the names and scores.
+    let level_x = ROW_X + 235.0;
+    let levels = scores.iter().any(|l| l.level.is_some());
     let mut y = top;
     for (x, h) in cols
         .iter()
         .zip(["PLACE", "PLAYER", "SCORE", "KILLS", "DEATHS"])
     {
         hb.text_left(font, f.at(*x, y), 8.0 * s, h, DIM);
+    }
+    if levels {
+        hb.text_left(font, f.at(level_x, y), 8.0 * s, "LEVEL", DIM);
     }
     y += 16.0;
     let teams = scores.iter().any(|l| l.header);
@@ -1515,6 +1531,10 @@ fn draw_scores(
             if let Some(e) = line.emblem {
                 crate::emblem::draw(hb, badge, e);
             }
+        }
+        if let Some(level) = line.level {
+            let icon = f.rect([level_x + 8.5, y - 1.0, level_x + 21.5, y + 12.0]);
+            crate::rank::draw(hb, icon, level);
         }
         let fg = if line.local || line.header {
             BRIGHT
@@ -1578,6 +1598,7 @@ mod tests {
                 how: "KEYBOARD",
                 team: 0,
                 look: Look::default(),
+                level: None,
             }]),
             local: 1,
             scores: &[],
@@ -1824,5 +1845,58 @@ mod tests {
         m.show(Screen::PostGame);
         assert_eq!(m.input(Input::Select, &c), Action::None);
         assert!(m.notice.is_some());
+    }
+
+    #[test]
+    fn rank_icons_show_only_for_known_levels() {
+        // Rank icons drawn, counted by their quads.
+        let icons = |hb: HudBuilder| -> usize {
+            hb.finish()
+                .iter()
+                .filter(|b| b.texture >= crate::gpu::RANK_TEXTURES)
+                .map(|b| b.vertices.len() / 6)
+                .sum()
+        };
+        let line = |level| ScoreLine {
+            name: "JOHN".into(),
+            score: 3,
+            timed: false,
+            kills: 3,
+            deaths: 1,
+            color: [1.0; 3],
+            emblem: None,
+            level,
+            local: false,
+            header: false,
+        };
+        let scoreboard = |scores: &[ScoreLine]| {
+            let mut hb = HudBuilder::new(1280.0, 720.0);
+            draw_scoreboard(&mut hb, 0, 1, 1280.0, 720.0, scores);
+            icons(hb)
+        };
+        assert_eq!(scoreboard(&[line(None), line(None)]), 0);
+        assert_eq!(scoreboard(&[line(Some(7)), line(None)]), 1);
+        // The lobby's list.
+        let maps = maps();
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Lobby);
+        let lobby = |c: &Context| {
+            let mut hb = HudBuilder::new(1280.0, 720.0);
+            m.draw(&mut hb, 0, 1, 1280.0, 720.0, c);
+            icons(hb)
+        };
+        assert_eq!(lobby(&ctx(&maps, &[])), 0);
+        let seats = [SeatInfo {
+            name: "JOHN".into(),
+            how: "KEYBOARD",
+            team: 0,
+            look: Look::default(),
+            level: Some(50),
+        }];
+        let c = Context {
+            seats: &seats,
+            ..ctx(&maps, &[])
+        };
+        assert_eq!(lobby(&c), 1);
     }
 }
