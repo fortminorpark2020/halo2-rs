@@ -1,12 +1,13 @@
 //! Rounds that fly through the air: plasma bolts, needles, rockets, tank
 //! shells and mortars. Each moves every tick (speeding up or slowing down,
 //! falling, turning toward its target) until it hits something or runs out
-//! of range, and explosive ones go off in a blast.
+//! of range, and explosive ones go off in a blast. Needles stick in whoever
+//! they hit and pop a moment later, or all at once in a supercombine.
 
 use super::{Event, Game};
 use crate::collision::World;
 use crate::player::GRAVITY;
-use crate::weapon::{Blast, Flight, WeaponState};
+use crate::weapon::{Blast, Flight, Sticky, WeaponState};
 use glam::Vec3;
 
 /// Seconds a round flies at most.
@@ -33,6 +34,18 @@ pub struct Projectile {
     pub travelled: f32,
     pub target: Option<Homing>,
     pub age: f32,
+}
+
+/// A round stuck in someone, about to go off (a needle).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StuckRound {
+    pub weapon: usize,
+    pub owner: usize,
+    pub victim: usize,
+    /// Where it is, from the victim's feet.
+    pub offset: Vec3,
+    /// Seconds before it goes off.
+    pub fuse: f32,
 }
 
 /// What a round ran into.
@@ -199,9 +212,13 @@ impl Game {
             return;
         }
         let damage = WeaponState::damage_at(&def, p.travelled);
+        let sticky = def.flight.and_then(|f| f.sticky);
         let hit_player = match what {
             Struck::Player(j) => {
                 self.damage(j, Some(p.owner), damage, false);
+                if let (Some(s), true) = (sticky, self.players[j].alive) {
+                    self.stick(p, j, s);
+                }
                 Some(j)
             }
             Struck::Vehicle(v) => {
@@ -222,6 +239,91 @@ impl Game {
             hit_player,
             exploded: blast.is_some(),
         });
+    }
+
+    /// A needle in player `j`: it goes off once its fuse burns down (with
+    /// any that follow it in quickly), unless it's the one that makes a
+    /// supercombine.
+    fn stick(&mut self, p: Projectile, j: usize, s: Sticky) {
+        // Fuses vary a little, needle to needle.
+        let spread = ((p.position.x * 12.9898 + p.position.y * 78.233).sin() * 43758.547)
+            .fract()
+            .abs();
+        let fuse = s.fuse.0 + (s.fuse.1 - s.fuse.0) * spread;
+        // Those already in wait for the newest, to go off together.
+        for r in self.stuck.iter_mut().filter(|r| r.victim == j) {
+            r.fuse = r.fuse.max(fuse);
+        }
+        self.stuck.push(StuckRound {
+            weapon: p.weapon,
+            owner: p.owner,
+            victim: j,
+            offset: p.position - self.players[j].body.position,
+            fuse,
+        });
+        let count = self.stuck.iter().filter(|r| r.victim == j).count();
+        if count >= s.supercombine.max(1) {
+            self.supercombine(j, p.owner, p.weapon, s);
+        }
+    }
+
+    /// Enough needles in player `j` at once: they all go off together.
+    fn supercombine(&mut self, j: usize, owner: usize, weapon: usize, s: Sticky) {
+        self.stuck.retain(|r| r.victim != j);
+        let q = &self.players[j];
+        let at = q.body.position + Vec3::Z * q.body.height() * 0.5;
+        self.damage(j, Some(owner), s.super_damage, false);
+        if let Some(b) = s.super_blast {
+            // The blast's own reach (no level to shield anyone this close).
+            for k in 0..self.players.len() {
+                let other = &self.players[k];
+                let d = (other.body.position + Vec3::Z * other.body.height() * 0.5).distance(at);
+                if k != j && other.alive && d < b.radius.1 {
+                    self.damage(k, Some(owner), b.damage_at(d), false);
+                }
+            }
+        }
+        self.events.push(Event::Impact {
+            weapon,
+            position: at,
+            normal: Vec3::Z,
+            hit_player: Some(j),
+            exploded: true,
+        });
+    }
+
+    /// Needles stuck in people burn down their fuses and pop.
+    pub(super) fn step_stuck(&mut self, dt: f32) {
+        let mut popped = Vec::new();
+        self.stuck.retain_mut(|r| {
+            r.fuse -= dt;
+            if r.fuse > 0.0 {
+                return true;
+            }
+            popped.push(*r);
+            false
+        });
+        for r in popped {
+            let Some(s) = self.weapons.get(r.weapon).and_then(|w| w.flight?.sticky) else {
+                continue;
+            };
+            let q = &self.players[r.victim];
+            if !q.alive {
+                continue;
+            }
+            let at = q.body.position + r.offset;
+            self.damage(r.victim, Some(r.owner), s.damage, false);
+            self.events.push(Event::Impact {
+                weapon: r.weapon,
+                position: at,
+                normal: Vec3::Z,
+                hit_player: Some(r.victim),
+                exploded: false,
+            });
+        }
+        // The dead shed theirs.
+        let players = &self.players;
+        self.stuck.retain(|r| players[r.victim].alive);
     }
 
     /// A blast at `at` set off by `owner`: it hurts and throws players
@@ -275,9 +377,10 @@ impl Game {
 
 #[cfg(test)]
 mod tests {
+    use super::Projectile;
     use crate::game::{Command, Event, Game};
     use crate::testing::{floor, game};
-    use crate::weapon::{Blast, Flight, WeaponDef};
+    use crate::weapon::{Blast, Flight, Sticky, WeaponDef};
     use glam::Vec3;
 
     /// A launcher whose rockets fly at 10 units a second and blow up.
@@ -298,6 +401,7 @@ mod tests {
                     radius: (1.0, 2.0),
                     push: 2.0,
                 }),
+                sticky: None,
             }),
             ..g.weapons[0].clone()
         };
@@ -343,6 +447,67 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// A needle that sticks: 1 on impact, 2 when it pops, 3 together kill.
+    fn needles(g: &mut Game) -> (Projectile, Sticky) {
+        let s = Sticky {
+            fuse: (0.5, 0.7),
+            damage: 2.0,
+            supercombine: 3,
+            super_damage: 400.0,
+            super_blast: None,
+        };
+        let needler = WeaponDef {
+            name: "needler".into(),
+            damage: 1.0,
+            damage_lower_bound: 1.0,
+            range: 100.0,
+            flight: Some(Flight {
+                speed: (10.0, 10.0),
+                acceleration_range: (0.0, 0.0),
+                gravity: 0.0,
+                homing: 0.0,
+                homes_on_vehicles: false,
+                blast: None,
+                sticky: Some(s),
+            }),
+            ..g.weapons[0].clone()
+        };
+        g.weapons.push(needler);
+        let p = Projectile {
+            weapon: g.weapons.len() - 1,
+            owner: 0,
+            position: Vec3::new(10.0, 0.0, 1.0),
+            velocity: Vec3::X,
+            travelled: 1.0,
+            target: None,
+            age: 0.0,
+        };
+        (p, s)
+    }
+
+    #[test]
+    fn needles_stick_and_pop_and_enough_supercombine() {
+        let mut g = duel();
+        let (p, s) = needles(&mut g);
+        let full = g.players[1].shield + g.players[1].health;
+        g.stick(p, 1, s);
+        assert_eq!(g.stuck.len(), 1);
+        // A second later it has popped.
+        for _ in 0..60 {
+            g.step(&floor(), &[Command::default(), Command::default()]);
+        }
+        assert!(g.stuck.is_empty());
+        let left = g.players[1].shield + g.players[1].health;
+        assert!(full - left > 1.0, "the pop hurt: {full} -> {left}");
+        // Three at once: a supercombine.
+        g.stick(p, 1, s);
+        g.stick(p, 1, s);
+        assert!(g.players[1].alive);
+        g.stick(p, 1, s);
+        assert!(!g.players[1].alive, "supercombined");
+        assert!(g.stuck.is_empty());
     }
 
     #[test]

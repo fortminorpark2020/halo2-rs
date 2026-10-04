@@ -121,6 +121,23 @@ pub struct Flight {
     /// Only homes in on vehicles (the rocket launcher's lock-on).
     pub homes_on_vehicles: bool,
     pub blast: Option<Blast>,
+    /// Rounds that stick in whoever they hit (needles).
+    pub sticky: Option<Sticky>,
+}
+
+/// Rounds that stick in whoever they hit and go off a moment later; enough
+/// in one target at once set off a supercombine (the Needler's).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sticky {
+    /// Seconds after sticking before one goes off (shortest, longest).
+    pub fuse: (f32, f32),
+    /// Damage to whoever it's in when it goes off.
+    pub damage: f32,
+    /// How many at once set off the supercombine.
+    pub supercombine: usize,
+    /// The supercombine's damage to whoever they're in, and its blast.
+    pub super_damage: f32,
+    pub super_blast: Option<Blast>,
 }
 
 impl Flight {
@@ -146,6 +163,10 @@ pub struct Rounds<'a> {
     pub impact: Option<&'a Damage>,
     /// Damage going off.
     pub detonation: Option<&'a Damage>,
+    /// A supercombine's blast, and its damage to whoever the rounds are
+    /// stuck in.
+    pub super_detonation: Option<&'a Damage>,
+    pub attached_super: Option<&'a Damage>,
 }
 
 /// A one-handed weapon's spread and damage when dual wielded.
@@ -179,6 +200,8 @@ impl WeaponDef {
             projectile,
             impact: damage,
             detonation,
+            super_detonation,
+            attached_super,
         } = rounds;
         let trigger = w
             .triggers
@@ -230,6 +253,20 @@ impl WeaponDef {
             homing: p.guided_angular_velocity.0.max(p.guided_angular_velocity.1),
             homes_on_vehicles: trigger.behavior == TriggerBehavior::LatchRocketLauncher,
             blast,
+            sticky: (p.super_count > 0)
+                .then_some(attached_super)
+                .flatten()
+                .map(|a| Sticky {
+                    fuse: if p.timer.1 > 0.0 {
+                        (p.timer.0.min(p.timer.1), p.timer.1)
+                    } else {
+                        (0.5, 0.7)
+                    },
+                    damage: detonation.map_or(0.0, |d| d.upper_bound.0.max(d.upper_bound.1)),
+                    supercombine: p.super_count as usize,
+                    super_damage: a.upper_bound.0.max(a.upper_bound.1),
+                    super_blast: super_detonation.and_then(Blast::from_tags),
+                }),
         });
         let upper = damage.map(|d| d.upper_bound.0.max(d.upper_bound.1));
         let dual = w.can_be_dual_wielded().then_some(DualWield {

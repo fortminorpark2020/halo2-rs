@@ -425,7 +425,9 @@ impl Soundscape {
                     (true, false) => g.explosion[1],
                     (false, _) => g.impact,
                 };
-                let s = r.and_then(|r| r.impact).or(fallback);
+                // Needles all going off together.
+                let together = r.and_then(|r| r.supercombine).filter(|_| exploded);
+                let s = together.or(r.and_then(|r| r.impact)).or(fallback);
                 let gain = if exploded { 1.0 } else { 0.6 };
                 self.play(scene, s, position, None, listeners, gain);
             }

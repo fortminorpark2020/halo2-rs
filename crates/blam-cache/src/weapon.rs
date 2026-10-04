@@ -28,7 +28,10 @@ const PROJ_FLAGS: usize = 0xBC;
 const PROJ_ARMING_TIME: usize = 0xCC;
 const PROJ_TIMER: usize = 0xD4;
 const PROJ_MAX_RANGE: usize = 0xE0;
+const PROJ_SUPER_COUNT: usize = 0xE6;
 const PROJ_DETONATION_DAMAGE: usize = 0x100;
+const PROJ_SUPER_DETONATION_DAMAGE: usize = 0x118;
+const PROJ_ATTACHED_SUPER_DAMAGE: usize = 0x12C;
 const PROJ_IMPACT_EFFECT: usize = 0x140;
 const PROJ_IMPACT_DAMAGE: usize = 0x148;
 const PROJ_AIR_GRAVITY: usize = 0x164;
@@ -134,6 +137,12 @@ pub struct Projectile {
     pub timer: (f32, f32),
     /// The blast when it goes off (`jpt!`).
     pub detonation_damage: DatumIndex,
+    /// How many stuck in one target at once set off a supercombine
+    /// (needles; 0 for rounds that don't), its blast and the damage to
+    /// whoever they're stuck in.
+    pub super_count: i16,
+    pub super_detonation_damage: DatumIndex,
+    pub attached_super_damage: DatumIndex,
     /// What hitting something looks and sounds like (`effe`): for rockets,
     /// the explosion.
     pub impact_effect: Option<DatumIndex>,
@@ -368,6 +377,10 @@ pub fn read_projectile(set: &mut MapSet, proj: DatumIndex) -> Result<Projectile>
         arming_time: f32_at(&d, PROJ_ARMING_TIME),
         timer: range(&d, PROJ_TIMER),
         detonation_damage: tag_ref(&d, PROJ_DETONATION_DAMAGE).unwrap_or(DatumIndex::NONE),
+        super_count: i16_at(&d, PROJ_SUPER_COUNT),
+        super_detonation_damage: tag_ref(&d, PROJ_SUPER_DETONATION_DAMAGE)
+            .unwrap_or(DatumIndex::NONE),
+        attached_super_damage: tag_ref(&d, PROJ_ATTACHED_SUPER_DAMAGE).unwrap_or(DatumIndex::NONE),
         impact_effect: tag_ref(&d, PROJ_IMPACT_EFFECT),
         guided_angular_velocity: range(&d, PROJ_GUIDED_ANGULAR_VELOCITY),
         acceleration_range: range(&d, PROJ_ACCELERATION_RANGE),

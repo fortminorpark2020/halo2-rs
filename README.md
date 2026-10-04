@@ -83,7 +83,10 @@ stats, held by Master Chief's arms with the game's own first person animations
 rockets, Brute Shot grenades and Fuel Rod shots fly at their tag speeds (rockets
 speed up, Brute Shot rounds arc), needles and the Fuel Rod home in, rockets lock
 on to enemy vehicles, and explosive rounds go off in a blast that hurts and
-throws everyone in reach, the shooter included.
+throws everyone in reach, the shooter included. Needles stick in whoever they
+hit and pop a moment later; seven in one target at once set off a supercombine
+that kills. Other Spartans bend at the waist to aim up and down.
+`H2_START_WEAPONS=needler,smg` changes what everyone spawns with, for testing.
 
 Dual wielding: holding a one-handed gun (SMG, Magnum, Plasma Pistol, Plasma
 Rifle, Needler), stand on another and hold Q (Y on a controller) to take it in

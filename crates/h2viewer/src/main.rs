@@ -135,8 +135,15 @@ fn rules(scene: &Scene) -> Rules {
     if let Some(v) = scene.grenades[1].speed {
         plasma.speed = v;
     }
+    // H2_START_WEAPONS=needler,smg: what everyone spawns with (testing).
+    let start = std::env::var("H2_START_WEAPONS").unwrap_or_default();
+    let start: Vec<&str> = start.split(',').filter(|w| !w.is_empty()).collect();
     Rules {
-        starting_weapons: index(&["battle_rifle", "smg"]),
+        starting_weapons: if start.is_empty() {
+            index(&["battle_rifle", "smg"])
+        } else {
+            index(&start)
+        },
         headshot_weapons: index(&[
             "battle_rifle",
             "magnum",
@@ -755,6 +762,25 @@ impl App {
                 }
             }
         }
+        // Needles stuck in people glow until they pop.
+        for n in &self.game.stuck {
+            let (Some(q), Some(w)) = (
+                self.game.players.get(n.victim),
+                self.scene.weapons.get(n.weapon),
+            ) else {
+                continue;
+            };
+            let at = q.body.position + n.offset;
+            // Not in your own view.
+            let near = self
+                .locals
+                .iter()
+                .any(|l| l.player == n.victim || l.camera.position.distance(at) < 0.5);
+            if !near {
+                self.effects
+                    .round(at, w.round.glow, w.round.size * 0.7, false);
+            }
+        }
         let listeners = self.listeners();
         self.sound.update(&self.scene, &self.game, &listeners, dt);
     }
@@ -1033,6 +1059,7 @@ impl App {
                 alive: p.alive,
                 style,
                 seat: None,
+                pitch: p.pitch,
             };
             let mut object = Mat4::from_translation(p.body.position) * Mat4::from_rotation_z(p.yaw);
             // Riding: sitting in the seat, turning with the vehicle (and
@@ -1054,6 +1081,12 @@ impl App {
                         SeatRole::Driver => ("unarmed", ""),
                         SeatRole::Gunner => ("fixed", ""),
                         SeatRole::Passenger => style,
+                    },
+                    // Only a passenger with a gun aims their own.
+                    pitch: if seat.role == SeatRole::Passenger {
+                        p.pitch
+                    } else {
+                        0.0
                     },
                     ..input
                 };

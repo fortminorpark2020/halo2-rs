@@ -12,7 +12,7 @@
 use crate::rig::{tag_quat, world_matrices, NodePose, Skeleton, SkinnedMesh};
 use blam_cache::animation::{AnimationGraph, AnimationKind, FRAME_RATE};
 use blam_cache::model::Marker;
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
 use std::collections::HashMap;
 
 /// Seconds to fade between base animations.
@@ -161,6 +161,23 @@ impl BodyRig {
         }
     }
 
+    /// Bend the spine and head to look `pitch` radians up (or down), so
+    /// the gun in the hands points where the Spartan aims.
+    fn look(&self, pose: &mut [NodePose], pitch: f32) {
+        for (name, share) in [("spine", 0.3), ("spine1", 0.45), ("head", 0.25)] {
+            let Some(n) = self.graph.node(name) else {
+                continue;
+            };
+            let parent = match usize::try_from(self.graph.nodes[n].parent) {
+                Ok(p) => self.world(pose)[p].to_scale_rotation_translation().1,
+                Err(_) => Quat::IDENTITY,
+            };
+            // Turned about the body's left-right axis, in the parent's space.
+            let turn = Quat::from_rotation_y(-pitch * share);
+            pose[n].rotation = parent.inverse() * turn * parent * pose[n].rotation;
+        }
+    }
+
     /// Graph node matrices relative to the object (origin at the feet,
     /// facing +x).
     pub fn world(&self, pose: &[NodePose]) -> Vec<Mat4> {
@@ -203,6 +220,8 @@ pub struct BodyInput {
     pub style: (&'static str, &'static str),
     /// Riding: the seat's animations ("warthog_d").
     pub seat: Option<&'static str>,
+    /// How far up (radians) they look; the upper body bends to aim there.
+    pub pitch: f32,
 }
 
 /// One Spartan's animation state.
@@ -300,6 +319,9 @@ impl BodyAnimator {
                 rig.apply(&mut pose, a, self.action_time, false, w);
             }
         }
+        if input.pitch.abs() > 1e-3 {
+            rig.look(&mut pose, input.pitch.clamp(-1.2, 1.2));
+        }
         pose
     }
 }
@@ -393,9 +415,22 @@ mod tests {
             alive: true,
             style: ("rifle", "br"),
             seat: None,
+            pitch: 0.0,
         };
         let pose = a.update(&r, &input, 0.016);
         assert!((pose[0].translation.z - 0.4).abs() < 1e-5);
+        // Looking up tips the head back.
+        let up = a.update(
+            &r,
+            &BodyInput {
+                pitch: 0.8,
+                ..input
+            },
+            0.016,
+        );
+        let head = r.world(&up)[1].transform_vector3(Vec3::X);
+        let level = r.world(&pose)[1].transform_vector3(Vec3::X);
+        assert!(head.z > level.z + 0.1, "{head} vs {level}");
         let crouched = BodyInput {
             crouching: true,
             ..input

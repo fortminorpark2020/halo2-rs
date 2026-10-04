@@ -4,7 +4,7 @@
 
 use super::{
     DroppedWeapon, Event, Flag, FlagEvent, Game, GameType, Grenade, GrenadeKind, HeldWeapon,
-    HillControl, HillEvent, ItemKind, LeadChange, Medal, Projectile, Spartan,
+    HillControl, HillEvent, ItemKind, LeadChange, Medal, Projectile, Spartan, StuckRound,
     DROPPED_WEAPON_LIFETIME, NEUTRAL, TEAMS,
 };
 use crate::game::Command;
@@ -672,6 +672,13 @@ impl Game {
             w.vec3(p.position);
             w.vec3(p.velocity);
         }
+        w.u16(self.stuck.len() as u16);
+        for r in &self.stuck {
+            w.index(Some(r.weapon));
+            w.index(Some(r.owner));
+            w.index(Some(r.victim));
+            w.vec3(r.offset);
+        }
         w.u8(self.flags.len().min(MAX_FLAGS) as u8);
         for f in self.flags.iter().take(MAX_FLAGS) {
             w.u8(f.team);
@@ -867,6 +874,18 @@ impl Game {
             });
         }
         self.projectiles = projectiles;
+        let n = r.u16()? as usize;
+        let mut stuck = Vec::with_capacity(n.min(256));
+        for _ in 0..n {
+            stuck.push(StuckRound {
+                weapon: r.index_below(weapons)?,
+                owner: r.index_below(count)?,
+                victim: r.index_below(count)?,
+                offset: r.vec3()?,
+                fuse: 1.0,
+            });
+        }
+        self.stuck = stuck;
         let n = r.u8()? as usize;
         if n > MAX_FLAGS {
             return Err(Malformed);

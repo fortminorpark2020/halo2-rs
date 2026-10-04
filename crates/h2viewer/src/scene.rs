@@ -266,8 +266,10 @@ pub struct RoundAssets {
     pub size: f32,
     /// Burns (a smoke trail and a fireball) rather than plasma.
     pub fiery: bool,
-    /// Going off, or hitting something (in `Scene::sounds`).
+    /// Going off, or hitting something (in `Scene::sounds`), and going
+    /// off all together (needles).
     pub impact: Option<usize>,
+    pub supercombine: Option<usize>,
 }
 
 /// How a weapon's rounds look: (glow, size, fiery), by the weapon's name.
@@ -938,10 +940,18 @@ impl Loader {
         let detonation = projectile
             .as_ref()
             .and_then(|p| weapon::read_damage(&mut self.set, p.detonation_damage).ok());
+        let [super_detonation, attached_super] = projectile
+            .as_ref()
+            .map_or([DatumIndex::NONE; 2], |p| {
+                [p.super_detonation_damage, p.attached_super_damage]
+            })
+            .map(|d| weapon::read_damage(&mut self.set, d).ok());
         let rounds = Rounds {
             projectile: projectile.as_ref(),
             impact: damage.as_ref(),
             detonation: detonation.as_ref(),
+            super_detonation: super_detonation.as_ref(),
+            attached_super: attached_super.as_ref(),
         };
         let mut def = WeaponDef::from_tags(&w, trigger, rounds);
         def.melee_damage = w
@@ -1041,6 +1051,9 @@ impl Loader {
                     impact: round_impact_sounds(name, exploding)
                         .iter()
                         .find_map(|n| self.sound_named(n)),
+                    supercombine: f.sticky.and_then(|_| {
+                        self.sound_named("sound\\weapons\\needler\\needler_super_expl")
+                    }),
                 }
             }
             None => RoundAssets::default(),

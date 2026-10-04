@@ -19,7 +19,7 @@ mod sync;
 mod vehicles;
 mod zones;
 pub use ctf::{Flag, FlagEvent, NEUTRAL};
-pub use projectiles::{Homing, Projectile};
+pub use projectiles::{Homing, Projectile, StuckRound};
 pub use sync::{Malformed, Reader, Writer};
 pub use vehicles::{VehicleAction, VehicleSpawn};
 pub use zones::{Hill, HillControl, HillEvent, Territory};
@@ -599,6 +599,8 @@ pub struct Game {
     pub grenades: Vec<Grenade>,
     /// Rounds in flight (rockets, plasma, needles...).
     pub projectiles: Vec<Projectile>,
+    /// Needles stuck in people.
+    pub stuck: Vec<StuckRound>,
     pub players: Vec<Spartan>,
     /// Capture the Flag: each team's flag.
     pub flags: Vec<Flag>,
@@ -683,6 +685,7 @@ impl Game {
             dropped: Vec::new(),
             grenades: Vec::new(),
             projectiles: Vec::new(),
+            stuck: Vec::new(),
             players: Vec::new(),
             flags: Vec::new(),
             flag_bases: Vec::new(),
@@ -877,6 +880,7 @@ impl Game {
         self.step_vehicles(world, dt);
         self.step_grenades(world, dt);
         self.step_projectiles(world, dt);
+        self.step_stuck(dt);
         self.step_items(dt);
         self.step_flags(world, dt);
         self.step_hills(dt);
