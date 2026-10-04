@@ -10,6 +10,8 @@ use crate::{
 };
 use gilrs::GamepadId;
 use h2net::LanGame;
+use h2sim::bot::bot_name;
+use h2sim::game::guest_name;
 use h2sim::{game::TEAMS, Bot, Game};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, TryRecvError};
@@ -192,9 +194,12 @@ impl App {
 
     /// How each person at this PC plays, for the lobby.
     fn seat_infos(&self) -> Vec<SeatInfo> {
+        let name = h2net::player_name();
         self.seats
             .iter()
-            .map(|s| SeatInfo {
+            .enumerate()
+            .map(|(k, s)| SeatInfo {
+                name: guest_name(&name, k),
                 how: if s.pad.is_some() {
                     "CONTROLLER"
                 } else {
@@ -212,7 +217,7 @@ impl App {
         let line = |i: usize| {
             let p = &game.players[i];
             ScoreLine {
-                name: format!("PLAYER {}", i + 1),
+                name: crate::local::player_name(game, usize::MAX, i),
                 score: p.score,
                 timed: game.rules.game_type.timed(),
                 kills: p.kills,
@@ -396,6 +401,7 @@ impl App {
             } else {
                 self.game.add_player()
             };
+            self.game.set_name(i, &guest_name(&h2net::player_name(), k));
             let mut l = LocalPlayer::new(i, &self.game);
             l.keyboard = k == 0;
             l.pad = seat.pad;
@@ -420,6 +426,7 @@ impl App {
                 break;
             }
             let i = self.game.add_player();
+            self.game.set_name(i, bot_name(i));
             self.bots.push(bot_for(i));
         }
         self.game.events.clear();

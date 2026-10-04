@@ -52,22 +52,24 @@ impl App {
         };
         for e in host.poll(&mut self.game, scene::MAX_BODIES) {
             match e {
-                HostEvent::Joined { computer, .. } => {
-                    self.announce(&format!("{} JOINED", computer.to_uppercase()));
+                HostEvent::Joined { players, .. } => {
+                    for p in players {
+                        self.announce(&format!("{} JOINED", self.game.name(p)));
+                    }
                 }
                 HostEvent::Added { player } => {
-                    self.announce(&format!("PLAYER {} JOINED", player + 1));
+                    self.announce(&format!("{} JOINED", self.game.name(player)));
                 }
                 HostEvent::Removed { player } => {
                     // Their Spartan plays on as a bot, as in splitscreen.
                     self.bots.push(bot_for(player));
-                    self.announce(&format!("PLAYER {} LEFT", player + 1));
+                    self.announce(&format!("{} LEFT", self.game.name(player)));
                 }
-                HostEvent::Left {
-                    computer, players, ..
-                } => {
+                HostEvent::Left { players, .. } => {
+                    for &p in &players {
+                        self.announce(&format!("{} LEFT", self.game.name(p)));
+                    }
                     self.bots.extend(players.into_iter().map(bot_for));
-                    self.announce(&format!("{} LEFT", computer.to_uppercase()));
                 }
             }
         }
@@ -206,7 +208,8 @@ impl App {
             let mut l = LocalPlayer::new(player, &self.game);
             l.pad = pad;
             self.locals.push(l);
-            self.announce(&format!("PLAYER {} JOINED", player + 1));
+            let name = crate::local::player_name(&self.game, usize::MAX, player);
+            self.announce(&format!("{name} JOINED"));
         }
     }
 

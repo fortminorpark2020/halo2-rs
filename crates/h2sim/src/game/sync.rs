@@ -615,6 +615,7 @@ impl Game {
         }
         w.u16(self.players.len() as u16);
         for p in &self.players {
+            w.str(&p.name);
             w.vec3(p.body.position);
             w.vec3(p.body.velocity);
             w.bool(p.body.grounded);
@@ -767,6 +768,7 @@ impl Game {
         for i in 0..count {
             let mut held = Vec::new();
             let p = &mut self.players[i];
+            p.name = super::clean_name(&r.str()?);
             p.body.position = r.vec3()?;
             p.body.velocity = r.vec3()?;
             p.body.grounded = r.bool()?;
@@ -1133,6 +1135,7 @@ mod tests {
             assert_eq!(h.health, j.health);
             assert_eq!(h.alive, j.alive);
             assert_eq!((h.team, h.score), (j.team, j.score));
+            assert_eq!(h.name, j.name);
             assert_eq!(h.weapons.len(), j.weapons.len());
             assert_eq!(
                 h.held().map(|w| w.state.loaded),

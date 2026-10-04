@@ -53,7 +53,8 @@ use effects::Effects;
 use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use gpu::{hud_mode, DrawCall, Frame, HudBatch};
-use h2sim::game::{Event, GrenadeKind, HeldWeapon, TICK};
+use h2sim::bot::bot_name;
+use h2sim::game::{guest_name, Event, GrenadeKind, HeldWeapon, TICK};
 use h2sim::vehicle::SeatRole;
 use h2sim::{
     Bot, Command, Game, GameType, ItemKind, ItemSpawn, KillZone, NavGraph, Rules, WeaponState,
@@ -261,6 +262,16 @@ fn load_level(path: &Path) -> Result<Level, String> {
         scene.netgame_flags.len(),
         scene.kill_volumes.len(),
     );
+    // H2_LIST_WEAPONS=1: each weapon's crosshair range and HUD pieces.
+    if std::env::var_os("H2_LIST_WEAPONS").is_some() {
+        for w in &scene.weapons {
+            let hud: Vec<&str> = w.hud.iter().map(|h| h.name.as_str()).collect();
+            println!(
+                "weapon {} autoaim {:.1} hud {hud:?}",
+                w.def.name, w.autoaim_range
+            );
+        }
+    }
     // H2_LIST_VEHICLES=1: where the map's vehicles are.
     if std::env::var_os("H2_LIST_VEHICLES").is_some() {
         for s in &scene.vehicles.spawns {
@@ -415,6 +426,7 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
     let mut bots: Vec<(usize, Bot)> = (0..settings.bots.max(2))
         .map(|_| {
             let i = game.add_player();
+            game.set_name(i, bot_name(i));
             (i, Bot::new(i as u32 * 7919 + 13 + seed * 104_729))
         })
         .collect();
@@ -429,7 +441,9 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             match e {
                 Event::Killed { killer, victim, .. } => {
                     let at = game.players[victim].body.position;
-                    println!("{t:6.1} {killer:?} killed {victim} at {at:.1}");
+                    let killer = killer.map_or("THE LEVEL", |k| game.name(k));
+                    let victim = game.name(victim);
+                    println!("{t:6.1} {killer} killed {victim} at {at:.1}");
                 }
                 Event::Flag { team, player, what } => {
                     println!("{t:6.1} flag {team} {what:?} by {player:?}");
@@ -640,8 +654,9 @@ impl App {
             return;
         }
         let i = self.game.add_player();
+        self.game.set_name(i, bot_name(i));
         self.bots.push((i, Bot::new(i as u32 * 7919 + 13)));
-        self.announce(&format!("PLAYER {} JOINED", i + 1));
+        self.announce(&format!("{} JOINED", self.game.name(i)));
     }
 
     /// Another person joins in splitscreen.
@@ -654,10 +669,12 @@ impl App {
             return;
         }
         let i = self.game.add_player();
+        let guest = guest_name(&h2net::player_name(), self.locals.len());
+        self.game.set_name(i, &guest);
         let mut l = LocalPlayer::new(i, &self.game);
         l.pad = pad;
         self.locals.push(l);
-        self.announce(&format!("PLAYER {} JOINED", i + 1));
+        self.announce(&format!("{guest} JOINED"));
     }
 
     fn pad_pressed(&mut self, id: GamepadId, press: PadPress) {
@@ -953,10 +970,11 @@ impl App {
                         killer.is_some_and(|k| k != victim && !self.game.is_enemy(k, victim));
                     println!(
                         "{}",
-                        kill_message(usize::MAX, killer, victim, betrayal).to_lowercase()
+                        kill_message(&self.game, usize::MAX, killer, victim, betrayal)
+                            .to_lowercase()
                     );
                     for l in &mut self.locals {
-                        l.message(kill_message(l.player, killer, victim, betrayal));
+                        l.message(kill_message(&self.game, l.player, killer, victim, betrayal));
                         if victim == l.player {
                             // The death camera starts behind and above the body.
                             l.camera.pitch = -0.6;

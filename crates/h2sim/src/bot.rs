@@ -71,6 +71,17 @@ pub struct Bot {
     riding: Riding,
 }
 
+/// Computer players' names, picked by player number.
+const BOT_NAMES: [&str; 16] = [
+    "SARGE", "VIPER", "NOMAD", "RAZOR", "HAVOC", "SPECTER", "BLITZ", "RAVEN", "TITAN", "COBRA",
+    "WARDEN", "ROOK", "FURY", "DRIFTER", "ONYX", "BANDIT",
+];
+
+/// The name a computer player in seat `player` goes by.
+pub fn bot_name(player: usize) -> &'static str {
+    BOT_NAMES[player % BOT_NAMES.len()]
+}
+
 fn wrap(a: f32) -> f32 {
     let tau = std::f32::consts::TAU;
     (a + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI

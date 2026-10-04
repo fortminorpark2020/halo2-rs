@@ -28,6 +28,35 @@ pub use zones::{Hill, HillControl, HillEvent, Territory};
 /// networked game computes the same thing.
 pub const TICK: f32 = 1.0 / 60.0;
 
+/// Longest gamertag, in characters (Xbox Live allowed 15).
+pub const MAX_NAME: usize = 15;
+
+/// A name as gamertags are shown here: capitals and printable characters,
+/// at most `MAX_NAME` of them.
+pub fn clean_name(name: &str) -> String {
+    let name: String = name
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(MAX_NAME)
+        .collect();
+    name.trim_end().to_ascii_uppercase()
+}
+
+/// A splitscreen guest's name: "NAME(1)", "NAME(2)" and so on after the
+/// person signed in (guest 0), as Xbox Live named guests.
+pub fn guest_name(name: &str, guest: usize) -> String {
+    if guest == 0 {
+        return clean_name(name);
+    }
+    let tag = format!("({guest})");
+    let base: String = clean_name(name)
+        .chars()
+        .take(MAX_NAME - tag.len())
+        .collect();
+    format!("{}{tag}", base.trim_end())
+}
+
 /// How hard grenade blasts throw people (world units per second).
 const GRENADE_PUSH: f32 = 1.5;
 /// Gravity for thrown grenades, world units per second squared.
@@ -341,6 +370,8 @@ pub enum GrenadeKind {
 
 #[derive(Debug, Clone)]
 pub struct Spartan {
+    /// The gamertag shown in the scoreboard and kill messages.
+    pub name: String,
     pub body: Player,
     pub yaw: f32,
     pub pitch: f32,
@@ -736,6 +767,7 @@ impl Game {
     pub fn add_player_on(&mut self, team: u8) -> usize {
         let i = self.players.len();
         let mut spartan = self.fresh_spartan(Vec3::ZERO, 0.0);
+        spartan.name = format!("PLAYER {}", i + 1);
         spartan.team = if self.rules.game_type.teams() {
             team.min(TEAMS - 1)
         } else {
@@ -744,6 +776,19 @@ impl Game {
         self.players.push(spartan);
         self.respawn(i);
         i
+    }
+
+    /// Give a player a gamertag (cleaned up; blank names are left alone).
+    pub fn set_name(&mut self, player: usize, name: &str) {
+        let name = clean_name(name);
+        if let (Some(p), false) = (self.players.get_mut(player), name.is_empty()) {
+            p.name = name;
+        }
+    }
+
+    /// A player's gamertag.
+    pub fn name(&self, player: usize) -> &str {
+        self.players.get(player).map_or("", |p| &p.name)
     }
 
     /// Players `a` and `b` are on opposite sides.
@@ -782,6 +827,7 @@ impl Game {
             .take(2)
             .collect();
         Spartan {
+            name: String::new(),
             body: Player::new(position, self.movement, self.biped),
             yaw,
             pitch: 0.0,
@@ -854,9 +900,11 @@ impl Game {
             }
         }
         let (pos, yaw) = best.1;
-        let old = &self.players[player];
+        let old = &mut self.players[player];
         let (team, score, kills, deaths) = (old.team, old.score, old.kills, old.deaths);
+        let name = std::mem::take(&mut old.name);
         let mut s = self.fresh_spartan(pos + Vec3::Z * 0.05, yaw);
+        s.name = name;
         s.team = team;
         s.score = score;
         s.kills = kills;
@@ -1068,6 +1116,20 @@ impl Game {
         p.current = (p.current + 1) % p.weapons.len();
         p.readying = ready_time(&self.weapons, p);
         self.events.push(Event::Switched { player: i });
+    }
+
+    /// The player seen first along a ray (a crosshair) by `viewer` within
+    /// `range`, unless the level hides them: (player, distance).
+    pub fn player_along(
+        &self,
+        world: &World,
+        viewer: usize,
+        origin: Vec3,
+        dir: Vec3,
+        range: f32,
+    ) -> Option<(usize, f32)> {
+        let (j, t, _) = self.trace_players(viewer, origin, dir)?;
+        (t < range && world.raycast(origin, dir, t).is_none()).then_some((j, t))
     }
 
     /// Who a ray from `origin` hits first among living players other than
@@ -1823,6 +1885,22 @@ pub(crate) mod tests {
         ffa.add_player();
         ffa.add_player();
         assert!(ffa.is_enemy(0, 1));
+    }
+
+    #[test]
+    fn names_are_gamertags_and_last_through_respawns() {
+        assert_eq!(clean_name("  John Morrow\t"), "JOHN MORROW");
+        assert_eq!(clean_name("averyveryverylongname"), "AVERYVERYVERYLO");
+        assert_eq!(guest_name("john", 0), "JOHN");
+        assert_eq!(guest_name("john", 2), "JOHN(2)");
+        assert_eq!(guest_name("averyveryverylongname", 1), "AVERYVERYVER(1)");
+        let mut g = game();
+        let a = g.add_player();
+        assert_eq!(g.name(a), "PLAYER 1");
+        g.set_name(a, "fortminorpark");
+        g.set_name(a, "   ");
+        g.respawn(a);
+        assert_eq!(g.name(a), "FORTMINORPARK");
     }
 
     #[test]

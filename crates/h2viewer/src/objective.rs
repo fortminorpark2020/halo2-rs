@@ -122,7 +122,7 @@ fn thing(game_type: GameType) -> &'static str {
 pub fn event_message(me: usize, game: &Game, e: &Event) -> Option<String> {
     let my_team = game.players.get(me)?.team;
     let teams = game.rules.game_type.teams();
-    let name = |p: usize| crate::local::player_name(me, p);
+    let name = |p: usize| crate::local::player_name(game, me, p);
     let kind = game.rules.game_type;
     Some(match *e {
         Event::Flag { team, player, what } => {

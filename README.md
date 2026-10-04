@@ -56,6 +56,13 @@ and flying (flying: Space / C up / down, Shift fast). When someone reaches the
 score to win, the game stops and the carnage report shows everyone's kills and
 deaths; Continue goes back to the lobby.
 
+Names: you play under your Windows user name (set `H2_NAME` to pick another),
+splitscreen guests as NAME(1), NAME(2) and so on, and bots under callsigns.
+Names show in the lobby, scoreboard, kill feed and announcements, over
+teammates in sight, and over whoever is under your crosshair, which turns red
+on an enemy in your weapon's range as in Halo 2. `H2_LIST_WEAPONS=1` lists each
+weapon's crosshair range and HUD pieces as a map loads.
+
 Capture the Flag: walk onto the enemy flag and press E (X on a controller) to
 take it, then carry it to your own flag's stand while yours is home to score; Q
 (Y) drops it. Carriers can't pick up weapons. A dropped flag goes home after 30

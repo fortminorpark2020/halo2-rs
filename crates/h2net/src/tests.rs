@@ -55,6 +55,9 @@ fn a_joined_pc_plays_in_the_hosts_game() {
     let mine = mine.unwrap();
     assert_ne!(mine, me);
     assert!(host.is_remote(mine));
+    // They go by the name of the person at that PC, on both PCs.
+    assert_eq!(hg.players[mine].name, player_name());
+    assert_eq!(cg.players[mine].name, player_name());
 
     // The joined player walks forward and fires; the host runs it and the
     // joined PC sees the result.

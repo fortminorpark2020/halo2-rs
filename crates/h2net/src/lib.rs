@@ -14,7 +14,7 @@ pub use discovery::{local_ip, Browser, LanGame};
 pub use host::{Host, HostEvent};
 
 /// Bumped whenever the messages change; PCs on different versions can't play.
-pub const PROTOCOL: u32 = 12;
+pub const PROTOCOL: u32 = 13;
 /// The host listens here (or the next free port above it).
 pub const GAME_PORT: u16 = 47040;
 /// Hosts announce their games to this port.
@@ -45,6 +45,18 @@ pub fn computer_name() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     name.unwrap_or_else(|| "PC".into())
+}
+
+/// The gamertag of the person at this PC: H2_NAME if set, otherwise their
+/// Windows user name (or this PC's name).
+pub fn player_name() -> String {
+    ["H2_NAME", "USERNAME", "USER"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .chain([computer_name()])
+        .map(|n| h2sim::game::clean_name(&n))
+        .find(|n| !n.is_empty())
+        .unwrap_or_else(|| "PLAYER".into())
 }
 
 /// A number that tells this running game apart from others.

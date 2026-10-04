@@ -4,7 +4,7 @@
 use crate::conn::Connection;
 use crate::discovery::Beacon;
 use crate::{kind, MAGIC, PROTOCOL};
-use h2sim::game::{Event, Reader, Writer};
+use h2sim::game::{guest_name, Event, Reader, Writer};
 use h2sim::{Command, Game};
 use std::net::{SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
@@ -37,6 +37,8 @@ struct Remote {
     conn: Connection,
     address: SocketAddr,
     computer: String,
+    /// The gamertag of the person at that PC.
+    name: String,
     since: Instant,
     welcomed: bool,
     /// Needs the whole game now (just joined).
@@ -64,8 +66,15 @@ fn seat(game: &Game, player: usize) -> (usize, Command, Command) {
     (player, still, Command::default())
 }
 
+/// What a joining PC said about itself.
+struct Hello {
+    computer: String,
+    name: String,
+    locals: usize,
+}
+
 /// Why a hello can't be accepted.
-fn check_hello(r: &mut Reader, game: &Game, map: &str) -> Result<(String, usize), String> {
+fn check_hello(r: &mut Reader, game: &Game, map: &str) -> Result<Hello, String> {
     let bad = |_| "not a Halo 2 Rust game".to_string();
     if r.u32().map_err(bad)? != MAGIC {
         return Err("not a Halo 2 Rust game".into());
@@ -78,13 +87,18 @@ fn check_hello(r: &mut Reader, game: &Game, map: &str) -> Result<(String, usize)
     let items = r.u16().map_err(bad)? as usize;
     let locals = (r.u8().map_err(bad)? as usize).max(1);
     let computer = r.str().map_err(bad)?;
+    let name = r.str().map_err(bad)?;
     if !their_map.eq_ignore_ascii_case(map)
         || weapons != game.weapons.len()
         || items != game.item_spawns.len()
     {
         return Err(format!("HOST IS PLAYING {}", map.to_uppercase()));
     }
-    Ok((computer, locals))
+    Ok(Hello {
+        computer,
+        name,
+        locals,
+    })
 }
 
 impl Host {
@@ -138,6 +152,7 @@ impl Host {
                     conn,
                     address,
                     computer: address.ip().to_string(),
+                    name: String::new(),
                     since: Instant::now(),
                     welcomed: false,
                     fresh: false,
@@ -183,7 +198,7 @@ impl Host {
             let mut rd = Reader::new(&body);
             match kind {
                 kind::HELLO if !r.welcomed => {
-                    let (computer, locals) = match check_hello(&mut rd, game, &self.map) {
+                    let hello = match check_hello(&mut rd, game, &self.map) {
                         Ok(v) => v,
                         Err(why) => {
                             let mut w = Writer::default();
@@ -193,6 +208,11 @@ impl Host {
                             return Err(why);
                         }
                     };
+                    let Hello {
+                        computer,
+                        name,
+                        locals,
+                    } = hello;
                     if game.players.len() + locals > max_players {
                         let mut w = Writer::default();
                         w.str("THE GAME IS FULL");
@@ -201,6 +221,9 @@ impl Host {
                         return Err("game full".into());
                     }
                     let players: Vec<usize> = (0..locals).map(|_| game.add_player()).collect();
+                    for (k, &p) in players.iter().enumerate() {
+                        game.set_name(p, &guest_name(&name, k));
+                    }
                     let mut w = Writer::default();
                     w.str(&self.computer);
                     w.u8(players.len() as u8);
@@ -209,6 +232,7 @@ impl Host {
                     }
                     r.conn.send(kind::WELCOME, &w.0);
                     r.computer = computer.clone();
+                    r.name = name;
                     r.welcomed = true;
                     r.fresh = true;
                     r.players = players.iter().map(|&p| seat(game, p)).collect();
@@ -229,6 +253,7 @@ impl Host {
                 kind::ADD_LOCAL if r.welcomed => {
                     if game.players.len() < max_players && r.players.len() < 4 {
                         let p = game.add_player();
+                        game.set_name(p, &guest_name(&r.name, r.players.len()));
                         r.players.push(seat(game, p));
                         let mut w = Writer::default();
                         w.index(Some(p));

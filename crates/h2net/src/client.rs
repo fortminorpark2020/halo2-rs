@@ -55,6 +55,7 @@ impl Client {
         w.u16(game.item_spawns.len() as u16);
         w.u8(locals.clamp(1, 4) as u8);
         w.str(&crate::computer_name());
+        w.str(&crate::player_name());
         conn.send(kind::HELLO, &w.0);
         conn.flush().map_err(std::io::Error::other)?;
         Ok(Client {

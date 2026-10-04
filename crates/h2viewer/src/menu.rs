@@ -181,8 +181,10 @@ pub struct ScoreLine {
 }
 
 /// Someone at this PC, in the lobby.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SeatInfo {
+    /// Their gamertag.
+    pub name: String,
     /// "KEYBOARD" or "CONTROLLER".
     pub how: &'static str,
     pub team: u8,
@@ -801,7 +803,7 @@ impl Menu {
                 hud_mode::PLAIN,
                 0.0,
             );
-            let line = format!("PLAYER {}  {how}", i + 1);
+            let line = format!("{}  {how}", seat.name);
             hb.text_left(font, f.at(x + 14.0, y), 9.0 * s, &line, TEXT);
             y += 16.0;
         }
@@ -966,10 +968,11 @@ mod tests {
         Context {
             maps,
             lan,
-            seats: &[SeatInfo {
+            seats: Vec::leak(vec![SeatInfo {
+                name: "JOHN".into(),
                 how: "KEYBOARD",
                 team: 0,
-            }],
+            }]),
             scores: &[],
             joined: false,
         }

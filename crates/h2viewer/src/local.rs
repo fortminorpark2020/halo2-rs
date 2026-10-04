@@ -27,8 +27,10 @@ enum HudRole {
     Background,
     AmmoMeter,
     ZoomedAmmoMeter,
-    /// Always drawn as is (crosshair, heat and battery frames).
+    /// Always drawn as is (heat and battery frames).
     Static,
+    /// The crosshair: red over an enemy in range.
+    Reticle,
     Scope,
     /// Only while zoomed (scope ticks, magnification label).
     Zoomed,
@@ -50,9 +52,8 @@ fn hud_role(name: &str, magnification: f32) -> HudRole {
         "weapon_background_single" | "weapon_background_right" => HudRole::Background,
         "ammo_meter_single" | "ammo_meter_right" => HudRole::AmmoMeter,
         "ammo_meter_zoomed" => HudRole::ZoomedAmmoMeter,
-        "crosshair" | "heat_background" | "heat_background_right" | "battery_meter" => {
-            HudRole::Static
-        }
+        "crosshair" => HudRole::Reticle,
+        "heat_background" | "heat_background_right" | "battery_meter" => HudRole::Static,
         n if n.contains("scope_mask") => HudRole::Scope,
         "left_crosshair" | "right_crosshair" | "top_crosshair" | "bottom_crosshair"
         | "distance_meter" | "covenant_2xa" | "covenant_2xb" => HudRole::Zoomed,
@@ -220,22 +221,30 @@ pub fn display_name(name: &str) -> String {
     name.replace('_', " ").to_uppercase()
 }
 
-pub fn player_name(me: usize, i: usize) -> String {
-    if i == me {
-        "YOU".into()
-    } else {
-        format!("PLAYER {}", i + 1)
+/// Player `i` as player `me` is told about them: "YOU", or their gamertag.
+pub fn player_name(game: &Game, me: usize, i: usize) -> String {
+    match game.name(i) {
+        _ if i == me => "YOU".into(),
+        "" => format!("PLAYER {}", i + 1),
+        name => name.into(),
     }
 }
 
 /// A kill feed line, as Halo 2 words it. A betrayal is a teammate's kill.
-pub fn kill_message(me: usize, killer: Option<usize>, victim: usize, betrayal: bool) -> String {
-    let v = player_name(me, victim);
+pub fn kill_message(
+    game: &Game,
+    me: usize,
+    killer: Option<usize>,
+    victim: usize,
+    betrayal: bool,
+) -> String {
+    let name = |i| player_name(game, me, i);
+    let v = name(victim);
     match killer {
         Some(k) if k == victim && k == me => "YOU KILLED YOURSELF".into(),
         Some(k) if k == victim => format!("{v} COMMITTED SUICIDE"),
-        Some(k) if betrayal => format!("{} BETRAYED {v}", player_name(me, k)),
-        Some(k) => format!("{} KILLED {v}", player_name(me, k)),
+        Some(k) if betrayal => format!("{} BETRAYED {v}", name(k)),
+        Some(k) => format!("{} KILLED {v}", name(k)),
         None => format!("{v} DIED"),
     }
 }
@@ -298,6 +307,13 @@ fn chase_distance(game: &Game, i: usize) -> Option<f32> {
     game.chase_distance(i)
 }
 
+/// How far away the crosshair shows a player's name.
+const NAME_RANGE: f32 = 60.0;
+/// Seconds a name stays up after the crosshair leaves them.
+const NAME_LINGER: f32 = 0.6;
+/// Teammates this close and in sight have their names over them.
+const TEAMMATE_NAME_RANGE: f32 = 25.0;
+
 pub struct LocalPlayer {
     /// The game player this person controls.
     pub player: usize,
@@ -327,6 +343,12 @@ pub struct LocalPlayer {
     /// A standing line at the top of the view (LAN games to join).
     pub notice: Option<String>,
     pub view: ViewEvents,
+    /// The player last under the crosshair, and seconds their name stays up.
+    pub tagged: Option<(usize, f32)>,
+    /// Teammates nearby in plain sight, who have their names over them.
+    pub friends_seen: Vec<usize>,
+    /// The player under the crosshair right now, and how far.
+    pub aimed_at: Option<(usize, f32)>,
 }
 
 impl LocalPlayer {
@@ -352,6 +374,9 @@ impl LocalPlayer {
             messages: Vec::new(),
             notice: None,
             view: ViewEvents::default(),
+            tagged: None,
+            friends_seen: Vec::new(),
+            aimed_at: None,
         }
     }
 
@@ -495,6 +520,95 @@ impl LocalPlayer {
             m.1 -= dt;
         }
         self.messages.retain(|m| m.1 > 0.0);
+        self.tag(game, world, dt);
+    }
+
+    /// Note who is under the crosshair and which teammates are in sight,
+    /// so their names show over them.
+    fn tag(&mut self, game: &Game, world: &World, dt: f32) {
+        self.friends_seen.clear();
+        self.aimed_at = None;
+        let me = self.me(game);
+        if !me.alive {
+            self.tagged = None;
+            return;
+        }
+        let eye = self.camera.position;
+        let own = me.seat.map(|(v, _)| v);
+        for (j, q) in game.players.iter().enumerate() {
+            if j == self.player || !q.alive || game.is_enemy(self.player, j) {
+                continue;
+            }
+            if own.is_some() && q.seat.map(|(v, _)| v) == own {
+                continue;
+            }
+            let to = q.eye() - eye;
+            let d = to.length();
+            if d < TEAMMATE_NAME_RANGE && world.raycast(eye, to / d.max(1e-3), d).is_none() {
+                self.friends_seen.push(j);
+            }
+        }
+        let dir = self.camera.forward();
+        self.aimed_at = game.player_along(world, self.player, eye, dir, NAME_RANGE);
+        match self.aimed_at {
+            Some((j, _)) => self.tagged = Some((j, NAME_LINGER)),
+            None => {
+                if let Some(t) = &mut self.tagged {
+                    t.1 -= dt;
+                }
+            }
+        }
+        self.tagged = self
+            .tagged
+            .filter(|&(j, left)| left > 0.0 && game.players.get(j).is_some_and(|p| p.alive));
+    }
+
+    /// The crosshair's colour: red with an enemy under it in the weapon's
+    /// range, as in Halo 2.
+    fn reticle_color(&self, game: &Game, weapon: &WeaponAssets) -> [f32; 4] {
+        match self.aimed_at {
+            Some((j, d)) if d <= weapon.autoaim_range && game.is_enemy(self.player, j) => hud::RED,
+            _ => hud::BLUE,
+        }
+    }
+
+    /// Gamertags over teammates nearby and over whoever is under the
+    /// crosshair, as Halo 2 shows them.
+    fn name_tags(&self, hb: &mut HudBuilder, scene: &Scene, game: &Game, (w, h): (f32, f32)) {
+        let me = self.me(game);
+        if !me.alive {
+            return;
+        }
+        let view_proj = self
+            .camera
+            .view_proj(w / h.max(1.0), self.magnification(scene, game));
+        let s = hb.scale();
+        let tagged = self
+            .tagged
+            .map(|t| t.0)
+            .filter(|j| !self.friends_seen.contains(j));
+        for j in self.friends_seen.iter().copied().chain(tagged) {
+            let Some(q) = game.players.get(j).filter(|q| q.alive) else {
+                continue;
+            };
+            let above = q.body.position + Vec3::Z * (q.body.height() + 0.25);
+            let clip = view_proj * above.extend(1.0);
+            if clip.w <= 0.01 {
+                continue;
+            }
+            let ndc = clip.truncate() / clip.w;
+            if ndc.x.abs() > 1.0 || ndc.y.abs() > 1.0 {
+                continue;
+            }
+            let (x, y) = ((ndc.x * 0.5 + 0.5) * w, (0.5 - ndc.y * 0.5) * h);
+            let color = if game.is_enemy(self.player, j) {
+                hud::RED
+            } else {
+                hud::BLUE
+            };
+            let size = 8.0 * s;
+            hb.text(scene.hud_font, [x, y - size], size, &q.name, color);
+        }
     }
 
     /// Pick and advance the first person animations: bring a new weapon up,
@@ -831,6 +945,7 @@ impl LocalPlayer {
                 colors[1],
             );
         }
+        self.name_tags(&mut hb, scene, game, (w, h));
         self.objective_waypoints(&mut hb, scene, game, (w, h));
         if let Some(text) = self.objective_prompt(game) {
             hb.text(
@@ -846,7 +961,7 @@ impl LocalPlayer {
                 Some(t) if t == me.team => "YOUR TEAM WINS".to_string(),
                 Some(t) => format!("{} TEAM WINS", TEAM_NAMES[t.min(1) as usize]),
                 None if winner == self.player => "YOU WIN".to_string(),
-                None => format!("{} WINS", player_name(self.player, winner)),
+                None => format!("{} WINS", player_name(game, self.player, winner)),
             };
             hb.text(font, [w * 0.5, h * 0.3], 20.0 * s, &text, hud::BLUE);
         }
@@ -875,11 +990,12 @@ impl LocalPlayer {
             if let Some((weapon, state)) = gun {
                 // A vehicle gun's HUD is its reticle (and one for aiming
                 // at friends).
-                weapon_hud(&mut hb, scene, weapon, state, |name, _| {
+                let reticle = self.reticle_color(game, weapon);
+                weapon_hud(&mut hb, scene, weapon, state, reticle, |name, _| {
                     if name.contains("friend") {
                         HudRole::Hidden
                     } else {
-                        HudRole::Static
+                        HudRole::Reticle
                     }
                 });
             }
@@ -898,10 +1014,13 @@ impl LocalPlayer {
             return hb.finish();
         };
         let def = &weapon.def;
-        weapon_hud(&mut hb, scene, weapon, state, hud_role);
+        let reticle = self.reticle_color(game, weapon);
+        weapon_hud(&mut hb, scene, weapon, state, reticle, hud_role);
         let left = me.left.as_ref();
         if let Some((lw, ls)) = left.and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state))) {
-            weapon_hud(&mut hb, scene, lw, ls, |name, _| left_hud_role(name));
+            weapon_hud(&mut hb, scene, lw, ls, reticle, |name, _| {
+                left_hud_role(name)
+            });
         }
         if def.uses_ammo() && state.loaded == 0 && state.reloading.is_none() {
             let msg = if state.reserve == 0 {
@@ -951,6 +1070,7 @@ fn weapon_hud(
     scene: &Scene,
     weapon: &WeaponAssets,
     state: &WeaponState,
+    reticle: [f32; 4],
     role: impl Fn(&str, f32) -> HudRole,
 ) {
     let font = scene.hud_font;
@@ -986,7 +1106,15 @@ fn weapon_hud(
                 hb.widget(widget, hud::BLUE, hud_mode::METER_BLUE, ammo_fill)
             }
             HudRole::Static => hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0),
-            HudRole::Zoomed if zoomed => hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0),
+            HudRole::Reticle => hb.widget(widget, reticle, hud_mode::CHANNELS, 0.0),
+            HudRole::Zoomed if zoomed => {
+                let color = if widget.name.ends_with("_crosshair") {
+                    reticle
+                } else {
+                    hud::BLUE
+                };
+                hb.widget(widget, color, hud_mode::CHANNELS, 0.0)
+            }
             _ => {}
         }
     }
@@ -1036,12 +1164,19 @@ mod tests {
 
     #[test]
     fn kill_feed_wording() {
-        assert_eq!(kill_message(0, Some(0), 1, false), "YOU KILLED PLAYER 2");
-        assert_eq!(kill_message(0, Some(1), 0, false), "PLAYER 2 KILLED YOU");
-        assert_eq!(kill_message(0, Some(0), 0, false), "YOU KILLED YOURSELF");
-        assert_eq!(kill_message(0, None, 2, false), "PLAYER 3 DIED");
-        assert_eq!(kill_message(0, Some(0), 2, true), "YOU BETRAYED PLAYER 3");
-        assert_eq!(kill_message(0, Some(1), 0, true), "PLAYER 2 BETRAYED YOU");
+        let mut g = h2sim::testing::game();
+        for _ in 0..3 {
+            g.add_player();
+        }
+        g.set_name(2, "Sarge");
+        let kill = |me, killer, victim, betrayal| kill_message(&g, me, killer, victim, betrayal);
+        assert_eq!(kill(0, Some(0), 1, false), "YOU KILLED PLAYER 2");
+        assert_eq!(kill(0, Some(1), 0, false), "PLAYER 2 KILLED YOU");
+        assert_eq!(kill(0, Some(0), 0, false), "YOU KILLED YOURSELF");
+        assert_eq!(kill(0, None, 2, false), "SARGE DIED");
+        assert_eq!(kill(0, Some(0), 2, true), "YOU BETRAYED SARGE");
+        assert_eq!(kill(0, Some(1), 0, true), "PLAYER 2 BETRAYED YOU");
+        assert_eq!(kill(1, Some(2), 2, false), "SARGE COMMITTED SUICIDE");
     }
 
     #[test]
