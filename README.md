@@ -39,6 +39,8 @@ install. No game files are included in this repository.
   that suits the fight, and only spot a camouflaged player close up or when
   they fire.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
+- `h2live`: online play, like Halo 2 on Xbox Live: Bungie's levels 1 to 50
+  (hidden XP per ranked playlist, won and lost against each opponent).
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
 - `h2viewer`: the game: Halo 2 style menus and lobby, Halo 2's maps with their

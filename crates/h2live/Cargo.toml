@@ -1,0 +1,8 @@
+[package]
+name = "h2live"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Online play, like Halo 2 on Xbox Live: levels, playlists and matchmaking"
+
+[dependencies]
