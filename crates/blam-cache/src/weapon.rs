@@ -441,6 +441,78 @@ pub fn read_weapon_effects(
     })
 }
 
+const EQIP_POWERUP_TYPE: usize = 0x12C;
+const EQIP_POWERUP_TIME: usize = 0x130;
+const EQIP_PICKUP_SOUND: usize = 0x134;
+const MAGAZINE_EQUIPMENT: usize = 0x54;
+const MAGAZINE_EQUIPMENT_SIZE: usize = 0xC;
+
+/// What picking up a piece of equipment (eqip) does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerupType {
+    /// Ammo packs and the like.
+    None,
+    DoubleSpeed,
+    Overshield,
+    ActiveCamouflage,
+    FullSpectrumVision,
+    Health,
+    Grenade,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Equipment {
+    pub powerup: PowerupType,
+    /// Seconds the power-up lasts.
+    pub powerup_time: f32,
+    pub pickup_sound: Option<DatumIndex>,
+}
+
+pub fn read_equipment(set: &mut MapSet, eqip: DatumIndex) -> Result<Equipment> {
+    let (_, tag, d) = set.tag_data(eqip)?;
+    if d.len() < EQIP_PICKUP_SOUND + 8 {
+        return Err(Error::Corrupt(format!(
+            "equipment tag {} too short",
+            tag.name
+        )));
+    }
+    Ok(Equipment {
+        powerup: match i16_at(&d, EQIP_POWERUP_TYPE) {
+            1 => PowerupType::DoubleSpeed,
+            2 => PowerupType::Overshield,
+            3 => PowerupType::ActiveCamouflage,
+            4 => PowerupType::FullSpectrumVision,
+            5 => PowerupType::Health,
+            6 => PowerupType::Grenade,
+            _ => PowerupType::None,
+        },
+        powerup_time: f32_at(&d, EQIP_POWERUP_TIME),
+        pickup_sound: tag_ref(&d, EQIP_PICKUP_SOUND),
+    })
+}
+
+/// The ammo packs a weapon's magazines take: rounds in each (0 for a full
+/// load) and the equipment.
+pub fn magazine_equipment(set: &mut MapSet, weap: DatumIndex) -> Result<Vec<(u16, DatumIndex)>> {
+    let (src, _, d) = set.tag_data(weap)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let mut packs = Vec::new();
+    for m in file
+        .read_block(region, &d, WEAP_MAGAZINES, MAGAZINE_SIZE)?
+        .as_chunks::<MAGAZINE_SIZE>()
+        .0
+    {
+        let entries = file.read_block(region, m, MAGAZINE_EQUIPMENT, MAGAZINE_EQUIPMENT_SIZE)?;
+        for e in entries.as_chunks::<MAGAZINE_EQUIPMENT_SIZE>().0 {
+            if let Some(eqip) = tag_ref(e, 0x4) {
+                packs.push((i16_at(e, 0).max(0) as u16, eqip));
+            }
+        }
+    }
+    Ok(packs)
+}
+
 pub fn read_projectile(set: &mut MapSet, proj: DatumIndex) -> Result<Projectile> {
     let (_, tag, d) = set.tag_data(proj)?;
     if d.len() < PROJ_ACCELERATION_RANGE + 8 {

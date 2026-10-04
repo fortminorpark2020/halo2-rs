@@ -4,8 +4,8 @@
 
 use super::{
     DroppedWeapon, Event, Flag, FlagEvent, Game, GameType, Grenade, GrenadeKind, HeldWeapon,
-    HillControl, HillEvent, ItemKind, LeadChange, Look, Medal, Projectile, Spartan, StuckRound,
-    DROPPED_WEAPON_LIFETIME, NEUTRAL, TEAMS,
+    HillControl, HillEvent, ItemKind, LeadChange, Look, Medal, Powerup, Projectile, Spartan,
+    StuckRound, DROPPED_WEAPON_LIFETIME, NEUTRAL, TEAMS,
 };
 use crate::game::Command;
 use crate::weapon::WeaponState;
@@ -222,6 +222,13 @@ fn write_kind(w: &mut Writer, kind: ItemKind) {
         }
         ItemKind::FragGrenades => w.u8(1),
         ItemKind::PlasmaGrenades => w.u8(2),
+        ItemKind::Powerup(Powerup::Overshield) => w.u8(3),
+        ItemKind::Powerup(Powerup::Camouflage) => w.u8(4),
+        ItemKind::Ammo { weapon, rounds } => {
+            w.u8(5);
+            w.index(Some(weapon));
+            w.u32(rounds);
+        }
     }
 }
 
@@ -230,6 +237,12 @@ fn read_kind(r: &mut Reader, weapons: usize) -> Result<ItemKind, Malformed> {
         0 => ItemKind::Weapon(r.index_below(weapons)?),
         1 => ItemKind::FragGrenades,
         2 => ItemKind::PlasmaGrenades,
+        3 => ItemKind::Powerup(Powerup::Overshield),
+        4 => ItemKind::Powerup(Powerup::Camouflage),
+        5 => ItemKind::Ammo {
+            weapon: r.index_below(weapons)?,
+            rounds: r.u32()?,
+        },
         _ => return Err(Malformed),
     })
 }
@@ -627,6 +640,8 @@ impl Game {
             w.f32(p.shield);
             w.f32(p.health);
             w.f32(p.since_damage);
+            w.f32(p.camo);
+            w.f32(p.reveal);
             w.bool(p.alive);
             w.f32(p.respawn_in);
             w.u8(p.weapons.len().min(2) as u8 | (p.left.is_some() as u8) << 4);
@@ -786,6 +801,8 @@ impl Game {
             p.shield = r.f32()?;
             p.health = r.f32()?;
             p.since_damage = r.f32()?;
+            p.camo = r.f32()?;
+            p.reveal = r.f32()?.clamp(0.0, 1.0);
             p.alive = r.bool()?;
             p.respawn_in = r.f32()?;
             let counts = r.u8()?;

@@ -463,6 +463,11 @@ impl Soundscape {
                     ItemKind::Weapon(w) => scene.weapons.get(w).and_then(|w| w.sounds.pickup),
                     ItemKind::FragGrenades => g.grenade_pickup[0],
                     ItemKind::PlasmaGrenades => g.grenade_pickup[1],
+                    ItemKind::Powerup(_) | ItemKind::Ammo { .. } => scene
+                        .item_sounds
+                        .iter()
+                        .find(|(k, _)| *k == kind)
+                        .and_then(|(_, s)| *s),
                 };
                 self.play(scene, s, body(player), Some(player), listeners, 1.0);
             }

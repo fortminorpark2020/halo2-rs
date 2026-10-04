@@ -19,6 +19,7 @@ use blam_cache::{
 };
 use glam::{Mat4, Vec3};
 use h2sim::game::FallingDamage;
+use h2sim::game::Powerup;
 use h2sim::weapon::Rounds;
 use h2sim::{ItemKind, WeaponDef};
 use std::collections::HashMap;
@@ -589,6 +590,12 @@ pub struct Scene {
     pub grenades: [GrenadeAssets; 2],
     pub objects: Vec<SceneObject>,
     pub items: Vec<MapItem>,
+    /// What picking up a power-up or an ammo pack sounds like.
+    pub item_sounds: Vec<(ItemKind, Option<usize>)>,
+    /// From the power-up tags: seconds an overshield drains over, and
+    /// camouflage lasts.
+    pub overshield_time: Option<f32>,
+    pub camo_time: Option<f32>,
     /// The level's baked light, for lighting objects.
     pub level_light: LevelLight,
     /// The player's own HUD (shields, motion tracker, grenades).
@@ -1488,9 +1495,26 @@ impl Scene {
             }
         }
         let mut items = Vec::new();
-        for spawn in scenario::netgame_equipment(&mut loader.set).unwrap_or_default() {
+        let mut item_sounds: Vec<(ItemKind, Option<usize>)> = Vec::new();
+        let (mut overshield_time, mut camo_time) = (None, None);
+        // Ammo packs: the equipment each weapon's magazines take.
+        let mut packs = Vec::new();
+        for (w, assets) in weapons.iter().enumerate() {
+            for (rounds, eqip) in
+                weapon::magazine_equipment(&mut loader.set, assets.tag).unwrap_or_default()
+            {
+                packs.push((eqip, w, rounds as u32));
+            }
+        }
+        let equipment = scenario::netgame_equipment(&mut loader.set).unwrap_or_default();
+        for (k, spawn) in equipment.into_iter().enumerate() {
+            // A collection of several (any power-up) gives each spot one of
+            // them in turn, the same on every PC.
             let collection = scenario::item_collection(&mut loader.set, spawn.collection);
-            let Some(&(_, item)) = collection.ok().and_then(|c| c.first().copied()).as_ref() else {
+            let Some((_, item)) = collection
+                .ok()
+                .and_then(|c| c.get(k % c.len().max(1)).copied())
+            else {
                 continue;
             };
             let name = loader
@@ -1504,6 +1528,33 @@ impl Scene {
                 ItemKind::FragGrenades
             } else if name.ends_with("plasma_grenade") {
                 ItemKind::PlasmaGrenades
+            } else if let Ok(e) = weapon::read_equipment(&mut loader.set, item) {
+                let (kind, sound) = match e.powerup {
+                    weapon::PowerupType::Overshield => {
+                        overshield_time = Some(e.powerup_time).filter(|t| *t > 0.0);
+                        // Its tag has no sound of its own.
+                        let sound = e.pickup_sound.or_else(|| {
+                            loader.find("snd!", "sound\\game_sfx\\multiplayer\\pickup_health")
+                        });
+                        (ItemKind::Powerup(Powerup::Overshield), sound)
+                    }
+                    weapon::PowerupType::ActiveCamouflage => {
+                        camo_time = Some(e.powerup_time).filter(|t| *t > 0.0);
+                        (ItemKind::Powerup(Powerup::Camouflage), e.pickup_sound)
+                    }
+                    weapon::PowerupType::None => {
+                        let Some(&(_, weapon, rounds)) = packs.iter().find(|p| p.0 == item) else {
+                            continue;
+                        };
+                        (ItemKind::Ammo { weapon, rounds }, e.pickup_sound)
+                    }
+                    _ => continue,
+                };
+                if !item_sounds.iter().any(|(k, _)| *k == kind) {
+                    let sound = sound.and_then(|s| loader.sound(s));
+                    item_sounds.push((kind, sound));
+                }
+                kind
             } else {
                 continue;
             };
@@ -1511,18 +1562,27 @@ impl Scene {
                 ItemKind::Weapon(w) => weapons[w].world_mesh,
                 _ => loader.object_mesh(item, &mut meshes),
             };
+            // Weapons and grenades settle on the ground in the game; lay
+            // them on their side rather than as placed in the editor.
+            // Power-ups and ammo packs stand as placed.
+            let lies = matches!(
+                kind,
+                ItemKind::Weapon(_) | ItemKind::FragGrenades | ItemKind::PlasmaGrenades
+            );
             let light =
                 level_light.at(&loader.textures, Vec3::from(spawn.position) + Vec3::Z * 0.2);
             items.push(MapItem {
                 kind,
                 mesh,
-                // Items settle on the ground in the game; lay them on their
-                // side rather than as placed in the editor.
-                transform: placement_matrix(
-                    spawn.position,
-                    [spawn.rotation[0], 0.0, std::f32::consts::FRAC_PI_2],
-                    1.0,
-                ),
+                transform: if lies {
+                    placement_matrix(
+                        spawn.position,
+                        [spawn.rotation[0], 0.0, std::f32::consts::FRAC_PI_2],
+                        1.0,
+                    )
+                } else {
+                    placement_matrix(spawn.position, spawn.rotation, 1.0)
+                },
                 position: Vec3::from(spawn.position),
                 respawn_seconds: match spawn.respawn_seconds {
                     0 => 30.0,
@@ -1698,6 +1758,9 @@ impl Scene {
             grenades,
             objects,
             items,
+            item_sounds,
+            overshield_time,
+            camo_time,
             level_light,
             player_hud,
             hud_font,

@@ -1,7 +1,7 @@
 //! Drawing the game's vehicles: each posed for its state (wheels turning
 //! and riding their suspension, turrets aiming) where the game has it.
 
-use crate::gpu::DrawCall;
+use crate::gpu::{DrawCall, Fx};
 use crate::scene::{Scene, Vertex};
 use glam::Vec3;
 use h2sim::Game;
@@ -34,6 +34,7 @@ pub fn draws(scene: &Scene, game: &Game) -> (Vec<DrawCall>, Vec<(usize, Vec<Vert
             light,
             colors: None,
             emblem: None,
+            fx: Fx::default(),
         });
         if let (Some(mesh), Some(vertices), Some((_, attach))) =
             (turret, turret_vertices, &kind.turret)
@@ -45,6 +46,7 @@ pub fn draws(scene: &Scene, game: &Game) -> (Vec<DrawCall>, Vec<(usize, Vec<Vert
                 light,
                 colors: None,
                 emblem: None,
+                fx: Fx::default(),
             });
         }
     }

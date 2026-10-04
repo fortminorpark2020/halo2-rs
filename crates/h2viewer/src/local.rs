@@ -4,7 +4,7 @@
 
 use crate::camera::{self, FlyCamera};
 use crate::effects;
-use crate::gpu::{self, hud_mode, DrawCall, SpriteVertex};
+use crate::gpu::{self, hud_mode, DrawCall, Fx, SpriteVertex};
 use crate::hud::{self, HudBuilder};
 use crate::input::PadState;
 use crate::rig;
@@ -194,6 +194,31 @@ pub fn player_colors(game: &Game, player: usize) -> [[f32; 3]; 2] {
         }
         Some(p) => armor_colors(p.look),
         None => armor_colors(Look::default()),
+    }
+}
+
+/// The shield meter's overshield layers.
+const OVERSHIELD_GREEN: [f32; 4] = [0.35, 1.0, 0.45, 0.95];
+const OVERSHIELD_YELLOW: [f32; 4] = [1.0, 0.9, 0.3, 0.95];
+
+/// How a player's power-ups show on them: see-through with active
+/// camouflage, glowing with an overshield.
+pub fn player_fx(game: &Game, player: usize) -> Fx {
+    match game.players.get(player) {
+        Some(p) if p.alive => Fx {
+            camo: 1.0 - p.visibility(),
+            overshield: p.overshield(&game.rules),
+        },
+        _ => Fx::default(),
+    }
+}
+
+/// Your own arms and gun with active camouflage: still faintly there so
+/// you can see what you hold. (An overshield shows on the HUD instead.)
+fn own_fx(game: &Game, player: usize) -> Fx {
+    Fx {
+        camo: player_fx(game, player).camo * 0.8,
+        overshield: 0.0,
     }
 }
 
@@ -751,6 +776,7 @@ impl LocalPlayer {
                         light,
                         colors: Some(crate::objective::flag_colors(f.team)),
                         emblem: crate::objective::flag_emblem(game, f.team),
+                        fx: Fx::default(),
                     });
                 }
                 // The left hand's gun: the same arm and gun, mirrored.
@@ -783,6 +809,7 @@ impl LocalPlayer {
                 light,
                 colors: None,
                 emblem: None,
+                fx: Fx::default(),
             });
             let node = weapon
                 .skeleton
@@ -824,6 +851,7 @@ impl LocalPlayer {
             light,
             colors: Some(player_colors(game, self.player)),
             emblem: None,
+            fx: own_fx(game, self.player),
         });
         out.view_models.push(DrawCall {
             mesh: gun_mesh,
@@ -831,6 +859,7 @@ impl LocalPlayer {
             light,
             colors: None,
             emblem: None,
+            fx: own_fx(game, self.player),
         });
         let muzzle = hand
             .rig
@@ -893,7 +922,14 @@ impl LocalPlayer {
                 }
                 "shield_meter" => {
                     let color = if flash { hud::RED } else { hud::BLUE };
-                    hb.widget(widget, color, hud_mode::METER_GREY, shield);
+                    hb.widget(widget, color, hud_mode::METER_GREY, shield.min(1.0));
+                    // An overshield fills the meter again, once green and
+                    // once yellow.
+                    for (layer, color) in [(1.0, OVERSHIELD_GREEN), (2.0, OVERSHIELD_YELLOW)] {
+                        if shield > layer {
+                            hb.widget(widget, color, hud_mode::METER_GREY, shield - layer);
+                        }
+                    }
                 }
                 "shield_mask" => hb.widget(widget, hud::BLUE, hud_mode::PLAIN, 0.0),
                 // Dual wielding, the left gun's display takes its place.

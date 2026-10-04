@@ -17,6 +17,8 @@ use ride::Riding;
 
 /// How far a bot sees.
 const SIGHT: f32 = 35.0;
+/// Camouflaged enemies are noticed within this distance.
+const CAMO_NOTICE: f32 = 3.0;
 /// Seconds between seeing someone and shooting at them.
 const REACTION: f32 = 0.35;
 /// Radians per second a bot can turn.
@@ -197,17 +199,21 @@ impl Bot {
         len < SIGHT && world.raycast(from, d / len.max(1e-4), len).is_none()
     }
 
-    /// The nearest enemy in sight.
+    /// The nearest enemy in sight. Camouflaged ones are only spotted close
+    /// up, or when firing gives them away.
     fn find_target(&self, game: &Game, world: &World, me: usize) -> Option<usize> {
         let eye = game.players[me].eye();
         game.players
             .iter()
             .enumerate()
             .filter(|(j, p)| game.is_enemy(me, *j) && p.alive)
-            .map(|(j, p)| (j, p.eye().distance(eye), p.eye() - Vec3::Z * 0.1))
-            .filter(|&(_, d, chest)| d < SIGHT && Bot::visible(world, eye, chest))
+            .map(|(j, p)| {
+                let sight = (SIGHT * p.visibility()).max(CAMO_NOTICE);
+                (j, p.eye().distance(eye), p.eye() - Vec3::Z * 0.1, sight)
+            })
+            .filter(|&(_, d, chest, sight)| d < sight && Bot::visible(world, eye, chest))
             .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(j, _, _)| j)
+            .map(|(j, ..)| j)
     }
 
     /// Where the game sends this bot while no one is in sight, and whether

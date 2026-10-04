@@ -15,6 +15,7 @@ mod ctf;
 mod dual;
 mod juggernaut;
 mod options;
+mod powerups;
 mod projectiles;
 mod sensor;
 mod sync;
@@ -22,6 +23,7 @@ mod vehicles;
 mod zones;
 pub use ctf::{Flag, FlagEvent, NEUTRAL};
 pub use options::{MapWeapons, Options};
+pub use powerups::Powerup;
 pub use projectiles::{Homing, Projectile, StuckRound};
 pub use sensor::{Blip, SENSOR_RANGE};
 pub use sync::{Malformed, Reader, Writer};
@@ -311,6 +313,9 @@ pub struct Rules {
     /// Seconds for empty shields to fill.
     pub shield_recharge: f32,
     pub respawn_time: f32,
+    /// Seconds an overshield takes to drain away, and active camouflage lasts.
+    pub overshield_time: f32,
+    pub camo_time: f32,
     /// Weapons (indexes into the weapon list) every player spawns with.
     pub starting_weapons: Vec<usize>,
     pub starting_frags: u8,
@@ -410,6 +415,9 @@ impl Default for Rules {
             shield_delay: 5.0,
             shield_recharge: 2.0,
             respawn_time: 5.0,
+            // Halo 2's power-up tags.
+            overshield_time: 60.0,
+            camo_time: 45.0,
             starting_weapons: Vec::new(),
             starting_frags: 2,
             starting_plasmas: 0,
@@ -462,6 +470,13 @@ pub enum ItemKind {
     Weapon(usize),
     FragGrenades,
     PlasmaGrenades,
+    Powerup(Powerup),
+    /// An ammo pack for a weapon: rounds for whoever carries it (0 for a
+    /// full load).
+    Ammo {
+        weapon: usize,
+        rounds: u32,
+    },
 }
 
 /// A place items appear on the map.
@@ -514,9 +529,16 @@ pub struct Spartan {
     pub body: Player,
     pub yaw: f32,
     pub pitch: f32,
+    /// Above the rules' shield while an overshield lasts.
     pub shield: f32,
     pub health: f32,
     since_damage: f32,
+    /// Shield an overshield picked up has yet to charge.
+    overshield_charge: f32,
+    /// Seconds of active camouflage left.
+    pub camo: f32,
+    /// How much firing and getting hurt give a camouflaged player away (0-1).
+    pub reveal: f32,
     pub alive: bool,
     /// Seconds until respawning, while dead.
     pub respawn_in: f32,
@@ -982,6 +1004,9 @@ impl Game {
             shield: self.rules.shield,
             health: self.rules.health,
             since_damage: f32::INFINITY,
+            overshield_charge: 0.0,
+            camo: 0.0,
+            reveal: 0.0,
             alive: true,
             respawn_in: 0.0,
             weapons,
@@ -1120,6 +1145,7 @@ impl Game {
                 p.shield = (p.shield + self.rules.shield / self.rules.shield_recharge * dt)
                     .min(self.rules.shield);
             }
+            powerups::step(p, &self.rules, dt);
             p.readying = (p.readying - dt).max(0.0);
             p.melee_cooldown = (p.melee_cooldown - dt).max(0.0);
             p.grenade_cooldown = (p.grenade_cooldown - dt).max(0.0);
@@ -1319,6 +1345,7 @@ impl Game {
         weapon: usize,
         left: bool,
     ) {
+        self.reveal(i, powerups::FIRE_REVEAL);
         // Slow and explosive rounds fly; the rest hit at once.
         if let Some(flight) = def.flight {
             self.launch(i, eye, dir, weapon, flight);
@@ -1368,6 +1395,7 @@ impl Game {
     }
 
     fn melee(&mut self, i: usize, lunge: bool) {
+        self.reveal(i, powerups::FIRE_REVEAL);
         let (eye, aim) = (self.players[i].eye(), self.players[i].aim());
         let reach = if lunge { LUNGE_RANGE } else { MELEE_RANGE };
         let mut target: Option<(usize, f32)> = None;
@@ -1441,6 +1469,7 @@ impl Game {
             age: 0.0,
         };
         self.grenades.push(g);
+        self.reveal(i, powerups::FIRE_REVEAL);
         self.events.push(Event::Thrown { player: i });
     }
 
@@ -1549,6 +1578,7 @@ impl Game {
             return;
         }
         p.since_damage = 0.0;
+        p.reveal = p.reveal.max(powerups::HURT_REVEAL);
         // What gets past the shields (all of it once they're down).
         let past = if p.shield <= 0.0 {
             amount
@@ -1583,6 +1613,8 @@ impl Game {
         p.alive = false;
         p.health = 0.0;
         p.shield = 0.0;
+        p.overshield_charge = 0.0;
+        p.camo = 0.0;
         p.respawn_in = respawn;
         p.deaths += 1;
         p.spree = 0;
@@ -1740,6 +1772,8 @@ impl Game {
                     };
                     (*count < max).then(|| *count += 1).is_some()
                 }
+                ItemKind::Powerup(kind) => self.give_powerup(i, kind),
+                ItemKind::Ammo { weapon, rounds } => self.take_ammo(i, weapon, rounds),
                 ItemKind::Weapon(w) => {
                     let mut state = match self.weapons.get(w) {
                         Some(def) => WeaponState::new(def),

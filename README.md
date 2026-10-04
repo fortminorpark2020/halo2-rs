@@ -21,6 +21,10 @@ install. No game files are included in this repository.
   weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
   with Halo 2's damage table (sniper rounds twice as hard on shields, plasma
   1.5 times on shields but a third on bodies, explosions half on shields),
+  the maps' power-ups (the overshield charges shields to three times and
+  drains back over a minute; active camouflage all but hides a player for 45
+  seconds, less so while they fire or get hurt) and ammo packs for power
+  weapons, timed from their tags,
   the rules of every Halo 2 game type: Slayer, Capture the Flag, King of the
   Hill, Oddball, Juggernaut, Territories and Assault, with team versions of
   Slayer, King and Oddball (shields, health, grenades, pickups, respawns,
@@ -31,8 +35,9 @@ install. No game files are included in this repository.
   defend, finding their way over a walking graph sampled from each level's
   floors, and in Slayer take the vehicles they come across (driving, running
   people over, manning turrets and a teammate's Warthog gun). Bots go for
-  power weapons lying nearby, dual wield, and switch to the gun that suits
-  the fight.
+  power weapons and power-ups lying nearby, dual wield, switch to the gun
+  that suits the fight, and only spot a camouflaged player close up or when
+  they fire.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).

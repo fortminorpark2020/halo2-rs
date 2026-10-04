@@ -4,7 +4,7 @@
 //! arrows over them; and what players are told when something happens.
 
 use crate::effects;
-use crate::gpu::{hud_mode, DrawCall, SpriteVertex};
+use crate::gpu::{hud_mode, DrawCall, Fx, SpriteVertex};
 use crate::hud::HudBuilder;
 use crate::local::{armor_colors, LocalPlayer, TEAM_COLORS};
 use crate::scene::{FlagAssets, Scene, Vertex};
@@ -286,6 +286,7 @@ impl App {
                     light: light_at(f.home),
                     colors: None,
                     emblem: None,
+                    fx: Fx::default(),
                 });
             }
             if f.carrier.is_some() {
@@ -306,6 +307,7 @@ impl App {
                     light,
                     colors: None,
                     emblem: None,
+                    fx: Fx::default(),
                 });
             }
             if let (Some(flag), true) = (&scene.flag, ctf) {
@@ -315,6 +317,7 @@ impl App {
                     light,
                     colors: Some(flag_colors(f.team)),
                     emblem: flag_emblem(game, f.team),
+                    fx: Fx::default(),
                 });
             }
         }
@@ -389,6 +392,7 @@ pub fn carried_cloth(scene: &Scene, game: &Game, player: usize, pole: Mat4) -> O
         light: None,
         colors: Some(flag_colors(f.team)),
         emblem: flag_emblem(game, f.team),
+        fx: Fx::default(),
     })
 }
 

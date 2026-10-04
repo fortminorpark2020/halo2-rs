@@ -3,13 +3,17 @@
 
 use super::Bot;
 use crate::collision::World;
-use crate::game::{Command, Game, HeldWeapon, ItemKind};
+use crate::game::{Command, Game, HeldWeapon, ItemKind, Powerup};
 use glam::{Vec2, Vec3};
 
 /// How far a bot goes out of its way for a better weapon.
 const WEAPON_SEARCH: f32 = 15.0;
 /// A weapon must be worth this much more than the one it replaces.
 const WORTH_SWAPPING: f32 = 1.0;
+/// How much power-ups and ammo for a gun running low are worth (a rocket
+/// launcher in place of an SMG gains 6).
+const POWERUP_VALUE: f32 = 5.0;
+const AMMO_VALUE: f32 = 2.0;
 /// Seconds between weapon switches in a fight.
 const SWITCH_WAIT: f32 = 1.5;
 /// Seconds going for one weapon before giving up on it.
@@ -149,9 +153,40 @@ impl Bot {
         self.fetching = None;
     }
 
-    /// Weapons lying close by worth having, and how much (less the farther
-    /// away). With an objective to play, only the closest are worth the
-    /// detour.
+    /// What a power-up would add: worth a detour unless the bot already
+    /// has it.
+    fn powerup_gain(game: &Game, me: usize, kind: Powerup) -> f32 {
+        let p = &game.players[me];
+        match kind {
+            Powerup::Overshield if p.overshield(&game.rules) < 0.5 && game.rules.shield > 0.0 => {
+                POWERUP_VALUE
+            }
+            Powerup::Camouflage if p.camo < game.rules.camo_time * 0.5 => POWERUP_VALUE,
+            _ => 0.0,
+        }
+    }
+
+    /// An ammo pack is worth fetching for a gun that's running low.
+    fn ammo_gain(game: &Game, me: usize, weapon: usize) -> f32 {
+        let Some(def) = game.weapons.get(weapon) else {
+            return 0.0;
+        };
+        let p = &game.players[me];
+        let low = p
+            .weapons
+            .iter()
+            .chain(&p.left)
+            .any(|h| h.weapon == weapon && h.state.reserve < def.maximum_rounds / 2);
+        if low {
+            AMMO_VALUE
+        } else {
+            0.0
+        }
+    }
+
+    /// Weapons, power-ups and ammo lying close by worth having, and how
+    /// much (less the farther away). With an objective to play, only the
+    /// closest are worth the detour.
     fn weapons_wanted(&self, game: &Game, me: usize) -> Vec<(Vec3, f32)> {
         let feet = game.players[me].body.position;
         let search = if Bot::objective(game, me).is_some() {
@@ -159,20 +194,28 @@ impl Bot {
         } else {
             WEAPON_SEARCH
         };
-        let lying = game
+        let items = game
             .item_spawns
             .iter()
             .zip(&game.item_timers)
             .filter(|(_, t)| **t <= 0.0)
-            .filter_map(|(s, _)| match s.kind {
-                ItemKind::Weapon(w) => Some((s.position, w)),
-                _ => None,
-            })
-            .chain(game.dropped.iter().map(|d| (d.position, d.weapon)));
-        lying
-            .filter_map(|(at, w)| {
+            .map(|(s, _)| {
+                let gain = match s.kind {
+                    ItemKind::Weapon(w) => Bot::weapon_gain(game, me, w),
+                    ItemKind::Powerup(kind) => Bot::powerup_gain(game, me, kind),
+                    ItemKind::Ammo { weapon, .. } => Bot::ammo_gain(game, me, weapon),
+                    ItemKind::FragGrenades | ItemKind::PlasmaGrenades => 0.0,
+                };
+                (s.position, gain)
+            });
+        let dropped = game
+            .dropped
+            .iter()
+            .map(|d| (d.position, Bot::weapon_gain(game, me, d.weapon)));
+        items
+            .chain(dropped)
+            .filter_map(|(at, gain)| {
                 let d = at.distance(feet);
-                let gain = Bot::weapon_gain(game, me, w);
                 let shunned = self.shunned_weapons.iter().any(|s| s.distance(at) < 0.5);
                 let wanted = d < search && gain > WORTH_SWAPPING && !shunned;
                 wanted.then_some((at, gain - d * 0.1))
@@ -275,6 +318,23 @@ mod tests {
             let cmd = bot.think(g, &world, &nav, me);
             g.step(&world, &[cmd]);
         }
+    }
+
+    #[test]
+    fn bots_fetch_power_ups() {
+        let (mut g, ..) = armory();
+        let me = g.add_player();
+        g.players[me].body.position = Vec3::ZERO;
+        g.item_spawns.push(crate::game::ItemSpawn {
+            kind: ItemKind::Powerup(Powerup::Overshield),
+            position: Vec3::new(8.0, 0.0, 0.0),
+            respawn: 1000.0,
+        });
+        g.item_timers.push(0.0);
+        let mut bot = Bot::new(5);
+        play(&mut g, &mut bot, me, 8.0);
+        assert!(g.item_timers[0] > 0.0, "never went for it");
+        assert!(g.players[me].overshield(&g.rules) > 0.5);
     }
 
     #[test]

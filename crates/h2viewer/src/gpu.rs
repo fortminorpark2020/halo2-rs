@@ -28,9 +28,12 @@ struct DrawUniforms {
     /// coordinates; none when z <= x) and its two colours.
     emblem: [f32; 4],
     emblem_colors: [[f32; 4]; 2],
+    /// x: how hidden by active camouflage (0-1), y: overshield glow (drawn
+    /// as a shell over the body), z: seconds, for shimmering.
+    fx: [f32; 4],
 }
 
-const SLOT: u64 = 256;
+const SLOT: u64 = 512;
 const MAX_DRAWS: u64 = 1024;
 
 /// A coloured, textured point of an effect (decal, flash, puff) in world space.
@@ -74,6 +77,17 @@ pub struct DrawCall {
     pub colors: Option<[[f32; 3]; 2]>,
     /// The player's emblem, for surfaces that show it.
     pub emblem: Option<Emblem>,
+    /// Power-ups showing on a player.
+    pub fx: Fx,
+}
+
+/// How power-ups show on a player and what they hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Fx {
+    /// Active camouflage: 0 in plain sight, 1 unseen.
+    pub camo: f32,
+    /// Overshield glow, 0-1.
+    pub overshield: f32,
 }
 
 /// HUD batches number the menus' own textures from here.
@@ -184,6 +198,8 @@ struct U {
     emblem: vec4<f32>,
     emblem_primary: vec4<f32>,
     emblem_secondary: vec4<f32>,
+    // x: camouflage, y: overshield shell, z: seconds.
+    fx: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(1) @binding(0) var tex: texture_2d<f32>;
@@ -213,6 +229,11 @@ fn vs(
 ) -> Out {
     var o: Out;
     o.clip = u.mvp * vec4<f32>(position, 1.0);
+    if (u.fx.y > 0.0) {
+        // The overshield's shell sits just outside the armour.
+        o.clip = u.mvp * vec4<f32>(position + normal * 0.006, 1.0);
+        o.clip.z *= 1.002;
+    }
     if (m.mode.y > 3.5) {
         // Emblems lie on the armour; nudge them in front of it (depth is
         // reversed, so nearer is larger).
@@ -304,6 +325,26 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     }
     let fog = clamp(distance(i.world, u.camera.xyz) / 400.0, 0.0, 1.0) * u.params.x;
     let sky = vec3<f32>(0.62, 0.70, 0.80);
+    if (u.fx.y > 0.0 || u.fx.x > 0.0) {
+        let n = normalize(i.normal);
+        let v = normalize(u.camera.xyz - i.world);
+        let edge = 1.0 - abs(dot(n, v));
+        let ripple = 0.5 + 0.5 * sin(i.world.z * 70.0 - u.fx.z * 7.0 + i.world.x * 25.0);
+        if (u.fx.y > 0.0) {
+            // Overshield: a flickering glow, brightest at the edges.
+            let glow = (0.03 + 0.6 * pow(edge, 3.0)) * (0.5 + 0.5 * ripple) * u.fx.y;
+            return vec4<f32>(vec3<f32>(0.45, 1.0, 0.55) * glow, 1.0);
+        }
+        // Active camouflage: see-through but for a shimmer at the edges.
+        var a = alpha;
+        if (m.mode.x < 1.5) {
+            a = 1.0;
+        }
+        let shown = 1.0 - u.fx.x;
+        let shimmer = pow(edge, 2.5) * (0.2 + 0.3 * ripple);
+        let tint = colour * mix(0.3, 1.0, shown);
+        return vec4<f32>(mix(tint, sky, fog * fog), a * max(shown, shimmer));
+    }
     if (m.mode.x > 2.5) {
         // Additive: fade out rather than towards the fog colour.
         return vec4<f32>(colour * alpha * (1.0 - fog * fog), 1.0);
@@ -396,6 +437,14 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Objects' uniform slots by how they are drawn.
+#[derive(Default)]
+struct Slotted {
+    plain: Vec<(usize, u32)>,
+    cloaked: Vec<(usize, u32)>,
+    shells: Vec<(usize, u32)>,
+}
+
 pub struct GpuMesh {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
@@ -418,6 +467,8 @@ pub struct Gpu {
     additive_pipeline: wgpu::RenderPipeline,
     sprite_pipeline: wgpu::RenderPipeline,
     hud_pipeline: wgpu::RenderPipeline,
+    /// For shimmering effects.
+    started: std::time::Instant,
     material_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     repeat: wgpu::Sampler,
@@ -892,6 +943,7 @@ impl Gpu {
             depth,
             staging: Vec::new(),
             view_size: (1.0, 1.0),
+            started: std::time::Instant::now(),
         };
         gpu.load_scene(scene);
         Ok(gpu)
@@ -1058,6 +1110,7 @@ impl Gpu {
         camera: Vec3,
         [fog, shading]: [f32; 2],
         object: Option<&DrawCall>,
+        fx: [f32; 4],
     ) -> Option<u32> {
         let light = object.and_then(|d| d.light);
         let colors = object.and_then(|d| d.colors);
@@ -1081,6 +1134,7 @@ impl Gpu {
                     [r, g, b, 1.0]
                 })
             }),
+            fx,
         };
         self.staging.extend_from_slice(bytemuck::bytes_of(&u));
         self.staging.resize((offset + SLOT) as usize, 0);
@@ -1163,26 +1217,29 @@ impl Gpu {
         let sky = f.sky.as_ref().and_then(|d| {
             Some((
                 d.mesh,
-                self.slot(f.sky_proj, d.model, cam, [0.0, UNLIT], None)?,
+                self.slot(f.sky_proj, d.model, cam, [0.0, UNLIT], None, [0.0; 4])?,
             ))
         });
-        let mut world = Vec::new();
-        for d in f.world {
-            let shading = self.meshes.get(d.mesh).map_or(OBJECT, |m| m.shading);
-            if let Some(o) = self.slot(f.view_proj, d.model, cam, [1.0, shading], Some(d)) {
-                world.push((d.mesh, o));
-            }
-        }
-        let sprites_slot = self.slot(f.view_proj, Mat4::IDENTITY, cam, [0.0, OBJECT], None);
-        let mut views = Vec::new();
-        for d in f.view_models {
-            if let Some(o) = self.slot(f.view_model_proj, d.model, cam, [0.0, OBJECT], Some(d)) {
-                views.push((d.mesh, o));
-            }
-        }
-        let view_sprites_slot =
-            self.slot(f.view_model_proj, Mat4::IDENTITY, cam, [0.0, OBJECT], None);
-        let hud_slot = self.slot(Mat4::IDENTITY, Mat4::IDENTITY, cam, [0.0, OBJECT], None);
+        let world = self.draw_slots(f.view_proj, cam, 1.0, f.world);
+        let none = [0.0; 4];
+        let sprites_slot = self.slot(f.view_proj, Mat4::IDENTITY, cam, [0.0, OBJECT], None, none);
+        let views = self.draw_slots(f.view_model_proj, cam, 0.0, f.view_models);
+        let view_sprites_slot = self.slot(
+            f.view_model_proj,
+            Mat4::IDENTITY,
+            cam,
+            [0.0, OBJECT],
+            None,
+            none,
+        );
+        let hud_slot = self.slot(
+            Mat4::IDENTITY,
+            Mat4::IDENTITY,
+            cam,
+            [0.0, OBJECT],
+            None,
+            none,
+        );
         self.queue.write_buffer(&self.uniforms, 0, &self.staging);
 
         let sprites = self.vertex_buffer(f.sprites);
@@ -1245,14 +1302,13 @@ impl Gpu {
                 ..Default::default()
             });
             fit(&mut pass);
-            let pipelines = (&self.mesh_pipeline, &self.alpha_pipeline);
-            self.draw_meshes(&mut pass, &world, pipelines);
+            self.draw_slotted(&mut pass, &world);
             if let (Some(buf), Some(offset)) = (&sprites, sprites_slot) {
                 self.draw_sprites(&mut pass, buf, f.sprites.len(), offset);
             }
         }
         // First person weapon on top of the world.
-        if !views.is_empty() || view_sprites.is_some() {
+        if !views.plain.is_empty() || !views.cloaked.is_empty() || view_sprites.is_some() {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("view model"),
                 color_attachments: &[Some(color())],
@@ -1260,8 +1316,7 @@ impl Gpu {
                 ..Default::default()
             });
             fit(&mut pass);
-            let pipelines = (&self.mesh_pipeline, &self.alpha_pipeline);
-            self.draw_meshes(&mut pass, &views, pipelines);
+            self.draw_slotted(&mut pass, &views);
             if let (Some(buf), Some(offset)) = (&view_sprites, view_sprites_slot) {
                 self.draw_sprites(&mut pass, buf, f.view_sprites.len(), offset);
             }
@@ -1283,6 +1338,64 @@ impl Gpu {
             }
         }
         self.queue.submit([enc.finish()]);
+    }
+
+    /// Uniform slots for objects: plain ones, camouflaged ones and
+    /// overshield shells.
+    fn draw_slots(&mut self, proj: Mat4, cam: Vec3, fog: f32, draws: &[DrawCall]) -> Slotted {
+        let now = self.started.elapsed().as_secs_f32();
+        let mut out = Slotted::default();
+        for d in draws {
+            let shading = self.meshes.get(d.mesh).map_or(OBJECT, |m| m.shading);
+            let fx = [d.fx.camo, 0.0, now, 0.0];
+            if let Some(o) = self.slot(proj, d.model, cam, [fog, shading], Some(d), fx) {
+                let list = if d.fx.camo > 0.0 {
+                    &mut out.cloaked
+                } else {
+                    &mut out.plain
+                };
+                list.push((d.mesh, o));
+            }
+            let glow = d.fx.overshield * (1.0 - d.fx.camo);
+            if glow > 0.01 {
+                let fx = [0.0, glow, now, 0.0];
+                if let Some(o) = self.slot(proj, d.model, cam, [fog, shading], Some(d), fx) {
+                    out.shells.push((d.mesh, o));
+                }
+            }
+        }
+        out
+    }
+
+    /// Plain meshes, then camouflaged ones over them, then glowing shells.
+    fn draw_slotted(&self, pass: &mut wgpu::RenderPass, s: &Slotted) {
+        let pipelines = (&self.mesh_pipeline, &self.alpha_pipeline);
+        self.draw_meshes(pass, &s.plain, pipelines);
+        self.draw_whole(pass, &s.cloaked, &self.alpha_pipeline);
+        self.draw_whole(pass, &s.shells, &self.additive_pipeline);
+    }
+
+    /// Draw every surface of these meshes with one pipeline.
+    fn draw_whole(
+        &self,
+        pass: &mut wgpu::RenderPass,
+        meshes: &[(usize, u32)],
+        pipeline: &wgpu::RenderPipeline,
+    ) {
+        pass.set_pipeline(pipeline);
+        for &(mesh, offset) in meshes {
+            let Some(m) = self.meshes.get(mesh) else {
+                continue;
+            };
+            pass.set_bind_group(0, &self.globals, &[offset]);
+            pass.set_bind_group(2, self.armour_emblems(), &[]);
+            pass.set_vertex_buffer(0, m.vertices.slice(..));
+            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for (material, range, _) in &m.batches {
+                pass.set_bind_group(1, &self.materials[*material], &[]);
+                pass.draw_indexed(range.clone(), 0, 0..1);
+            }
+        }
     }
 
     /// Draw meshes (mesh, uniform offset): opaque surfaces, then alpha

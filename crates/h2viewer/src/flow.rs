@@ -472,6 +472,22 @@ impl App {
                 pad: self.locals[0].pad,
                 ..LocalPlayer::new(0, &self.game)
             };
+            // Splitscreen player two stands in front, facing them (testing).
+            if self.locals.len() > 1 {
+                let me = &self.game.players[0];
+                let (at, yaw) = (
+                    me.body.position + me.aim() * 2.0,
+                    me.yaw + std::f32::consts::PI,
+                );
+                let them = self.locals[1].player;
+                let p = &mut self.game.players[them];
+                p.body.position = at;
+                p.yaw = yaw;
+                self.locals[1] = LocalPlayer {
+                    pad: self.locals[1].pad,
+                    ..LocalPlayer::new(them, &self.game)
+                };
+            }
         } else if self.scene.spawns.is_empty() {
             // No spawn points: look over the level from above.
             self.locals[0].flying = true;
@@ -492,6 +508,17 @@ impl App {
             // H2_DUAL=1: a second one in the left hand (for testing).
             if std::env::var_os("H2_DUAL").is_some() {
                 self.give_weapon(0, w);
+            }
+        }
+        // H2_POWERUP=camo or overshield: everyone starts with it (testing).
+        let powerup = match std::env::var("H2_POWERUP").as_deref() {
+            Ok("camo") => Some(h2sim::game::Powerup::Camouflage),
+            Ok("overshield") => Some(h2sim::game::Powerup::Overshield),
+            _ => None,
+        };
+        if let Some(kind) = powerup {
+            for i in 0..self.game.players.len() {
+                self.game.give_powerup(i, kind);
             }
         }
         // H2_VEHICLE_HEALTH=<fraction>: start the vehicles damaged (testing).

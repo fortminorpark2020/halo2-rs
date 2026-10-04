@@ -55,9 +55,9 @@ use camera::FlyCamera;
 use effects::Effects;
 use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
-use gpu::{hud_mode, DrawCall, Frame, HudBatch};
+use gpu::{hud_mode, DrawCall, Frame, Fx, HudBatch};
 use h2sim::bot::{bot_look, bot_name};
-use h2sim::game::{guest_name, Event, GrenadeKind, HeldWeapon, TICK};
+use h2sim::game::{guest_name, Event, GrenadeKind, HeldWeapon, Powerup, TICK};
 use h2sim::vehicle::SeatRole;
 use h2sim::{
     Bot, Command, Game, GameType, ItemKind, ItemSpawn, KillZone, NavGraph, Rules, WeaponState,
@@ -159,6 +159,8 @@ fn rules(scene: &Scene) -> Rules {
         frag,
         plasma,
         falling: scene.falling.unwrap_or(defaults.falling),
+        overshield_time: scene.overshield_time.unwrap_or(defaults.overshield_time),
+        camo_time: scene.camo_time.unwrap_or(defaults.camo_time),
         ..defaults
     }
 }
@@ -498,6 +500,10 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
                 | Event::Splattered { .. }
                 | Event::VehicleDestroyed { .. }
                 | Event::VehicleSpawned { .. } => println!("{t:6.1} {e:?}"),
+                Event::PickedUp {
+                    kind: ItemKind::Powerup(_) | ItemKind::Ammo { .. },
+                    ..
+                } => println!("{t:6.1} {e:?}"),
                 _ => {}
             }
         }
@@ -1081,6 +1087,14 @@ impl App {
                             .unwrap_or_default(),
                         ItemKind::FragGrenades => "FRAG GRENADE".into(),
                         ItemKind::PlasmaGrenades => "PLASMA GRENADE".into(),
+                        ItemKind::Powerup(Powerup::Overshield) => "OVERSHIELD".into(),
+                        ItemKind::Powerup(Powerup::Camouflage) => "ACTIVE CAMOUFLAGE".into(),
+                        ItemKind::Ammo { weapon, .. } => self
+                            .scene
+                            .weapons
+                            .get(weapon)
+                            .map(|a| format!("{} AMMO", display_name(&a.def.name)))
+                            .unwrap_or_default(),
                     };
                     if let Some(l) = self.local_of(player) {
                         l.message(format!("PICKED UP {what}"));
@@ -1295,6 +1309,7 @@ impl App {
             light,
             colors: Some(local::armor_colors(self.menu.profile.look)),
             emblem: Some(self.menu.profile.look.emblem),
+            fx: Fx::default(),
         }];
         let rifle = self
             .scene
@@ -1309,6 +1324,7 @@ impl App {
                 light,
                 colors: None,
                 emblem: None,
+                fx: Fx::default(),
             });
         }
         (draws, Some((pose.mesh, pose.vertices.clone())))
@@ -1325,6 +1341,7 @@ impl App {
             light: None,
             colors: None,
             emblem: None,
+            fx: Fx::default(),
         }];
         for o in &scene.objects {
             world.push(DrawCall {
@@ -1333,6 +1350,7 @@ impl App {
                 light: o.light,
                 colors: None,
                 emblem: None,
+                fx: Fx::default(),
             });
         }
         let spots = self.game.item_spawns.iter().zip(&self.game.item_timers);
@@ -1351,6 +1369,7 @@ impl App {
                     light: item.light,
                     colors: None,
                     emblem: None,
+                    fx: Fx::default(),
                 });
             }
         }
@@ -1362,6 +1381,7 @@ impl App {
                     light: light_at(d.position),
                     colors: None,
                     emblem: None,
+                    fx: Fx::default(),
                 });
             }
         }
@@ -1380,6 +1400,7 @@ impl App {
                     light: light_at(g.position),
                     colors: None,
                     emblem: None,
+                    fx: Fx::default(),
                 });
             }
         }
@@ -1395,6 +1416,7 @@ impl App {
                 light: light_at(p.position),
                 colors: None,
                 emblem: None,
+                fx: Fx::default(),
             });
         }
         world.extend(self.flag_draws());
@@ -1417,6 +1439,7 @@ impl App {
             light,
             colors: Some(player_colors(&self.game, player)),
             emblem: Some(p.look.emblem),
+            fx: local::player_fx(&self.game, player),
         }];
         // Drivers and gunners hold the controls, not their guns.
         let hands_free = local::seat_of(&self.game, player)
@@ -1436,6 +1459,11 @@ impl App {
                     light,
                     colors: None,
                     emblem: None,
+                    // Camouflage hides the gun too; the glow is the body's.
+                    fx: Fx {
+                        overshield: 0.0,
+                        ..out[0].fx
+                    },
                 });
             }
         }
@@ -1584,6 +1612,7 @@ impl App {
                         light: None,
                         colors: None,
                         emblem: None,
+                        fx: Fx::default(),
                     }),
                     sky_proj: camera::projection(v.aspect, v.magnification, 1.0, 10000.0)
                         * sky_view,
