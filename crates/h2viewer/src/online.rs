@@ -4,11 +4,11 @@
 //! last said through an `OnlineView`, and what players choose there comes
 //! back as menu actions, which become requests to the service.
 //!
-//! H2_LIVE names the service. `mem` runs one inside the game, for testing,
-//! with H2_LIVE_FAKE_PLAYERS=<n> made-up players signed in to it: some in
-//! parties, one inviting us into theirs, all taking our invites. Services
-//! on the network (ws:// and wss:// addresses) need a transport that isn't
-//! here yet.
+//! H2_LIVE names the service: ws://host:port or wss://host for one on the
+//! network (reached over a WebSocket, dialed in the background), or `mem`
+//! to run one inside the game, for testing, with H2_LIVE_FAKE_PLAYERS=<n>
+//! made-up players signed in to it: some in parties, one inviting us into
+//! theirs, all taking our invites.
 
 use crate::menu::{Action, MapChoice, Screen, Sound};
 use crate::App;
@@ -25,12 +25,15 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The service tried without H2_LIVE: one on this PC.
 const DEFAULT_SERVICE: &str = "ws://127.0.0.1:47050";
-/// Why a ws:// or wss:// service can't be reached yet.
-pub const NO_TRANSPORT: &str = "ONLINE PLAY OVER THE NETWORK ISN'T AVAILABLE YET";
+/// Longest signing in waits for the service to answer: one hosted for free
+/// sleeps while no one plays, and takes up to a minute to wake.
+const DIAL_WAIT: Duration = Duration::from_secs(90);
+/// Seconds of waiting after which the service is probably waking up.
+const WAKING: f64 = 5.0;
 /// Shown when the service turned down our gamertag.
 const TAKEN: &str = "THAT GAMERTAG IS TAKEN. TYPE ANOTHER, THEN SIGN IN";
 /// Most made-up players an in-game service has.
@@ -171,6 +174,8 @@ pub struct OnlineView<'a> {
     /// Why signing in failed or the link was lost (otherwise, until signed
     /// in, still signing in).
     pub failed: Option<&'a str>,
+    /// The service is slow to answer: waking up, probably.
+    pub waking: bool,
     pub text: &'a LiveText,
     /// The party's search: its playlist (or `QUICKMATCH`) and seconds so
     /// far.
@@ -349,6 +354,8 @@ impl OnlineView<'_> {
 /// This PC's link to the online service.
 pub struct Online {
     link: Link,
+    /// When we began to dial the service.
+    dialed: f64,
     /// The clock the service's messages are timed by.
     clock: Instant,
     /// Where the PC's key is kept (identity.key).
@@ -396,6 +403,17 @@ fn card_path(identity: &Path) -> PathBuf {
     identity.with_file_name(format!("{name}-card.txt"))
 }
 
+/// Where on the service at `address` a path is (`live` for signing in,
+/// `link` for relay legs), whatever path the address had.
+fn service_url(address: &str, path: &str) -> String {
+    let base = address.trim_end_matches('/');
+    let base = ["/live", "/link"]
+        .iter()
+        .find_map(|p| base.strip_suffix(p))
+        .unwrap_or(base);
+    format!("{base}/{path}")
+}
+
 /// The maps this PC has, as the service names them.
 fn map_hashes(maps: &[MapChoice]) -> Vec<(String, u64)> {
     let hash = |m: &MapChoice| Some((m.name.clone(), live::map_hash(&m.path).ok()?));
@@ -406,6 +424,7 @@ impl Online {
     pub fn new(text: LiveText, identity: Option<PathBuf>) -> Online {
         Online {
             link: Link::Offline,
+            dialed: 0.0,
             clock: Instant::now(),
             identity,
             failed: None,
@@ -433,6 +452,7 @@ impl Online {
         Some(OnlineView {
             live,
             failed: self.failed.as_deref(),
+            waking: matches!(self.link, Link::Dialing(..)) && now - self.dialed > WAKING,
             text: &self.text,
             search: self.search.map(|(p, since)| (p, now - since)),
         })
@@ -442,6 +462,7 @@ impl Online {
     /// `fakes` made-up players if the service runs in the game.
     pub fn connect(&mut self, address: &str, profile: client::Profile, fakes: usize, now: f64) {
         self.sign_out();
+        self.dialed = now;
         match self.dial(address, fakes, now) {
             Ok(connection) => self.link = Link::Dialing(connection, profile),
             Err(why) => self.failed = Some(why),
@@ -467,8 +488,7 @@ impl Online {
         }
         let lower = address.to_ascii_lowercase();
         if lower.starts_with("ws://") || lower.starts_with("wss://") {
-            // h2net::dial(address, ...) once that transport is here.
-            return Err(NO_TRANSPORT.into());
+            return Ok(h2net::dial(&service_url(address, "live"), DIAL_WAIT));
         }
         Err(format!("NO ONLINE SERVICE AT {}", address.to_uppercase()))
     }
@@ -933,11 +953,92 @@ mod tests {
         until(&mut online, &mut now, |v| v.party_size() == 5);
         let v = online.view(now).unwrap();
         assert_eq!(v.search_status().0, "SEARCHING FOR A GAME...");
-        // Signing out leaves; a service on the network isn't there yet.
+        // Signing out leaves.
         online.sign_out();
         assert!(online.view(now).is_none());
-        online.connect("wss://h2live.example.com/live", profile("JOHN"), 0, now);
-        assert_eq!(online.view(now).unwrap().failed, Some(NO_TRANSPORT));
+    }
+
+    /// A service on a port of its own, as the h2live program runs one:
+    /// WebSockets that come to it are the server's, by their path.
+    struct NetService {
+        server: Server,
+        asked: Receiver<Result<h2net::Request, String>>,
+        port: u16,
+        clock: Instant,
+    }
+
+    impl NetService {
+        fn start(dir: &Path) -> NetService {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, asked) = mpsc::channel();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let _ = tx.send(h2net::accept(stream));
+                }
+            });
+            NetService {
+                server: Server::open(dir, Some("a test service")).unwrap(),
+                asked,
+                port,
+                clock: Instant::now(),
+            }
+        }
+
+        /// Seconds since it started.
+        fn now(&self) -> f64 {
+            self.clock.elapsed().as_secs_f64()
+        }
+
+        /// Take what came and run the server a step, after a moment.
+        fn poll(&mut self) -> f64 {
+            std::thread::sleep(Duration::from_millis(5));
+            let now = self.now();
+            while let Ok(Ok(h2net::Request::WebSocket(conn, path, _))) = self.asked.try_recv() {
+                let route = if path == "/link" {
+                    Route::Link
+                } else {
+                    Route::Live
+                };
+                self.server
+                    .accept(conn, route, IpAddr::V4(Ipv4Addr::LOCALHOST), now);
+            }
+            self.server.poll(now);
+            now
+        }
+    }
+
+    #[test]
+    fn services_on_the_network_are_dialed_in_the_background() {
+        let home = TempDir(std::env::temp_dir().join(format!("h2-dial-{}", std::process::id())));
+        let mut service = NetService::start(&home.0.join("service"));
+        let mut online = Online::new(LiveText::default(), Some(home.0.join("identity.key")));
+        let address = format!("ws://127.0.0.1:{}/live/", service.port);
+        online.connect(&address, profile("JOHN"), 0, 0.0);
+        let view = online.view(0.0).unwrap();
+        assert!(view.live.is_none() && view.failed.is_none() && !view.waking);
+        assert!(online.view(WAKING + 1.0).unwrap().waking, "slow to answer");
+        let signed_in = (0..1000).any(|_| {
+            let now = service.poll();
+            online.poll(now);
+            online.view(now).is_some_and(|v| v.party().is_some())
+        });
+        assert!(signed_in);
+        // Nothing there: why comes back, to the notice line.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("ws://127.0.0.1:{}", closed.local_addr().unwrap().port());
+        drop(closed);
+        online.connect(&address, profile("JOHN"), 0, 0.0);
+        let failed = (0..1000).find_map(|_| {
+            std::thread::sleep(Duration::from_millis(5));
+            online.poll(service.now());
+            online.failed.clone()
+        });
+        assert!(failed.unwrap().starts_with("COULDN'T CONNECT"));
+        // Addresses that aren't the service's say so at once.
+        online.connect("h2live.example.com", profile("JOHN"), 0, 0.0);
+        let why = online.view(0.0).unwrap().failed.unwrap();
+        assert_eq!(why, "NO ONLINE SERVICE AT H2LIVE.EXAMPLE.COM");
     }
 
     #[test]

@@ -894,6 +894,9 @@ impl Menu {
             Row::EndGame => ("END GAME".into(), None),
             Row::Continue => ("CONTINUE".into(), None),
             Row::Online => ("ONLINE".into(), None),
+            Row::Connecting if ctx.online.is_some_and(|o| o.waking) => {
+                ("WAKING UP THE SERVER (UP TO A MINUTE)...".into(), None)
+            }
             Row::Connecting => ("CONNECTING...".into(), None),
             Row::SignIn => ("SIGN IN".into(), None),
             Row::Matchmaking => ("MATCHMAKING".into(), None),
@@ -2657,6 +2660,7 @@ mod tests {
         OnlineView {
             live,
             failed: None,
+            waking: false,
             text: Box::leak(Box::default()),
             search: None,
         }
@@ -2678,6 +2682,16 @@ mod tests {
         };
         assert_eq!(m.rows(&c), [Row::Connecting]);
         assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.label(Row::Connecting, &c).0, "CONNECTING...");
+        let waking = OnlineView {
+            waking: true,
+            ..online(None)
+        };
+        let c = Context {
+            online: Some(&waking),
+            ..ctx(&maps, &[])
+        };
+        assert!(m.label(Row::Connecting, &c).0.starts_with("WAKING UP"));
         // Turned away: SIGN IN again.
         let failed = OnlineView {
             failed: Some("SERVER FULL"),
