@@ -11,13 +11,15 @@
 //! the host and the joining PC (`Host::add_connection`, `Client::over`),
 //! with the game sent 30 times a second rather than after every tick, and
 //! mostly as how it changed since the last. Those connections are
-//! WebSockets: PCs `dial` the service, and it `accept`s them.
+//! WebSockets: PCs `dial` the service, and it `accept`s them. The messages
+//! between a PC and the online service itself are in `live`.
 
 mod client;
 mod conn;
 mod delta;
 mod discovery;
 mod host;
+pub mod live;
 mod lobby;
 mod ws;
 
@@ -31,7 +33,7 @@ pub use lobby::{Lobby, LobbyPlayer};
 pub use ws::{accept, dial, reply, Request};
 
 /// Bumped whenever the messages change; PCs on different versions can't play.
-pub const PROTOCOL: u32 = 22;
+pub const PROTOCOL: u32 = 23;
 /// A joining player's team when the host is to choose it.
 pub const ANY_TEAM: u8 = u8::MAX;
 /// The host listens here (or the next free port above it).
