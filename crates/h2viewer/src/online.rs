@@ -23,6 +23,7 @@ use h2sim::bot::{bot_look, bot_name};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
@@ -34,6 +35,9 @@ pub const NO_TRANSPORT: &str = "ONLINE PLAY OVER THE NETWORK ISN'T AVAILABLE YET
 const TAKEN: &str = "THAT GAMERTAG IS TAKEN. TYPE ANOTHER, THEN SIGN IN";
 /// Most made-up players an in-game service has.
 const MAX_FAKES: usize = 15;
+/// Seconds a search we asked for may take to start before we give up on
+/// it (the service always answers sooner).
+const ASK_WAIT: f64 = 10.0;
 
 /// Halo 2's string lists the online screens use, in mainmenu.map.
 const PLAYLIST_TEXT: &str = "multiplayer\\matchmaking_hopper_descriptions";
@@ -321,8 +325,16 @@ impl OnlineView<'_> {
             }
             Stage::Joining => (words(t, "joining_game", "JOINING A GAME..."), None),
             Stage::Starting => (words(t, "starting_game", "STARTING THE GAME..."), None),
-            Stage::Failed => (words(t, "matchmaking_failed", "MATCHMAKING FAILED"), None),
+            Stage::Failed => (words(t, "matchmaking_failed", "MATCHMAKING FAILED!"), None),
         }
+    }
+
+    /// Why the party's last search ended, if it gave up: "MATCHMAKING
+    /// FAILED!"
+    pub fn search_failed(&self) -> Option<String> {
+        let failed = self.live?.status?.stage == Stage::Failed;
+        let t = &self.text.progress;
+        failed.then(|| words(t, "matchmaking_failed", "MATCHMAKING FAILED!"))
     }
 
     /// "SARGE IS THE PARTY LEADER": Halo 2's text marks where the name
@@ -346,6 +358,9 @@ pub struct Online {
     /// The party's search: its playlist (or `QUICKMATCH`) and when it began,
     /// while it searches.
     search: Option<(u8, f64)>,
+    /// When we asked for a search, until the service starts it or says why
+    /// not. (It shows as searching meanwhile.)
+    asked: Option<f64>,
     /// What the party was last doing.
     activity: Activity,
     /// A service run in the game, for testing.
@@ -370,6 +385,17 @@ pub fn identity_path() -> Option<PathBuf> {
     }
 }
 
+/// Where the stat card for the key at `identity` is kept: live-card.txt
+/// beside identity.key, and `<name>-card.txt` beside any other key, so keys
+/// that share a folder (H2_IDENTITY's, say) don't share a card.
+fn card_path(identity: &Path) -> PathBuf {
+    if identity.file_name() == Some("identity.key".as_ref()) {
+        return identity.with_file_name("live-card.txt");
+    }
+    let name = identity.file_stem().unwrap_or_default().to_string_lossy();
+    identity.with_file_name(format!("{name}-card.txt"))
+}
+
 /// The maps this PC has, as the service names them.
 fn map_hashes(maps: &[MapChoice]) -> Vec<(String, u64)> {
     let hash = |m: &MapChoice| Some((m.name.clone(), live::map_hash(&m.path).ok()?));
@@ -384,6 +410,7 @@ impl Online {
             identity,
             failed: None,
             search: None,
+            asked: None,
             activity: Activity::Lobby,
             test: None,
             text,
@@ -451,6 +478,7 @@ impl Online {
         self.link = Link::Offline;
         self.failed = None;
         self.search = None;
+        self.asked = None;
         self.activity = Activity::Lobby;
         self.test = None;
     }
@@ -479,11 +507,18 @@ impl Online {
             return Vec::new();
         };
         let events = client.poll(now);
+        let searching = client.view.party.as_ref().map(|p| p.activity) == Some(Activity::Searching);
         for e in &events {
-            if let LiveEvent::Refused(why) | LiveEvent::Lost(why) = e {
-                self.link = Link::Offline;
-                self.failed = Some(why.to_uppercase());
-                self.search = None;
+            match e {
+                LiveEvent::Refused(why) | LiveEvent::Lost(why) => {
+                    self.link = Link::Offline;
+                    self.failed = Some(why.to_uppercase());
+                    self.search = None;
+                }
+                // The service says why it won't start a search we asked
+                // for with a notice.
+                LiveEvent::Notice(_) if !searching => self.asked = None,
+                _ => {}
             }
         }
         events
@@ -513,7 +548,7 @@ impl Online {
             .map_err(|e| format!("CAN'T READ {}: {e}", path.display()).to_uppercase())?;
         let card = match &self.test {
             Some(test) => test.dir.join("live-card.txt"),
-            None => path.with_file_name("live-card.txt"),
+            None => card_path(&path),
         };
         let client = LiveClient::new(conn, key, profile, &card, now);
         self.link = Link::Live(Box::new(client));
@@ -529,6 +564,8 @@ impl Online {
             Action::Search(playlist) => {
                 let playlist = playlist.unwrap_or(QUICKMATCH);
                 self.search = Some((playlist, now));
+                self.asked = Some(now);
+                self.activity = Activity::Searching;
                 client.view.status = None;
                 ToServer::Search(playlist)
             }
@@ -550,13 +587,21 @@ impl Online {
     }
 
     /// Follow the party into and out of searches its leader starts and
-    /// stops: true when it started, false when it stopped.
+    /// stops: true when it started, false when it stopped (or the service
+    /// wouldn't start ours). A search that found a match isn't stopped:
+    /// the match comes next.
     pub fn follow_party(&mut self, now: f64) -> Option<bool> {
         let Link::Live(client) = &self.link else {
             return None;
         };
         let party = client.view.party.as_ref();
         let activity = party.map_or(Activity::Lobby, |p| p.activity);
+        if let Some(asked) = self.asked {
+            if activity == Activity::Lobby && now - asked < ASK_WAIT {
+                return None;
+            }
+            self.asked = None;
+        }
         let was = std::mem::replace(&mut self.activity, activity);
         match (was, activity) {
             (Activity::Searching, Activity::Searching) => None,
@@ -564,6 +609,10 @@ impl Online {
                 let playlist = party.map_or(QUICKMATCH, |p| p.playlist);
                 self.search.get_or_insert((playlist, now));
                 Some(true)
+            }
+            (Activity::Searching, Activity::Playing) => {
+                self.search = None;
+                None
             }
             (Activity::Searching, _) => {
                 self.search = None;
@@ -652,6 +701,10 @@ impl App {
             }
             Some(false) if screen == Screen::Matchmaking => {
                 self.menu.show(Screen::Live);
+                let view = self.online.view(now);
+                if let Some(failed) = view.and_then(|v| v.search_failed()) {
+                    self.menu.notice = Some(failed);
+                }
             }
             _ => {}
         }
@@ -677,9 +730,31 @@ struct TestService {
     done: Vec<bool>,
 }
 
+/// Test services started in this process, to tell their folders apart.
+static TEST_SERVICES: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether the process `pid` still runs. Only Linux can say (elsewhere it
+/// might, so its folder is left alone).
+fn running(pid: &str) -> bool {
+    !cfg!(target_os = "linux") || Path::new("/proc").join(pid).exists()
+}
+
 impl TestService {
     fn start(fakes: usize, now: f64) -> Result<TestService, String> {
-        let dir = std::env::temp_dir().join(format!("h2live-mem-{}", std::process::id()));
+        // Each in a folder of its own, named for the process; those left
+        // by games that didn't stop cleanly go.
+        let temp = std::env::temp_dir();
+        for entry in std::fs::read_dir(&temp).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let pid = name
+                .strip_prefix("h2live-mem-")
+                .and_then(|n| n.split('-').next());
+            if pid.is_some_and(|pid| !running(pid)) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+        let n = TEST_SERVICES.fetch_add(1, Ordering::Relaxed);
+        let dir = temp.join(format!("h2live-mem-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let server = Server::open(&dir, Some("an in-game test service"))?;
         let mut service = TestService {
@@ -863,5 +938,67 @@ mod tests {
         assert!(online.view(now).is_none());
         online.connect("wss://h2live.example.com/live", profile("JOHN"), 0, now);
         assert_eq!(online.view(now).unwrap().failed, Some(NO_TRANSPORT));
+    }
+
+    #[test]
+    fn the_party_follows_its_searches() {
+        let home = TempDir(std::env::temp_dir().join(format!("h2-follow-{}", std::process::id())));
+        let mut online = Online::new(LiveText::default(), Some(home.0.join("identity.key")));
+        let mut now = 0.0;
+        online.connect("mem", profile("JOHN"), 0, now);
+        until(&mut online, &mut now, |v| v.party().is_some());
+        // Ours shows at once, but with no maps the service won't start it,
+        // and says why.
+        online.ask(&Action::Search(Some(2)), now);
+        assert_eq!(online.view(now).unwrap().search.map(|s| s.0), Some(2));
+        assert_eq!(online.follow_party(now), None, "until the service answers");
+        let mut notices = Vec::new();
+        let stopped = (0..100).find_map(|_| {
+            now += 0.05;
+            for e in online.poll(now) {
+                if let LiveEvent::Notice(text) = e {
+                    notices.push(text);
+                }
+            }
+            online.follow_party(now)
+        });
+        assert_eq!(stopped, Some(false));
+        assert_eq!(
+            notices,
+            ["YOUR PARTY HAS NO MAP FROM THIS PLAYLIST IN COMMON"]
+        );
+        assert!(online.view(now).unwrap().search.is_none());
+        // The leader's searches, as the party sees them: started, then
+        // stopped, or on to a match.
+        let set = |online: &mut Online, activity| {
+            if let Link::Live(client) = &mut online.link {
+                client.view.party.as_mut().unwrap().activity = activity;
+            }
+        };
+        set(&mut online, Activity::Searching);
+        assert_eq!(online.follow_party(now), Some(true));
+        assert!(online.view(now).unwrap().search.is_some());
+        assert_eq!(online.follow_party(now), None, "still searching");
+        set(&mut online, Activity::Playing);
+        assert_eq!(online.follow_party(now), None, "a match was found");
+        assert!(online.view(now).unwrap().search.is_none());
+        set(&mut online, Activity::Lobby);
+        assert_eq!(online.follow_party(now), None, "back from the match");
+        set(&mut online, Activity::Searching);
+        online.follow_party(now);
+        set(&mut online, Activity::Lobby);
+        assert_eq!(online.follow_party(now), Some(false), "cancelled");
+        // One the service never answers is given up on.
+        online.ask(&Action::Search(None), now);
+        assert_eq!(online.follow_party(now + 1.0), None);
+        assert_eq!(online.follow_party(now + ASK_WAIT), Some(false));
+    }
+
+    #[test]
+    fn cards_are_kept_beside_their_keys() {
+        let card = |key: &str| card_path(Path::new(key));
+        assert_eq!(card("/h/identity.key"), Path::new("/h/live-card.txt"));
+        assert_eq!(card("/h/alpha.key"), Path::new("/h/alpha-card.txt"));
+        assert_eq!(card("/h/bravo"), Path::new("/h/bravo-card.txt"));
     }
 }

@@ -14,7 +14,8 @@ use h2net::live::OnlinePlayer;
 use h2net::live::{self, Privacy};
 use h2net::{LanGame, Lobby};
 use h2sim::game::{
-    clean_name, Emblem, Look, EMBLEM_BACKGROUNDS, EMBLEM_FOREGROUNDS, MAX_NAME, PROFILE_COLORS,
+    clean_name, name_char, Emblem, Look, EMBLEM_BACKGROUNDS, EMBLEM_FOREGROUNDS, MAX_NAME,
+    PROFILE_COLORS,
 };
 use h2sim::GameType;
 use std::path::{Path, PathBuf};
@@ -420,8 +421,6 @@ enum Row {
     LeaveParty,
     /// Someone else online.
     Player(usize),
-    /// More players than the list shows.
-    MorePlayers,
     Invite,
     JoinTheirParty,
     MakeLeader,
@@ -443,8 +442,9 @@ const MAIN_ROWS: [Row; 5] = [
     Row::Profile,
     Row::Quit,
 ];
-/// Most players the online list shows.
-const MAX_PLAYER_ROWS: usize = 8;
+/// Most rows a list (games on the network, players online, playlists)
+/// shows at once; the rest scroll into view.
+const MAX_LIST_ROWS: usize = 8;
 
 impl Row {
     fn selectable(self, ctx: &Context) -> bool {
@@ -453,7 +453,6 @@ impl Row {
             | Row::Waiting
             | Row::NoMissions
             | Row::Connecting
-            | Row::MorePlayers
             | Row::Nothing
             | Row::SearchStatus
             | Row::SearchDetail => false,
@@ -484,6 +483,8 @@ impl Row {
 pub struct Menu {
     pub screen: Screen,
     cursor: usize,
+    /// The first row shown of a list longer than `MAX_LIST_ROWS`.
+    scroll: usize,
     pub settings: Settings,
     /// A line to show (why a game ended, a join that failed).
     pub notice: Option<String>,
@@ -593,6 +594,7 @@ impl Menu {
         Menu {
             screen: Screen::Main,
             cursor: 0,
+            scroll: 0,
             settings,
             notice: None,
             sound: None,
@@ -606,6 +608,34 @@ impl Menu {
     pub fn show(&mut self, screen: Screen) {
         self.screen = screen;
         self.cursor = 0;
+        self.scroll = 0;
+    }
+
+    /// The screen is a list that scrolls when long.
+    fn lists(&self) -> bool {
+        matches!(
+            self.screen,
+            Screen::SystemLink | Screen::Players | Screen::Playlists
+        )
+    }
+
+    /// The rows shown of `n`: on a long list, `MAX_LIST_ROWS` from the
+    /// first scrolled to.
+    fn shown(&self, n: usize) -> std::ops::Range<usize> {
+        if !self.lists() {
+            return 0..n;
+        }
+        let first = self.scroll.min(n.saturating_sub(MAX_LIST_ROWS));
+        first..n.min(first + MAX_LIST_ROWS)
+    }
+
+    /// Scroll a long list so the cursor's row shows.
+    fn follow_cursor(&mut self) {
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + MAX_LIST_ROWS {
+            self.scroll = self.cursor + 1 - MAX_LIST_ROWS;
+        }
     }
 
     fn title(&self) -> &'static str {
@@ -674,21 +704,14 @@ impl Menu {
                 Row::TimeLimit,
             ],
             Screen::SystemLink if ctx.lan.is_empty() => vec![Row::Searching],
-            Screen::SystemLink => (0..ctx.lan.len().min(8)).map(Row::Join).collect(),
+            Screen::SystemLink => (0..ctx.lan.len()).map(Row::Join).collect(),
             Screen::Pause => vec![Row::Resume, Row::EndGame, Row::Quit],
             Screen::PostGame => vec![Row::Continue],
             Screen::Live => live_rows(ctx),
-            Screen::Players => {
-                let n = ctx.online.map_or(0, |o| o.others().len());
-                let mut rows: Vec<Row> = (0..n.min(MAX_PLAYER_ROWS)).map(Row::Player).collect();
-                if n > MAX_PLAYER_ROWS {
-                    rows.push(Row::MorePlayers);
-                }
-                if n == 0 {
-                    rows.push(Row::Nothing);
-                }
-                rows
-            }
+            Screen::Players => match ctx.online.map_or(0, |o| o.others().len()) {
+                0 => vec![Row::Nothing],
+                n => (0..n).map(Row::Player).collect(),
+            },
             Screen::Player => self.player_rows(ctx),
             Screen::Playlists => match ctx.online.map_or(0, |o| o.playlists().len()) {
                 0 => vec![Row::Nothing],
@@ -886,7 +909,6 @@ impl Menu {
             | Row::Privacy
             | Row::AcceptInvite
             | Row::Player(_)
-            | Row::MorePlayers
             | Row::Nothing
             | Row::Playlist(_)
             | Row::SearchStatus
@@ -914,10 +936,6 @@ impl Menu {
                 Some(p) => (p.gamertag.clone(), Some(o.doing(p))),
                 None => (String::new(), None),
             },
-            Row::MorePlayers => {
-                let more = o.others().len().saturating_sub(MAX_PLAYER_ROWS);
-                (format!("+ {more} MORE"), None)
-            }
             Row::Nothing => {
                 let why = match self.screen {
                     Screen::Players => "NO ONE ELSE IS ONLINE",
@@ -936,7 +954,8 @@ impl Menu {
             },
             Row::SearchStatus => {
                 let seconds = o.search.map_or(0.0, |(_, s)| s);
-                (o.search_status().0, Some(clock_text(seconds)))
+                let headline = progress_dots(&o.search_status().0, seconds);
+                (headline, Some(clock_text(seconds)))
             }
             Row::SearchDetail => (o.search_status().1.unwrap_or_default(), None),
             _ => (String::new(), None),
@@ -955,9 +974,11 @@ impl Menu {
         name
     }
 
-    /// Keep the cursor on a row that's there and can be chosen.
+    /// Keep the cursor on a row that's there and can be chosen, and in
+    /// view.
     fn settle(&mut self, rows: &[Row], ctx: &Context) {
         self.cursor = self.settled(rows, ctx);
+        self.follow_cursor();
     }
 
     /// Where `settle` puts the cursor.
@@ -1003,6 +1024,7 @@ impl Menu {
                             break;
                         }
                     }
+                    self.follow_cursor();
                     self.sound = Some(Sound::Cursor);
                 }
                 Action::None
@@ -1236,11 +1258,7 @@ impl Menu {
                 self.back_to(Screen::Live, Row::Matchmaking, ctx);
                 Action::CancelSearch
             }
-            Row::Connecting
-            | Row::MorePlayers
-            | Row::Nothing
-            | Row::SearchStatus
-            | Row::SearchDetail => Action::None,
+            Row::Connecting | Row::Nothing | Row::SearchStatus | Row::SearchDetail => Action::None,
         }
     }
 
@@ -1326,7 +1344,7 @@ impl Menu {
         match typed {
             Typed::Text(text) => {
                 let before = name.len();
-                name.extend(text.chars().filter(|c| c.is_ascii_graphic() || *c == ' '));
+                name.extend(text.chars().filter(|&c| name_char(c)));
                 name.make_ascii_uppercase();
                 name.truncate(MAX_NAME);
                 if name.len() != before {
@@ -1356,9 +1374,11 @@ impl Menu {
         }
     }
 
-    /// Back on the main menu, on the item that led here.
+    /// Back on the main menu, on the item that led here, leaving any notice
+    /// behind.
     fn back_to_main(&mut self, from: Row) {
         self.show(Screen::Main);
+        self.notice = None;
         self.cursor = MAIN_ROWS.iter().position(|&r| r == from).unwrap_or(0);
         self.sound = Some(Sound::Back);
     }
@@ -1471,8 +1491,10 @@ impl Menu {
     fn row_at(&self, [x, y]: [f32; 2], w: f32, h: f32, ctx: &Context) -> Option<(usize, f32)> {
         let f = Frame::new(w, h);
         let rows = self.rows(ctx);
-        (0..rows.len()).find_map(|k| {
-            let [x0, y0, x1, y1] = f.rect(self.row_rect(k));
+        let shown = self.shown(rows.len());
+        let first = shown.start;
+        shown.into_iter().find_map(|k| {
+            let [x0, y0, x1, y1] = f.rect(self.row_rect(k - first));
             (x >= x0 && x < x1 && y >= y0 && y < y1 && rows[k].selectable(ctx))
                 .then(|| (k, (x - x0) / (x1 - x0)))
         })
@@ -1510,9 +1532,15 @@ impl Menu {
         self.input(Input::Select, ctx)
     }
 
-    /// The mouse wheel over a setting changes it.
+    /// The mouse wheel over a setting changes it; over a list, it moves
+    /// along the list.
     pub fn wheel(&mut self, up: bool, ctx: &Context) {
-        let input = if up { Input::Right } else { Input::Left };
+        let input = match (self.lists(), up) {
+            (true, true) => Input::Up,
+            (true, false) => Input::Down,
+            (false, true) => Input::Right,
+            (false, false) => Input::Left,
+        };
         self.input(input, ctx);
     }
 
@@ -1584,8 +1612,16 @@ impl Menu {
         }
         let rows = self.rows(ctx);
         let cursor = self.settled(&rows, ctx);
-        for (k, &row) in rows.iter().enumerate() {
-            let rect = self.row_rect(k);
+        let shown = self.shown(rows.len());
+        if shown.len() < rows.len() {
+            // Where in a long list the rows shown are.
+            let at = f.at(ROW_X + 10.0, self.row_rect(shown.len())[1] + 1.0);
+            let place = format!("{}-{} OF {}", shown.start + 1, shown.end, rows.len());
+            hb.text_left(font, at, 8.0 * s, &place, DIM);
+        }
+        let first = shown.start;
+        for (k, &row) in rows.iter().enumerate().take(shown.end).skip(first) {
+            let rect = self.row_rect(k - first);
             let fixed = self.screen == Screen::Lobby && ctx.host_lobby.is_some();
             let selectable = row.selectable(ctx);
             let selected = k == cursor && selectable && !fixed;
@@ -1655,7 +1691,13 @@ impl Menu {
             draw_objectives(hb, font, white, &f, ctx.objectives);
         }
         if let Some(header) = self.header(ctx) {
-            hb.text_left(font, f.at(ROW_X, ROW_Y - 22.0), 9.0 * s, &header, TEXT);
+            // System Link's says only what's below, so it's quieter.
+            let color = if self.screen == Screen::SystemLink {
+                DIM
+            } else {
+                TEXT
+            };
+            hb.text_left(font, f.at(ROW_X, ROW_Y - 22.0), 9.0 * s, &header, color);
         }
         if let Some(n) = &self.notice {
             hb.text_left(font, f.at(ROW_X, 400.0), 10.0 * s, n, WARNING);
@@ -1863,6 +1905,15 @@ impl Menu {
                 DIM,
             );
         }
+    }
+}
+
+/// Text ending in "..." with its dots counting up as `seconds` go by, as
+/// Halo 2's progress dots did.
+fn progress_dots(text: &str, seconds: f64) -> String {
+    match text.strip_suffix("...") {
+        Some(rest) => format!("{rest}{}", ".".repeat((seconds * 2.0) as usize % 4)),
+        None => text.to_string(),
     }
 }
 
@@ -2654,9 +2705,17 @@ mod tests {
         assert_eq!(m.typed(Typed::Done), Action::SaveProfile);
         assert!(m.profile.name.ends_with('2'));
         assert_eq!(m.input(Input::Select, &c), Action::GoOnline);
-        assert_eq!(m.cursor, 0, "on MATCHMAKING, once signed in");
-        // Back signs out, onto ONLINE.
+        let view = signed_in(1, &[(1, "JOHN")]);
+        let o = online(Some(&view));
+        let c = Context {
+            online: Some(&o),
+            ..ctx(&maps, &[])
+        };
+        assert_eq!(m.rows(&c)[m.cursor], Row::Matchmaking, "once signed in");
+        // Back signs out, onto ONLINE, leaving notices behind.
+        m.notice = Some("SERVER FULL".into());
         assert_eq!(m.input(Input::Back, &c), Action::SignOut);
+        assert_eq!(m.notice, None);
         assert_eq!(m.screen, Screen::Main);
         assert_eq!(m.rows(&c)[m.cursor], Row::Online);
     }
@@ -2787,6 +2846,48 @@ mod tests {
     }
 
     #[test]
+    fn long_lists_scroll() {
+        let maps = maps();
+        let mut view = signed_in(1, &[(1, "JOHN")]);
+        for k in 0..13 {
+            let mut p = view.online[2].clone();
+            p.account = 100 + k;
+            p.gamertag = format!("PLAYER {k}");
+            view.online.push(p);
+        }
+        let o = online(Some(&view));
+        let c = Context {
+            online: Some(&o),
+            ..ctx(&maps, &[])
+        };
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Players);
+        assert_eq!(m.rows(&c).len(), 15);
+        assert_eq!(m.shown(15), 0..8);
+        // Down past the eighth scrolls, and the tenth can be chosen.
+        for _ in 0..9 {
+            m.input(Input::Down, &c);
+        }
+        assert_eq!(m.shown(15), 2..10);
+        m.input(Input::Select, &c);
+        assert_eq!(m.screen, Screen::Player);
+        assert_eq!(m.player, o.others()[9].account);
+        // Up from the top goes round to the end of the list.
+        m.show(Screen::Players);
+        m.input(Input::Up, &c);
+        assert_eq!(m.shown(15), 7..15);
+        // The mouse finds the rows where they're shown: the top one is
+        // the eighth.
+        m.hover([300.0, 200.0], 1280.0, 720.0, &c);
+        assert_eq!(m.cursor, 7);
+        m.wheel(true, &c);
+        assert_eq!((m.cursor, m.shown(15)), (6, 6..14));
+        // Short lists don't scroll.
+        m.show(Screen::Live);
+        assert_eq!(m.shown(6), 0..6);
+    }
+
+    #[test]
     fn playlists_are_searched_until_cancelled() {
         let maps = maps();
         let mut view = signed_in(1, &[(1, "JOHN"), (2, "SARGE"), (3, "VIPER")]);
@@ -2837,6 +2938,25 @@ mod tests {
             ("STARTING IN 00:20".into(), Some("1:15".into()))
         );
         assert_eq!(m.label(Row::SearchDetail, &c).0, "PLAYERS: 6");
+        // Searching, the dots count up.
+        let searching = View {
+            status: None,
+            ..view.clone()
+        };
+        let dots = |seconds| {
+            let o = OnlineView {
+                search: Some((5, seconds)),
+                ..online(Some(&searching))
+            };
+            let c = Context {
+                online: Some(&o),
+                ..ctx(&maps, &[])
+            };
+            m.label(Row::SearchStatus, &c).0
+        };
+        assert_eq!(dots(76.0), "SEARCHING FOR A GAME");
+        assert_eq!(dots(76.5), "SEARCHING FOR A GAME.");
+        assert_eq!(dots(77.5), "SEARCHING FOR A GAME...");
         // CANCEL is the one row to choose.
         assert_eq!(m.input(Input::Select, &c), Action::CancelSearch);
         assert_eq!(m.screen, Screen::Live);

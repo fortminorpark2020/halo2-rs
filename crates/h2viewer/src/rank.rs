@@ -67,13 +67,22 @@ pub fn load(dir: &Path) -> Option<Vec<Image>> {
             (!icons.is_empty()).then(|| atlas(&icons, size))
         })
         .collect::<Option<_>>()?;
-    let tag = set.map.find_tag(group, LIVE_ICONS)?.datum;
-    let icons: Option<Vec<Image>> = LIVE_PICKS
-        .iter()
-        .map(|&i| bitmap::read_bitmap_at(&mut set, tag, i).ok())
-        .collect();
-    atlases.push(live_atlas(&icons?));
+    // Without the live icons the rank icons still show (and the live ones
+    // draw nothing).
+    match live_icons(&mut set, group) {
+        Some(icons) => atlases.push(live_atlas(&icons)),
+        None => println!("warning: no {LIVE_ICONS} {LIVE_PICKS:?}"),
+    }
     Some(atlases)
+}
+
+/// The live icons `LiveIcon` names, if mainmenu.map has them all.
+fn live_icons(set: &mut MapSet, group: GroupTag) -> Option<Vec<Image>> {
+    let tag = set.map.find_tag(group, LIVE_ICONS)?.datum;
+    LIVE_PICKS
+        .iter()
+        .map(|&i| bitmap::read_bitmap_at(set, tag, i).ok())
+        .collect()
 }
 
 /// The icons copied into a grid, by level, at most `size` of each.

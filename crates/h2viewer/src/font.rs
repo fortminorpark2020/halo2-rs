@@ -122,6 +122,13 @@ mod tests {
     }
 
     #[test]
+    fn every_gamertag_can_be_drawn() {
+        for c in (' '..='~').filter(|&c| h2sim::game::name_char(c)) {
+            assert!(glyph_uv(c.to_ascii_uppercase()).is_some(), "{c:?}");
+        }
+    }
+
+    #[test]
     fn atlas_has_ink() {
         let img = atlas();
         assert!(img.rgba.chunks(4).any(|p| p[3] == 255));
