@@ -5,7 +5,7 @@
 
 use crate::conn::Connection;
 use crate::discovery::Beacon;
-use crate::{kind, Lobby, ANY_TEAM, MAGIC, PROTOCOL};
+use crate::{kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
 use h2sim::game::{guest_name, Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 /// Joining PCs must say hello this soon.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Snapshots a second in online games, whose links are slower than a LAN.
+const ONLINE_RATE: u32 = 30;
 
 /// Things the host's game should show or act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +113,11 @@ pub struct Host {
     lobby: Option<Lobby>,
     /// Joined PCs not heard from for this long are dropped.
     timeout: Duration,
+    /// When the next snapshot may go, whether the game ran since the last,
+    /// and what happened meanwhile.
+    snapshots: Pace,
+    changed: bool,
+    held: Vec<Event>,
 }
 
 /// A player's controls before their PC sends any: stand still, facing the
@@ -225,7 +232,7 @@ impl Host {
     ) -> std::io::Result<Host> {
         let listener = listen(address)?;
         let port = listener.local_addr()?.port();
-        let mut host = Host::online(map);
+        let mut host = Host::unbound(map);
         host.listener = Some(listener);
         host.port = port;
         host.beacon = beacon.then(|| Beacon::new(session, port));
@@ -233,8 +240,14 @@ impl Host {
     }
 
     /// Host a game online: no listening and no announcing, PCs join only
-    /// through `add_connection`.
+    /// through `add_connection`. Snapshots go 30 times a second.
     pub fn online(map: &str) -> Host {
+        let mut host = Host::unbound(map);
+        host.set_rate(ONLINE_RATE);
+        host
+    }
+
+    fn unbound(map: &str) -> Host {
         Host {
             listener: None,
             port: 0,
@@ -244,7 +257,16 @@ impl Host {
             computer: crate::computer_name(),
             lobby: None,
             timeout: crate::TIMEOUT,
+            snapshots: Pace::new(0.0),
+            changed: false,
+            held: Vec::new(),
         }
+    }
+
+    /// Send the game at most `hz` times a second (0: after every tick, as
+    /// on a LAN). What happens in between goes with the next snapshot.
+    pub fn set_rate(&mut self, hz: u32) {
+        self.snapshots.every = if hz == 0 { 0.0 } else { 1.0 / hz as f32 };
     }
 
     /// Drop joined PCs not heard from for this long (`TIMEOUT` unless set).
@@ -294,10 +316,7 @@ impl Host {
     /// longer theirs). Joined PCs are told whenever the lobby changes.
     pub fn set_lobby(&mut self, lobby: Lobby) {
         if self.lobby.is_none() {
-            for r in &mut self.remotes {
-                r.in_game = false;
-                r.players.clear();
-            }
+            self.end_game();
         }
         if self.lobby.as_ref() == Some(&lobby) {
             return;
@@ -314,16 +333,26 @@ impl Host {
 
     /// Start a game on `map`: joined PCs load it and say hello again.
     pub fn start(&mut self, map: &str) {
+        self.end_game();
         self.lobby = None;
         self.map = map.to_string();
         let mut w = Writer::default();
         w.str(map);
         for r in self.remotes.iter_mut().filter(|r| r.welcomed) {
-            r.in_game = false;
-            r.players.clear();
             r.conn.send(kind::START, &w.0);
             let _ = r.conn.flush();
         }
+    }
+
+    /// The game is over for joined PCs: their players go with it, and so
+    /// does anything still to be sent.
+    fn end_game(&mut self) {
+        for r in &mut self.remotes {
+            r.in_game = false;
+            r.players.clear();
+        }
+        self.changed = false;
+        self.held.clear();
     }
 
     /// Whether a joined PC controls this player.
@@ -537,14 +566,22 @@ impl Host {
         Some(cmd)
     }
 
-    /// Send the game and what happened since the last call. `changed` is
-    /// false when no tick ran (PCs that just joined still get the game).
+    /// Send the game and what happened since the last call (or keep what
+    /// happened for the next snapshot, if this one is too soon after the
+    /// last). `changed` is false when no tick ran (PCs that just joined
+    /// still get the game).
     pub fn send(&mut self, game: &Game, events: &[Event], changed: bool) {
-        if !self
-            .remotes
-            .iter()
-            .any(|r| r.in_game && (changed || r.fresh))
-        {
+        self.changed |= changed;
+        self.held.extend_from_slice(events);
+        let due = self.snapshots.due() && self.changed;
+        let events = if due {
+            self.snapshots.went();
+            self.changed = false;
+            std::mem::take(&mut self.held)
+        } else {
+            Vec::new()
+        };
+        if !self.remotes.iter().any(|r| r.in_game && (due || r.fresh)) {
             return;
         }
         let mut w = Writer::default();
@@ -554,7 +591,7 @@ impl Host {
             e.write(&mut w);
         }
         for r in &mut self.remotes {
-            if r.in_game && (changed || r.fresh) {
+            if r.in_game && (due || r.fresh) {
                 r.fresh = false;
                 r.conn.send(kind::SNAPSHOT, &w.0);
                 // A failure shows up as a departure on the next poll.

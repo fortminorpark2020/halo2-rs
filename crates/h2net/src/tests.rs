@@ -387,7 +387,13 @@ fn a_pc_joined_online_plays_in_the_hosts_game() {
             .iter()
             .filter(|e| matches!(e, Event::Shot { player, .. } if *player == mine))
             .count();
+        // Ticks a tick apart: online, the game goes out every other one.
+        std::thread::sleep(Duration::from_secs_f32(h2sim::game::TICK));
     }
+    // The last tick goes with the next snapshot.
+    std::thread::sleep(Duration::from_millis(40));
+    host.send(&hg, &[], false);
+    client.poll(&mut cg);
     assert!(hg.players[mine].body.position.x > start.x + 0.3);
     assert!(shots > 0);
     let joined = cg.players[mine].body.position;
@@ -684,4 +690,90 @@ fn heartbeats_go_out_while_the_game_cannot_run() {
     // And the joined PC's ones, read late, still count.
     assert!(host.poll(&mut hg, 16).is_empty());
     assert_eq!(host.joined(), 1);
+}
+
+#[test]
+fn joined_pcs_send_their_controls_once_a_tick() {
+    let cg = game();
+    let (mut host_end, end) = Connection::pair();
+    let mut client = Client::over(end, &cg, "testmap", &[ANY_TEAM], me());
+    let inputs = |c: &mut Connection| {
+        let got = c.receive().unwrap();
+        got.iter().filter(|m| m.0 == kind::INPUT).count()
+    };
+    // A fast PC: a frame every millisecond, aiming all the while.
+    let start = Instant::now();
+    let mut frames = 0;
+    while start.elapsed() < Duration::from_millis(250) {
+        let aim = Command {
+            yaw: frames as f32 * 0.01,
+            ..Command::default()
+        };
+        client.send_commands(&[(0, aim)]);
+        frames += 1;
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let ticks = start.elapsed().as_secs_f32() / h2sim::game::TICK;
+    let sent = inputs(&mut host_end) as f32;
+    assert!(
+        sent <= ticks + 2.0 && sent >= ticks * 0.5,
+        "{sent} for {ticks}"
+    );
+    assert!(frames as f32 > sent * 2.0);
+    // A button pressed goes at once, and so does letting it go.
+    let fire = Command {
+        fire: true,
+        ..Command::default()
+    };
+    client.send_commands(&[(0, fire)]);
+    client.send_commands(&[(0, Command::default())]);
+    assert_eq!(inputs(&mut host_end), 2);
+}
+
+#[test]
+fn online_hosts_send_the_game_30_times_a_second() {
+    let world = floor();
+    let mut hg = game();
+    let shooter = hg.add_player();
+    let mut cg = game();
+    let who = verified("TESTER", ANY_TEAM);
+    let (mut host, mut client) = online("testmap", &cg, "testmap", &[ANY_TEAM], me(), who);
+    let mut welcomed = false;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, cg| {
+        welcomed |= matches!(ce.first(), Some(ClientEvent::Welcomed { .. }));
+        welcomed && cg.players.len() == 2
+    });
+    // A tick every frame at 60 frames a second, the host shooting.
+    let (before, mut made, mut got) = (client.snapshots, 0, 0);
+    let start = Instant::now();
+    for k in 0..30 {
+        let mut commands = vec![Command::default(); hg.players.len()];
+        commands[shooter].fire = k % 2 == 0;
+        hg.step(&world, &commands);
+        let events = std::mem::take(&mut hg.events);
+        made += events.len();
+        host.send(&hg, &events, true);
+        got += client.poll(&mut cg).1.len();
+        std::thread::sleep(Duration::from_secs_f32(h2sim::game::TICK));
+    }
+    let seconds = start.elapsed().as_secs_f32();
+    let snapshots = (client.snapshots - before) as f32;
+    assert!(
+        snapshots <= seconds * 30.0 + 2.0,
+        "{snapshots} in {seconds} s"
+    );
+    assert!(snapshots >= seconds * 15.0, "{snapshots} in {seconds} s");
+    // What happened between snapshots goes with the next.
+    std::thread::sleep(Duration::from_millis(40));
+    hg.step(&world, &vec![Command::default(); hg.players.len()]);
+    let events = std::mem::take(&mut hg.events);
+    made += events.len();
+    host.send(&hg, &events, true);
+    got += client.poll(&mut cg).1.len();
+    assert!(made > 0);
+    assert_eq!(got, made);
+    assert_eq!(
+        cg.players[shooter].body.position,
+        hg.players[shooter].body.position
+    );
 }

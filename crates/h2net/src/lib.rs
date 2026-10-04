@@ -1,6 +1,6 @@
 //! LAN games, like Halo 2's system link: one PC hosts and runs the game,
 //! others join over the local network. Joined PCs send their players'
-//! controls every frame; the host sends back the state of the game and what
+//! controls every tick; the host sends back the state of the game and what
 //! happened in it after every tick. Games announce themselves on the network
 //! so other PCs can list and join them without typing addresses.
 //!
@@ -8,7 +8,8 @@
 //! when the host starts a game they load its map and join it.
 //!
 //! Online games are the same, over connections the online service hands
-//! the host and the joining PC (`Host::add_connection`, `Client::over`).
+//! the host and the joining PC (`Host::add_connection`, `Client::over`),
+//! with the game sent 30 times a second rather than after every tick.
 
 mod client;
 mod conn;
@@ -16,7 +17,7 @@ mod discovery;
 mod host;
 mod lobby;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use client::{Client, ClientEvent};
 pub use conn::Connection;
@@ -89,6 +90,40 @@ pub fn session_id() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos() as u64);
     t ^ ((std::process::id() as u64) << 32) ^ 0x9E37_79B9_7F4A_7C15
+}
+
+/// Paces something to once every `every` seconds on average, however the
+/// frames that ask fall.
+struct Pace {
+    every: f32,
+    /// Time since it last went (up to two periods' worth), as of the last
+    /// frame.
+    owed: f32,
+    frame: Instant,
+}
+
+impl Pace {
+    fn new(every: f32) -> Pace {
+        Pace {
+            every,
+            owed: 0.0,
+            frame: Instant::now(),
+        }
+    }
+
+    /// Count the time since the last frame. True if it's time to go.
+    fn due(&mut self) -> bool {
+        let now = Instant::now();
+        let since = (now - self.frame).as_secs_f32();
+        self.owed = (self.owed + since).min(2.0 * self.every);
+        self.frame = now;
+        self.owed >= self.every
+    }
+
+    /// It went: the next is a period away.
+    fn went(&mut self) {
+        self.owed = (self.owed - self.every).max(0.0);
+    }
 }
 
 #[cfg(test)]

@@ -2,8 +2,8 @@
 //! host sends back.
 
 use crate::conn::Connection;
-use crate::{kind, Lobby, ANY_TEAM, MAGIC, PROTOCOL};
-use h2sim::game::{Event, Look, Reader, Writer};
+use crate::{kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
+use h2sim::game::{Event, Look, Reader, Writer, TICK};
 use h2sim::{Command, Game};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -44,6 +44,20 @@ pub struct Client {
     gone: bool,
     /// The host is gone if not heard from for this long.
     timeout: Duration,
+    /// The controls we last sent; they go once a tick.
+    sent: Vec<(usize, Command)>,
+    input: Pace,
+}
+
+/// A command's buttons, without where it aims or moves.
+fn buttons(c: &Command) -> Command {
+    Command {
+        movement: Default::default(),
+        yaw: 0.0,
+        pitch: 0.0,
+        rise: 0.0,
+        ..*c
+    }
 }
 
 /// What we say to the host to join its game, or its lobby: the map we have
@@ -103,6 +117,8 @@ impl Client {
             me: (me.0.to_string(), me.1),
             gone: false,
             timeout: crate::TIMEOUT,
+            sent: Vec::new(),
+            input: Pace::new(TICK),
         }
     }
 
@@ -214,8 +230,20 @@ impl Client {
         }
     }
 
-    /// Our players' controls for this frame.
+    /// Our players' controls for this frame. They go to the host once a
+    /// tick, as it runs the game, except that a button pressed or let go
+    /// goes at once (so taps between ticks are not lost).
     pub fn send_commands(&mut self, commands: &[(usize, Command)]) {
+        let pressed = commands.len() != self.sent.len()
+            || commands
+                .iter()
+                .zip(&self.sent)
+                .any(|(a, b)| a.0 != b.0 || buttons(&a.1) != buttons(&b.1));
+        if !self.input.due() && !pressed {
+            return;
+        }
+        self.input.went();
+        self.sent = commands.to_vec();
         let mut w = Writer::default();
         w.u8(commands.len().min(255) as u8);
         for (p, c) in commands.iter().take(255) {
