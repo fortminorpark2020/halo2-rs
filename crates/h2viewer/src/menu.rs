@@ -440,8 +440,19 @@ pub fn score_label(settings: &Settings) -> String {
 }
 
 /// The game options' variant name, or CUSTOM.
-pub fn options_label(options: &GameOptions) -> &'static str {
+pub fn variant_label(options: &GameOptions) -> &'static str {
     options.preset().map_or("CUSTOM", |k| presets()[k].0)
+}
+
+/// The game options as the lobby shows them (and sends to PCs that join):
+/// the variant, and the time limit if there is one.
+pub fn options_label(options: &GameOptions) -> String {
+    let variant = variant_label(options);
+    match options.time_limit {
+        0 => variant.into(),
+        t if t % 60 == 0 => format!("{variant}, {} MIN", t / 60),
+        t => format!("{variant}, {t} SEC"),
+    }
 }
 
 fn on_off(on: bool) -> String {
@@ -672,11 +683,8 @@ impl Menu {
             ),
             Row::Score => ("SCORE TO WIN".into(), Some(score_label(s))),
             Row::Bots => ("BOTS".into(), Some(s.bots.to_string())),
-            Row::GameOptions => (
-                "GAME OPTIONS".into(),
-                Some(options_label(&s.options).into()),
-            ),
-            Row::Variant => ("VARIANT".into(), Some(options_label(&s.options).into())),
+            Row::GameOptions => ("GAME OPTIONS".into(), Some(options_label(&s.options))),
+            Row::Variant => ("VARIANT".into(), Some(variant_label(&s.options).into())),
             Row::MapWeapons => (
                 "WEAPONS ON MAP".into(),
                 Some(s.options.map_weapons.label().into()),
@@ -1681,6 +1689,11 @@ mod tests {
         assert_eq!(m.settings.options.time_limit, 600);
         m.input(Input::Back, &c);
         assert_eq!(m.screen, Screen::Lobby);
+        // The lobby (and so PCs that join it) shows the limit too.
+        assert_eq!(
+            m.label(Row::GameOptions, &c).1.as_deref(),
+            Some("SWAT, 10 MIN")
+        );
         m.input(Input::Down, &c);
         assert_eq!(m.input(Input::Select, &c), Action::Start);
         assert_eq!(m.sound, Some(Sound::Advance));

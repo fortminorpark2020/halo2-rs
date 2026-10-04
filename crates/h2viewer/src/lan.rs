@@ -188,7 +188,7 @@ impl App {
                 .1
                 .into(),
             score: menu::score_label(s),
-            options: menu::options_label(&s.options).into(),
+            options: menu::options_label(&s.options),
             teams: s.game_type().teams(),
             players,
             bots: s.bots.min(255) as u8,
