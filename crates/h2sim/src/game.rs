@@ -76,13 +76,54 @@ pub fn guest_name(name: &str, guest: usize) -> String {
     format!("{}{tag}", base.trim_end())
 }
 
-/// How a player looks: a Spartan or an Elite, in two of the profile colours.
+/// Halo 2's emblem pieces: 64 foreground pictures over 32 backgrounds.
+pub const EMBLEM_FOREGROUNDS: u8 = 64;
+pub const EMBLEM_BACKGROUNDS: u8 = 32;
+
+/// A player's emblem: a foreground picture in two colours over a
+/// background pattern in a third.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Emblem {
+    pub foreground: u8,
+    pub background: u8,
+    /// Primary, secondary and background colour (profile colours).
+    pub colors: [u8; 3],
+}
+
+impl Emblem {
+    /// A varied emblem from any number (player numbers, name hashes).
+    pub fn from_number(n: u32) -> Emblem {
+        let c = PROFILE_COLORS as u32;
+        let primary = (n >> 3) % c;
+        let mut background = (n >> 9) % c;
+        if background == primary {
+            background = (primary + c / 2) % c;
+        }
+        Emblem {
+            foreground: (n % EMBLEM_FOREGROUNDS as u32) as u8,
+            background: ((n >> 6) % EMBLEM_BACKGROUNDS as u32) as u8,
+            colors: [primary as u8, ((n >> 14) % c) as u8, background as u8],
+        }
+    }
+
+    fn clamped(self) -> Emblem {
+        Emblem {
+            foreground: self.foreground % EMBLEM_FOREGROUNDS,
+            background: self.background % EMBLEM_BACKGROUNDS,
+            colors: self.colors.map(|c| c % PROFILE_COLORS),
+        }
+    }
+}
+
+/// How a player looks: a Spartan or an Elite, in two of the profile
+/// colours, and their emblem.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Look {
     pub elite: bool,
     /// Primary and secondary armour colour, indices into the profile
     /// colours.
     pub colors: [u8; 2],
+    pub emblem: Emblem,
 }
 
 impl Look {
@@ -91,18 +132,29 @@ impl Look {
         Look {
             elite: false,
             colors: DEFAULT_COLORS[i % DEFAULT_COLORS.len()],
+            emblem: Emblem::from_number((i as u32).wrapping_mul(0x9E37_79B9) >> 7),
         }
     }
 
-    /// A splitscreen guest's look: the same species in colours of their own.
+    /// A splitscreen guest's look: the same species and emblem in colours
+    /// of their own.
     pub fn guest(self, guest: usize) -> Look {
         if guest == 0 {
             return self;
         }
         let shift = (guest * 5) as u8;
         Look {
-            elite: self.elite,
             colors: self.colors.map(|c| (c + shift) % PROFILE_COLORS),
+            ..self
+        }
+    }
+
+    /// Every value in range.
+    pub fn clamped(self) -> Look {
+        Look {
+            elite: self.elite,
+            colors: self.colors.map(|c| c % PROFILE_COLORS),
+            emblem: self.emblem.clamped(),
         }
     }
 
@@ -110,13 +162,25 @@ impl Look {
         w.u8(self.elite as u8);
         w.u8(self.colors[0]);
         w.u8(self.colors[1]);
+        let e = &self.emblem;
+        w.u8(e.foreground);
+        w.u8(e.background);
+        for c in e.colors {
+            w.u8(c);
+        }
     }
 
     pub fn read(r: &mut Reader) -> Result<Look, Malformed> {
-        Ok(Look {
+        let look = Look {
             elite: r.u8()? != 0,
-            colors: [r.u8()? % PROFILE_COLORS, r.u8()? % PROFILE_COLORS],
-        })
+            colors: [r.u8()?, r.u8()?],
+            emblem: Emblem {
+                foreground: r.u8()?,
+                background: r.u8()?,
+                colors: [r.u8()?, r.u8()?, r.u8()?],
+            },
+        };
+        Ok(look.clamped())
     }
 }
 
@@ -855,10 +919,7 @@ impl Game {
     /// Set how a player looks: Elite or Spartan, and armour colours.
     pub fn set_look(&mut self, player: usize, look: Look) {
         if let Some(p) = self.players.get_mut(player) {
-            p.look = Look {
-                elite: look.elite,
-                colors: look.colors.map(|c| c % PROFILE_COLORS),
-            };
+            p.look = look.clamped();
         }
     }
 

@@ -2,9 +2,11 @@
 //! alpha-blended effect sprites, and the 2D HUD.
 
 use crate::scene::{mip_chain, AuxKind, Material, Scene, Vertex};
+use crate::{emblem, profile};
 use blam_cache::bitmap::Image;
 use blam_cache::shader::Blend;
 use glam::{Mat4, Vec3};
+use h2sim::game::Emblem;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -22,6 +24,10 @@ struct DrawUniforms {
     light: [f32; 4],
     /// Armour colours (primary, secondary) for change-colour surfaces.
     colors: [[f32; 4]; 2],
+    /// The player's emblem picture in the armour atlas (texture
+    /// coordinates; none when z <= x) and its two colours.
+    emblem: [f32; 4],
+    emblem_colors: [[f32; 4]; 2],
 }
 
 const SLOT: u64 = 256;
@@ -66,10 +72,14 @@ pub struct DrawCall {
     pub light: Option<[f32; 3]>,
     /// A player's primary and secondary armour colours.
     pub colors: Option<[[f32; 3]; 2]>,
+    /// The player's emblem, for surfaces that show it.
+    pub emblem: Option<Emblem>,
 }
 
 /// HUD batches number the menus' own textures from here.
 pub const MENU_TEXTURES: usize = 1 << 16;
+/// And the emblem atlases from here (see `emblem::load`).
+pub const EMBLEM_TEXTURES: usize = 1 << 17;
 
 pub struct HudBatch {
     pub texture: usize,
@@ -142,6 +152,7 @@ impl MaterialParams {
             AuxKind::Illum => 1.0,
             AuxKind::Mask => 2.0,
             AuxKind::ChangeColor => 3.0,
+            AuxKind::Emblem => 4.0,
         };
         let [r, g, b] = m.illum_color;
         let [tr, tg, tb] = m.tint;
@@ -170,12 +181,18 @@ struct U {
     light: vec4<f32>,
     primary: vec4<f32>,
     secondary: vec4<f32>,
+    emblem: vec4<f32>,
+    emblem_primary: vec4<f32>,
+    emblem_secondary: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 @group(1) @binding(2) var lightmap: texture_2d<f32>;
 @group(1) @binding(3) var lsamp: sampler;
+// Emblem pictures: red where the first colour goes, green the second.
+@group(2) @binding(0) var emblems: texture_2d<f32>;
+@group(2) @binding(1) var esamp: sampler;
 
 struct Out {
     @builtin(position) clip: vec4<f32>,
@@ -196,6 +213,11 @@ fn vs(
 ) -> Out {
     var o: Out;
     o.clip = u.mvp * vec4<f32>(position, 1.0);
+    if (m.mode.y > 3.5) {
+        // Emblems lie on the armour; nudge them in front of it (depth is
+        // reversed, so nearer is larger).
+        o.clip.z *= 1.001;
+    }
     o.world = (u.model * vec4<f32>(position, 1.0)).xyz;
     o.normal = (u.model * vec4<f32>(normal, 0.0)).xyz;
     o.uv = uv;
@@ -214,7 +236,7 @@ struct M {
     tint: vec4<f32>,
     // x: 0 opaque, 1 alpha tested, 2 alpha blended, 3 additive.
     // y: aux texture is 0 unused, 1 a glow map, 2 an opacity mask,
-    //    3 a change-colour map.
+    //    3 a change-colour map, 4 the player's emblem instead.
     mode: vec4<f32>,
 };
 @group(1) @binding(4) var aux: texture_2d<f32>;
@@ -225,8 +247,9 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     let a = textureSample(aux, samp, i.uv);
     let baked = textureSample(lightmap, lsamp, i.lmuv).rgb;
+    let e = textureSample(emblems, esamp, mix(u.emblem.xy, u.emblem.zw, clamp(i.uv, vec2<f32>(0.0), vec2<f32>(1.0))));
     var alpha = c.a;
-    if (m.mode.y > 1.5) {
+    if (m.mode.y > 1.5 && m.mode.y < 3.5) {
         alpha = min(a.r, a.a);
     }
     alpha *= m.tint.a;
@@ -240,6 +263,17 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         let p = pow(u.primary.rgb, vec3<f32>(2.2));
         let s = pow(u.secondary.rgb, vec3<f32>(2.2));
         albedo *= mix(vec3<f32>(1.0), p, a.r) * mix(vec3<f32>(1.0), s, a.g);
+    }
+    if (m.mode.y > 3.5) {
+        // Only the emblem's picture shows; the rest is see-through.
+        let cover = e.r + e.g;
+        let inside = all(i.uv >= vec2<f32>(0.0)) && all(i.uv <= vec2<f32>(1.0));
+        if (u.emblem.z <= u.emblem.x || !inside || cover < 0.5) {
+            discard;
+        }
+        let p = pow(u.emblem_primary.rgb, vec3<f32>(2.2));
+        let s = pow(u.emblem_secondary.rgb, vec3<f32>(2.2));
+        albedo = (p * e.r + s * e.g) / cover;
     }
     var light: vec3<f32>;
     if (u.params.w > 1.5 || m.mode.x > 2.5) {
@@ -396,6 +430,7 @@ pub struct Gpu {
     /// Textures the menus keep from map to map (the maps' pictures),
     /// numbered from [`MENU_TEXTURES`] in HUD batches.
     menu_textures: Vec<wgpu::BindGroup>,
+    emblem_textures: Vec<wgpu::BindGroup>,
     effects_texture: wgpu::BindGroup,
     meshes: Vec<GpuMesh>,
     depth: wgpu::TextureView,
@@ -667,7 +702,7 @@ impl Gpu {
                 texture_entry(4),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -693,7 +728,11 @@ impl Gpu {
         });
         let mesh_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&material_layout)],
+            bind_group_layouts: &[
+                Some(&globals_layout),
+                Some(&material_layout),
+                Some(&texture_layout),
+            ],
             immediate_size: 0,
         });
         let module = |label, src: &str| {
@@ -847,6 +886,7 @@ impl Gpu {
             materials: Vec::new(),
             hud_textures: Vec::new(),
             menu_textures: Vec::new(),
+            emblem_textures: Vec::new(),
             effects_texture,
             meshes: Vec::new(),
             depth,
@@ -968,7 +1008,27 @@ impl Gpu {
             .collect();
     }
 
+    pub fn set_emblem_textures(&mut self, images: &[Image]) {
+        self.emblem_textures = images
+            .iter()
+            .map(|img| {
+                let (device, queue) = (&self.device, &self.queue);
+                upload_texture(device, queue, &self.texture_layout, &self.clamp, img, false)
+            })
+            .collect();
+    }
+
+    /// The emblem pictures armour shows, or a stand-in until they load.
+    fn armour_emblems(&self) -> &wgpu::BindGroup {
+        self.emblem_textures
+            .get(emblem::ARMOUR_ATLAS)
+            .unwrap_or(&self.effects_texture)
+    }
+
     fn hud_texture(&self, texture: usize) -> Option<&wgpu::BindGroup> {
+        if let Some(k) = texture.checked_sub(EMBLEM_TEXTURES) {
+            return self.emblem_textures.get(k);
+        }
         match texture.checked_sub(MENU_TEXTURES) {
             Some(k) => self.menu_textures.get(k),
             None => self.hud_textures.get(texture),
@@ -1001,6 +1061,7 @@ impl Gpu {
     ) -> Option<u32> {
         let light = object.and_then(|d| d.light);
         let colors = object.and_then(|d| d.colors);
+        let emblem = object.and_then(|d| d.emblem);
         let offset = self.staging.len() as u64;
         if offset / SLOT >= MAX_DRAWS {
             return None;
@@ -1013,6 +1074,13 @@ impl Gpu {
             params: [fog, w, h, shading],
             light: light.map_or([0.0; 4], |[r, g, b]| [r, g, b, 1.0]),
             colors: colors.map_or([[0.0; 4]; 2], |c| c.map(|[r, g, b]| [r, g, b, 1.0])),
+            emblem: emblem.map_or([0.0; 4], |e| emblem::armour_cell(e.foreground)),
+            emblem_colors: emblem.map_or([[0.0; 4]; 2], |e| {
+                [e.colors[0], e.colors[1]].map(|c| {
+                    let [r, g, b] = profile::color(c);
+                    [r, g, b, 1.0]
+                })
+            }),
         };
         self.staging.extend_from_slice(bytemuck::bytes_of(&u));
         self.staging.resize((offset + SLOT) as usize, 0);
@@ -1237,6 +1305,7 @@ impl Gpu {
                     continue;
                 };
                 pass.set_bind_group(0, &self.globals, &[offset]);
+                pass.set_bind_group(2, self.armour_emblems(), &[]);
                 pass.set_vertex_buffer(0, m.vertices.slice(..));
                 pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for (material, range, blend) in &m.batches {

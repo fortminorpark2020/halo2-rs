@@ -4,7 +4,7 @@
 //! Bots produce the same `Command`s as people.
 
 use crate::collision::World;
-use crate::game::{Command, Game, GameType, Look, Spartan, VehicleAction, PROFILE_COLORS};
+use crate::game::{Command, Emblem, Game, GameType, Look, Spartan, VehicleAction, PROFILE_COLORS};
 use crate::nav::NavGraph;
 use crate::player::GRAVITY;
 use crate::weapon::WeaponDef;
@@ -103,6 +103,7 @@ pub fn bot_look(player: usize) -> Look {
     Look {
         elite: h % 3 == 0,
         colors: [primary as u8, secondary as u8],
+        emblem: Emblem::from_number(h.rotate_left(11)),
     }
 }
 

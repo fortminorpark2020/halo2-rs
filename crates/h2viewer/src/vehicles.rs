@@ -33,6 +33,7 @@ pub fn draws(scene: &Scene, game: &Game) -> (Vec<DrawCall>, Vec<(usize, Vec<Vert
             model,
             light,
             colors: None,
+            emblem: None,
         });
         if let (Some(mesh), Some(vertices), Some((_, attach))) =
             (turret, turret_vertices, &kind.turret)
@@ -43,6 +44,7 @@ pub fn draws(scene: &Scene, game: &Game) -> (Vec<DrawCall>, Vec<(usize, Vec<Vert
                 model: model * *attach,
                 light,
                 colors: None,
+                emblem: None,
             });
         }
     }

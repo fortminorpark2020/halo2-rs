@@ -28,6 +28,20 @@ const MATERIAL_SIZE: usize = 0x20;
 const OBJECT_MODEL: usize = 0x34;
 const HLMT_RENDER_MODEL: usize = 0x0;
 const HLMT_ANIMATIONS: usize = 0x10;
+const HLMT_VARIANTS: usize = 0x50;
+const VARIANT_SIZE: usize = 0x40;
+const VARIANT_REGIONS: usize = 0x14;
+const VARIANT_REGION_SIZE: usize = 0x14;
+const VARIANT_PERMUTATIONS: usize = 0x8;
+const VARIANT_PERMUTATION_SIZE: usize = 0x20;
+
+/// The permutation a model variant shows in each region it names: `None`
+/// hides the region. Regions it doesn't name show their first permutation.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Variant {
+    pub name: String,
+    pub regions: Vec<(String, Option<String>)>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
@@ -115,6 +129,59 @@ fn object_model_ref(set: &mut MapSet, object: DatumIndex, field: usize) -> Resul
     Ok(DatumIndex(u32_at(&model, field + 4)))
 }
 
+/// An object's look as the game shows it by default: its model's
+/// "default" variant (or first), if the model has variants.
+pub fn object_variant(set: &mut MapSet, object: DatumIndex) -> Result<Option<Variant>> {
+    let (_, _, obj) = set.tag_data(object)?;
+    let hlmt = DatumIndex(u32_at(&obj, OBJECT_MODEL + 4));
+    if hlmt == DatumIndex::NONE {
+        return Ok(None);
+    }
+    let (src, _, model) = set.tag_data(hlmt)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let variants = file.read_block(region, &model, HLMT_VARIANTS, VARIANT_SIZE)?;
+    let variants = variants.as_chunks::<VARIANT_SIZE>().0;
+    let Some(v) = variants
+        .iter()
+        .find(|v| sid_name(file, &v[..]) == "default")
+        .or(variants.first())
+    else {
+        return Ok(None);
+    };
+    let mut out = Variant {
+        name: sid_name(file, v),
+        regions: Vec::new(),
+    };
+    let regions = file.read_block(region, v, VARIANT_REGIONS, VARIANT_REGION_SIZE)?;
+    for r in regions.as_chunks::<VARIANT_REGION_SIZE>().0 {
+        let perms = file.read_block(region, r, VARIANT_PERMUTATIONS, VARIANT_PERMUTATION_SIZE)?;
+        // A permutation the render model doesn't have (runtime index
+        // 0xFF) hides the region.
+        let shown = perms
+            .as_chunks::<VARIANT_PERMUTATION_SIZE>()
+            .0
+            .first()
+            .filter(|p| p[4] != 0xFF)
+            .map(|p| sid_name(file, &p[..]));
+        out.regions.push((sid_name(file, r), shown));
+    }
+    Ok(Some(out))
+}
+
+/// The string id a tag block element starts with, as text.
+fn sid_name(file: &crate::mapset::Map, element: &[u8]) -> String {
+    file.string_id(u32_at(element, 0)).unwrap_or("").to_string()
+}
+
+/// An object's render model as the game shows it by default (see
+/// `object_variant`).
+pub fn read_object_render_model(set: &mut MapSet, object: DatumIndex) -> Result<RenderModel> {
+    let mode = object_render_model(set, object)?;
+    let variant = object_variant(set, object).ok().flatten();
+    read_render_model_variant(set, mode, variant.as_ref())
+}
+
 /// The render model of an object tag, via its `hlmt`.
 pub fn object_render_model(set: &mut MapSet, object: DatumIndex) -> Result<DatumIndex> {
     let mode = object_model_ref(set, object, HLMT_RENDER_MODEL)?;
@@ -144,6 +211,16 @@ pub fn sky_render_model(set: &mut MapSet, sky: DatumIndex) -> Result<DatumIndex>
 }
 
 pub fn read_render_model(set: &mut MapSet, mode: DatumIndex) -> Result<RenderModel> {
+    read_render_model_variant(set, mode, None)
+}
+
+/// A render model showing `variant`'s permutations (else each region's
+/// first).
+pub fn read_render_model_variant(
+    set: &mut MapSet,
+    mode: DatumIndex,
+    variant: Option<&Variant>,
+) -> Result<RenderModel> {
     let (src, _, data) = set.tag_data(mode)?;
     let file = set.get(src);
     let region = file.meta_region();
@@ -154,11 +231,25 @@ pub fn read_render_model(set: &mut MapSet, mode: DatumIndex) -> Result<RenderMod
     let groups = file.read_block(region, &data, MODE_MARKER_GROUPS, MARKER_GROUP_SIZE)?;
     let materials = file.read_block(region, &data, MODE_MATERIALS, MATERIAL_SIZE)?;
 
-    // One section per region: its first permutation at the best detail level.
+    // One section per region: its chosen permutation at the best detail
+    // level.
     let mut wanted = Vec::new();
     for r in regions.as_chunks::<REGION_SIZE>().0 {
         let perms = file.read_block(region, r, 0x8, PERMUTATION_SIZE)?;
-        if let Some(p) = perms.as_chunks::<PERMUTATION_SIZE>().0.first() {
+        let perms = perms.as_chunks::<PERMUTATION_SIZE>().0;
+        let choice = variant.and_then(|v| {
+            let region = sid_name(file, r);
+            v.regions.iter().find(|(n, _)| *n == region)
+        });
+        let chosen = match choice {
+            Some((_, None)) => None,
+            Some((_, Some(p))) => perms
+                .iter()
+                .find(|q| sid_name(file, &q[..]) == *p)
+                .or(perms.first()),
+            None => perms.first(),
+        };
+        if let Some(p) = chosen {
             // L6 (hollywood) down to L1.
             let best = (0..6).rev().map(|l| i16_at(p, 4 + l * 2)).find(|&s| s >= 0);
             if let Some(s) = best {

@@ -59,8 +59,10 @@ score to win, the game stops and the carnage report shows everyone's kills and
 deaths; Continue goes back to the lobby.
 
 Player Profile (main menu): type your gamertag, choose Spartan or Elite and
-your primary and secondary armour colours from Halo 2's 18, with your model
-turning beside the menu. It's saved in `%APPDATA%\halo2-rs\profile.txt` and
+your primary and secondary armour colours from Halo 2's 18, and build your
+emblem (one of Halo 2's 64 pictures in two colours over one of its 32
+backgrounds), with your model turning beside the menu. Your emblem shows in
+the lobby and on the scoreboard, and Elites wear it on their back. It's saved in `%APPDATA%\halo2-rs\profile.txt` and
 sent to the other PCs in a System Link game. In team games armour takes the
 team's colour. Splitscreen guests play the same model in other colours; bots
 each have their own look, about a third of them Elites. Elites hold weapons

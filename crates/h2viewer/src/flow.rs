@@ -225,6 +225,7 @@ impl App {
                 kills: p.kills,
                 deaths: p.deaths,
                 color: player_colors(game, i)[0],
+                emblem: Some(p.look.emblem),
                 local: self.locals.iter().any(|l| l.player == i),
                 header: false,
             }
@@ -250,6 +251,7 @@ impl App {
                 kills: members().map(|p| p.kills).sum(),
                 deaths: members().map(|p| p.deaths).sum(),
                 color: TEAM_COLORS[t as usize],
+                emblem: None,
                 local: false,
                 header: true,
             });

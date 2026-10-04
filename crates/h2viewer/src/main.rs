@@ -29,6 +29,7 @@ mod audio;
 mod body;
 mod camera;
 mod effects;
+mod emblem;
 mod flow;
 mod font;
 mod gpu;
@@ -600,6 +601,8 @@ struct App {
     maps: Vec<MapChoice>,
     /// The maps' pictures, for the lobby.
     map_pictures: Vec<blam_cache::bitmap::Image>,
+    /// The emblem atlases, uploaded with the window.
+    emblem_art: Vec<blam_cache::bitmap::Image>,
     loading: Option<Loading>,
     /// Seconds the menus have been up, for the camera circling the map.
     menu_time: f32,
@@ -1231,7 +1234,7 @@ impl App {
             return (Vec::new(), None);
         };
         // Where on screen, in the menus' 640x480 layout.
-        const SPOT: [f32; 2] = [488.0, 250.0];
+        const SPOT: [f32; 2] = [470.0, 290.0];
         const DISTANCE: f32 = 1.35;
         const MIDDLE: f32 = 0.37;
         let s = (h / 480.0).min(w / 640.0);
@@ -1258,6 +1261,7 @@ impl App {
             model: object,
             light,
             colors: Some(local::armor_colors(self.menu.profile.look)),
+            emblem: Some(self.menu.profile.look.emblem),
         }];
         let rifle = self
             .scene
@@ -1271,6 +1275,7 @@ impl App {
                 model: object * pose.weapons[0],
                 light,
                 colors: None,
+                emblem: None,
             });
         }
         (draws, Some((pose.mesh, pose.vertices.clone())))
@@ -1286,6 +1291,7 @@ impl App {
             model: Mat4::IDENTITY,
             light: None,
             colors: None,
+            emblem: None,
         }];
         for o in &scene.objects {
             world.push(DrawCall {
@@ -1293,6 +1299,7 @@ impl App {
                 model: o.transform,
                 light: o.light,
                 colors: None,
+                emblem: None,
             });
         }
         for (item, timer) in scene.items.iter().zip(&self.game.item_timers) {
@@ -1302,6 +1309,7 @@ impl App {
                     model: item.transform,
                     light: item.light,
                     colors: None,
+                    emblem: None,
                 });
             }
         }
@@ -1312,6 +1320,7 @@ impl App {
                     model: scene::placement_matrix(d.position.into(), [d.yaw, 0.0, FRAC_PI_2], 1.0),
                     light: light_at(d.position),
                     colors: None,
+                    emblem: None,
                 });
             }
         }
@@ -1329,6 +1338,7 @@ impl App {
                     model: Mat4::from_translation(g.position) * Mat4::from_rotation_y(spin),
                     light: light_at(g.position),
                     colors: None,
+                    emblem: None,
                 });
             }
         }
@@ -1343,6 +1353,7 @@ impl App {
                 model: Mat4::from_rotation_translation(turn, p.position),
                 light: light_at(p.position),
                 colors: None,
+                emblem: None,
             });
         }
         world.extend(self.flag_draws());
@@ -1364,6 +1375,7 @@ impl App {
             model: pose.object,
             light,
             colors: Some(player_colors(&self.game, player)),
+            emblem: Some(p.look.emblem),
         }];
         // Drivers and gunners hold the controls, not their guns.
         let hands_free = local::seat_of(&self.game, player)
@@ -1382,6 +1394,7 @@ impl App {
                     model: pose.object * hand,
                     light,
                     colors: None,
+                    emblem: None,
                 });
             }
         }
@@ -1529,6 +1542,7 @@ impl App {
                         model: Mat4::IDENTITY,
                         light: None,
                         colors: None,
+                        emblem: None,
                     }),
                     sky_proj: camera::projection(v.aspect, v.magnification, 1.0, 10000.0)
                         * sky_view,
@@ -1564,6 +1578,7 @@ impl ApplicationHandler for App {
         match pollster::block_on(gpu::Gpu::new(window.clone(), &self.scene)) {
             Ok(mut g) => {
                 g.set_menu_textures(&self.map_pictures);
+                g.set_emblem_textures(&self.emblem_art);
                 self.gpu = Some(g);
             }
             Err(e) => {
@@ -1829,6 +1844,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .map(|dir| mapinfo::describe_maps(dir, &mut maps))
         .unwrap_or_default();
+    let emblem_art = path.parent().and_then(emblem::load).unwrap_or_default();
     // Three computer opponents (H2_BOTS=<n> for another number).
     let bots = env("H2_BOTS")
         .and_then(|v| v.parse().ok())
@@ -1904,6 +1920,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         menu_open: false,
         maps,
         map_pictures,
+        emblem_art,
         loading: None,
         menu_time: 0.0,
         game_over: None,

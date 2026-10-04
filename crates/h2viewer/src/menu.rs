@@ -7,7 +7,9 @@ use crate::gpu::hud_mode;
 use crate::hud::HudBuilder;
 use crate::profile::{color_name, Profile};
 use h2net::LanGame;
-use h2sim::game::{clean_name, Look, MAX_NAME, PROFILE_COLORS};
+use h2sim::game::{
+    clean_name, Emblem, Look, EMBLEM_BACKGROUNDS, EMBLEM_FOREGROUNDS, MAX_NAME, PROFILE_COLORS,
+};
 use h2sim::GameType;
 use std::path::{Path, PathBuf};
 
@@ -188,6 +190,8 @@ pub struct ScoreLine {
     pub kills: u32,
     pub deaths: u32,
     pub color: [f32; 3],
+    /// A player's emblem (team lines have none).
+    pub emblem: Option<Emblem>,
     /// Someone playing at this PC.
     pub local: bool,
     pub header: bool,
@@ -267,6 +271,11 @@ enum Row {
     Model,
     Primary,
     Secondary,
+    Emblem,
+    EmblemBackground,
+    EmblemPrimary,
+    EmblemSecondary,
+    EmblemBackColor,
     GameType,
     Map,
     Score,
@@ -282,6 +291,21 @@ enum Row {
 impl Row {
     fn selectable(self) -> bool {
         self != Row::Searching
+    }
+
+    /// A profile setting stepped with left and right.
+    fn in_profile(self) -> bool {
+        matches!(
+            self,
+            Row::Model
+                | Row::Primary
+                | Row::Secondary
+                | Row::Emblem
+                | Row::EmblemBackground
+                | Row::EmblemPrimary
+                | Row::EmblemSecondary
+                | Row::EmblemBackColor
+        )
     }
 }
 
@@ -306,6 +330,8 @@ const ROW_STEP: f32 = 32.0;
 /// The lobby's right-hand panels (map, players).
 const PANEL_X: f32 = 372.0;
 const PANEL_W: f32 = 228.0;
+/// The profile's emblem: left, top and size.
+const PROFILE_EMBLEM: [f32; 3] = [530.0, 104.0, 64.0];
 /// The map's picture (Halo 2's are 440 by 414).
 const PICTURE: [f32; 2] = [104.0, 98.0];
 const TEXT: [f32; 4] = [0.72, 0.84, 1.0, 1.0];
@@ -390,7 +416,17 @@ impl Menu {
     fn rows(&self, ctx: &Context) -> Vec<Row> {
         match self.screen {
             Screen::Main => vec![Row::Multiplayer, Row::SystemLink, Row::Profile, Row::Quit],
-            Screen::Profile => vec![Row::Name, Row::Model, Row::Primary, Row::Secondary],
+            Screen::Profile => vec![
+                Row::Name,
+                Row::Model,
+                Row::Primary,
+                Row::Secondary,
+                Row::Emblem,
+                Row::EmblemBackground,
+                Row::EmblemPrimary,
+                Row::EmblemSecondary,
+                Row::EmblemBackColor,
+            ],
             Screen::Lobby => vec![
                 Row::GameType,
                 Row::Map,
@@ -434,6 +470,32 @@ impl Menu {
             Row::Secondary => (
                 "SECONDARY COLOR".into(),
                 Some(color_name(self.profile.look.colors[1]).into()),
+            ),
+            Row::Emblem => (
+                "EMBLEM".into(),
+                Some(format!(
+                    "{}",
+                    self.profile.look.emblem.foreground as u32 + 1
+                )),
+            ),
+            Row::EmblemBackground => (
+                "EMBLEM BACKGROUND".into(),
+                Some(format!(
+                    "{}",
+                    self.profile.look.emblem.background as u32 + 1
+                )),
+            ),
+            Row::EmblemPrimary => (
+                "EMBLEM PRIMARY".into(),
+                Some(color_name(self.profile.look.emblem.colors[0]).into()),
+            ),
+            Row::EmblemSecondary => (
+                "EMBLEM SECONDARY".into(),
+                Some(color_name(self.profile.look.emblem.colors[1]).into()),
+            ),
+            Row::EmblemBackColor => (
+                "EMBLEM BACK COLOR".into(),
+                Some(color_name(self.profile.look.emblem.colors[2]).into()),
             ),
             Row::GameType => (
                 "GAME TYPE".into(),
@@ -555,6 +617,23 @@ impl Menu {
                 let c = &mut self.profile.look.colors[(row == Row::Secondary) as usize];
                 *c = cycle(*c as usize, PROFILE_COLORS as usize) as u8;
             }
+            Row::Emblem => {
+                let e = &mut self.profile.look.emblem.foreground;
+                *e = cycle(*e as usize, EMBLEM_FOREGROUNDS as usize) as u8;
+            }
+            Row::EmblemBackground => {
+                let e = &mut self.profile.look.emblem.background;
+                *e = cycle(*e as usize, EMBLEM_BACKGROUNDS as usize) as u8;
+            }
+            Row::EmblemPrimary | Row::EmblemSecondary | Row::EmblemBackColor => {
+                let k = match row {
+                    Row::EmblemPrimary => 0,
+                    Row::EmblemSecondary => 1,
+                    _ => 2,
+                };
+                let c = &mut self.profile.look.emblem.colors[k];
+                *c = cycle(*c as usize, PROFILE_COLORS as usize) as u8;
+            }
             _ => return false,
         }
         true
@@ -577,13 +656,20 @@ impl Menu {
                 self.sound = Some(Sound::Forward);
                 Action::None
             }
-            Row::GameType
-            | Row::Map
-            | Row::Score
-            | Row::Bots
-            | Row::Model
+            Row::GameType | Row::Map | Row::Score | Row::Bots => {
+                if self.adjust(row, 1, ctx) {
+                    self.sound = Some(Sound::Cursor);
+                }
+                Action::None
+            }
+            Row::Model
             | Row::Primary
-            | Row::Secondary => {
+            | Row::Secondary
+            | Row::Emblem
+            | Row::EmblemBackground
+            | Row::EmblemPrimary
+            | Row::EmblemSecondary
+            | Row::EmblemBackColor => {
                 if self.adjust(row, 1, ctx) {
                     self.sound = Some(Sound::Cursor);
                 }
@@ -618,7 +704,7 @@ impl Menu {
 
     /// After changing a row's value: profile rows are kept.
     fn saving(&self, row: Row) -> Action {
-        if matches!(row, Row::Model | Row::Primary | Row::Secondary) {
+        if row.in_profile() {
             Action::SaveProfile
         } else {
             Action::None
@@ -733,16 +819,8 @@ impl Menu {
         self.cursor = k;
         let row = self.rows(ctx)[k];
         let (_, value) = self.label(row, ctx);
-        let stepped = matches!(
-            row,
-            Row::Map
-                | Row::Score
-                | Row::Bots
-                | Row::GameType
-                | Row::Model
-                | Row::Primary
-                | Row::Secondary
-        );
+        let stepped =
+            matches!(row, Row::Map | Row::Score | Row::Bots | Row::GameType) || row.in_profile();
         if value.is_some() && stepped && !self.editing {
             let input = if along < 0.6 {
                 Input::Left
@@ -909,37 +987,28 @@ impl Menu {
         y + height + 20.0
     }
 
-    /// The profile's armour colours, beside its rows (the model itself
-    /// stands to the right, drawn with the level).
+    /// The profile's emblem, at the top right (the model stands below it,
+    /// drawn with the level).
     fn draw_profile(&self, hb: &mut HudBuilder, font: usize, white: usize, f: &Frame) {
-        let s = f.s;
-        let look = self.profile.look;
-        let colors = crate::local::armor_colors(look);
-        let (x, y) = (ROW_X, ROW_Y + 4.0 * ROW_STEP + 12.0);
-        let height = 54.0;
+        let (x, y) = (PROFILE_EMBLEM[0], PROFILE_EMBLEM[1]);
+        let size = PROFILE_EMBLEM[2];
         hb.quad(
             white,
-            f.rect([x, y, x + ROW_W, y + height]),
+            f.rect([x - 6.0, y - 6.0, x + size + 6.0, y + size + 20.0]),
             [0.0; 4],
             PANEL,
             hud_mode::PLAIN,
             0.0,
         );
-        for (k, (label, c)) in ["PRIMARY", "SECONDARY"].iter().zip(colors).enumerate() {
-            let sx = x + 10.0 + k as f32 * 145.0;
-            let swatch = f.rect([sx, y + 10.0, sx + 34.0, y + 44.0]);
-            hb.quad(
-                white,
-                swatch,
-                [0.0; 4],
-                gamma_color(c),
-                hud_mode::PLAIN,
-                0.0,
-            );
-            hb.text_left(font, f.at(sx + 42.0, y + 14.0), 8.0 * s, label, DIM);
-            let name = color_name(look.colors[k]);
-            hb.text_left(font, f.at(sx + 42.0, y + 27.0), 10.0 * s, name, TEXT);
-        }
+        crate::emblem::draw(
+            hb,
+            f.rect([x, y, x + size, y + size]),
+            self.profile.look.emblem,
+        );
+        let label = "EMBLEM";
+        let width = label.len() as f32 * 7.0 * crate::font::ASPECT;
+        let at = f.at(x + (size - width) * 0.5, y + size + 6.0);
+        hb.text_left(font, at, 7.0 * f.s, label, DIM);
     }
 
     fn draw_players(
@@ -975,23 +1044,19 @@ impl Menu {
                 crate::local::armor_colors(seat.look)[0]
             };
             let how = seat.how;
-            let swatch = f.rect([x, y, x + 8.0, y + 9.0]);
-            hb.quad(
-                white,
-                swatch,
-                [0.0; 4],
-                gamma_color(c),
-                hud_mode::PLAIN,
-                0.0,
-            );
+            // Their colour (or team's) beside their emblem.
+            let bar = f.rect([x, y - 1.0, x + 3.0, y + 10.0]);
+            hb.quad(white, bar, [0.0; 4], gamma_color(c), hud_mode::PLAIN, 0.0);
+            let badge = f.rect([x + 5.0, y - 1.0, x + 16.0, y + 10.0]);
+            crate::emblem::draw(hb, badge, seat.look.emblem);
             let line = format!("{}  {how}", seat.name);
-            hb.text_left(font, f.at(x + 14.0, y), 9.0 * s, &line, TEXT);
+            hb.text_left(font, f.at(x + 21.0, y), 9.0 * s, &line, TEXT);
             y += 16.0;
         }
         let bots = self.settings.bots;
         if bots > 0 {
             let line = format!("+ {bots} BOT{}", if bots == 1 { "" } else { "S" });
-            hb.text_left(font, f.at(x + 14.0, y), 9.0 * s, &line, DIM);
+            hb.text_left(font, f.at(x + 21.0, y), 9.0 * s, &line, DIM);
             y += 16.0;
         }
         y += 6.0;
@@ -1090,14 +1155,12 @@ fn draw_scores(
             0.0,
         );
         if !line.header {
-            hb.quad(
-                white,
-                f.rect([cols[1] - 14.0, y + 1.0, cols[1] - 6.0, y + 10.0]),
-                [0.0; 4],
-                gamma_color(c),
-                hud_mode::PLAIN,
-                0.0,
-            );
+            // Their emblem, or (without the emblem pictures) their colour.
+            let badge = f.rect([cols[1] - 18.0, y - 1.0, cols[1] - 6.0, y + 11.0]);
+            hb.quad(white, badge, [0.0; 4], gamma_color(c), hud_mode::PLAIN, 0.0);
+            if let Some(e) = line.emblem {
+                crate::emblem::draw(hb, badge, e);
+            }
         }
         let fg = if line.local || line.header {
             BRIGHT

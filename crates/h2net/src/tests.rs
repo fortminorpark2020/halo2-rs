@@ -1,5 +1,5 @@
 use super::*;
-use h2sim::game::{Event, Look};
+use h2sim::game::{Emblem, Event, Look};
 use h2sim::testing::{floor, game};
 use h2sim::Command;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -44,6 +44,11 @@ fn a_joined_pc_plays_in_the_hosts_game() {
     let look = Look {
         elite: true,
         colors: [12, 3],
+        emblem: Emblem {
+            foreground: 63,
+            background: 31,
+            colors: [17, 0, 9],
+        },
     };
     let mut client =
         Client::connect(address(&host), &cg, "testmap", 1, ("Noble Six", look)).unwrap();

@@ -221,7 +221,14 @@ fn bitmap_png(path: &str, name: &str, out: &str) -> Res {
     use blam_cache::{bitmap, MapSet};
     let mut set = MapSet::open(path)?;
     let tag = find_tag(&set, "bitm", name).ok_or("no bitmap with that name")?;
-    let img = bitmap::read_bitmap(&mut set, tag.datum)?;
+    // H2_INDEX=<n> picks another image of the tag.
+    let index = std::env::var("H2_INDEX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let count = bitmap::image_count(&mut set, tag.datum)?;
+    let img = bitmap::read_bitmap_at(&mut set, tag.datum, index)?;
+    println!("image {index} of {count}");
     let (w, h) = (img.width as usize, img.height as usize);
     let rgb: Vec<u8> = img
         .rgba
@@ -423,7 +430,13 @@ fn model(path: &str, name: &str, png: Option<&str>) -> Res {
     } else {
         model::object_render_model(&mut set, tag.datum)?
     };
-    let m = model::read_render_model(&mut set, mode)?;
+    let variant = (tag.group != GroupTag::parse("mode").unwrap())
+        .then(|| model::object_variant(&mut set, tag.datum).ok().flatten())
+        .flatten();
+    if let Some(v) = &variant {
+        println!("variant {}: {:?}", v.name, v.regions);
+    }
+    let m = model::read_render_model_variant(&mut set, mode, variant.as_ref())?;
     println!(
         "render model {:08x}: {} sections, {} triangles, {} shaders, {} nodes",
         mode.0,
@@ -432,6 +445,29 @@ fn model(path: &str, name: &str, png: Option<&str>) -> Res {
         m.shaders.len(),
         m.nodes.len()
     );
+    for (k, &shader) in m.shaders.iter().enumerate() {
+        let name = set
+            .locate(shader)
+            .map_or(String::new(), |(_, t)| t.name.clone());
+        let template = blam_cache::shader::read_shader(&mut set, shader)
+            .map(|i| i.template)
+            .unwrap_or_default();
+        let (mut parts, mut uv) = (0, ([f32::MAX; 2], [f32::MIN; 2]));
+        for s in &m.sections {
+            for p in s.parts.iter().filter(|p| p.material == k as i16) {
+                parts += 1;
+                for &i in &p.indices {
+                    let t = s.uvs.get(i as usize).copied().unwrap_or_default();
+                    uv.0 = [uv.0[0].min(t[0]), uv.0[1].min(t[1])];
+                    uv.1 = [uv.1[0].max(t[0]), uv.1[1].max(t[1])];
+                }
+            }
+        }
+        println!(
+            "  shader {k:2} {name} ({template}): {parts} parts, uv {:.2?} .. {:.2?}",
+            uv.0, uv.1
+        );
+    }
     for s in &m.sections {
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for p in &s.positions {

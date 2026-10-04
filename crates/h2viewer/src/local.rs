@@ -744,6 +744,7 @@ impl LocalPlayer {
                         model: pole * Mat4::from_translation(at),
                         light,
                         colors: Some(crate::objective::flag_colors(f.team)),
+                        emblem: None,
                     });
                 }
                 // The left hand's gun: the same arm and gun, mirrored.
@@ -775,6 +776,7 @@ impl LocalPlayer {
                 model: m,
                 light,
                 colors: None,
+                emblem: None,
             });
             let node = weapon
                 .skeleton
@@ -815,12 +817,14 @@ impl LocalPlayer {
             model: hand.frame,
             light,
             colors: Some(player_colors(game, self.player)),
+            emblem: None,
         });
         out.view_models.push(DrawCall {
             mesh: gun_mesh,
             model: hand.frame,
             light,
             colors: None,
+            emblem: None,
         });
         let muzzle = hand
             .rig

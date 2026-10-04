@@ -1,7 +1,7 @@
 //! The player's profile: their gamertag, Spartan or Elite, and armour
 //! colours. It's kept in a small text file so it lasts between games.
 
-use h2sim::game::{clean_name, Look, PROFILE_COLORS};
+use h2sim::game::{clean_name, Look, EMBLEM_BACKGROUNDS, EMBLEM_FOREGROUNDS, PROFILE_COLORS};
 use std::path::PathBuf;
 
 /// Halo 2's 18 profile colours, as its profile lists them, with the RGB
@@ -30,6 +30,11 @@ pub const COLORS: [(&str, [f32; 3]); PROFILE_COLORS as usize] = [
 /// A profile colour's name.
 pub fn color_name(color: u8) -> &'static str {
     COLORS[color as usize % COLORS.len()].0
+}
+
+/// A profile colour's RGB (gamma space).
+pub fn color(color: u8) -> [f32; 3] {
+    COLORS[color as usize % COLORS.len()].1
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -103,6 +108,25 @@ impl Profile {
                 "model" => p.look.elite = value.eq_ignore_ascii_case("elite"),
                 "primary" => p.look.colors[0] = color().unwrap_or(p.look.colors[0]),
                 "secondary" => p.look.colors[1] = color().unwrap_or(p.look.colors[1]),
+                "emblem" => {
+                    if let Some(n) = value.parse::<u8>().ok().filter(|&n| n < EMBLEM_FOREGROUNDS) {
+                        p.look.emblem.foreground = n;
+                    }
+                }
+                "emblem_background" => {
+                    if let Some(n) = value.parse::<u8>().ok().filter(|&n| n < EMBLEM_BACKGROUNDS) {
+                        p.look.emblem.background = n;
+                    }
+                }
+                "emblem_primary" | "emblem_secondary" | "emblem_background_color" => {
+                    let k = match key.trim() {
+                        "emblem_primary" => 0,
+                        "emblem_secondary" => 1,
+                        _ => 2,
+                    };
+                    let c = &mut p.look.emblem.colors[k];
+                    *c = color().unwrap_or(*c);
+                }
                 _ => {}
             }
         }
@@ -110,12 +134,21 @@ impl Profile {
     }
 
     fn to_text(&self) -> String {
+        let color = |c: u8| color_name(c).to_lowercase();
+        let e = &self.look.emblem;
         format!(
-            "name={}\nmodel={}\nprimary={}\nsecondary={}\n",
+            "name={}\nmodel={}\nprimary={}\nsecondary={}\n\
+             emblem={}\nemblem_background={}\n\
+             emblem_primary={}\nemblem_secondary={}\nemblem_background_color={}\n",
             self.name,
             if self.look.elite { "elite" } else { "spartan" },
-            color_name(self.look.colors[0]).to_lowercase(),
-            color_name(self.look.colors[1]).to_lowercase(),
+            color(self.look.colors[0]),
+            color(self.look.colors[1]),
+            e.foreground,
+            e.background,
+            color(e.colors[0]),
+            color(e.colors[1]),
+            color(e.colors[2]),
         )
     }
 }
@@ -144,6 +177,11 @@ mod tests {
             look: Look {
                 elite: true,
                 colors: [15, 4],
+                emblem: h2sim::game::Emblem {
+                    foreground: 63,
+                    background: 31,
+                    colors: [0, 17, 9],
+                },
             },
         };
         assert!(p.to_text().contains("primary=crimson"));

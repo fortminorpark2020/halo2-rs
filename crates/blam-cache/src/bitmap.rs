@@ -127,6 +127,15 @@ pub fn read_sequences(set: &mut MapSet, bitmap: DatumIndex) -> Result<Vec<Sequen
     Ok(out)
 }
 
+/// How many images a bitmap tag holds.
+pub fn image_count(set: &mut MapSet, bitmap: DatumIndex) -> Result<usize> {
+    let (src, _, data) = set.tag_data(bitmap)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let entries = file.read_block(region, &data, BITM_BITMAPS, BITMAP_DATA_SIZE)?;
+    Ok(entries.len() / BITMAP_DATA_SIZE)
+}
+
 /// Decode the first 2D image of a bitmap tag.
 pub fn read_bitmap(set: &mut MapSet, bitmap: DatumIndex) -> Result<Image> {
     read_bitmap_at(set, bitmap, 0)

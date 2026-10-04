@@ -373,7 +373,12 @@ impl Loader {
         let name = self.set.locate(vehi)?.1.name;
         let loaded = vehicle::read_vehicle(&mut self.set, vehi).and_then(|tag| {
             let model = vehicle::read_model(&mut self.set, tag.model)?;
-            let render = model::read_render_model(&mut self.set, model.render_model)?;
+            let variant = model::object_variant(&mut self.set, vehi).ok().flatten();
+            let render = model::read_render_model_variant(
+                &mut self.set,
+                model.render_model,
+                variant.as_ref(),
+            )?;
             Ok((tag, model, render))
         });
         let (tag, model, render) = match loaded {
@@ -451,7 +456,12 @@ impl Loader {
             let attach = marker(&render, &bind, &mount.parent_marker).unwrap_or(Mat4::IDENTITY);
             let t = vehicle::read_vehicle(&mut self.set, mount.object).ok()?;
             let m = vehicle::read_model(&mut self.set, t.model).ok()?;
-            let r = model::read_render_model(&mut self.set, m.render_model).ok()?;
+            let variant = model::object_variant(&mut self.set, mount.object)
+                .ok()
+                .flatten();
+            let r =
+                model::read_render_model_variant(&mut self.set, m.render_model, variant.as_ref())
+                    .ok()?;
             Some((t, r, attach))
         });
         if let Some((ttag, tm, attach)) = loaded {

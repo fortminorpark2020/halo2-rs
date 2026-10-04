@@ -64,6 +64,8 @@ pub enum AuxKind {
     Mask,
     /// Where the player's armour colours go (red: primary, green: secondary).
     ChangeColor,
+    /// The player's emblem picture (the surface's own texture is a stand-in).
+    Emblem,
 }
 
 /// How a surface is drawn: its textures and how it blends.
@@ -791,6 +793,8 @@ impl Loader {
                 } else if let Some(b) = info.change_color {
                     m.aux = self.bitmap_texture(b);
                     m.aux_kind = AuxKind::ChangeColor;
+                } else if info.template.contains("emblem_overlay") {
+                    m.aux_kind = AuxKind::Emblem;
                 }
                 m
             }
@@ -1235,9 +1239,7 @@ impl Loader {
         if let Some(&m) = self.mesh_of_object.get(&object) {
             return m;
         }
-        let mesh = match model::object_render_model(&mut self.set, object)
-            .and_then(|mode| model::read_render_model(&mut self.set, mode))
-        {
+        let mesh = match model::read_object_render_model(&mut self.set, object) {
             Ok(m) => {
                 meshes.push(self.model_mesh(&m));
                 Some(meshes.len() - 1)
@@ -1268,12 +1270,10 @@ impl Loader {
     /// markers its hands hold weapons by.
     fn body(&mut self, bipd: &str, hands: [&str; 2], meshes: &mut Vec<MeshData>) -> Option<Body> {
         let tag = self.find("bipd", bipd)?;
-        let loaded = model::object_render_model(&mut self.set, tag)
-            .and_then(|mode| model::read_render_model(&mut self.set, mode))
-            .and_then(|m| {
-                let jmad = model::object_animations(&mut self.set, tag)?;
-                Ok((m, animation::read_animation_graph(&mut self.set, jmad)?))
-            });
+        let loaded = model::read_object_render_model(&mut self.set, tag).and_then(|m| {
+            let jmad = model::object_animations(&mut self.set, tag)?;
+            Ok((m, animation::read_animation_graph(&mut self.set, jmad)?))
+        });
         let (m, graph) = match loaded {
             Ok(x) => x,
             Err(e) => {

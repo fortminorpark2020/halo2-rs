@@ -275,6 +275,7 @@ impl App {
                     model: Mat4::from_translation(f.home),
                     light: light_at(f.home),
                     colors: None,
+                    emblem: None,
                 });
             }
             if f.carrier.is_some() {
@@ -294,6 +295,7 @@ impl App {
                     model: pole,
                     light,
                     colors: None,
+                    emblem: None,
                 });
             }
             if let (Some(flag), true) = (&scene.flag, ctf) {
@@ -302,6 +304,7 @@ impl App {
                     model: pole * Mat4::from_translation(flag.attach),
                     light,
                     colors: Some(flag_colors(f.team)),
+                    emblem: None,
                 });
             }
         }
@@ -375,6 +378,7 @@ pub fn carried_cloth(scene: &Scene, game: &Game, player: usize, pole: Mat4) -> O
         model: pole * Mat4::from_translation(flag.attach),
         light: None,
         colors: Some(flag_colors(f.team)),
+        emblem: None,
     })
 }
 

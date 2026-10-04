@@ -1011,6 +1011,7 @@ impl Game {
 mod tests {
     use super::*;
     use crate::game::tests::{floor, game};
+    use crate::game::Emblem;
 
     #[test]
     fn commands_survive_the_trip() {
@@ -1096,6 +1097,11 @@ mod tests {
             Look {
                 elite: true,
                 colors: [5, 9],
+                emblem: Emblem {
+                    foreground: 40,
+                    background: 7,
+                    colors: [1, 2, 3],
+                },
             },
         );
         host.players[a].body.position = Vec3::new(0.0, 0.0, 0.0);

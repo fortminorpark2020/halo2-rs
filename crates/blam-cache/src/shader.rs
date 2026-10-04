@@ -137,6 +137,11 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
             info.tint = [0.0; 3];
         }
         "opaque\\overlay" => info.blend = Blend::Alpha,
+        // Never drawn (lights a model variant switches off).
+        "opaque\\render_layer_disabled" => {
+            info.blend = Blend::Alpha;
+            info.opacity = 0.0;
+        }
         _ if t.starts_with("opaque\\") && t.ends_with("change_color") => {
             info.diffuse = own(2).or(info.diffuse);
             info.change_color = own(4);
