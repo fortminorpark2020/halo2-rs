@@ -169,6 +169,9 @@ pub struct Weapon {
     /// First person render model and animations (Spartan entry).
     pub first_person_model: Option<DatumIndex>,
     pub first_person_animations: Option<DatumIndex>,
+    /// The same for an Elite (the Arbiter's arms and their animations).
+    pub elite_first_person_model: Option<DatumIndex>,
+    pub elite_first_person_animations: Option<DatumIndex>,
     /// The weapon's HUD (`nhdt`): crosshair, ammo meter, scope.
     pub hud: Option<DatumIndex>,
     /// The weapon flags (see [`Weapon::CAN_BE_DUAL_WIELDED`]).
@@ -217,6 +220,7 @@ pub fn read_weapon(set: &mut MapSet, weap: DatumIndex) -> Result<Weapon> {
     let barrels = file.read_block(region, &d, WEAP_BARRELS, BARREL_SIZE)?;
 
     let first = fp.as_chunks::<FIRST_PERSON_SIZE>().0.first();
+    let elite = fp.as_chunks::<FIRST_PERSON_SIZE>().0.get(1);
     let magazines = mags
         .as_chunks::<MAGAZINE_SIZE>()
         .0
@@ -285,6 +289,8 @@ pub fn read_weapon(set: &mut MapSet, weap: DatumIndex) -> Result<Weapon> {
         name: tag.name.clone(),
         first_person_model: first.and_then(|f| tag_ref(f, 0x0)),
         first_person_animations: first.and_then(|f| tag_ref(f, 0x8)),
+        elite_first_person_model: elite.and_then(|f| tag_ref(f, 0x0)),
+        elite_first_person_animations: elite.and_then(|f| tag_ref(f, 0x8)),
         hud: tag_ref(&d, WEAP_HUD),
         flags: u32_at(&d, WEAP_FLAGS),
         ready_time: f32_at(&d, WEAP_READY_TIME),

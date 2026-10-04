@@ -607,9 +607,10 @@ impl LocalPlayer {
         let dual = left.is_some();
         let switched = view.switched || dual != self.shown_dual;
         self.shown_dual = dual;
+        let elite = me.look.elite;
         let rig_of = |w: Option<usize>| {
             w.and_then(|w| scene.weapons.get(w))
-                .and_then(|w| w.rig.as_ref())
+                .and_then(|w| w.rig_for(elite))
         };
         let right = me.held().map(|h| h.weapon);
         if let Some(rig) = rig_of(right) {
@@ -715,7 +716,8 @@ impl LocalPlayer {
         // The gun and arms take the light where the player stands.
         let light = scene.level_light.at(&scene.textures, self.camera.position);
         let (_, r, u) = self.camera.basis();
-        let posed = match (&weapon.rig, scene.arms_for(self.me(game).look.elite)) {
+        let elite = self.me(game).look.elite;
+        let posed = match (weapon.rig_for(elite), scene.arms_for(elite)) {
             (Some(rig), Some(arms)) if !self.animator.pose().is_empty() => {
                 let frame = self.view_frame(game);
                 let hand = Hand {
@@ -748,7 +750,7 @@ impl LocalPlayer {
                 let left = self.me(game).left.as_ref();
                 let left = left.and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state)));
                 if let Some((lw, ls)) = left {
-                    if let (Some(lrig), Some(lmesh)) = (&lw.rig, lw.mirror_mesh) {
+                    if let (Some(lrig), Some(lmesh)) = (lw.rig_for(elite), lw.mirror_mesh) {
                         if !self.left_animator.pose().is_empty() {
                             let hand = Hand {
                                 rig: lrig,

@@ -342,7 +342,7 @@ impl Loader {
             {
                 return Some(i);
             }
-            let w = self.weapon_trigger(&name, trigger, None, meshes)?;
+            let w = self.weapon_trigger(&name, trigger, [None; 2], meshes)?;
             weapons.push(w);
             Some(weapons.len() - 1)
         };

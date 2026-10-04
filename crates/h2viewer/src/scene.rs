@@ -250,6 +250,8 @@ pub struct WeaponAssets {
     pub grip: [f32; 3],
     /// First person animations (arms and gun), when the map has them.
     pub rig: Option<FirstPersonRig>,
+    /// The same for an Elite's arms.
+    pub elite_rig: Option<FirstPersonRig>,
     pub hud: Vec<HudWidget>,
     pub sounds: WeaponSounds,
     /// How its rounds look and sound, when they fly.
@@ -535,6 +537,9 @@ const SPARTAN: &str = "objects\\characters\\masterchief\\masterchief_mp";
 const ELITE: &str = "objects\\characters\\elite\\elite_mp";
 const SPARTAN_ARMS: &str = "objects\\characters\\masterchief\\fp\\fp";
 const ELITE_ARMS: &str = "objects\\characters\\elite\\fp_arms\\fp_arms";
+
+/// The Spartan's and the Elite's first person arms skeletons.
+type Arms2<'a> = [Option<&'a Skeleton>; 2];
 
 /// A multiplayer Spartan or Elite seen in third person.
 pub struct Body {
@@ -917,10 +922,29 @@ impl Loader {
     fn weapon(
         &mut self,
         name: &str,
-        arms: Option<&Skeleton>,
+        arms: Arms2<'_>,
         meshes: &mut Vec<MeshData>,
     ) -> Option<WeaponAssets> {
         self.weapon_trigger(name, 0, arms, meshes)
+    }
+
+    /// First person animations for a gun held by arms with `arms`'
+    /// skeleton.
+    fn first_person_rig(
+        &mut self,
+        name: &str,
+        jmad: Option<DatumIndex>,
+        arms: Option<&Skeleton>,
+        gun: &Skeleton,
+    ) -> Option<FirstPersonRig> {
+        let (jmad, arms) = (jmad?, arms?);
+        match animation::read_animation_graph(&mut self.set, jmad) {
+            Ok(g) => Some(FirstPersonRig::new(g, arms, gun)),
+            Err(e) => {
+                println!("warning: first person animations for {name}: {e}");
+                None
+            }
+        }
     }
 
     /// A weapon as fired by its trigger `trigger` (vehicle guns have a
@@ -929,7 +953,7 @@ impl Loader {
         &mut self,
         name: &str,
         trigger: usize,
-        arms: Option<&Skeleton>,
+        [arms, elite_arms]: Arms2<'_>,
         meshes: &mut Vec<MeshData>,
     ) -> Option<WeaponAssets> {
         let datum = self.find("weap", name)?;
@@ -1007,31 +1031,25 @@ impl Loader {
             }
         }
         let mut anim_sounds = (None, None, None);
-        let rig = match (w.first_person_animations, arms) {
-            (Some(jmad), Some(arms)) if view_mesh.is_some() => {
-                match animation::read_animation_graph(&mut self.set, jmad) {
-                    Ok(g) => {
-                        // Sounds the first person animations start.
-                        for (what, slot) in [
-                            ("first_person:ready", &mut anim_sounds.0),
-                            ("first_person:reload_full", &mut anim_sounds.1),
-                            ("first_person:melee_strike_1", &mut anim_sounds.2),
-                        ] {
-                            *slot = g
-                                .find(what)
-                                .and_then(|a| a.sound_events.first())
-                                .and_then(|&(_, i)| g.sounds.get(i).copied().flatten());
-                        }
-                        Some(FirstPersonRig::new(g, arms, &skeleton))
-                    }
-                    Err(e) => {
-                        println!("warning: first person animations for {name}: {e}");
-                        None
-                    }
-                }
+        let (mut rig, mut elite_rig) = (None, None);
+        if view_mesh.is_some() {
+            rig = self.first_person_rig(name, w.first_person_animations, arms, &skeleton);
+            elite_rig =
+                self.first_person_rig(name, w.elite_first_person_animations, elite_arms, &skeleton);
+        }
+        if let Some(g) = rig.as_ref().map(|r| &r.graph) {
+            // Sounds the first person animations start.
+            for (what, slot) in [
+                ("first_person:ready", &mut anim_sounds.0),
+                ("first_person:reload_full", &mut anim_sounds.1),
+                ("first_person:melee_strike_1", &mut anim_sounds.2),
+            ] {
+                *slot = g
+                    .find(what)
+                    .and_then(|a| a.sound_events.first())
+                    .and_then(|&(_, i)| g.sounds.get(i).copied().flatten());
             }
-            _ => None,
-        };
+        }
         let hud = w.hud.map(|h| self.hud_widgets(h)).unwrap_or_default();
         let world_mesh = self.object_mesh(datum, meshes);
         let fx =
@@ -1086,6 +1104,7 @@ impl Loader {
             muzzle,
             grip,
             rig,
+            elite_rig,
             hud,
             sounds,
             autoaim_range: w.autoaim_range,
@@ -1115,11 +1134,11 @@ impl Loader {
     /// its stand.
     fn flag(
         &mut self,
-        arms: Option<&Arms>,
+        arms: Arms2<'_>,
         weapons: &mut Vec<WeaponAssets>,
         meshes: &mut Vec<MeshData>,
     ) -> Option<FlagAssets> {
-        let assets = self.weapon(FLAG, arms.map(|a| &a.skeleton), meshes)?;
+        let assets = self.weapon(FLAG, arms, meshes)?;
         let datum = assets.tag;
         let cloth = self
             .find("clwd", FLAG)
@@ -1302,6 +1321,17 @@ impl Loader {
     }
 }
 
+impl WeaponAssets {
+    /// First person animations for a Spartan's or an Elite's arms.
+    pub fn rig_for(&self, elite: bool) -> Option<&FirstPersonRig> {
+        if elite {
+            self.elite_rig.as_ref().or(self.rig.as_ref())
+        } else {
+            self.rig.as_ref()
+        }
+    }
+}
+
 impl Scene {
     /// The third person body for a Spartan or an Elite (the Spartan's if
     /// the map has no Elite).
@@ -1397,14 +1427,15 @@ impl Scene {
         let elite_arms = loader.arms(ELITE_ARMS, &mut meshes);
         let body = loader.body(SPARTAN, ["right_hand", "left_hand"], &mut meshes);
         let elite = loader.body(ELITE, ["right_hand_elite", "left_hand_elite"], &mut meshes);
+        let skeletons = [&arms, &elite_arms].map(|a| a.as_ref().map(|a| &a.skeleton));
         let weapons = WEAPONS
             .iter()
-            .filter_map(|name| loader.weapon(name, arms.as_ref().map(|a| &a.skeleton), &mut meshes))
+            .filter_map(|name| loader.weapon(name, skeletons, &mut meshes))
             .collect();
         let mut weapons: Vec<WeaponAssets> = weapons;
-        let flag = loader.flag(arms.as_ref(), &mut weapons, &mut meshes);
+        let flag = loader.flag(skeletons, &mut weapons, &mut meshes);
         let mut carried = |name: &str| {
-            let w = loader.weapon(name, arms.as_ref().map(|a| &a.skeleton), &mut meshes)?;
+            let w = loader.weapon(name, skeletons, &mut meshes)?;
             weapons.push(w);
             Some(weapons.len() - 1)
         };
