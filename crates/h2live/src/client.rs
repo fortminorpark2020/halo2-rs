@@ -87,25 +87,10 @@ pub struct LiveClient {
     gone: bool,
 }
 
-/// The key this PC signs in with, kept at `path` as 64 hex digits; made and
-/// saved there the first time.
+/// The key this PC signs in with, kept at `path` (identity.key, next to
+/// the game's profile); made and saved there the first time.
 pub fn identity(path: &Path) -> io::Result<SigningKey> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => match store::unhex::<32>(text.trim()) {
-            Some(seed) => Ok(SigningKey::from_bytes(&seed)),
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{} isn't a key", path.display()),
-            )),
-        },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let mut seed = [0; 32];
-            getrandom::fill(&mut seed).map_err(|e| io::Error::other(e.to_string()))?;
-            store::replace(path, &format!("{}\n", store::hex(&seed)))?;
-            Ok(SigningKey::from_bytes(&seed))
-        }
-        Err(e) => Err(e),
-    }
+    store::signing_key(path)
 }
 
 impl LiveClient {
@@ -287,29 +272,5 @@ impl LiveClient {
                 self.card_path.display()
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_pcs_identity_is_made_once_and_kept() {
-        let dir = std::env::temp_dir().join(format!("h2live-identity-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("identity.key");
-        let made = identity(&path).unwrap();
-        let again = identity(&path).unwrap();
-        assert_eq!(made.to_bytes(), again.to_bytes());
-        assert_eq!(std::fs::read_to_string(&path).unwrap().trim().len(), 64);
-        // Another PC's is another key.
-        let other = identity(&dir.join("other.key")).unwrap();
-        assert_ne!(made.to_bytes(), other.to_bytes());
-        // A broken file is an error, not a new key.
-        std::fs::write(&path, "not a key").unwrap();
-        assert!(identity(&path).is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not a key");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

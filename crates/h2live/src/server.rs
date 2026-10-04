@@ -9,10 +9,16 @@
 //! no two accounts have the same gamertag, whatever the case. Then the PC
 //! and the server ping each other every second, and each gives up on the
 //! other after 15 seconds without a word.
+//!
+//! Each time a player signs in they get their account on a stat card the
+//! server signed (see `card`), and show it the next time. A card newer than
+//! what the server has brings the account back, after the server lost its
+//! data folder, say.
 
+use crate::card;
 use crate::playlists::{self, Playlist};
 use crate::store::{self, Account};
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use h2net::live::{self, Login, PlaylistInfo, ToPc, ToServer, Welcome};
 use h2net::Connection;
 use h2sim::game::{clean_name, Look};
@@ -112,6 +118,8 @@ struct Leg {
 pub struct Server {
     /// The data folder.
     dir: PathBuf,
+    /// Signs stat cards.
+    key: SigningKey,
     playlists: Vec<Playlist>,
     accounts: BTreeMap<u64, Account>,
     /// Sent with every challenge.
@@ -129,9 +137,12 @@ pub struct Server {
 impl Server {
     /// A server keeping its accounts in the folder `dir` (made if need be),
     /// and taking its playlists from `playlists.txt` and its message of the
-    /// day from `motd.txt` there, if they're there.
-    pub fn open(dir: &Path) -> Result<Server, String> {
+    /// day from `motd.txt` there, if they're there. Its stat cards are
+    /// signed with a key made from `secret` (H2LIVE_SECRET), or else kept in
+    /// `secret.txt` there.
+    pub fn open(dir: &Path, secret: Option<&str>) -> Result<Server, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let key = card::server_key(dir, secret)?;
         let playlists = playlists::load(&dir.join("playlists.txt"))?;
         let accounts = store::load(&dir.join("accounts.txt"))?;
         let motd = std::fs::read_to_string(dir.join("motd.txt")).unwrap_or_default();
@@ -140,6 +151,7 @@ impl Server {
             .map_or(0, |d| d.as_secs());
         Ok(Server {
             dir: dir.to_path_buf(),
+            key,
             playlists,
             accounts: accounts.into_iter().map(|a| (a.id, a)).collect(),
             motd: motd.trim().to_string(),
@@ -343,12 +355,19 @@ impl Server {
     fn sign_in(&mut self, k: usize, login: Login, now: f64) {
         let id = store::account_id(&login.key);
         let existing = self.accounts.get(&id);
-        let mut account = existing
-            .cloned()
+        // A card newer than what's here brings back what this server lost.
+        let restored = card::verify(&login.card, &self.key.verifying_key())
+            .filter(|a| a.key == login.key && a.seq > existing.map_or(0, |e| e.seq));
+        if let Some(a) = &restored {
+            println!("live: {} restored from a stat card", a.gamertag);
+        }
+        let mut account = restored
+            .or_else(|| existing.cloned())
             .unwrap_or_else(|| Account::new(login.key, self.epoch + now as u64));
         // The gamertag asked for if it's free; otherwise the one it had.
         let names = [
             clean_name(&login.gamertag),
+            account.gamertag.clone(),
             existing.map_or(String::new(), |a| a.gamertag.clone()),
         ];
         let Some(gamertag) = names.into_iter().find(|n| self.free(n, id)) else {
@@ -426,7 +445,7 @@ impl Server {
         let welcome = Welcome {
             account: id,
             gamertag: account.gamertag.clone(),
-            card: String::new(),
+            card: card::sign(account, &self.key),
             best: account.best_level(),
             levels: levels.collect(),
         };

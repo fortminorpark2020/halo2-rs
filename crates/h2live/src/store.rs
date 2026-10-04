@@ -25,6 +25,7 @@
 
 use crate::levels::{Rank, MAX_LEVEL, MAX_XP};
 use crate::playlists::GAME_TYPES;
+use ed25519_dalek::SigningKey;
 use h2sim::game::{Look, Reader, Writer};
 use h2sim::GameType;
 use sha2::{Digest, Sha512};
@@ -205,6 +206,27 @@ pub fn replace(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(&temp, path)
 }
 
+/// A signing key kept at `path` as its seed (64 hex digits), made at
+/// random and saved there the first time.
+pub fn signing_key(path: &Path) -> std::io::Result<SigningKey> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match unhex::<32>(text.trim()) {
+            Some(seed) => Ok(SigningKey::from_bytes(&seed)),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} isn't a key", path.display()),
+            )),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut seed = [0; 32];
+            getrandom::fill(&mut seed).map_err(|e| std::io::Error::other(e.to_string()))?;
+            replace(path, &format!("{}\n", hex(&seed)))?;
+            Ok(SigningKey::from_bytes(&seed))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Write `accounts` to `path` (accounts.txt) whole.
 pub fn save<'a>(
     path: &Path,
@@ -364,6 +386,25 @@ mod tests {
         ] {
             assert!(parse(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_signing_key_is_made_once_and_kept() {
+        let dir = std::env::temp_dir().join(format!("h2live-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("identity.key");
+        let made = signing_key(&path).unwrap();
+        let again = signing_key(&path).unwrap();
+        assert_eq!(made.to_bytes(), again.to_bytes());
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim().len(), 64);
+        // Another file is another key.
+        let other = signing_key(&dir.join("other.key")).unwrap();
+        assert_ne!(made.to_bytes(), other.to_bytes());
+        // A broken file is an error, not a new key.
+        std::fs::write(&path, "not a key").unwrap();
+        assert!(signing_key(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not a key");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

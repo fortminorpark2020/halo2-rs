@@ -1,5 +1,7 @@
 use super::*;
 use crate::client::{LiveClient, LiveEvent, Profile};
+use crate::levels::Rank;
+use crate::store::Stats;
 use ed25519_dalek::{Signer, SigningKey};
 use h2net::live::kind;
 use h2sim::game::Writer;
@@ -7,6 +9,8 @@ use std::net::Ipv4Addr;
 
 /// Seconds between polls.
 const STEP: f64 = 0.05;
+/// What a server on a free host is told to sign with (H2LIVE_SECRET).
+const SECRET: &str = "a secret that outlives the disk";
 
 /// A folder of a test's own, removed afterwards.
 struct TempDir(PathBuf);
@@ -31,6 +35,8 @@ struct World {
     /// The server's data folder, and the PCs' (for their stat cards).
     data: TempDir,
     home: TempDir,
+    /// The server's H2LIVE_SECRET, if it has one.
+    secret: Option<String>,
     server: Server,
     now: f64,
     pcs: Vec<LiveClient>,
@@ -61,12 +67,17 @@ fn profile(gamertag: &str) -> Profile {
 
 impl World {
     fn new(name: &str) -> World {
+        World::with_secret(name, None)
+    }
+
+    fn with_secret(name: &str, secret: Option<&str>) -> World {
         let data = TempDir::new(&format!("{name}-data"));
         let home = TempDir::new(&format!("{name}-home"));
-        let server = Server::open(&data.0).unwrap();
+        let server = Server::open(&data.0, secret).unwrap();
         World {
             data,
             home,
+            secret: secret.map(String::from),
             server,
             now: 0.0,
             pcs: Vec::new(),
@@ -77,10 +88,28 @@ impl World {
 
     /// Start the server again from its data folder, everyone signed out.
     fn restart(&mut self) {
-        self.server = Server::open(&self.data.0).unwrap();
+        self.server = Server::open(&self.data.0, self.secret.as_deref()).unwrap();
         self.pcs.clear();
         self.events.clear();
         self.frozen.clear();
+    }
+
+    /// Lose the whole data folder, as a free host does on a restart, and
+    /// start again.
+    fn wipe(&mut self) {
+        for file in std::fs::read_dir(&self.data.0).unwrap() {
+            std::fs::remove_file(file.unwrap().path()).unwrap();
+        }
+        self.restart();
+    }
+
+    /// Where PC number `n` keeps its stat card.
+    fn card_path(&self, n: u8) -> PathBuf {
+        self.home.0.join(format!("card-{n}.txt"))
+    }
+
+    fn card(&self, n: u8) -> String {
+        std::fs::read_to_string(self.card_path(n)).unwrap()
     }
 
     /// PC number `n` connects and signs in with `profile`. Returns its
@@ -88,7 +117,7 @@ impl World {
     fn connect_as(&mut self, n: u8, profile: &Profile) -> usize {
         let (server_end, pc_end) = Connection::pair();
         self.server.accept(server_end, Route::Live, ip(n), self.now);
-        let card = self.home.0.join(format!("card-{n}.txt"));
+        let card = self.card_path(n);
         let pc = LiveClient::new(pc_end, key(n), profile, &card, self.now);
         self.pcs.push(pc);
         self.events.push(Vec::new());
@@ -301,6 +330,7 @@ fn accounts_are_kept_across_a_restart() {
     let a = w.sign_in(1, "Jorge");
     let id = w.welcome(a).account;
     let before = w.server.account(id).unwrap().clone();
+    let card = w.card(1);
     w.restart();
     // Someone else can't take the gamertag after the restart.
     let other = w.connect(2, "JORGE");
@@ -310,6 +340,124 @@ fn accounts_are_kept_across_a_restart() {
     let a = w.sign_in(1, "Jorge");
     assert_eq!(w.welcome(a).account, id);
     assert_eq!(w.server.account(id), Some(&before));
+    // Signed with the same key: the server kept it in secret.txt.
+    assert_eq!(w.card(1), card);
+}
+
+/// Give PC 1 an account at level 13 in Double Team, as if it had played
+/// there, and start the server with it.
+fn veteran(w: &mut World) -> Account {
+    let mut a = Account::new(key(1).verifying_key().to_bytes(), 1_600_000_000);
+    a.gamertag = "VETERAN".into();
+    a.look = profile("").look;
+    a.seq = 5;
+    a.stats.push(Stats {
+        playlist: "double_team".into(),
+        rank: Rank {
+            xp: 1234,
+            level: 13,
+        },
+        games: 40,
+        wins: 22,
+    });
+    store::save(&w.data.0.join("accounts.txt"), [&a]).unwrap();
+    w.restart();
+    a
+}
+
+/// Double Team's number.
+const DOUBLE_TEAM: u8 = 2;
+
+#[test]
+fn a_stat_card_brings_an_account_back_to_an_empty_disk() {
+    let mut w = World::with_secret("restore", Some(SECRET));
+    let veteran = veteran(&mut w);
+    let a = w.sign_in(1, "Veteran");
+    assert_eq!(w.welcome(a).levels, [(DOUBLE_TEAM, 13, 40)]);
+    assert_eq!(w.welcome(a).best, 13);
+    let playlists = &w.pcs[a].view.playlists;
+    let double_team = playlists.iter().find(|p| p.id == DOUBLE_TEAM).unwrap();
+    assert_eq!(double_team.level, 13);
+    assert_eq!(w.card(1), w.welcome(a).card);
+    w.wipe();
+    assert_eq!(w.server.account(veteran.id), None);
+    let a = w.sign_in(1, "Veteran");
+    assert_eq!(w.welcome(a).levels, [(DOUBLE_TEAM, 13, 40)]);
+    let restored = w.server.account(veteran.id).unwrap();
+    assert_eq!(restored.stats, veteran.stats);
+    assert_eq!(restored.created, veteran.created);
+    assert!(restored.seq > veteran.seq);
+    assert_eq!(w.accounts_txt(), restored.lines());
+}
+
+#[test]
+fn a_changed_card_brings_nothing_back() {
+    let mut w = World::with_secret("tampered", Some(SECRET));
+    veteran(&mut w);
+    w.sign_in(1, "Veteran");
+    let raised = w.card(1).replace(" 1234 13 ", " 9999 30 ");
+    assert_ne!(raised, w.card(1));
+    std::fs::write(w.card_path(1), raised).unwrap();
+    w.wipe();
+    let a = w.sign_in(1, "Veteran");
+    assert_eq!((w.welcome(a).best, w.welcome(a).levels.len()), (1, 0));
+    // The card is replaced by one with what the server does know.
+    assert!(!w.card(1).contains("double_team"));
+    // Nor does a card from a server with another key: without a secret,
+    // a wiped server makes itself a new one.
+    let mut w = World::new("other-key");
+    veteran(&mut w);
+    w.sign_in(1, "Veteran");
+    w.wipe();
+    let a = w.sign_in(1, "Veteran");
+    assert_eq!(w.welcome(a).best, 1);
+}
+
+#[test]
+fn only_a_newer_card_of_ones_own_counts() {
+    let mut w = World::with_secret("newer", Some(SECRET));
+    let veteran = veteran(&mut w);
+    // Cards as this server would have signed them.
+    let key = card::server_key(&w.data.0, Some(SECRET)).unwrap();
+    let card = |seq, level| {
+        let mut a = veteran.clone();
+        a.seq = seq;
+        a.stats[0].rank = Rank {
+            xp: crate::levels::min_xp(level),
+            level,
+        };
+        card::sign(&a, &key)
+    };
+    // One older than the server's copy changes nothing.
+    std::fs::write(w.card_path(1), card(4, 20)).unwrap();
+    let a = w.sign_in(1, "Veteran");
+    assert_eq!(w.welcome(a).best, 13);
+    // A newer one wins.
+    std::fs::write(w.card_path(1), card(6, 20)).unwrap();
+    let a = w.sign_in(1, "Veteran");
+    assert_eq!(w.welcome(a).best, 20);
+    // Someone else's card is no use to another PC.
+    std::fs::write(w.card_path(2), card(9, 30)).unwrap();
+    let b = w.sign_in(2, "Rookie");
+    assert_eq!(w.welcome(b).best, 1);
+    assert_eq!(w.server.account(veteran.id).unwrap().best_level(), 20);
+}
+
+#[test]
+fn a_restored_account_whose_gamertag_was_taken_picks_another() {
+    let mut w = World::with_secret("restore-taken", Some(SECRET));
+    veteran(&mut w);
+    w.sign_in(1, "Veteran");
+    w.wipe();
+    // Someone else takes the gamertag on the empty disk first.
+    w.sign_in(2, "Veteran");
+    let a = w.connect(1, "Veteran");
+    w.until(|w| w.refused(a).is_some());
+    assert_eq!(w.refused(a), Some(live::GAMERTAG_TAKEN));
+    // Under another, the card still brings the account back.
+    let a = w.sign_in(1, "Old Timer");
+    assert_eq!(w.welcome(a).gamertag, "OLD TIMER");
+    assert_eq!(w.welcome(a).best, 13);
 }
 
 #[test]
