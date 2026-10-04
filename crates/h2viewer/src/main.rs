@@ -846,6 +846,8 @@ struct App {
     bodies: Vec<BodyAnimator>,
     /// Actions players started this frame (reload, melee...), for their bodies.
     body_actions: Vec<(usize, &'static str)>,
+    /// Gestures scripts have actors play, by animation name.
+    body_gestures: Vec<(usize, String)>,
     body_poses: Vec<Option<BodyPose>>,
     /// The player's own model beside the profile menu.
     preview: BodyAnimator,
@@ -1185,6 +1187,7 @@ impl App {
                         l.camera.pitch = 0.0;
                     }
                 }
+                self.body_gestures.extend(m.take_gestures());
                 let effects = m.take_effects();
                 let sounds = m.take_sounds();
                 if !sounds.is_empty() {
@@ -1446,6 +1449,7 @@ impl App {
     /// player's body while it looks through their eyes.
     fn animate_bodies(&mut self, dt: f32) {
         let actions = std::mem::take(&mut self.body_actions);
+        let gestures = std::mem::take(&mut self.body_gestures);
         let n = self.game.players.len();
         self.bodies.resize_with(n, BodyAnimator::default);
         self.body_poses.resize_with(n, || None);
@@ -1540,6 +1544,9 @@ impl App {
             }
             for &(_, what) in actions.iter().filter(|a| a.0 == i) {
                 self.bodies[i].act(rig, &input, what);
+            }
+            for (_, name) in gestures.iter().filter(|g| g.0 == i) {
+                self.bodies[i].play(rig, name);
             }
             let pose = self.bodies[i].update(rig, &input, dt);
             let world = rig.world(&pose);
@@ -2419,6 +2426,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         effects: Effects::new(),
         bodies: Vec::new(),
         body_actions: Vec::new(),
+        body_gestures: Vec::new(),
         body_poses: Vec::new(),
         preview: BodyAnimator::default(),
         preview_pose: None,

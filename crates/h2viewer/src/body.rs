@@ -245,6 +245,17 @@ impl BodyAnimator {
         }
     }
 
+    /// Play an animation by its full name (a script's gesture) over the
+    /// movement; false if the body has none called that.
+    pub fn play(&mut self, rig: &BodyRig, name: &str) -> bool {
+        let Some(a) = rig.by_name(name) else {
+            return false;
+        };
+        self.action = Some(a);
+        self.action_time = 0.0;
+        true
+    }
+
     /// Advance by `dt` and pose the body.
     pub fn update(&mut self, rig: &BodyRig, input: &BodyInput, dt: f32) -> Vec<NodePose> {
         let (want, rate) = if !input.alive {

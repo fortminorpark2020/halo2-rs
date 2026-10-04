@@ -30,6 +30,10 @@ pub(super) struct Cutscene {
     fov: Option<f32>,
     /// Named objects' animations.
     objects: HashMap<u16, Playing>,
+    /// Actors' gestures (Johnson pointing, a Hunter shaking its fist):
+    /// playing, by player, and those to start (by animation name).
+    units: HashMap<usize, Playing>,
+    gestures: Vec<(usize, String)>,
     /// Permutations scripts swapped in (region and permutation string
     /// ids), by object name.
     looks: HashMap<u16, (u32, u32)>,
@@ -150,10 +154,32 @@ impl Ctx<'_> {
             looping,
         };
         for &o in object.objects() {
-            if let Obj::Name(n) = o {
-                self.st.cutscene.objects.insert(n, playing);
+            match o {
+                Obj::Name(n) => {
+                    self.st.cutscene.objects.insert(n, playing);
+                }
+                Obj::Unit(i) => {
+                    let name = playing.animation(self.scene).map(|a| a.name.clone());
+                    if let Some(name) = name {
+                        if self.st.log {
+                            println!("script: unit {i} plays {name} at {:.1}", self.st.time);
+                        }
+                        self.st.cutscene.units.insert(i, playing);
+                        self.st.cutscene.gestures.push((i, name));
+                    }
+                }
+                Obj::Vehicle(_) => {}
             }
         }
+    }
+
+    /// An object's animation playing, if one is.
+    fn playing(&self, v: &Value) -> Option<&Playing> {
+        v.objects().iter().find_map(|&o| match o {
+            Obj::Name(n) => self.st.cutscene.objects.get(&n),
+            Obj::Unit(i) => self.st.cutscene.units.get(&i),
+            Obj::Vehicle(_) => None,
+        })
     }
 
     /// Where an effect on an object goes: where a cutscene has it, else
@@ -276,31 +302,26 @@ impl Ctx<'_> {
             }
             "unit_stop_custom_animation" | "scenery_animation_idle" => {
                 for &o in arg(0).objects() {
-                    if let Obj::Name(n) = o {
-                        self.st.cutscene.objects.remove(&n);
+                    match o {
+                        Obj::Name(n) => {
+                            self.st.cutscene.objects.remove(&n);
+                        }
+                        Obj::Unit(i) => {
+                            self.st.cutscene.units.remove(&i);
+                        }
+                        Obj::Vehicle(_) => {}
                     }
                 }
                 Value::Void
             }
-            "unit_is_playing_custom_animation" => {
-                let playing = arg(0).objects().iter().any(|&o| match o {
-                    Obj::Name(n) => self
-                        .st
-                        .cutscene
-                        .objects
-                        .get(&n)
-                        .is_some_and(|p| p.looping || p.left(self.scene, now) > 0.0),
-                    _ => false,
-                });
-                Value::Bool(playing)
-            }
-            "scenery_get_animation_time" => {
-                let left = arg(0).objects().iter().find_map(|&o| match o {
-                    Obj::Name(n) => self.st.cutscene.objects.get(&n),
-                    _ => None,
-                });
-                ticks(left.map_or(0.0, |p| p.left(self.scene, now)))
-            }
+            "unit_is_playing_custom_animation" => Value::Bool(
+                self.playing(&arg(0))
+                    .is_some_and(|p| p.looping || p.left(self.scene, now) > 0.0),
+            ),
+            "scenery_get_animation_time" | "unit_get_custom_animation_time" => ticks(
+                self.playing(&arg(0))
+                    .map_or(0.0, |p| p.left(self.scene, now)),
+            ),
             // A cutscene the player can skip.
             "cinematic_skip_start_internal" => {
                 self.st.cutscene.skippable = true;
@@ -332,13 +353,6 @@ impl Ctx<'_> {
                     }
                 }
                 Value::Void
-            }
-            "unit_get_custom_animation_time" => {
-                let left = arg(0).objects().iter().find_map(|&o| match o {
-                    Obj::Name(n) => self.st.cutscene.objects.get(&n),
-                    _ => None,
-                });
-                ticks(left.map_or(0.0, |p| p.left(self.scene, now)))
             }
             "cinematic_subtitle" => {
                 if let Some(id) = arg(0).handle() {
@@ -423,6 +437,12 @@ impl Mission {
             .objects
             .get(&name)?
             .root(scene, self.state.time)
+    }
+
+    /// The gestures actors started since last asked: player and
+    /// animation name.
+    pub fn take_gestures(&mut self) -> Vec<(usize, String)> {
+        std::mem::take(&mut self.state.cutscene.gestures)
     }
 
     /// The subtitle up now.
