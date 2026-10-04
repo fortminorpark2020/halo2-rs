@@ -8,7 +8,7 @@ use blam_cache::ai::{self, Character, CharacterKind, Squad};
 use blam_cache::physics::{self, BipedPhysics};
 use blam_cache::scenario::{self, PlacedKind};
 use blam_cache::script::{self, Scripts};
-use blam_cache::DatumIndex;
+use blam_cache::{text, DatumIndex};
 use glam::Vec3;
 use h2sim::game::{CharacterDef, GrenadeKind, Mind, Side, Vitality};
 use h2sim::KillZone;
@@ -47,10 +47,26 @@ pub struct CampaignAi {
     pub machines: Vec<Option<scenario::Machine>>,
     /// The device groups switches and scripts set.
     pub device_groups: Vec<scenario::DeviceGroup>,
+    /// The titles scripts show (chapter names), and the mission's
+    /// objectives.
+    pub titles: Vec<Title>,
+    pub objectives: Vec<String>,
     /// The sounds scripts play (dialogue), by tag: in `Scene::sounds`.
     pub sounds: HashMap<u32, usize>,
     /// The music and loops scripts start, by tag.
     pub loops: HashMap<u32, ScriptLoop>,
+}
+
+/// A title scripts put on screen: its text, where (top, left, bottom,
+/// right on Halo 2's 640 x 480 screen), and seconds to fade in, stay up
+/// and fade out.
+#[derive(Debug, Clone, Default)]
+pub struct Title {
+    pub text: String,
+    pub bounds: [f32; 4],
+    pub fade_in: f32,
+    pub up: f32,
+    pub fade_out: f32,
 }
 
 /// Music (or another looping sound) a script starts: its opening, the
@@ -202,6 +218,29 @@ impl Loader {
             .collect();
         out.bsp_switches = scenario::bsp_switches(set).unwrap_or_default();
         out.device_groups = scenario::device_groups(set).unwrap_or_default();
+        let table = text::language_table(set).unwrap_or_default();
+        let (titles, objectives) =
+            scenario::text_lists(set).unwrap_or((DatumIndex::NONE, DatumIndex::NONE));
+        let titles = text::unicode_strings(set, &table, titles).unwrap_or_default();
+        out.titles = scenario::cutscene_titles(set)
+            .unwrap_or_default()
+            .iter()
+            .map(|t| Title {
+                text: titles
+                    .iter()
+                    .find(|(id, _)| *id == t.name)
+                    .map_or_else(String::new, |(_, s)| s.clone()),
+                bounds: t.bounds.map(f32::from),
+                fade_in: t.fade_in,
+                up: t.up,
+                fade_out: t.fade_out,
+            })
+            .collect();
+        out.objectives = text::unicode_strings(set, &table, objectives)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect();
         let placed: Vec<(PlacedKind, Vec<scenario::Placement>)> = PlacedKind::ALL
             .iter()
             .map(|&k| (k, scenario::placements(set, k).unwrap_or_default()))

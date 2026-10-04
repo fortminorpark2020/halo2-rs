@@ -87,6 +87,11 @@ impl App {
             Net::Joined { lobby, .. } => lobby.as_ref(),
             _ => None,
         };
+        let objectives = self
+            .mission
+            .as_ref()
+            .map(|m| m.objectives(&self.scene))
+            .unwrap_or_default();
         let ctx = menu::Context {
             maps: &self.maps,
             missions: &self.missions,
@@ -96,6 +101,7 @@ impl App {
             scores: &scores,
             joined,
             host_lobby,
+            objectives: &objectives,
         };
         f(&mut self.menu, &ctx)
     }

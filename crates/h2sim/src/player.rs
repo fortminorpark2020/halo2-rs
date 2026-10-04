@@ -37,6 +37,9 @@ pub struct Player {
     /// Height of the fall just landed from (for falling damage; whoever
     /// reads it clears it).
     pub fell: f32,
+    /// The level's gravity, as a share of normal (scripts lower it where
+    /// the air's let out).
+    pub gravity: f32,
     jump_held: bool,
     accumulator: f32,
     contacts: Vec<Contact>,
@@ -52,6 +55,7 @@ impl Player {
             movement,
             biped,
             fell: 0.0,
+            gravity: 1.0,
             jump_held: false,
             accumulator: 0.0,
             contacts: Vec::new(),
@@ -141,7 +145,7 @@ impl Player {
         }
         self.jump_held = input.jump;
 
-        let gravity = GRAVITY * m.gravity_scale;
+        let gravity = GRAVITY * m.gravity_scale * self.gravity;
         self.velocity.z -= gravity * dt;
         let was_grounded = self.grounded;
         let falling = (-self.velocity.z).max(0.0);

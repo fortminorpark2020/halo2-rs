@@ -170,9 +170,79 @@ pub enum MissionSound {
     StopLoop(u32),
 }
 
+/// A value easing from one level to another over a while.
+#[derive(Debug, Clone, Copy, Default)]
+struct Ramp {
+    from: f32,
+    to: f32,
+    start: f32,
+    length: f32,
+}
+
+impl Ramp {
+    fn level(level: f32) -> Ramp {
+        Ramp {
+            from: level,
+            to: level,
+            ..Ramp::default()
+        }
+    }
+
+    fn at(&self, now: f32) -> f32 {
+        if self.length <= 0.0 {
+            return self.to;
+        }
+        let t = ((now - self.start) / self.length).clamp(0.0, 1.0);
+        self.from + (self.to - self.from) * t
+    }
+
+    /// Head for `to` over `length` seconds from where it is now.
+    fn go(&mut self, now: f32, to: f32, length: f32) {
+        *self = Ramp {
+            from: self.at(now),
+            to,
+            start: now,
+            length,
+        };
+    }
+}
+
+/// What the scripts put over the view: a fade, letterbox bars, a title,
+/// and how much of the HUD shows.
+#[derive(Debug, Clone, Copy, Default)]
+struct Screen {
+    fade: Ramp,
+    fade_color: [f32; 3],
+    letterbox: Ramp,
+    hud: Ramp,
+    /// A title (in `CampaignAi::titles`) and when it went up.
+    title: Option<(usize, f32)>,
+}
+
+/// The screen as it looks now: a colour over everything, how far the
+/// letterbox bars are in (0-1), how much the HUD shows (0-1), and a title
+/// with how much it shows.
+#[derive(Debug, Clone, Default)]
+pub struct ScreenView {
+    pub fade: [f32; 4],
+    pub letterbox: f32,
+    pub hud: f32,
+    pub title: Option<(String, [f32; 4], f32)>,
+}
+
+/// Seconds the letterbox bars take to come in or go.
+const LETTERBOX_TIME: f32 = 0.5;
+
 /// The level as the mission's scripts have left it.
 #[derive(Default)]
 struct State {
+    /// Seconds since the mission started.
+    time: f32,
+    screen: Screen,
+    /// Gravity as a share of normal.
+    gravity: f32,
+    /// How many of the mission's objectives are shown, and done.
+    objectives: (usize, usize),
     /// Sounds to play, for whoever's listening.
     sounds: Vec<MissionSound>,
     /// The structure BSP the players are in.
@@ -228,6 +298,11 @@ impl Mission {
     ) -> Mission {
         let log = std::env::var_os("H2_SCRIPT_LOG").is_some();
         let mut state = State {
+            screen: Screen {
+                hud: Ramp::level(1.0),
+                ..Screen::default()
+            },
+            gravity: 1.0,
             bsp: start_bsp(scene, game),
             difficulty,
             log,
@@ -317,7 +392,24 @@ impl Mission {
                 d.target = to;
             }
         }
+        // H2_TITLE="k@seconds" shows title k then (for testing).
+        if let Some((k, at)) = std::env::var("H2_TITLE").ok().and_then(|v| {
+            let (k, at) = v.split_once('@')?;
+            Some((k.parse::<usize>().ok()?, at.parse::<f32>().ok()?))
+        }) {
+            ctx.st.screen.title = Some((k, at));
+            ctx.st.screen.letterbox = Ramp {
+                from: 0.0,
+                to: 1.0,
+                start: at - 1.0,
+                length: LETTERBOX_TIME,
+            };
+        }
         if log {
+            for t in &scene.ai.titles {
+                println!("title {t:?}");
+            }
+            println!("objectives {:?}", scene.ai.objectives);
             for (k, l) in scene.lifts.iter().enumerate() {
                 let name = l.name.and_then(|n| scene.ai.object_names.get(n as usize));
                 println!(
@@ -351,6 +443,10 @@ impl Mission {
         bots: &mut Vec<(usize, Bot)>,
     ) {
         self.ticks += 1;
+        self.state.time = self.ticks as f32 * h2sim::game::TICK;
+        for p in &mut game.players {
+            p.body.gravity = self.state.gravity;
+        }
         let mut ctx = Ctx {
             st: &mut self.state,
             scene,
@@ -378,6 +474,45 @@ impl Mission {
         self.state.exists(o.name, o.automatic)
             && o.door
                 .is_none_or(|d| self.state.doors.get(d).is_none_or(|d| d.position < 0.5))
+    }
+
+    /// The objectives the mission has given so far, and whether each is
+    /// done.
+    pub fn objectives(&self, scene: &Scene) -> Vec<(String, bool)> {
+        let (shown, done) = self.state.objectives;
+        let all = &scene.ai.objectives;
+        (0..shown.min(all.len()))
+            .map(|k| (all[k].clone(), k < done))
+            .collect()
+    }
+
+    /// The fade, letterbox bars, title and HUD the scripts want now.
+    pub fn screen(&self, scene: &Scene) -> ScreenView {
+        let s = &self.state.screen;
+        let now = self.state.time;
+        let title = s.title.and_then(|(k, start)| {
+            let t = scene.ai.titles.get(k)?;
+            let age = now - start;
+            let showing = if age < t.fade_in {
+                age / t.fade_in.max(1e-3)
+            } else if age < t.fade_in + t.up {
+                1.0
+            } else {
+                1.0 - (age - t.fade_in - t.up) / t.fade_out.max(1e-3)
+            };
+            (showing > 0.0 && !t.text.is_empty())
+                .then(|| (t.text.clone(), t.bounds, showing.min(1.0)))
+        });
+        let [r, g, b] = s.fade_color;
+        // Once it's won, the HUD says so through the last fade.
+        let won = self.state.won;
+        let fade = s.fade.at(now);
+        ScreenView {
+            fade: [r, g, b, if won { fade.min(0.7) } else { fade }],
+            letterbox: s.letterbox.at(now),
+            hud: if won { 1.0 } else { s.hud.at(now) },
+            title,
+        }
     }
 
     /// The lifts' parts to draw: mesh, model matrix and light.
@@ -1160,6 +1295,86 @@ impl Host for Ctx<'_> {
                 if let Some(d) = self.device(args.first()) {
                     d.automatic = on;
                 }
+                Value::Void
+            }
+            // What's over the view.
+            "fade_out" | "fade_in" => {
+                // (fade_out r g b ticks): to the colour; fade_in: from it.
+                let out = function == "fade_out";
+                let seconds = num(3) / h2sim::script::TICKS_PER_SECOND as f32;
+                let now = self.st.time;
+                let screen = &mut self.st.screen;
+                screen.fade_color = [num(0), num(1), num(2)];
+                let (from, to) = if out {
+                    (screen.fade.at(now), 1.0)
+                } else {
+                    (1.0, 0.0)
+                };
+                screen.fade = Ramp {
+                    from,
+                    to,
+                    start: now,
+                    length: seconds,
+                };
+                Value::Void
+            }
+            "cinematic_show_letterbox" | "cinematic_show_letterbox_immediate" => {
+                let to = if arg(0).truthy() { 1.0 } else { 0.0 };
+                let length = if function.ends_with("immediate") {
+                    0.0
+                } else {
+                    LETTERBOX_TIME
+                };
+                self.st.screen.letterbox.go(self.st.time, to, length);
+                Value::Void
+            }
+            // The end of a cutscene takes its bars away.
+            "cinematic_stop" => {
+                self.st.screen.letterbox = Ramp::level(0.0);
+                Value::Void
+            }
+            "hud_cinematic_fade" => {
+                self.st.screen.hud.go(self.st.time, num(0), num(1));
+                Value::Void
+            }
+            "cinematic_set_title" => {
+                if let Some(k) = arg(0).index() {
+                    if self.st.log {
+                        let text = self
+                            .scene
+                            .ai
+                            .titles
+                            .get(k as usize)
+                            .map(|t| t.text.as_str());
+                        let at = self.st.time;
+                        println!("script: title {:?} at {at:.1}s", text.unwrap_or("?"));
+                    }
+                    self.st.screen.title = Some((k as usize, self.st.time));
+                }
+                Value::Void
+            }
+            // (objectives_show_up_to n): the first n + 1 are given;
+            // finishing marks them done.
+            "objectives_show_up_to" => {
+                let n = num(0).max(0.0) as usize + 1;
+                if self.st.log {
+                    println!("script: objectives up to {n} at {:.1}s", self.st.time);
+                }
+                self.st.objectives.0 = self.st.objectives.0.max(n);
+                Value::Void
+            }
+            "objectives_finish_up_to" => {
+                let n = num(0).max(0.0) as usize + 1;
+                self.st.objectives.1 = self.st.objectives.1.max(n);
+                self.st.objectives.0 = self.st.objectives.0.max(n);
+                Value::Void
+            }
+            "objectives_clear" => {
+                self.st.objectives = (0, 0);
+                Value::Void
+            }
+            "physics_set_gravity" => {
+                self.st.gravity = num(0).max(0.0);
                 Value::Void
             }
             // (objects_attach parent marker child child_marker)

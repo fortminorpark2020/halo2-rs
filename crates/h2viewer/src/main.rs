@@ -655,6 +655,54 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
     println!("kills by weapon {kills_with:?}");
 }
 
+/// How much of the view the letterbox bars cover, top and bottom each.
+const LETTERBOX: f32 = 0.12;
+
+/// What a mission's scripts put over a view: the HUD faded as they say,
+/// letterbox bars, a chapter title and a fade to or from a colour.
+fn mission_screen(
+    hud: &mut Vec<HudBatch>,
+    view: &campaign::ScreenView,
+    font: usize,
+    white: usize,
+    w: f32,
+    h: f32,
+) {
+    if view.hud < 0.05 {
+        hud.clear();
+    } else if view.hud < 0.999 {
+        for v in hud.iter_mut().flat_map(|b| &mut b.vertices) {
+            v.color[3] *= view.hud.max(0.0);
+        }
+    }
+    let mut hb = HudBuilder::new(w, h);
+    let s = hb.scale();
+    let fill = |hb: &mut HudBuilder, rect: [f32; 4], color: [f32; 4]| {
+        hb.quad(white, rect, [0.0; 4], color, hud_mode::PLAIN, 0.0);
+    };
+    if view.letterbox > 0.0 {
+        let bar = h * LETTERBOX * view.letterbox.min(1.0);
+        fill(&mut hb, [0.0, 0.0, w, bar], [0.0, 0.0, 0.0, 1.0]);
+        fill(&mut hb, [0.0, h - bar, w, h], [0.0, 0.0, 0.0, 1.0]);
+    }
+    if let Some((text, _, shown)) = &view.title {
+        // In the bottom bar.
+        let size = 13.0 * s;
+        let y = h * (1.0 - LETTERBOX * 0.5) - size * 0.5;
+        hb.text(
+            font,
+            [w * 0.5, y],
+            size,
+            &text.to_uppercase(),
+            [1.0, 1.0, 1.0, *shown],
+        );
+    }
+    if view.fade[3] > 0.0 {
+        fill(&mut hb, [0.0, 0.0, w, h], view.fade);
+    }
+    hud.extend(hb.finish());
+}
+
 /// A map loading in the background, behind the loading screen.
 struct Loading {
     title: String,
@@ -1767,6 +1815,16 @@ impl App {
             } else {
                 l.build_hud(&self.scene, &self.game, vw, vh)
             };
+            if let Some(m) = self.mission.as_ref().filter(|_| !self.menu_open) {
+                mission_screen(
+                    &mut hud,
+                    &m.screen(&self.scene),
+                    self.scene.hud_font,
+                    self.scene.hud_white,
+                    vw,
+                    vh,
+                );
+            }
             let prompt = self
                 .mission
                 .as_ref()

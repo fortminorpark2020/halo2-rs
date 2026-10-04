@@ -12,6 +12,11 @@ const SCNR_NETGAME_FLAGS: usize = 0x118;
 const SCNR_BSP_SWITCHES: usize = 0x130;
 const BSP_SWITCH_SIZE: usize = 0xE;
 const SCNR_DEVICE_GROUPS: usize = 0xA0;
+const SCNR_CUTSCENE_TITLES: usize = 0x1F0;
+const CUTSCENE_TITLE_SIZE: usize = 0x24;
+/// The string lists of the chapter titles and of the objectives.
+const SCNR_CHAPTER_TITLE_TEXT: usize = 0x200;
+const SCNR_OBJECTIVES: usize = 0x3B8;
 const DEVICE_GROUP_SIZE: usize = 0x28;
 const SCNR_NETGAME_EQUIPMENT: usize = 0x120;
 const NETGAME_FLAG_SIZE: usize = 0x20;
@@ -494,6 +499,49 @@ pub fn device_groups(set: &mut MapSet) -> Result<Vec<DeviceGroup>> {
             once: u32_at(g, 0x24) & 1 != 0,
         })
         .collect())
+}
+
+/// A title scripts show (a chapter's name): its name (a string id, which
+/// its text in the chapter title strings has too), where it goes on the
+/// 640 x 480 screen (top, left, bottom, right), and how it fades.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CutsceneTitle {
+    pub name: u32,
+    pub bounds: [i16; 4],
+    pub fade_in: f32,
+    pub up: f32,
+    pub fade_out: f32,
+}
+
+pub fn cutscene_titles(set: &mut MapSet) -> Result<Vec<CutsceneTitle>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let titles = map.read_block(meta, &data, SCNR_CUTSCENE_TITLES, CUTSCENE_TITLE_SIZE)?;
+    Ok(titles
+        .as_chunks::<CUTSCENE_TITLE_SIZE>()
+        .0
+        .iter()
+        .map(|t| CutsceneTitle {
+            name: u32_at(t, 0),
+            bounds: [4, 6, 8, 0xA].map(|o| i16_at(t, o)),
+            fade_in: f32_at(t, 0x18),
+            up: f32_at(t, 0x1C),
+            fade_out: f32_at(t, 0x20),
+        })
+        .collect())
+}
+
+/// The scenario's chapter title strings and objective strings (`unic`).
+pub fn text_lists(set: &mut MapSet) -> Result<(DatumIndex, DatumIndex)> {
+    let data = scenario_data(set)?;
+    if data.len() < SCNR_OBJECTIVES + 8 {
+        return Err(Error::Corrupt("scenario tag too small".into()));
+    }
+    Ok((
+        DatumIndex(u32_at(&data, SCNR_CHAPTER_TITLE_TEXT + 4)),
+        DatumIndex(u32_at(&data, SCNR_OBJECTIVES + 4)),
+    ))
 }
 
 /// What kind of switch a control is.

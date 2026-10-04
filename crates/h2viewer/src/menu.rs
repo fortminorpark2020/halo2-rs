@@ -319,6 +319,8 @@ pub struct Context<'a> {
     pub joined: bool,
     /// Joined: the host's lobby, while waiting there for its next game.
     pub host_lobby: Option<&'a Lobby>,
+    /// A mission's objectives so far, and whether each is done.
+    pub objectives: &'a [(String, bool)],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1204,6 +1206,9 @@ impl Menu {
         if self.screen == Screen::Profile {
             self.draw_profile(hb, font, white, &f);
         }
+        if self.screen == Screen::Pause && !ctx.objectives.is_empty() {
+            draw_objectives(hb, font, white, &f, ctx.objectives);
+        }
         if self.screen == Screen::SystemLink {
             let y = ROW_Y - 22.0;
             hb.text_left(font, f.at(ROW_X, y), 9.0 * s, "GAMES ON YOUR NETWORK", DIM);
@@ -1374,6 +1379,48 @@ fn gamma_color(c: [f32; 3]) -> [f32; 4] {
 }
 
 /// Break `text` into lines of at most `width` characters, at spaces.
+/// A mission's objectives, beside the pause menu: done ones dimmed.
+fn draw_objectives(
+    hb: &mut HudBuilder,
+    font: usize,
+    white: usize,
+    f: &Frame,
+    objectives: &[(String, bool)],
+) {
+    let s = f.s;
+    let (x, mut y) = (PANEL_X, ROW_Y);
+    let per_line = (PANEL_W / (9.0 * crate::font::ASPECT)) as usize;
+    let lines: Vec<(String, bool)> = objectives
+        .iter()
+        .flat_map(|(text, done)| {
+            let mut lines = wrap(&text.to_uppercase(), per_line.saturating_sub(2));
+            for (k, l) in lines.iter_mut().enumerate() {
+                *l = format!(
+                    "{} {l}",
+                    if k > 0 {
+                        " "
+                    } else if *done {
+                        "+"
+                    } else {
+                        "-"
+                    }
+                );
+            }
+            lines.into_iter().map(move |l| (l, *done))
+        })
+        .collect();
+    let height = 22.0 + 13.0 * lines.len() as f32;
+    let back = f.rect([x - 8.0, y - 8.0, x + PANEL_W + 8.0, y + height + 4.0]);
+    hb.quad(white, back, [0.0; 4], PANEL, hud_mode::PLAIN, 0.0);
+    hb.text_left(font, f.at(x, y), 10.0 * s, "OBJECTIVES", BRIGHT);
+    y += 22.0;
+    for (line, done) in lines {
+        let color = if done { DIM } else { TEXT };
+        hb.text_left(font, f.at(x, y), 9.0 * s, &line, color);
+        y += 13.0;
+    }
+}
+
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for word in text.split_whitespace() {
@@ -1513,6 +1560,7 @@ mod tests {
             scores: &[],
             joined: false,
             host_lobby: None,
+            objectives: &[],
         }
     }
 

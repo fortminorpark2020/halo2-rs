@@ -52,6 +52,7 @@ fn main() -> ExitCode {
         Some("squads") if args.len() >= 2 => squads(&args[1]),
         Some("scripts") if args.len() >= 2 => scripts(&args[1]),
         Some("mission") if args.len() >= 2 => mission(&args[1]),
+        Some("text") if args.len() >= 2 => text(&args[1], args.get(2).map(String::as_str)),
         Some("sound") if args.len() >= 3 => {
             sound(&args[1], &args[2], args.get(3).map(String::as_str))
         }
@@ -755,6 +756,27 @@ fn mission(path: &str) -> Res {
             "device group {i} {} initial {} once {}",
             g.name, g.initial, g.once
         );
+    }
+    Ok(())
+}
+
+/// The map's English strings (all, or one string list's).
+fn text(path: &str, unic: Option<&str>) -> Res {
+    use blam_cache::{text, MapSet};
+    let mut set = MapSet::open(path)?;
+    let table = text::language_table(&mut set)?;
+    println!("{} strings", table.len());
+    let strings = match unic {
+        Some(name) => {
+            let tag = find_tag(&set, "unic", name).ok_or("no unic with that name")?;
+            println!("{}", tag.name);
+            text::unicode_strings(&mut set, &table, tag.datum)?
+        }
+        None => table,
+    };
+    for (id, s) in &strings {
+        let name = set.map.string_id(*id).unwrap_or("?").to_string();
+        println!("  {name}: {s:?}");
     }
     Ok(())
 }
