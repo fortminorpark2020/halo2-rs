@@ -21,13 +21,20 @@ use h2net::live::{
 use h2net::Connection;
 use h2sim::bot::{bot_look, bot_name};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-/// The service tried without H2_LIVE: one on this PC.
-const DEFAULT_SERVICE: &str = "ws://127.0.0.1:47050";
+/// The online server everyone signs in to, unless H2_LIVE or a `server=`
+/// line in the profile names another. None yet: until there is, it's the
+/// one on this PC.
+const DEFAULT_LIVE_SERVER: &str = "";
+/// h2live on this PC, which is tried first so the PC running it finds it:
+/// where it listens, and how long it has to answer.
+const HERE: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 47050);
+const HERE_WAIT: Duration = Duration::from_millis(100);
 /// Why a ws:// or wss:// service can't be reached yet.
 pub const NO_TRANSPORT: &str = "ONLINE PLAY OVER THE NETWORK ISN'T AVAILABLE YET";
 /// Shown when the service turned down our gamertag.
@@ -376,6 +383,39 @@ fn map_hashes(maps: &[MapChoice]) -> Vec<(String, u64)> {
     maps.iter().filter_map(hash).collect()
 }
 
+/// The online server to sign in to when H2_LIVE doesn't say: h2live on
+/// this PC if it's `here`, or else the one `chosen` (the profile's
+/// `server=`), or else the usual one. Web addresses, as a browser shows
+/// them, become WebSocket ones.
+fn live_server(chosen: &str, here: impl FnOnce() -> bool) -> String {
+    let elsewhere = [chosen.trim(), DEFAULT_LIVE_SERVER]
+        .into_iter()
+        .find(|a| !a.is_empty());
+    let Some(address) = elsewhere.filter(|_| !here()) else {
+        return format!("ws://{HERE}");
+    };
+    let address = address.trim_end_matches('/');
+    let lower = address.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        format!("wss://{}", &address["https://".len()..])
+    } else if lower.starts_with("http://") {
+        format!("ws://{}", &address["http://".len()..])
+    } else {
+        address.to_string()
+    }
+}
+
+/// Whether something listens at `address`, taking calls within `wait`.
+/// It's asked what a host's health check asks, so a server there has
+/// nothing to complain about.
+fn listens(address: SocketAddr, wait: Duration) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, wait) else {
+        return false;
+    };
+    let _ = stream.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    true
+}
+
 impl Online {
     pub fn new(text: LiveText, identity: Option<PathBuf>) -> Online {
         Online {
@@ -583,10 +623,12 @@ fn online_screen(screen: Screen) -> bool {
 }
 
 impl App {
-    /// Sign in to the online service H2_LIVE names (ONLINE on the main
-    /// menu, or SIGN IN again).
+    /// Sign in to the online service H2_LIVE names, or else `live_server`'s
+    /// (ONLINE on the main menu, or SIGN IN again).
     pub(crate) fn go_online(&mut self) {
-        let address = std::env::var("H2_LIVE").unwrap_or_else(|_| DEFAULT_SERVICE.into());
+        let address = std::env::var("H2_LIVE").unwrap_or_else(|_| {
+            live_server(&self.menu.profile.server, || listens(HERE, HERE_WAIT))
+        });
         let fakes = std::env::var("H2_LIVE_FAKE_PLAYERS")
             .ok()
             .and_then(|n| n.parse().ok())
@@ -784,6 +826,28 @@ mod tests {
         assert_eq!(fill("%2d%% complete, %s", &[7]), " 7% complete, %s");
         assert_eq!(fill("trailing %", &[]), "trailing %");
         assert_eq!(clock_text(65.9), "1:05");
+    }
+
+    #[test]
+    fn the_server_is_this_pcs_or_else_the_one_chosen() {
+        let here = format!("ws://{HERE}");
+        let address = |chosen: &str| live_server(chosen, || false);
+        assert_eq!(
+            address("https://h2live.example.com/"),
+            "wss://h2live.example.com"
+        );
+        assert_eq!(
+            address(" HTTP://203.0.113.5:47050"),
+            "ws://203.0.113.5:47050"
+        );
+        assert_eq!(address("ws://203.0.113.5:47050"), "ws://203.0.113.5:47050");
+        assert_eq!(live_server("wss://h2live.example.com", || true), here);
+        // Something listening on this PC is found, and nothing isn't.
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let at = listener.local_addr().unwrap();
+        assert!(listens(at, HERE_WAIT));
+        drop(listener);
+        assert!(!listens(at, HERE_WAIT));
     }
 
     /// A folder of a test's own, removed afterwards.

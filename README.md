@@ -249,6 +249,12 @@ An `h2live.txt` next to it can set `port=` and `data=`. On a host online,
 set the same; `/health` answers health checks, and `/` says how many
 players are online. `H2LIVE_UPNP=0` leaves the router alone.
 
+Games sign in to h2live on the same PC if it's running, or else the server a
+`server=` line in `profile.txt` names, or else the one built into the game;
+`H2_LIVE=<address>` overrides them all. [docs/ONLINE.md](docs/ONLINE.md) has
+the steps for running the server online (on Render's free plan, from
+`render.yaml` and `Dockerfile.live`) or on a PC at home.
+
 ## Roadmap
 
 1. Map file reader (done)

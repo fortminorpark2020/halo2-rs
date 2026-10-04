@@ -1,0 +1,13 @@
+# Only what building h2live takes goes to Docker (see Dockerfile.live): its
+# crates' sources and the workspace's manifests. No map files, no build
+# output, nothing else.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/*/Cargo.toml
+!crates/blam-cache/src
+!crates/wma/src
+!crates/h2sim/src
+!crates/h2net/src
+!crates/h2live/src
+**/*.map

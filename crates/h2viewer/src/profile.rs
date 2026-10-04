@@ -1,5 +1,6 @@
 //! The player's profile: their gamertag, Spartan or Elite, and armour
-//! colours. It's kept in a small text file so it lasts between games.
+//! colours, and the online server they sign in to if not the usual one.
+//! It's kept in a small text file so it lasts between games.
 
 use h2sim::game::{clean_name, Look, EMBLEM_BACKGROUNDS, EMBLEM_FOREGROUNDS, PROFILE_COLORS};
 use std::path::PathBuf;
@@ -42,6 +43,9 @@ pub struct Profile {
     /// Their gamertag.
     pub name: String,
     pub look: Look,
+    /// The online server to sign in to, from a `server=` line players add
+    /// themselves; empty for the usual one.
+    pub server: String,
 }
 
 impl Default for Profile {
@@ -49,6 +53,7 @@ impl Default for Profile {
         Profile {
             name: h2net::player_name(),
             look: Look::default_for(0),
+            server: String::new(),
         }
     }
 }
@@ -106,6 +111,7 @@ impl Profile {
                     }
                 }
                 "model" => p.look.elite = value.eq_ignore_ascii_case("elite"),
+                "server" => p.server = value.to_string(),
                 "primary" => p.look.colors[0] = color().unwrap_or(p.look.colors[0]),
                 "secondary" => p.look.colors[1] = color().unwrap_or(p.look.colors[1]),
                 "emblem" => {
@@ -136,7 +142,7 @@ impl Profile {
     fn to_text(&self) -> String {
         let color = |c: u8| color_name(c).to_lowercase();
         let e = &self.look.emblem;
-        format!(
+        let mut text = format!(
             "name={}\nmodel={}\nprimary={}\nsecondary={}\n\
              emblem={}\nemblem_background={}\n\
              emblem_primary={}\nemblem_secondary={}\nemblem_background_color={}\n",
@@ -149,7 +155,11 @@ impl Profile {
             color(e.colors[0]),
             color(e.colors[1]),
             color(e.colors[2]),
-        )
+        );
+        if !self.server.is_empty() {
+            text += &format!("server={}\n", self.server);
+        }
+        text
     }
 }
 
@@ -189,9 +199,17 @@ mod tests {
                     colors: [0, 17, 9],
                 },
             },
+            server: "https://h2live.example.com".into(),
         };
         assert!(p.to_text().contains("primary=crimson"));
         assert_eq!(Profile::parse(&p.to_text()), p);
+        // No server line for the usual server.
+        let usual = Profile {
+            server: String::new(),
+            ..p
+        };
+        assert!(!usual.to_text().contains("server"));
+        assert_eq!(Profile::parse(&usual.to_text()), usual);
         // Numbers work for colours too; nonsense is skipped.
         let q = Profile::parse("name=  arbiter \nprimary=3\nsecondary=plaid\nmodel=ELITE");
         assert_eq!(q.name, "ARBITER");

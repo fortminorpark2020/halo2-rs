@@ -1,0 +1,41 @@
+# The online server on Render, free: on render.com, New -> Blueprint, pick
+# this repository, Apply. docs/ONLINE.md has the steps.
+services:
+  - type: web
+    name: h2live
+    runtime: docker
+    dockerfilePath: ./Dockerfile.live
+    dockerContext: .
+    plan: free
+    # Can't be moved once made, so pick it nearest the players first: one of
+    # oregon, ohio, virginia, frankfurt or singapore.
+    region: ohio
+    healthCheckPath: /health
+    autoDeploy: true
+    # Only changes to the server deploy it again (which restarts it, ending
+    # games in progress), not changes to the game alone.
+    buildFilter:
+      paths:
+        - Dockerfile.live
+        - .dockerignore
+        - Cargo.toml
+        - Cargo.lock
+        - crates/blam-cache/**
+        - crates/wma/**
+        - crates/h2sim/**
+        - crates/h2net/**
+        - crates/h2live/**
+    envVars:
+      # What signs players' stat cards, made up by Render once. Never delete
+      # the service: a new one has a new secret, and old cards are no good to
+      # it.
+      - key: H2LIVE_SECRET
+        generateValue: true
+      # Free services keep no disk between restarts; stat cards bring
+      # accounts and levels back.
+      - key: H2LIVE_DATA
+        value: /tmp/h2live-data
+      # Render's own port, said outright: with PORT set, h2live knows it's
+      # behind Render's proxy and takes players' addresses from it.
+      - key: PORT
+        value: "10000"

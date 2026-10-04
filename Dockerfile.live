@@ -1,0 +1,30 @@
+# The online server, h2live, for a host online such as Render (render.yaml,
+# docs/ONLINE.md). It's built from the crates it needs, and .dockerignore
+# keeps everything else out, map files above all: the server never reads
+# one.
+#
+#   docker build -f Dockerfile.live -t h2live .
+#   docker run -p 47050:47050 h2live
+#
+# A host sets PORT, and h2live listens there instead.
+
+FROM rust:1.99-slim-trixie AS build
+WORKDIR /src
+COPY . .
+# The workspace has the game and h2tool in it too. Cargo only needs them to
+# be there, not built, so they're left as empty programs.
+RUN for c in h2tool h2viewer; do \
+        mkdir -p crates/$c/src && echo 'fn main() {}' > crates/$c/src/main.rs; \
+    done
+RUN cargo build --release --locked -p h2live
+
+FROM debian:trixie-slim
+RUN useradd --create-home h2live
+USER h2live
+# Accounts are kept in h2live-data here unless H2LIVE_DATA says otherwise.
+WORKDIR /home/h2live
+COPY --from=build /src/target/release/h2live /usr/local/bin/h2live
+# There's no router to ask for the port from inside a container.
+ENV H2LIVE_UPNP=0
+EXPOSE 47050
+CMD ["h2live"]
