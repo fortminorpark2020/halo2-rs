@@ -2,6 +2,7 @@ use super::*;
 use h2sim::game::{Emblem, Event, Look};
 use h2sim::testing::{floor, game};
 use h2sim::Command;
+use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -626,12 +627,12 @@ const SHORT: Duration = Duration::from_millis(300);
 
 #[test]
 fn a_silent_host_is_lost_within_the_timeout() {
-    let cg = game();
+    let mut cg = game();
+    // From when the connection is made, as the timeout runs.
+    let start = Instant::now();
     let (mut silent, end) = Connection::pair();
     let mut client = Client::over(end, &cg, "testmap", &[ANY_TEAM], me());
     client.set_timeout(SHORT);
-    let mut cg = game();
-    let start = Instant::now();
     let why = loop {
         let (ce, _) = client.poll(&mut cg);
         if let Some(ClientEvent::Lost(why)) = ce.first() {
@@ -881,7 +882,8 @@ fn lan_hosts_send_the_whole_game_every_tick() {
 }
 
 /// Bots playing on the test floor: a host with `bots` of them, and a PC
-/// joined to it (whose player a bot on the host plays too).
+/// joined to it (whose player a bot on the host plays too, unless taken
+/// out of `bots`).
 struct BotGame {
     world: h2sim::World,
     nav: h2sim::NavGraph,
@@ -894,6 +896,11 @@ struct BotGame {
 
 impl BotGame {
     fn new(bots: usize) -> BotGame {
+        BotGame::over(bots, Connection::pair())
+    }
+
+    /// The same over another connection: the host's end, then the PC's.
+    fn over(bots: usize, (a, b): (Connection, Connection)) -> BotGame {
         let world = floor();
         let points: Vec<glam::Vec3> = (-4..=4)
             .flat_map(|x| {
@@ -907,8 +914,9 @@ impl BotGame {
             hg.add_player();
         }
         let mut cg = game();
-        let who = verified("TESTER", ANY_TEAM);
-        let (mut host, mut client) = online("testmap", &cg, "testmap", &[ANY_TEAM], me(), who);
+        let mut host = Host::online("testmap");
+        host.add_connection(a, verified("TESTER", ANY_TEAM));
+        let mut client = Client::over(b, &cg, "testmap", &[ANY_TEAM], me());
         let mut welcomed = false;
         pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
             welcomed |= matches!(ce.first(), Some(ClientEvent::Welcomed { .. }));
@@ -930,7 +938,9 @@ impl BotGame {
 
     /// Run a tick on the host and send it. What happened in it.
     fn tick(&mut self) -> Vec<Event> {
-        let mut commands = vec![Command::default(); self.hg.players.len()];
+        let mut commands: Vec<Command> = (0..self.hg.players.len())
+            .map(|i| self.host.command(i).unwrap_or_default())
+            .collect();
         for (i, bot) in &mut self.bots {
             commands[*i] = bot.think(&self.hg, &self.world, &self.nav, *i);
         }
@@ -1084,4 +1094,130 @@ fn a_pc_that_never_catches_up_is_dropped() {
         std::thread::sleep(Duration::from_millis(1));
     };
     assert_eq!(reason, "connection too slow");
+}
+
+// Under lag, as over the internet: every message 100-200 ms late.
+
+/// Timeouts for games under lag: ten heartbeats, against messages up to a
+/// fifth of a second late.
+const LAGGED: Duration = Duration::from_secs(1);
+
+/// Messages on their way, each with when it arrives.
+type Late = VecDeque<(Instant, u8, Vec<u8>)>;
+
+/// The two ends of a connection (a host's, and a joining PC's) on which
+/// each message takes 100-200 ms to arrive, in the order sent.
+fn lag_pair() -> (Connection, Connection) {
+    let (host_end, mut a) = Connection::pair();
+    let (mut b, pc_end) = Connection::pair();
+    std::thread::spawn(move || {
+        let (mut to_b, mut to_a, mut seed) = (Late::new(), Late::new(), 1);
+        // Until either end goes.
+        while carry(&mut a, &mut b, &mut to_b, &mut seed)
+            .and_then(|()| carry(&mut b, &mut a, &mut to_a, &mut seed))
+            .is_ok()
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    (host_end, pc_end)
+}
+
+/// Take what `from` sent, a random 100-200 ms late, and hand `to` what's
+/// due.
+fn carry(
+    from: &mut Connection,
+    to: &mut Connection,
+    late: &mut Late,
+    seed: &mut u32,
+) -> Result<(), String> {
+    let now = Instant::now();
+    for (kind, body) in from.receive()? {
+        *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let lag = Duration::from_millis(100 + (*seed >> 16) as u64 % 101);
+        // Never ahead of what was sent before it.
+        let due = late.back().map_or(now, |m| m.0).max(now + lag);
+        late.push_back((due, kind, body));
+    }
+    while late.front().is_some_and(|m| m.0 <= now) {
+        let (_, kind, body) = late.pop_front().unwrap();
+        to.send(kind, &body);
+    }
+    to.flush()
+}
+
+#[test]
+fn an_idle_lobby_stays_connected_under_lag() {
+    let mut hg = game();
+    hg.add_player();
+    let mut host = Host::online("lockout");
+    host.set_timeout(LAGGED);
+    host.set_lobby(Lobby::default());
+    let (a, b) = lag_pair();
+    host.add_connection(a, verified("TESTER", ANY_TEAM));
+    let mut cg = game();
+    let mut client = Client::over(b, &cg, "midship", &[ANY_TEAM], me());
+    client.set_timeout(LAGGED);
+    // Three timeouts with nothing to say but that they're still there.
+    let start = Instant::now();
+    let mut seen = false;
+    while start.elapsed() < LAGGED * 3 {
+        for e in host.poll(&mut hg, 16) {
+            assert!(matches!(e, HostEvent::Arrived { .. }), "{e:?}");
+        }
+        for e in client.poll(&mut cg).0 {
+            assert!(matches!(e, ClientEvent::Lobby(_)), "{e:?}");
+            seen = true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(seen);
+    assert_eq!(host.joined(), 1);
+}
+
+#[test]
+fn a_game_under_lag_goes_on() {
+    let mut g = BotGame::over(5, lag_pair());
+    g.host.set_timeout(LAGGED);
+    g.client.set_timeout(LAGGED);
+    // A snapshot every tick, a tick every 30th of a second, as online.
+    g.host.set_rate(0);
+    // The joined PC plays its own player, firing all the while.
+    let mine = g.client.players[0];
+    g.bots.retain(|b| b.0 != mine);
+    let fire = Command {
+        fire: true,
+        ..Command::default()
+    };
+    let (mut made, mut got, mut shots) = (Vec::new(), Vec::new(), 0);
+    for _ in 0..60 {
+        g.client.send_commands(&[(mine, fire)]);
+        assert!(g.host.poll(&mut g.hg, 16).is_empty());
+        let before = g.host.sent();
+        let events = g.tick();
+        // Each goes: lag alone doesn't put the PC behind.
+        assert!(g.host.sent() > before);
+        shots += events
+            .iter()
+            .filter(|e| matches!(e, Event::Shot { player, .. } if *player == mine))
+            .count();
+        made.extend(events);
+        let (ce, events) = g.client.poll(&mut g.cg);
+        assert!(ce.is_empty(), "{ce:?}");
+        got.extend(events);
+        std::thread::sleep(Duration::from_secs_f32(2.0 * h2sim::game::TICK));
+    }
+    // Its controls reached the host.
+    assert!(shots > 0);
+    // And the last of the game reaches it.
+    let start = Instant::now();
+    while got.len() < made.len() || state(&g.cg) != state(&g.hg) {
+        assert!(g.host.poll(&mut g.hg, 16).is_empty());
+        let (ce, events) = g.client.poll(&mut g.cg);
+        assert!(ce.is_empty(), "{ce:?}");
+        got.extend(events);
+        assert!(start.elapsed() < LAGGED, "still waiting");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(got, made);
 }
