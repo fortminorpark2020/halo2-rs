@@ -1,7 +1,7 @@
 //! Weapon firing: triggers, bursts, rate of fire, spread, ammo and reloading,
 //! driven by the values in the weapon's tags.
 
-use blam_cache::weapon::{Damage, Projectile, TriggerBehavior, Weapon};
+use blam_cache::weapon::{Damage, Projectile, TriggerBehavior, TriggerInput, Weapon};
 use glam::Vec3;
 
 /// Halo 2 drives reload length from animations; this stands in until they
@@ -9,11 +9,19 @@ use glam::Vec3;
 const DEFAULT_RELOAD_TIME: f32 = 2.0;
 /// Shots that never hit anything vanish after this distance.
 const DEFAULT_RANGE: f32 = 1000.0;
+/// Rounds at least this fast (world units per second) hit at once; slower
+/// ones, and anything that explodes, fly through the air.
+const INSTANT_SPEED: f32 = 100.0;
+/// Flying rounds with no range of their own go this far.
+const FLIGHT_RANGE: f32 = 150.0;
 
 /// Everything about a weapon the simulation needs, flattened from its tags.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WeaponDef {
     pub name: String,
+    /// The control that fires it (vehicle guns have a second trigger: the
+    /// Scorpion's machine gun, the Banshee's bomb).
+    pub input: TriggerInput,
     pub behavior: TriggerBehavior,
     /// Firing effects per second at the start and after sustained fire.
     pub rounds_per_second: (f32, f32),
@@ -50,6 +58,94 @@ pub struct WeaponDef {
     pub melee_damage: Option<f32>,
     /// How it fires held in one of two hands, if it can be.
     pub dual: Option<DualWield>,
+    /// How its rounds fly, unless they hit at once.
+    pub flight: Option<Flight>,
+}
+
+/// A blast: full damage close in, falling off to the edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Blast {
+    /// Damage at the edge and inside the first radius.
+    pub damage: (f32, f32),
+    /// Full damage inside the first radius, none beyond the second.
+    pub radius: (f32, f32),
+    /// How hard it throws people (world units per second at the centre).
+    pub push: f32,
+}
+
+impl Blast {
+    /// The blast a `jpt!` describes, if it reaches anywhere.
+    pub fn from_tags(d: &Damage) -> Option<Blast> {
+        let outer = d.radius.0.max(d.radius.1);
+        let upper = d.upper_bound.0.max(d.upper_bound.1);
+        (outer > 0.0 && upper > 0.0).then_some(Blast {
+            damage: (d.lower_bound.min(upper), upper),
+            radius: (d.radius.0.min(outer), outer),
+            push: d.instantaneous_acceleration,
+        })
+    }
+
+    /// How much of the blast reaches `distance` from its centre (0..1).
+    pub fn falloff(&self, distance: f32) -> f32 {
+        let (inner, outer) = self.radius;
+        if distance >= outer {
+            0.0
+        } else if distance <= inner {
+            1.0
+        } else {
+            1.0 - (distance - inner) / (outer - inner)
+        }
+    }
+
+    /// Damage `distance` from the centre.
+    pub fn damage_at(&self, distance: f32) -> f32 {
+        if distance >= self.radius.1 {
+            return 0.0;
+        }
+        let f = self.falloff(distance);
+        self.damage.0 + (self.damage.1 - self.damage.0) * f
+    }
+}
+
+/// How a weapon's rounds fly: plasma bolts, needles, rockets, shells.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flight {
+    /// World units per second: leaving the barrel, and once past the
+    /// acceleration distances.
+    pub speed: (f32, f32),
+    pub acceleration_range: (f32, f32),
+    /// Times normal gravity.
+    pub gravity: f32,
+    /// Radians per second it turns toward a target (0: flies straight).
+    pub homing: f32,
+    /// Only homes in on vehicles (the rocket launcher's lock-on).
+    pub homes_on_vehicles: bool,
+    pub blast: Option<Blast>,
+}
+
+impl Flight {
+    /// Speed after travelling `distance`.
+    pub fn speed_at(&self, distance: f32) -> f32 {
+        let (near, far) = self.acceleration_range;
+        let t = if far <= near {
+            (distance >= far) as u8 as f32
+        } else {
+            ((distance - near) / (far - near)).clamp(0.0, 1.0)
+        };
+        let (a, b) = self.speed;
+        let b = if b > 0.0 { b } else { a };
+        a + (b - a) * t
+    }
+}
+
+/// What a barrel fires, read from its tags.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Rounds<'a> {
+    pub projectile: Option<&'a Projectile>,
+    /// Damage hitting someone directly.
+    pub impact: Option<&'a Damage>,
+    /// Damage going off.
+    pub detonation: Option<&'a Damage>,
 }
 
 /// A one-handed weapon's spread and damage when dual wielded.
@@ -66,8 +162,30 @@ pub struct DualWield {
 pub const DEFAULT_READY_TIME: f32 = 0.5;
 
 impl WeaponDef {
-    pub fn from_tags(w: &Weapon, projectile: Option<&Projectile>, damage: Option<&Damage>) -> Self {
-        let trigger = w.triggers.first().copied().unwrap_or_default();
+    /// The barrel trigger `trigger` fires.
+    pub fn barrel_of(w: &Weapon, trigger: usize) -> blam_cache::weapon::Barrel {
+        let t = w.triggers.get(trigger).or(w.triggers.first());
+        t.and_then(|t| usize::try_from(t.barrel).ok())
+            .and_then(|b| w.barrels.get(b))
+            .or(w.barrels.first())
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The weapon as fired by trigger `trigger` (the first for hand-held
+    /// guns).
+    pub fn from_tags(w: &Weapon, trigger: usize, rounds: Rounds) -> Self {
+        let Rounds {
+            projectile,
+            impact: damage,
+            detonation,
+        } = rounds;
+        let trigger = w
+            .triggers
+            .get(trigger)
+            .or(w.triggers.first())
+            .copied()
+            .unwrap_or_default();
         let barrel = usize::try_from(trigger.barrel)
             .ok()
             .and_then(|b| w.barrels.get(b))
@@ -98,10 +216,21 @@ impl WeaponDef {
         } else {
             DEFAULT_RELOAD_TIME
         };
+        let blast = detonation.and_then(Blast::from_tags);
+        let velocity = projectile.map(|p| p.initial_velocity).unwrap_or(0.0);
+        let flies = velocity > 0.0 && (velocity < INSTANT_SPEED || blast.is_some());
         let range = projectile
             .map(|p| p.maximum_range)
             .filter(|r| *r > 0.0)
-            .unwrap_or(DEFAULT_RANGE);
+            .unwrap_or(if flies { FLIGHT_RANGE } else { DEFAULT_RANGE });
+        let flight = projectile.filter(|_| flies).map(|p| Flight {
+            speed: (p.initial_velocity, p.final_velocity),
+            acceleration_range: p.acceleration_range,
+            gravity: p.air_gravity_scale.max(0.0),
+            homing: p.guided_angular_velocity.0.max(p.guided_angular_velocity.1),
+            homes_on_vehicles: trigger.behavior == TriggerBehavior::LatchRocketLauncher,
+            blast,
+        });
         let upper = damage.map(|d| d.upper_bound.0.max(d.upper_bound.1));
         let dual = w.can_be_dual_wielded().then_some(DualWield {
             minimum_error: barrel.dual_minimum_error,
@@ -115,6 +244,7 @@ impl WeaponDef {
         });
         WeaponDef {
             name: w.name.rsplit('\\').next().unwrap_or(&w.name).to_string(),
+            input: trigger.input,
             behavior: trigger.behavior,
             rounds_per_second: rps,
             rate_acceleration_time: barrel.acceleration_time,
@@ -134,7 +264,7 @@ impl WeaponDef {
             zoom_levels: w.zoom_levels.max(0) as u32,
             zoom_range: w.zoom_range,
             range,
-            velocity: projectile.map(|p| p.initial_velocity).unwrap_or(0.0),
+            velocity,
             damage: upper.unwrap_or(0.0),
             damage_range: projectile
                 .map(|p| p.air_damage_range)
@@ -143,6 +273,7 @@ impl WeaponDef {
             ready_time: DEFAULT_READY_TIME,
             melee_damage: None,
             dual,
+            flight,
         }
     }
 
@@ -396,6 +527,7 @@ mod tests {
     fn battle_rifle() -> WeaponDef {
         WeaponDef {
             name: "battle_rifle".into(),
+            input: Default::default(),
             behavior: TriggerBehavior::LatchZoom,
             rounds_per_second: (15.0, 15.0),
             rate_acceleration_time: 0.0,
@@ -422,6 +554,7 @@ mod tests {
             ready_time: DEFAULT_READY_TIME,
             melee_damage: None,
             dual: None,
+            flight: None,
         }
     }
 

@@ -19,6 +19,7 @@ pub fn floor() -> World {
 fn rifle() -> WeaponDef {
     WeaponDef {
         name: "rifle".into(),
+        input: Default::default(),
         behavior: TriggerBehavior::Latch,
         rounds_per_second: (10.0, 10.0),
         rate_acceleration_time: 0.0,
@@ -45,6 +46,7 @@ fn rifle() -> WeaponDef {
         ready_time: crate::weapon::DEFAULT_READY_TIME,
         melee_damage: None,
         dual: None,
+        flight: None,
     }
 }
 

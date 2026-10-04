@@ -395,6 +395,22 @@ impl Soundscape {
                 let s = g.explosion[(kind == GrenadeKind::Plasma) as usize];
                 self.play(scene, s, position, None, listeners, 1.0);
             }
+            Event::Impact {
+                weapon,
+                position,
+                exploded,
+                ..
+            } => {
+                let r = scene.weapons.get(weapon).map(|w| w.round);
+                let fallback = match (exploded, r.is_some_and(|r| r.fiery)) {
+                    (true, true) => g.explosion[0],
+                    (true, false) => g.explosion[1],
+                    (false, _) => g.impact,
+                };
+                let s = r.and_then(|r| r.impact).or(fallback);
+                let gain = if exploded { 1.0 } else { 0.6 };
+                self.play(scene, s, position, None, listeners, gain);
+            }
             Event::Damaged { player, .. } => {
                 // Your own shields taking the hit.
                 let shielded = game.players.get(player).is_some_and(|p| p.shield > 0.0);

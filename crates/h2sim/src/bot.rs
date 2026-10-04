@@ -4,8 +4,10 @@
 //! Bots produce the same `Command`s as people.
 
 use crate::collision::World;
-use crate::game::{Command, Game, GameType};
+use crate::game::{Command, Game, GameType, Spartan};
 use crate::nav::NavGraph;
+use crate::player::GRAVITY;
+use crate::weapon::WeaponDef;
 use blam_cache::weapon::TriggerBehavior;
 use glam::{Vec2, Vec3};
 
@@ -75,6 +77,29 @@ fn wrap(a: f32) -> f32 {
 }
 
 impl Bot {
+    /// Where to point `def` to hit player `q` from `eye`: where they'll
+    /// be when its rounds get there, and higher for rounds that fall.
+    /// Explosive rounds go at the feet, to catch them in the blast.
+    pub(super) fn aim_point(def: Option<&WeaponDef>, eye: Vec3, q: &Spartan) -> Vec3 {
+        let chest = q.eye() - Vec3::Z * 0.12;
+        let Some(f) = def.and_then(|d| d.flight) else {
+            return chest + q.body.velocity * 0.1;
+        };
+        let at = match f.blast {
+            Some(_) if q.body.grounded => q.body.position + Vec3::Z * 0.1,
+            _ => chest,
+        };
+        let mut ahead = at;
+        let mut t = 0.0;
+        for _ in 0..3 {
+            let d = eye.distance(ahead);
+            let speed = (f.speed_at(0.0) + f.speed_at(d)) * 0.5;
+            t = d / speed.max(0.5);
+            ahead = at + q.body.velocity * t;
+        }
+        ahead + Vec3::Z * 0.5 * GRAVITY * f.gravity * t * t
+    }
+
     pub fn new(seed: u32) -> Bot {
         let mut bot = Bot {
             rng: seed.max(1).wrapping_mul(0x9E37_79B9) | 1,
@@ -387,18 +412,21 @@ impl Bot {
             self.seen_for += dt;
             self.aim_error *= 1.0 - (2.5 * dt).min(1.0);
             let q = &game.players[t];
-            let aim_at = q.eye() - Vec3::Z * 0.12 + q.body.velocity * 0.1;
-            let to = aim_at - eye;
+            let def = p.held().and_then(|h| game.weapons.get(h.weapon));
+            let to = Bot::aim_point(def, eye, q) - eye;
             let dist = to.length();
             let yaw = to.y.atan2(to.x) + self.aim_error.x;
             let pitch = (to.z / dist.max(1e-4)).asin() + self.aim_error.y;
             self.turn_to(yaw, pitch, dt);
             let off = wrap(yaw - self.yaw).abs() + (pitch - self.pitch).abs();
-            let def = p.held().and_then(|h| game.weapons.get(h.weapon));
             let melee_only = carrying
                 || p.held()
                     .is_some_and(|h| game.rules.lunge_weapons.contains(&h.weapon));
-            if self.seen_for > REACTION && off < FIRE_CONE && !melee_only {
+            // Not a rocket at your own feet.
+            let too_close = def
+                .and_then(|d| d.flight?.blast)
+                .is_some_and(|b| dist < b.radius.1 + 0.5);
+            if self.seen_for > REACTION && off < FIRE_CONE && !melee_only && !too_close {
                 // Semi-automatic weapons need the trigger released between shots.
                 cmd.fire = match def.map(|d| d.behavior) {
                     Some(TriggerBehavior::Spew) | None => true,

@@ -713,6 +713,18 @@ impl App {
             l.animate_view_model(&self.scene, &self.game, dt);
         }
         self.effects.update(dt);
+        for p in &self.game.projectiles {
+            // Just out of the barrel it would fill the shooter's view.
+            let near = self
+                .locals
+                .iter()
+                .any(|l| l.camera.position.distance(p.position) < 0.5);
+            if let Some(r) = self.scene.weapons.get(p.weapon).map(|w| w.round) {
+                if !near {
+                    self.effects.round(p.position, r.glow, r.size, r.fiery);
+                }
+            }
+        }
         let listeners = self.listeners();
         self.sound.update(&self.scene, &self.game, &listeners, dt);
     }
@@ -839,6 +851,46 @@ impl App {
                 Event::Exploded { kind, position } => {
                     self.effects
                         .explosion(position, kind == GrenadeKind::Plasma);
+                }
+                Event::Impact {
+                    weapon,
+                    position,
+                    normal,
+                    hit_player,
+                    exploded,
+                } => {
+                    let r = self
+                        .scene
+                        .weapons
+                        .get(weapon)
+                        .map(|w| w.round)
+                        .unwrap_or_default();
+                    let reach = self
+                        .game
+                        .weapons
+                        .get(weapon)
+                        .and_then(|w| w.flight?.blast)
+                        .map_or(1.5, |b| b.radius.1);
+                    if exploded {
+                        let core = [1.0, 0.95, 0.8, 1.0];
+                        let edge = if r.fiery {
+                            [1.0, 0.45, 0.12, 0.9]
+                        } else {
+                            [r.glow[0], r.glow[1], r.glow[2], 0.9]
+                        };
+                        self.effects.blast(
+                            position,
+                            core,
+                            edge,
+                            r.fiery,
+                            (reach / 1.5).clamp(0.4, 2.0),
+                        );
+                    } else if let Some(j) = hit_player {
+                        let shielded = self.game.players[j].shield > 0.0;
+                        self.effects.player_hit(position, shielded);
+                    } else {
+                        self.effects.splash(position, normal, r.glow);
+                    }
                 }
                 Event::Killed { killer, victim, .. } => {
                     let betrayal =
@@ -1046,6 +1098,19 @@ impl App {
                     colors: None,
                 });
             }
+        }
+        // Rounds with a model of their own (rockets), nose first.
+        for p in &self.game.projectiles {
+            let Some(mesh) = scene.weapons.get(p.weapon).and_then(|w| w.round.mesh) else {
+                continue;
+            };
+            let turn = glam::Quat::from_rotation_arc(Vec3::X, p.velocity.normalize_or(Vec3::X));
+            world.push(DrawCall {
+                mesh,
+                model: Mat4::from_rotation_translation(turn, p.position),
+                light: light_at(p.position),
+                colors: None,
+            });
         }
         world.extend(self.flag_draws());
         world

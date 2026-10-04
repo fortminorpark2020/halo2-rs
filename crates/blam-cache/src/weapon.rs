@@ -24,12 +24,19 @@ const TRIGGER_SIZE: usize = 0x40;
 const WEAP_BARRELS: usize = 0x2D0;
 const BARREL_SIZE: usize = 0xEC;
 
+const PROJ_FLAGS: usize = 0xBC;
+const PROJ_ARMING_TIME: usize = 0xCC;
+const PROJ_TIMER: usize = 0xD4;
 const PROJ_MAX_RANGE: usize = 0xE0;
+const PROJ_DETONATION_DAMAGE: usize = 0x100;
+const PROJ_IMPACT_EFFECT: usize = 0x140;
 const PROJ_IMPACT_DAMAGE: usize = 0x148;
 const PROJ_AIR_GRAVITY: usize = 0x164;
 const PROJ_AIR_DAMAGE_RANGE: usize = 0x168;
 const PROJ_INITIAL_VELOCITY: usize = 0x17C;
 const PROJ_FINAL_VELOCITY: usize = 0x180;
+const PROJ_GUIDED_ANGULAR_VELOCITY: usize = 0x184;
+const PROJ_ACCELERATION_RANGE: usize = 0x18C;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Magazine {
@@ -56,8 +63,22 @@ pub enum TriggerBehavior {
     LatchRocketLauncher,
 }
 
+/// The control that pulls a trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TriggerInput {
+    #[default]
+    Right,
+    /// The left trigger: the Banshee's fuel rod, the Scorpion's machine gun.
+    Left,
+    Melee,
+    /// Fires on its own (AI weapons).
+    Automated,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Trigger {
+    /// Which control pulls it.
+    pub input: TriggerInput,
     pub behavior: TriggerBehavior,
     pub barrel: i16,
     pub autofire_time: f32,
@@ -106,6 +127,22 @@ pub struct Projectile {
     /// Damage falls off between these distances.
     pub air_damage_range: (f32, f32),
     pub impact_damage: DatumIndex,
+    pub flags: u32,
+    /// Seconds before it can go off.
+    pub arming_time: f32,
+    /// Seconds before it goes off by itself.
+    pub timer: (f32, f32),
+    /// The blast when it goes off (`jpt!`).
+    pub detonation_damage: DatumIndex,
+    /// What hitting something looks and sounds like (`effe`): for rockets,
+    /// the explosion.
+    pub impact_effect: Option<DatumIndex>,
+    /// Radians per second it turns toward its target (rockets locked on to
+    /// a vehicle, needles), at the start and the end of its flight.
+    pub guided_angular_velocity: (f32, f32),
+    /// Distances over which it speeds up from its initial to its final
+    /// velocity (rockets).
+    pub acceleration_range: (f32, f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -189,6 +226,12 @@ pub fn read_weapon(set: &mut MapSet, weap: DatumIndex) -> Result<Weapon> {
         .0
         .iter()
         .map(|t| Trigger {
+            input: match i16_at(t, 0x4) {
+                1 => TriggerInput::Left,
+                2 => TriggerInput::Melee,
+                3 => TriggerInput::Automated,
+                _ => TriggerInput::Right,
+            },
             behavior: match i16_at(t, 0x6) {
                 1 => TriggerBehavior::Latch,
                 2 => TriggerBehavior::LatchAutofire,
@@ -271,7 +314,12 @@ const MAGAZINE_RELOAD_EFFECT: usize = 0x34;
 const BARREL_FIRING_EFFECTS: usize = 0xE4;
 const FIRING_EFFECT_SIZE: usize = 0x34;
 
-pub fn read_weapon_effects(set: &mut MapSet, weap: DatumIndex) -> Result<WeaponEffects> {
+/// The effects of a weapon firing its barrel `barrel` (and reloading, readying...).
+pub fn read_weapon_effects(
+    set: &mut MapSet,
+    weap: DatumIndex,
+    barrel: usize,
+) -> Result<WeaponEffects> {
     let (src, tag, d) = set.tag_data(weap)?;
     if d.len() < WEAP_BARRELS + 8 {
         return Err(Error::Corrupt(format!("weapon tag {} too short", tag.name)));
@@ -280,7 +328,8 @@ pub fn read_weapon_effects(set: &mut MapSet, weap: DatumIndex) -> Result<WeaponE
     let region = file.meta_region();
     let mags = file.read_block(region, &d, WEAP_MAGAZINES, MAGAZINE_SIZE)?;
     let barrels = file.read_block(region, &d, WEAP_BARRELS, BARREL_SIZE)?;
-    let firing = match barrels.as_chunks::<BARREL_SIZE>().0.first() {
+    let all = barrels.as_chunks::<BARREL_SIZE>().0;
+    let firing = match all.get(barrel).or(all.first()) {
         Some(b) => file.read_block(region, b, BARREL_FIRING_EFFECTS, FIRING_EFFECT_SIZE)?,
         None => Vec::new(),
     };
@@ -302,7 +351,7 @@ pub fn read_weapon_effects(set: &mut MapSet, weap: DatumIndex) -> Result<WeaponE
 
 pub fn read_projectile(set: &mut MapSet, proj: DatumIndex) -> Result<Projectile> {
     let (_, tag, d) = set.tag_data(proj)?;
-    if d.len() < PROJ_FINAL_VELOCITY + 4 {
+    if d.len() < PROJ_ACCELERATION_RANGE + 8 {
         return Err(Error::Corrupt(format!(
             "projectile tag {} too short",
             tag.name
@@ -315,6 +364,13 @@ pub fn read_projectile(set: &mut MapSet, proj: DatumIndex) -> Result<Projectile>
         air_gravity_scale: f32_at(&d, PROJ_AIR_GRAVITY),
         air_damage_range: range(&d, PROJ_AIR_DAMAGE_RANGE),
         impact_damage: tag_ref(&d, PROJ_IMPACT_DAMAGE).unwrap_or(DatumIndex::NONE),
+        flags: u32_at(&d, PROJ_FLAGS),
+        arming_time: f32_at(&d, PROJ_ARMING_TIME),
+        timer: range(&d, PROJ_TIMER),
+        detonation_damage: tag_ref(&d, PROJ_DETONATION_DAMAGE).unwrap_or(DatumIndex::NONE),
+        impact_effect: tag_ref(&d, PROJ_IMPACT_EFFECT),
+        guided_angular_velocity: range(&d, PROJ_GUIDED_ANGULAR_VELOCITY),
+        acceleration_range: range(&d, PROJ_ACCELERATION_RANGE),
     })
 }
 

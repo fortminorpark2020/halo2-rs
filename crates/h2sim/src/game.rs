@@ -7,17 +7,19 @@
 use crate::collision::{KillZone, World};
 use crate::player::{Input, Player};
 use crate::vehicle::{Vehicle, VehicleDef};
-use crate::weapon::{WeaponDef, WeaponInput, WeaponState};
+use crate::weapon::{Blast, WeaponDef, WeaponInput, WeaponState};
 use blam_cache::physics::{BipedPhysics, PlayerMovement};
 use glam::{Vec2, Vec3};
 
 mod ctf;
 mod dual;
 mod juggernaut;
+mod projectiles;
 mod sync;
 mod vehicles;
 mod zones;
 pub use ctf::{Flag, FlagEvent, NEUTRAL};
+pub use projectiles::{Homing, Projectile};
 pub use sync::{Malformed, Reader, Writer};
 pub use vehicles::{VehicleAction, VehicleSpawn};
 pub use zones::{Hill, HillControl, HillEvent, Territory};
@@ -26,6 +28,8 @@ pub use zones::{Hill, HillControl, HillEvent, Territory};
 /// networked game computes the same thing.
 pub const TICK: f32 = 1.0 / 60.0;
 
+/// How hard grenade blasts throw people (world units per second).
+const GRENADE_PUSH: f32 = 1.5;
 /// Gravity for thrown grenades, world units per second squared.
 const GRENADE_GRAVITY: f32 = crate::player::GRAVITY;
 /// How far in front of the eye a melee reaches.
@@ -473,6 +477,14 @@ pub enum Event {
         kind: GrenadeKind,
         position: Vec3,
     },
+    /// A round that flew (plasma, a rocket...) hit something, or went off.
+    Impact {
+        weapon: usize,
+        position: Vec3,
+        normal: Vec3,
+        hit_player: Option<usize>,
+        exploded: bool,
+    },
     Damaged {
         player: usize,
         amount: f32,
@@ -577,6 +589,8 @@ pub struct Game {
     pub item_timers: Vec<f32>,
     pub dropped: Vec<DroppedWeapon>,
     pub grenades: Vec<Grenade>,
+    /// Rounds in flight (rockets, plasma, needles...).
+    pub projectiles: Vec<Projectile>,
     pub players: Vec<Spartan>,
     /// Capture the Flag: each team's flag.
     pub flags: Vec<Flag>,
@@ -660,6 +674,7 @@ impl Game {
             item_spawns,
             dropped: Vec::new(),
             grenades: Vec::new(),
+            projectiles: Vec::new(),
             players: Vec::new(),
             flags: Vec::new(),
             flag_bases: Vec::new(),
@@ -853,6 +868,7 @@ impl Game {
         }
         self.step_vehicles(world, dt);
         self.step_grenades(world, dt);
+        self.step_projectiles(world, dt);
         self.step_items(dt);
         self.step_flags(world, dt);
         self.step_hills(dt);
@@ -1079,6 +1095,20 @@ impl Game {
         weapon: usize,
         left: bool,
     ) {
+        // Slow and explosive rounds fly; the rest hit at once.
+        if let Some(flight) = def.flight {
+            self.launch(i, eye, dir, weapon, flight);
+            self.events.push(Event::Shot {
+                player: i,
+                weapon,
+                left,
+                origin: eye,
+                direction: dir,
+                hit: None,
+                hit_player: None,
+            });
+            return;
+        }
         let range = def.range;
         let wall = world.raycast_hit(eye, dir, range);
         let wall_t = wall.map_or(f32::MAX, |w| w.0);
@@ -1256,34 +1286,12 @@ impl Game {
 
     fn explode(&mut self, world: &World, g: Grenade) {
         let def = self.grenade_def(g.kind);
-        let (inner, outer) = def.radius;
-        for j in 0..self.players.len() {
-            let p = &self.players[j];
-            if !p.alive {
-                continue;
-            }
-            let centre = p.body.position + Vec3::Z * p.body.height() * 0.5;
-            let d = centre.distance(g.position);
-            if d >= outer {
-                continue;
-            }
-            // Walls shield players from the blast.
-            let to = centre - g.position;
-            if g.stuck != Some(j)
-                && world
-                    .raycast(g.position, to / d.max(1e-4), d)
-                    .is_some_and(|t| t < d - 0.05)
-            {
-                continue;
-            }
-            let falloff = if d <= inner {
-                1.0
-            } else {
-                1.0 - (d - inner) / (outer - inner)
-            };
-            self.damage(j, Some(g.owner), def.damage * falloff, false);
-        }
-        self.blast_vehicles(g.position, g.owner, def.damage, def.radius);
+        let blast = Blast {
+            damage: (0.0, def.damage),
+            radius: def.radius,
+            push: GRENADE_PUSH,
+        };
+        self.blast(world, g.position, g.owner, blast, g.stuck);
         self.events.push(Event::Exploded {
             kind: g.kind,
             position: g.position,

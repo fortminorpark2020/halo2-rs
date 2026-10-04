@@ -19,6 +19,7 @@ use blam_cache::{
 };
 use glam::{Mat4, Vec3};
 use h2sim::game::FallingDamage;
+use h2sim::weapon::Rounds;
 use h2sim::{ItemKind, WeaponDef};
 use std::collections::HashMap;
 use std::path::Path;
@@ -250,6 +251,79 @@ pub struct WeaponAssets {
     pub rig: Option<FirstPersonRig>,
     pub hud: Vec<HudWidget>,
     pub sounds: WeaponSounds,
+    /// How its rounds look and sound, when they fly.
+    pub round: RoundAssets,
+}
+
+/// A weapon's rounds in flight (rockets, plasma bolts, needles...).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct RoundAssets {
+    /// The round's own model (a rocket, a shell), in `Scene::meshes`.
+    pub mesh: Option<usize>,
+    /// The colour it glows, and how big.
+    pub glow: [f32; 4],
+    pub size: f32,
+    /// Burns (a smoke trail and a fireball) rather than plasma.
+    pub fiery: bool,
+    /// Going off, or hitting something (in `Scene::sounds`).
+    pub impact: Option<usize>,
+}
+
+/// How a weapon's rounds look: (glow, size, fiery), by the weapon's name.
+fn round_look(weapon: &str) -> ([f32; 4], f32, bool) {
+    let has = |s: &str| weapon.contains(s);
+    if has("rocket") || has("cannon_turret") || has("brute_shot") {
+        ([1.0, 0.65, 0.3, 1.0], 0.07, true)
+    } else if has("gauss") {
+        ([0.6, 0.8, 1.0, 1.0], 0.06, false)
+    } else if has("needle") {
+        ([1.0, 0.45, 0.85, 1.0], 0.035, false)
+    } else if has("brute_plasma") {
+        ([1.0, 0.35, 0.25, 1.0], 0.05, false)
+    } else if has("plasma_pistol") {
+        ([0.45, 1.0, 0.35, 1.0], 0.05, false)
+    } else if has("mortar") {
+        ([0.45, 0.6, 1.0, 1.0], 0.25, false)
+    } else if has("banshee") || has("flak") {
+        ([0.5, 1.0, 0.4, 1.0], 0.08, false)
+    } else {
+        ([0.35, 0.6, 1.0, 1.0], 0.05, false)
+    }
+}
+
+/// Sounds a weapon's rounds make going off or hitting, best first.
+fn round_impact_sounds(weapon: &str, exploding: bool) -> &'static [&'static str] {
+    let has = |s: &str| weapon.contains(s);
+    if !exploding {
+        if has("needle") {
+            &["sound\\weapons\\needler\\expl"]
+        } else if has("plasma_pistol") {
+            &[
+                "sound\\weapons\\plasma_pistol\\plasma_charge_hit",
+                "sound\\weapons\\plasma_rifle\\plasma_hit",
+            ]
+        } else {
+            &["sound\\weapons\\plasma_rifle\\plasma_hit"]
+        }
+    } else if has("brute_shot") {
+        &["sound\\weapons\\brute_shot\\brute_round_explode"]
+    } else if has("flak") {
+        &["sound\\weapons\\flak_cannon\\flak_expl"]
+    } else if has("banshee") {
+        &[
+            "sound\\vehicles\\banshee\\banshee_cannon_expl",
+            "sound\\weapons\\flak_cannon\\flak_expl",
+        ]
+    } else if has("mortar") {
+        &["sound\\weapons\\plasma_grenade\\plasma_expl"]
+    } else if has("gauss") {
+        &["sound\\weapons\\plasma_rifle\\plasma_hit"]
+    } else {
+        &[
+            "sound\\vehicles\\scorpion\\scorpion_explosion",
+            "sound\\weapons\\frag_grenade\\frag_expl",
+        ]
+    }
 }
 
 /// A sound ready to play: its variations and how far it carries.
@@ -830,6 +904,18 @@ impl Loader {
         arms: Option<&Skeleton>,
         meshes: &mut Vec<MeshData>,
     ) -> Option<WeaponAssets> {
+        self.weapon_trigger(name, 0, arms, meshes)
+    }
+
+    /// A weapon as fired by its trigger `trigger` (vehicle guns have a
+    /// second: the Scorpion's machine gun, the Banshee's bomb).
+    fn weapon_trigger(
+        &mut self,
+        name: &str,
+        trigger: usize,
+        arms: Option<&Skeleton>,
+        meshes: &mut Vec<MeshData>,
+    ) -> Option<WeaponAssets> {
         let datum = self.find("weap", name)?;
         let w = match weapon::read_weapon(&mut self.set, datum) {
             Ok(w) => w,
@@ -838,12 +924,25 @@ impl Loader {
                 return None;
             }
         };
-        let barrel = w.barrels.first().copied().unwrap_or_default();
+        let barrel = WeaponDef::barrel_of(&w, trigger);
+        let barrel_index = w
+            .triggers
+            .get(trigger)
+            .and_then(|t| usize::try_from(t.barrel).ok())
+            .unwrap_or(0);
         let projectile = weapon::read_projectile(&mut self.set, barrel.projectile).ok();
         let damage = projectile
             .as_ref()
             .and_then(|p| weapon::read_damage(&mut self.set, p.impact_damage).ok());
-        let mut def = WeaponDef::from_tags(&w, projectile.as_ref(), damage.as_ref());
+        let detonation = projectile
+            .as_ref()
+            .and_then(|p| weapon::read_damage(&mut self.set, p.detonation_damage).ok());
+        let rounds = Rounds {
+            projectile: projectile.as_ref(),
+            impact: damage.as_ref(),
+            detonation: detonation.as_ref(),
+        };
+        let mut def = WeaponDef::from_tags(&w, trigger, rounds);
         def.melee_damage = w
             .melee_damage
             .and_then(|d| weapon::read_damage(&mut self.set, d).ok())
@@ -911,7 +1010,8 @@ impl Loader {
         };
         let hud = w.hud.map(|h| self.hud_widgets(h)).unwrap_or_default();
         let world_mesh = self.object_mesh(datum, meshes);
-        let fx = weapon::read_weapon_effects(&mut self.set, datum).unwrap_or_default();
+        let fx =
+            weapon::read_weapon_effects(&mut self.set, datum, barrel_index).unwrap_or_default();
         let sounds = WeaponSounds {
             fire: self.effect_sound(fx.fire),
             empty: self.effect_sound(fx.empty),
@@ -928,9 +1028,26 @@ impl Loader {
             zoom_in: self.effect_sound(fx.zoom_in),
             zoom_out: self.effect_sound(fx.zoom_out),
         };
+        let round = match def.flight {
+            Some(f) => {
+                let (glow, size, fiery) = round_look(name);
+                let exploding = f.blast.is_some();
+                RoundAssets {
+                    mesh: self.object_mesh(barrel.projectile, meshes),
+                    glow,
+                    size,
+                    fiery,
+                    impact: round_impact_sounds(name, exploding)
+                        .iter()
+                        .find_map(|n| self.sound_named(n)),
+                }
+            }
+            None => RoundAssets::default(),
+        };
         Some(WeaponAssets {
             tag: datum,
             world_mesh,
+            round,
             def,
             view_mesh,
             mirror_mesh,

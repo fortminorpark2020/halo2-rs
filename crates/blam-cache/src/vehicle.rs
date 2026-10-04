@@ -229,6 +229,28 @@ fn datum(b: &[u8], tag_ref: usize) -> DatumIndex {
     DatumIndex(u32_at(b, tag_ref + 4))
 }
 
+/// What any object tag (a vehicle, a projectile...) carries attached:
+/// lights, effects and looping sounds, each with the marker it sits at.
+pub fn object_attachments(
+    set: &mut MapSet,
+    object: DatumIndex,
+) -> Result<Vec<(DatumIndex, String)>> {
+    let (src, _, data) = set.tag_data(object)?;
+    if data.len() < OBJECT_ATTACHMENTS + 8 {
+        return Err(Error::Corrupt("object tag too short".into()));
+    }
+    let file = set.get(src);
+    let region = file.meta_region();
+    Ok(file
+        .read_block(region, &data, OBJECT_ATTACHMENTS, ATTACHMENT_SIZE)?
+        .as_chunks::<ATTACHMENT_SIZE>()
+        .0
+        .iter()
+        .map(|a| (datum(a, 0), sid(file, a, 0x8)))
+        .filter(|a| a.0 != DatumIndex::NONE)
+        .collect())
+}
+
 /// Read a vehicle tag.
 pub fn read_vehicle(set: &mut MapSet, vehi: DatumIndex) -> Result<VehicleTag> {
     let (src, tag, data) = set.tag_data(vehi)?;

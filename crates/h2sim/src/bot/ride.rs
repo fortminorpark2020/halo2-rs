@@ -183,7 +183,7 @@ impl Bot {
             self.seen_for += dt;
             self.aim_error *= 1.0 - (2.5 * dt).min(1.0);
             let q = &game.players[t];
-            let to = q.eye() - Vec3::Z * 0.12 + q.body.velocity * 0.15 - eye;
+            let to = Bot::aim_point(Some(gun), eye, q) - eye;
             let yaw = to.y.atan2(to.x) + self.aim_error.x;
             let pitch = (to.z / to.length().max(1e-4)).asin() + self.aim_error.y;
             self.turn_to(yaw, pitch, dt);

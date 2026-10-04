@@ -360,11 +360,25 @@ fn weapon(path: &str, name: &str) -> Res {
             }
             let p = weapon::read_projectile(&mut set, b.projectile)?;
             println!("{p:#?}");
+            let tag_name = |set: &blam_cache::MapSet, d: blam_cache::DatumIndex| {
+                set.locate(d)
+                    .map_or("-".to_string(), |(_, t)| format!("{} {}", t.group, t.name))
+            };
             if p.impact_damage != blam_cache::DatumIndex::NONE {
+                println!("impact: {}", tag_name(&set, p.impact_damage));
                 println!("{:#?}", weapon::read_damage(&mut set, p.impact_damage)?);
             }
+            if p.detonation_damage != blam_cache::DatumIndex::NONE {
+                println!("detonation: {}", tag_name(&set, p.detonation_damage));
+                println!("{:#?}", weapon::read_damage(&mut set, p.detonation_damage)?);
+            }
+            if let Some(e) = p.impact_effect {
+                let sounds = blam_cache::sound::effect_sounds(&mut set, e)?;
+                let names: Vec<String> = sounds.iter().map(|&d| tag_name(&set, d)).collect();
+                println!("impact effect: {} -> {names:?}", tag_name(&set, e));
+            }
         }
-        let fx = weapon::read_weapon_effects(&mut set, datum)?;
+        let fx = weapon::read_weapon_effects(&mut set, datum, 0)?;
         let name_of = |set: &blam_cache::MapSet, d: blam_cache::DatumIndex| {
             set.locate(d)
                 .map_or("?".to_string(), |(_, t)| format!("{} {}", t.group, t.name))

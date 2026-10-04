@@ -109,30 +109,43 @@ impl Effects {
         } else {
             ([1.0, 0.9, 0.6, 1.0], [1.0, 0.45, 0.12, 0.9])
         };
+        self.blast(position, core, edge, !plasma, 1.0);
+    }
+
+    /// Something going off: a flash, a fireball in `edge` colours, sparks
+    /// and (`smoke`) smoke, `scale` times grenade-sized.
+    pub fn blast(
+        &mut self,
+        position: Vec3,
+        core: [f32; 4],
+        edge: [f32; 4],
+        smoke: bool,
+        scale: f32,
+    ) {
         self.particles.push(Particle {
             position,
             velocity: Vec3::ZERO,
             age: 0.0,
             life: 0.18,
-            size: (0.6, 1.4),
+            size: (0.6 * scale, 1.4 * scale),
             color: core,
             gravity: 0.0,
         });
         for _ in 0..14 {
-            let v = self.random_unit() * (1.0 + self.random() * 2.0);
+            let v = self.random_unit() * (1.0 + self.random() * 2.0) * scale;
             let life = 0.25 + self.random() * 0.25;
             self.particles.push(Particle {
                 position: position + v * 0.1,
                 velocity: v,
                 age: 0.0,
                 life,
-                size: (0.25, 0.6),
+                size: (0.25 * scale, 0.6 * scale),
                 color: edge,
                 gravity: -0.5,
             });
         }
         for _ in 0..20 {
-            let v = self.random_unit() * (3.0 + self.random() * 5.0);
+            let v = self.random_unit() * (3.0 + self.random() * 5.0) * scale;
             let life = 0.3 + self.random() * 0.4;
             self.particles.push(Particle {
                 position,
@@ -144,21 +157,80 @@ impl Effects {
                 gravity: 4.0,
             });
         }
-        if !plasma {
+        if smoke {
             for _ in 0..10 {
-                let v = (self.random_unit() + Vec3::Z * 0.5) * (0.3 + self.random() * 0.6);
+                let v = (self.random_unit() + Vec3::Z * 0.5) * (0.3 + self.random() * 0.6) * scale;
                 let life = 1.5 + self.random() * 1.5;
                 self.particles.push(Particle {
                     position: position + v * 0.3,
                     velocity: v,
                     age: 0.0,
                     life,
-                    size: (0.3, 1.0),
+                    size: (0.3 * scale, 1.0 * scale),
                     color: [0.3, 0.29, 0.27, 0.5],
                     gravity: -0.15,
                 });
             }
         }
+    }
+
+    /// A plasma bolt or needle splashing on a wall: a scorch and a few
+    /// glowing sparks of its colour.
+    pub fn splash(&mut self, position: Vec3, normal: Vec3, color: [f32; 4]) {
+        self.impact(position, normal);
+        for _ in 0..6 {
+            let v = (normal + self.random_unit() * 0.8) * (0.4 + self.random() * 0.8);
+            let life = 0.15 + self.random() * 0.15;
+            self.particles.push(Particle {
+                position: position + normal * 0.02,
+                velocity: v,
+                age: 0.0,
+                life,
+                size: (0.05, 0.01),
+                color,
+                gravity: 1.0,
+            });
+        }
+    }
+
+    /// A round in flight this frame: its glow, and what it leaves behind
+    /// (smoke if it burns, a fading streak if plasma).
+    pub fn round(&mut self, position: Vec3, color: [f32; 4], size: f32, fiery: bool) {
+        // Gone at the next update: drawn this frame only.
+        self.particles.push(Particle {
+            position,
+            velocity: Vec3::ZERO,
+            age: 0.0,
+            life: 1e-4,
+            size: (size, size),
+            color,
+            gravity: 0.0,
+        });
+        let (life, trail, gravity) = if fiery {
+            (
+                0.9,
+                ([0.6, 0.58, 0.55, 0.45], (size * 0.6, size * 3.0)),
+                -0.1,
+            )
+        } else {
+            (
+                0.12,
+                (
+                    [color[0], color[1], color[2], 0.6],
+                    (size * 0.8, size * 0.3),
+                ),
+                0.0,
+            )
+        };
+        self.particles.push(Particle {
+            position,
+            velocity: Vec3::ZERO,
+            age: 0.0,
+            life,
+            size: trail.1,
+            color: trail.0,
+            gravity,
+        });
     }
 
     /// A shot hitting a player: a flare off their shields, or blood once

@@ -4,8 +4,8 @@
 
 use super::{
     DroppedWeapon, Event, Flag, FlagEvent, Game, GameType, Grenade, GrenadeKind, HeldWeapon,
-    HillControl, HillEvent, ItemKind, LeadChange, Medal, Spartan, DROPPED_WEAPON_LIFETIME, NEUTRAL,
-    TEAMS,
+    HillControl, HillEvent, ItemKind, LeadChange, Medal, Projectile, Spartan,
+    DROPPED_WEAPON_LIFETIME, NEUTRAL, TEAMS,
 };
 use crate::game::Command;
 use crate::weapon::WeaponState;
@@ -411,6 +411,20 @@ impl Event {
                 w.u8(21);
                 w.index(Some(vehicle));
             }
+            Event::Impact {
+                weapon,
+                position,
+                normal,
+                hit_player,
+                exploded,
+            } => {
+                w.u8(22);
+                w.index(Some(weapon));
+                w.vec3(position);
+                w.vec3(normal);
+                w.index(hit_player);
+                w.bool(exploded);
+            }
         }
     }
 
@@ -551,6 +565,13 @@ impl Event {
             21 => Event::VehicleSpawned {
                 vehicle: r.index_below(vehicles)?,
             },
+            22 => Event::Impact {
+                weapon: r.index_below(weapons)?,
+                position: r.vec3()?,
+                normal: r.vec3()?,
+                hit_player: opt_player(r)?,
+                exploded: r.bool()?,
+            },
             _ => return Err(Malformed),
         })
     }
@@ -619,6 +640,13 @@ impl Game {
             w.vec3(g.velocity);
             w.opt_f32(g.fuse);
             w.index(g.stuck);
+        }
+        w.u16(self.projectiles.len() as u16);
+        for p in &self.projectiles {
+            w.index(Some(p.weapon));
+            w.index(Some(p.owner));
+            w.vec3(p.position);
+            w.vec3(p.velocity);
         }
         w.u8(self.flags.len().min(MAX_FLAGS) as u8);
         for f in self.flags.iter().take(MAX_FLAGS) {
@@ -800,6 +828,20 @@ impl Game {
             });
         }
         self.grenades = grenades;
+        let n = r.u16()? as usize;
+        let mut projectiles = Vec::with_capacity(n.min(256));
+        for _ in 0..n {
+            projectiles.push(Projectile {
+                weapon: r.index_below(weapons)?,
+                owner: r.index_below(count)?,
+                position: r.vec3()?,
+                velocity: r.vec3()?,
+                travelled: 0.0,
+                target: None,
+                age: 0.0,
+            });
+        }
+        self.projectiles = projectiles;
         let n = r.u8()? as usize;
         if n > MAX_FLAGS {
             return Err(Malformed);

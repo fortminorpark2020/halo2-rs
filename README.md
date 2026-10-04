@@ -79,7 +79,11 @@ mouse wheel switches weapon, G throws a grenade, X switches grenade type, E pick
 up (hold to swap weapons), 1-9 pick one directly. B adds a bot. All 15 multiplayer weapons are
 loaded with their real first person models, HUD, crosshairs, scopes and firing
 stats, held by Master Chief's arms with the game's own first person animations
-(ready, idle, fire, reload, melee).
+(ready, idle, fire, reload, melee). Bullets hit at once; plasma bolts, needles,
+rockets, Brute Shot grenades and Fuel Rod shots fly at their tag speeds (rockets
+speed up, Brute Shot rounds arc), needles and the Fuel Rod home in, rockets lock
+on to enemy vehicles, and explosive rounds go off in a blast that hurts and
+throws everyone in reach, the shooter included.
 
 Dual wielding: holding a one-handed gun (SMG, Magnum, Plasma Pistol, Plasma
 Rifle, Needler), stand on another and hold Q (Y on a controller) to take it in
