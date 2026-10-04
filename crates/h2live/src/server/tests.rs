@@ -3,7 +3,7 @@ use crate::client::{LiveClient, LiveEvent, Profile};
 use crate::levels::Rank;
 use crate::store::Stats;
 use ed25519_dalek::{Signer, SigningKey};
-use h2net::live::kind;
+use h2net::live::{kind, Activity, PartyInfo};
 use h2sim::game::Writer;
 use std::net::Ipv4Addr;
 
@@ -128,11 +128,56 @@ impl World {
         self.connect_as(n, &profile(gamertag))
     }
 
-    /// PC number `n` signs in as `gamertag` (or what the server gives it).
+    /// PC number `n` signs in as `gamertag` (or what the server gives it),
+    /// and hears of its party.
     fn sign_in(&mut self, n: u8, gamertag: &str) -> usize {
-        let i = self.connect(n, gamertag);
-        self.until(|w| w.pcs[i].signed_in());
+        self.sign_in_as(n, &profile(gamertag))
+    }
+
+    fn sign_in_as(&mut self, n: u8, profile: &Profile) -> usize {
+        let i = self.connect_as(n, profile);
+        self.until(|w| w.pcs[i].signed_in() && w.pcs[i].view.party.is_some());
         i
+    }
+
+    /// PCs numbered from 1 signed in as `gamertags`, all in the first one's
+    /// party (and in that order) by invite.
+    fn party_of(&mut self, gamertags: &[&str]) -> Vec<usize> {
+        let pcs: Vec<usize> = (1..)
+            .zip(gamertags)
+            .map(|(n, g)| self.sign_in(n, g))
+            .collect();
+        let (leader, party) = (pcs[0], self.party(pcs[0]).id);
+        for &pc in &pcs[1..] {
+            self.send(leader, ToServer::Invite(self.id(pc)));
+            self.until(|w| w.pcs[pc].view.invites.iter().any(|i| i.0 == party));
+            self.send(pc, ToServer::Accept(party));
+            self.until(|w| w.members(leader).contains(&w.id(pc)));
+        }
+        pcs
+    }
+
+    fn send(&mut self, i: usize, message: ToServer) {
+        self.pcs[i].send(message);
+    }
+
+    /// PC `i`'s account.
+    fn id(&self, i: usize) -> u64 {
+        self.welcome(i).account
+    }
+
+    /// PC `i`'s party, as it was last told.
+    fn party(&self, i: usize) -> &PartyInfo {
+        self.pcs[i].view.party.as_ref().unwrap()
+    }
+
+    /// The accounts in PC `i`'s party, the longest-standing first.
+    fn members(&self, i: usize) -> Vec<u64> {
+        self.party(i).members.iter().map(|m| m.account).collect()
+    }
+
+    fn notices(&self, i: usize) -> &[String] {
+        &self.pcs[i].view.notices
     }
 
     /// A connection to the server that the test speaks through itself.
@@ -193,6 +238,39 @@ fn heard(conn: &mut Connection) -> Vec<ToPc> {
         .collect()
 }
 
+/// Start signing PC `n` in by hand: the connection, and the challenge to
+/// sign.
+fn log_in_by_hand(w: &mut World, n: u8, gamertag: &str) -> (Connection, [u8; 32]) {
+    let mut conn = w.raw(n);
+    let login = Login {
+        key: key(n).verifying_key().to_bytes(),
+        gamertag: gamertag.into(),
+        look: Look::default(),
+        card: String::new(),
+        maps: Vec::new(),
+        guests: 0,
+    };
+    ToServer::Login(login).send(&mut conn);
+    conn.flush().unwrap();
+    w.step();
+    let [ToPc::Challenge { nonce, .. }] = heard(&mut conn)[..] else {
+        panic!("no challenge");
+    };
+    (conn, nonce)
+}
+
+/// Sign PC `n` in by hand, to hear what the server says over the
+/// connection returned.
+fn sign_in_by_hand(w: &mut World, n: u8, gamertag: &str) -> Connection {
+    let (mut conn, nonce) = log_in_by_hand(w, n, gamertag);
+    let proof = live::proof(&nonce, key(n).verifying_key().as_bytes());
+    ToServer::Prove(key(n).sign(&proof).to_bytes()).send(&mut conn);
+    conn.flush().unwrap();
+    w.step();
+    assert!(matches!(heard(&mut conn)[0], ToPc::Welcome(_)));
+    conn
+}
+
 #[test]
 fn a_pc_signs_in_with_its_key() {
     let mut w = World::new("sign-in");
@@ -221,21 +299,7 @@ fn a_pc_signs_in_with_its_key() {
 #[test]
 fn a_bad_signature_is_refused() {
     let mut w = World::new("bad-signature");
-    let mut conn = w.raw(1);
-    let login = Login {
-        key: key(1).verifying_key().to_bytes(),
-        gamertag: "IMPOSTOR".into(),
-        look: Look::default(),
-        card: String::new(),
-        maps: Vec::new(),
-        guests: 0,
-    };
-    ToServer::Login(login).send(&mut conn);
-    conn.flush().unwrap();
-    w.step();
-    let [ToPc::Challenge { nonce, .. }] = heard(&mut conn)[..] else {
-        panic!("no challenge");
-    };
+    let (mut conn, nonce) = log_in_by_hand(&mut w, 1, "IMPOSTOR");
     // Signed with another key than the one it signs in with.
     let proof = live::proof(&nonce, key(1).verifying_key().as_bytes());
     let signature = key(2).sign(&proof).to_bytes();
@@ -553,4 +617,249 @@ fn the_server_keeps_its_limits() {
     w.run(20.0);
     assert_eq!(w.server.connections(), before);
     w.sign_in(7, "Late");
+}
+
+#[test]
+fn everyone_starts_in_a_party_of_their_own() {
+    let mut w = World::new("own-party");
+    let a = w.sign_in(1, "Alpha");
+    let party = w.party(a);
+    assert_eq!(party.leader, w.id(a));
+    assert_eq!(party.privacy, Privacy::Open);
+    assert_eq!(party.maps, ["lockout", "midship"]);
+    assert_eq!(w.members(a), [w.id(a)]);
+    let me = &party.members[0];
+    assert_eq!((me.gamertag.as_str(), me.best, me.guests), ("ALPHA", 1, 0));
+}
+
+#[test]
+fn invited_players_join_the_party() {
+    let mut w = World::new("invites");
+    let a = w.sign_in(1, "Alpha");
+    let b = w.sign_in(2, "Bravo");
+    let c = w.sign_in(3, "Charlie");
+    let d = w.sign_in(4, "Delta");
+    let party = w.party(a).id;
+    w.send(a, ToServer::Invite(w.id(b)));
+    w.until(|w| !w.pcs[b].view.invites.is_empty());
+    assert_eq!(w.pcs[b].view.invites, [(party, "ALPHA".to_string())]);
+    let invited = LiveEvent::Invited {
+        party,
+        from: "ALPHA".into(),
+    };
+    assert!(w.events[b].contains(&invited));
+    w.send(b, ToServer::Accept(party));
+    w.until(|w| w.members(a).len() == 2);
+    assert_eq!(w.members(a), [w.id(a), w.id(b)]);
+    assert_eq!(w.members(b), w.members(a));
+    assert_eq!(w.party(b).leader, w.id(a));
+    assert!(w.pcs[b].view.invites.is_empty());
+    // Whoever asked hears of an invite turned down.
+    w.send(a, ToServer::Invite(w.id(c)));
+    w.until(|w| !w.pcs[c].view.invites.is_empty());
+    w.send(c, ToServer::Decline(party));
+    w.until(|w| !w.notices(a).is_empty());
+    assert_eq!(w.notices(a), ["CHARLIE DECLINED YOUR INVITE"]);
+    assert_eq!(w.members(c), [w.id(c)]);
+    // Any member can invite.
+    w.send(b, ToServer::Invite(w.id(d)));
+    w.until(|w| !w.pcs[d].view.invites.is_empty());
+    w.send(d, ToServer::Accept(party));
+    w.until(|w| w.members(a).len() == 3);
+    // The party sees a member's new gamertag and look.
+    w.send(
+        d,
+        ToServer::Profile {
+            gamertag: "Echo".into(),
+            look: Look::default_for(9),
+        },
+    );
+    w.until(|w| w.party(a).members[2].gamertag == "ECHO");
+    assert_eq!(w.party(b).members[2].look, Look::default_for(9));
+    // An invite to a party that broke up is no use.
+    let gone = w.party(c).id;
+    w.send(c, ToServer::Invite(w.id(a)));
+    w.until(|w| w.pcs[a].view.invites.iter().any(|i| i.0 == gone));
+    w.send(c, ToServer::JoinParty(party));
+    w.until(|w| w.members(a).len() == 4);
+    w.send(a, ToServer::Accept(gone));
+    w.until(|w| w.notices(a).len() == 2);
+    assert_eq!(w.notices(a)[1], "THAT PARTY HAS BROKEN UP");
+}
+
+#[test]
+fn leaders_remove_and_promote_and_members_leave() {
+    let mut w = World::new("leaders");
+    let [a, b, c] = w.party_of(&["Alpha", "Bravo", "Charlie"])[..] else {
+        unreachable!();
+    };
+    let party = w.party(a).id;
+    // Bravo leaves for a party of its own.
+    w.send(b, ToServer::LeaveParty);
+    w.until(|w| w.members(a).len() == 2);
+    assert_eq!(w.members(a), [w.id(a), w.id(c)]);
+    assert_eq!(w.members(b), [w.id(b)]);
+    assert_eq!(w.party(b).leader, w.id(b));
+    assert_ne!(w.party(b).id, party);
+    // Only the leader removes members...
+    w.send(c, ToServer::Kick(w.id(a)));
+    w.run(1.0);
+    assert_eq!(w.members(a).len(), 2);
+    w.send(a, ToServer::Kick(w.id(c)));
+    w.until(|w| w.members(a).len() == 1);
+    assert_eq!(w.members(c), [w.id(c)]);
+    assert_eq!(w.notices(c), ["YOU WERE REMOVED FROM THE PARTY"]);
+    // ... who can't just come back, though it's open,
+    w.send(c, ToServer::JoinParty(party));
+    w.until(|w| w.notices(c).len() == 2);
+    assert_eq!(w.notices(c)[1], "THAT PARTY IS INVITE ONLY");
+    // ... but can when invited.
+    w.send(a, ToServer::Invite(w.id(c)));
+    w.until(|w| !w.pcs[c].view.invites.is_empty());
+    w.send(c, ToServer::Accept(party));
+    w.until(|w| w.members(a).len() == 2);
+    // Only the leader hands over the lead.
+    w.send(c, ToServer::Promote(w.id(c)));
+    w.run(1.0);
+    assert_eq!(w.party(a).leader, w.id(a));
+    w.send(a, ToServer::Promote(w.id(c)));
+    w.until(|w| w.party(a).leader == w.id(c));
+    assert_eq!(w.party(c).leader, w.id(c));
+}
+
+#[test]
+fn the_longest_standing_member_leads_when_the_leader_goes() {
+    let mut w = World::new("handover");
+    let [a, b, c, d] = w.party_of(&["Alpha", "Bravo", "Charlie", "Delta"])[..] else {
+        unreachable!();
+    };
+    // Charlie leads, then leaves: Alpha has been in the party longest.
+    w.send(a, ToServer::Promote(w.id(c)));
+    w.until(|w| w.party(a).leader == w.id(c));
+    w.send(c, ToServer::LeaveParty);
+    w.until(|w| w.members(a).len() == 3);
+    assert_eq!(w.party(a).leader, w.id(a));
+    // Alpha's PC goes quiet and is signed out: then it's Bravo.
+    w.frozen.push(a);
+    w.until(|w| w.members(b).len() == 2);
+    assert_eq!(w.party(d).leader, w.id(b));
+    assert_eq!(w.members(d), [w.id(b), w.id(d)]);
+}
+
+#[test]
+fn open_parties_take_anyone_and_invite_only_ones_dont() {
+    let mut w = World::new("privacy");
+    let a = w.sign_in(1, "Alpha");
+    let b = w.sign_in(2, "Bravo");
+    let c = w.sign_in(3, "Charlie");
+    let party = w.party(a).id;
+    // Parties start open.
+    w.send(b, ToServer::JoinParty(party));
+    w.until(|w| w.members(a).len() == 2);
+    // Only the leader closes it.
+    w.send(b, ToServer::Privacy(Privacy::InviteOnly));
+    w.run(1.0);
+    assert_eq!(w.party(a).privacy, Privacy::Open);
+    w.send(a, ToServer::Privacy(Privacy::InviteOnly));
+    w.until(|w| w.party(b).privacy == Privacy::InviteOnly);
+    w.send(c, ToServer::JoinParty(party));
+    w.until(|w| !w.notices(c).is_empty());
+    assert_eq!(w.notices(c), ["THAT PARTY IS INVITE ONLY"]);
+    assert_eq!(w.members(a).len(), 2);
+    // Everyone online sees it closed.
+    w.until(|w| {
+        w.pcs[c]
+            .view
+            .online
+            .iter()
+            .any(|p| p.party == party && !p.open)
+    });
+    let online = &w.pcs[c].view.online;
+    let alpha = online.iter().find(|p| p.account == w.id(a)).unwrap();
+    assert_eq!((alpha.size, alpha.openings), (2, 0));
+}
+
+#[test]
+fn parties_hold_sixteen_people_guests_too() {
+    let mut w = World::new("full");
+    let with_guests = |name: &str| Profile {
+        guests: 3,
+        ..profile(name)
+    };
+    let pcs: Vec<usize> = (1..=4)
+        .map(|n| w.sign_in_as(n, &with_guests(&format!("Player {n}"))))
+        .collect();
+    let first = pcs[0];
+    let party = w.party(first).id;
+    for &pc in &pcs[1..] {
+        w.send(pc, ToServer::JoinParty(party));
+    }
+    w.until(|w| w.members(first).len() == 4);
+    assert!(w.party(first).members.iter().all(|m| m.guests == 3));
+    // Sixteen people: no room for one more.
+    let e = w.sign_in(5, "Echo");
+    w.send(e, ToServer::JoinParty(party));
+    w.until(|w| !w.notices(e).is_empty());
+    assert_eq!(w.notices(e), ["THE PARTY IS FULL"]);
+    // A guest fewer makes room.
+    w.send(first, ToServer::Guests(2));
+    w.until(|w| w.party(first).members[0].guests == 2);
+    w.send(e, ToServer::JoinParty(party));
+    w.until(|w| w.members(first).len() == 5);
+    // Then a guest more doesn't fit.
+    w.send(first, ToServer::Guests(3));
+    w.until(|w| !w.notices(first).is_empty());
+    assert_eq!(w.notices(first), ["THE PARTY IS FULL"]);
+    assert_eq!(w.party(first).members[0].guests, 2);
+}
+
+#[test]
+fn everyone_online_is_listed_at_most_once_a_second() {
+    let mut w = World::new("online");
+    let a = w.sign_in(1, "Alpha");
+    let b = w.sign_in(2, "Bravo");
+    let mut watcher = sign_in_by_hand(&mut w, 3, "Watcher");
+    let party = w.party(a).id;
+    w.send(b, ToServer::JoinParty(party));
+    w.until(|w| {
+        w.pcs[b]
+            .view
+            .online
+            .iter()
+            .filter(|p| p.party == party)
+            .count()
+            == 2
+    });
+    let online = &w.pcs[b].view.online;
+    assert_eq!(online.len(), 3);
+    let alpha = online.iter().find(|p| p.gamertag == "ALPHA").unwrap();
+    assert_eq!(alpha.account, w.id(a));
+    assert_eq!((alpha.best, alpha.activity), (1, Activity::Lobby));
+    assert_eq!((alpha.open, alpha.size, alpha.openings), (true, 2, 14));
+    // However often something changes, the list goes once a second.
+    heard(&mut watcher);
+    let mut sent = Vec::new();
+    for i in 0..100 {
+        let gamertag = format!("Alpha {}", i % 2);
+        let look = Look::default();
+        w.send(a, ToServer::Profile { gamertag, look });
+        w.step();
+        for message in heard(&mut watcher) {
+            if let ToPc::Online(list) = message {
+                sent.push((w.now, list));
+            }
+        }
+    }
+    assert!(sent.len() >= 4, "{} lists", sent.len());
+    assert!(sent.windows(2).all(|s| s[1].0 - s[0].0 > 1.0 - 1e-6));
+    // The latest says who's there now.
+    let (_, latest) = sent.last().unwrap();
+    assert_eq!(latest.len(), 3);
+    assert!(latest.iter().any(|p| p.gamertag.starts_with("ALPHA ")));
+    // Players signing out drop off it.
+    drop(watcher);
+    w.until(|w| w.pcs[b].view.online.len() == 2);
+    w.frozen.push(a);
+    w.until(|w| w.pcs[b].view.online.len() == 1);
+    assert_eq!(w.members(b), [w.id(b)]);
 }

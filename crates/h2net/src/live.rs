@@ -284,7 +284,7 @@ pub struct PartyInfo {
     pub leader: u64,
     pub privacy: Privacy,
     pub activity: Activity,
-    /// The playlist it searches (`QUICKMATCH` when none).
+    /// The playlist it searches or plays, while it does.
     pub playlist: u8,
     /// Members, the longest-standing first.
     pub members: Vec<PartyMember>,

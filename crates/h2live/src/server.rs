@@ -1,7 +1,8 @@
 //! The online service. PCs sign in to it over a control link, and it keeps
-//! their accounts. It runs on one thread: the caller hands it each new
-//! connection (`accept`) and calls `poll` often, passing the time in
-//! seconds since it started, so tests can run minutes in an instant.
+//! their accounts and their parties (see `party`). It runs on one thread:
+//! the caller hands it each new connection (`accept`) and calls `poll`
+//! often, passing the time in seconds since it started, so tests can run
+//! minutes in an instant.
 //!
 //! Signing in: a PC sends LOGIN with its public key, the server answers
 //! with a random challenge, and the PC signs it (PROVE). An account is
@@ -19,12 +20,14 @@ use crate::card;
 use crate::playlists::{self, Playlist};
 use crate::store::{self, Account};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use h2net::live::{self, Login, PlaylistInfo, ToPc, ToServer, Welcome};
+use h2net::live::{self, Login, PlaylistInfo, Privacy, ToPc, ToServer, Welcome};
 use h2net::Connection;
 use h2sim::game::{clean_name, Look};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+
+mod party;
 
 /// Most connections at once.
 pub const MAX_CONNECTIONS: usize = 500;
@@ -59,8 +62,9 @@ struct Pc {
     /// While signing in: what it signed in with, and the challenge it must
     /// sign.
     login: Option<(Login, [u8; 32])>,
-    /// Signed in as this account.
+    /// Signed in as this account, in this party.
     account: Option<u64>,
+    party: u64,
     /// The maps the PC has (file name and hash).
     maps: Vec<(String, u64)>,
     /// Splitscreen guests playing on it.
@@ -84,6 +88,7 @@ impl Pc {
             heard: now,
             login: None,
             account: None,
+            party: 0,
             maps: Vec::new(),
             guests: 0,
             ping: 0,
@@ -105,6 +110,18 @@ impl Pc {
                 .push_back(((now - sent) * 1000.0).round() as u32);
         }
     }
+}
+
+/// A party of players, which goes into matches whole.
+struct Party {
+    leader: u64,
+    privacy: Privacy,
+    /// Members, the longest-standing first.
+    members: Vec<u64>,
+    /// Invites not yet answered: who to, and who from.
+    invited: Vec<(u64, u64)>,
+    /// Members the leader removed, who need an invite to come back.
+    booted: Vec<u64>,
 }
 
 /// A relay leg, waiting for its other end.
@@ -130,6 +147,15 @@ pub struct Server {
     lingering: Vec<(Connection, f64)>,
     /// When each address started signing in, in the last minute.
     sign_ins: HashMap<IpAddr, Vec<f64>>,
+    parties: HashMap<u64, Party>,
+    /// The last party number given out.
+    party_ids: u64,
+    /// Parties whose members haven't been told how they changed.
+    changed_parties: Vec<u64>,
+    /// Whether the ONLINE list changed since it was last sent, and when
+    /// that was.
+    online_changed: bool,
+    online_sent: f64,
     /// The Unix time when the server's clock read 0.
     epoch: u64,
 }
@@ -159,6 +185,11 @@ impl Server {
             legs: Vec::new(),
             lingering: Vec::new(),
             sign_ins: HashMap::new(),
+            parties: HashMap::new(),
+            party_ids: 0,
+            changed_parties: Vec::new(),
+            online_changed: false,
+            online_sent: f64::NEG_INFINITY,
             epoch,
         })
     }
@@ -214,8 +245,8 @@ impl Server {
         }
     }
 
-    /// Read and answer everything that arrived, ping, and drop connections
-    /// that went quiet, at time `now`.
+    /// Read and answer everything that arrived, ping, drop connections that
+    /// went quiet, and tell players what changed, at time `now`.
     pub fn poll(&mut self, now: f64) {
         for k in 0..self.pcs.len() {
             self.read_pc(k, now);
@@ -231,6 +262,8 @@ impl Server {
                 k += 1;
             }
         }
+        self.send_parties();
+        self.send_online(now);
         for pc in &mut self.pcs {
             // A failure shows up when reading, next time.
             let _ = pc.conn.flush();
@@ -259,16 +292,21 @@ impl Server {
         }
     }
 
-    /// Drop PC `k`, signing it out.
+    /// Drop PC `k`, signing it out of its party.
     fn drop_pc(&mut self, k: usize, why: &str) {
         let pc = &mut self.pcs[k];
         if pc.gone.is_some() {
             return;
         }
         pc.gone = Some(why.to_string());
-        match pc.account.take().and_then(|id| self.accounts.get(&id)) {
-            Some(account) => println!("live: {} signed out: {why}", account.gamertag),
-            None => println!("live: {} dropped: {why}", pc.ip),
+        let (account, party, ip) = (pc.account.take(), pc.party, pc.ip);
+        match account.and_then(|id| self.accounts.get(&id)) {
+            Some(a) => println!("live: {} signed out: {why}", a.gamertag),
+            None => println!("live: {ip} dropped: {why}"),
+        }
+        if let Some(id) = account {
+            self.remove_member(party, id);
+            self.online_changed = true;
         }
     }
 
@@ -334,6 +372,14 @@ impl Server {
             (Some(me), ToServer::Profile { gamertag, look }) => {
                 self.profile(me, &gamertag, look);
             }
+            (Some(me), ToServer::Invite(who)) => self.invite(me, who),
+            (Some(me), ToServer::Accept(id) | ToServer::JoinParty(id)) => self.join_party(me, id),
+            (Some(me), ToServer::Decline(id)) => self.decline(me, id),
+            (Some(me), ToServer::LeaveParty) => self.leave_party(me),
+            (Some(me), ToServer::Kick(who)) => self.kick(me, who),
+            (Some(me), ToServer::Promote(who)) => self.promote(me, who),
+            (Some(me), ToServer::Privacy(privacy)) => self.set_privacy(me, privacy),
+            (Some(me), ToServer::Guests(n)) => self.set_guests(me, n),
             // Matchmaking and matches aren't served yet.
             (
                 Some(_),
@@ -393,6 +439,7 @@ impl Server {
         self.welcome(id);
         let playlists = ToPc::Playlists(self.playlists_for(id));
         self.tell(id, &playlists);
+        self.new_party(id);
     }
 
     /// A player asks for a new gamertag or look.
@@ -409,6 +456,10 @@ impl Server {
         account.look = look;
         if self.update(account) {
             self.welcome(me);
+            // Their party and everyone online see the change.
+            if let Some(k) = self.pc_of(me) {
+                self.party_changed(self.pcs[k].party);
+            }
         }
     }
 
