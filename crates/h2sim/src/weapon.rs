@@ -60,6 +60,42 @@ pub struct WeaponDef {
     pub dual: Option<DualWield>,
     /// How its rounds fly, unless they hit at once.
     pub flight: Option<Flight>,
+    /// How its direct hits hurt shields and bodies.
+    pub armor: ArmorScale,
+}
+
+/// How much harder (or softer) a kind of damage hits players' shields and
+/// bodies than its amount says: Halo 2's damage table for their armour.
+/// Plasma tears through shields but barely hurts bodies; explosions are
+/// half as hard on shields; sniper rounds twice as hard.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArmorScale {
+    pub shield: f32,
+    pub body: f32,
+}
+
+impl Default for ArmorScale {
+    fn default() -> ArmorScale {
+        ArmorScale {
+            shield: 1.0,
+            body: 1.0,
+        }
+    }
+}
+
+impl ArmorScale {
+    /// Explosions (grenades, rockets): half as hard on shields.
+    pub const EXPLOSION: ArmorScale = ArmorScale {
+        shield: 0.5,
+        body: 1.0,
+    };
+
+    pub fn from_tags(d: &Damage) -> ArmorScale {
+        ArmorScale {
+            shield: d.vs_shield.max(0.0),
+            body: d.vs_body.max(0.0),
+        }
+    }
 }
 
 /// A blast: full damage close in, falling off to the edge.
@@ -71,6 +107,7 @@ pub struct Blast {
     pub radius: (f32, f32),
     /// How hard it throws people (world units per second at the centre).
     pub push: f32,
+    pub armor: ArmorScale,
 }
 
 impl Blast {
@@ -82,6 +119,7 @@ impl Blast {
             damage: (d.lower_bound.min(upper), upper),
             radius: (d.radius.0.min(outer), outer),
             push: d.instantaneous_acceleration,
+            armor: ArmorScale::from_tags(d),
         })
     }
 
@@ -131,12 +169,14 @@ pub struct Flight {
 pub struct Sticky {
     /// Seconds after sticking before one goes off (shortest, longest).
     pub fuse: (f32, f32),
-    /// Damage to whoever it's in when it goes off.
+    /// Damage to whoever it's in when it goes off, and how it hurts them.
     pub damage: f32,
+    pub armor: ArmorScale,
     /// How many at once set off the supercombine.
     pub supercombine: usize,
     /// The supercombine's damage to whoever they're in, and its blast.
     pub super_damage: f32,
+    pub super_armor: ArmorScale,
     pub super_blast: Option<Blast>,
 }
 
@@ -263,8 +303,10 @@ impl WeaponDef {
                         (0.5, 0.7)
                     },
                     damage: detonation.map_or(0.0, |d| d.upper_bound.0.max(d.upper_bound.1)),
+                    armor: detonation.map(ArmorScale::from_tags).unwrap_or_default(),
                     supercombine: p.super_count as usize,
                     super_damage: a.upper_bound.0.max(a.upper_bound.1),
+                    super_armor: ArmorScale::from_tags(a),
                     super_blast: super_detonation.and_then(Blast::from_tags),
                 }),
         });
@@ -311,6 +353,7 @@ impl WeaponDef {
             melee_damage: None,
             dual,
             flight,
+            armor: damage.map(ArmorScale::from_tags).unwrap_or_default(),
         }
     }
 
@@ -592,6 +635,7 @@ mod tests {
             melee_damage: None,
             dual: None,
             flight: None,
+            armor: ArmorScale::default(),
         }
     }
 

@@ -4,6 +4,22 @@
 use crate::mapset::MapSet;
 use crate::{f32_at, i16_at, u32_at, DatumIndex, Error, Result};
 
+/// `jpt!` general and specific damage: string ids naming the groups of the
+/// globals' damage table it belongs to (the specific one wins).
+const JPT_GENERAL_DAMAGE: usize = 0x50;
+const JPT_SPECIFIC_DAMAGE: usize = 0x54;
+/// `matg` damage table: one element, holding damage groups (name, then
+/// armour modifiers: armour name and damage multiplier).
+const MATG_DAMAGE_TABLE: usize = 0xD0;
+const DAMAGE_TABLE_SIZE: usize = 0x8;
+const DAMAGE_GROUP_SIZE: usize = 0xC;
+const DAMAGE_GROUP_ARMOR: usize = 0x4;
+const ARMOR_MODIFIER_SIZE: usize = 0x8;
+/// The armour of multiplayer Spartans' and Elites' shields and bodies: the
+/// general armour of their materials (`energy_shield_thin_hum_masterchief`,
+/// `hard_metal_thin_cov_elite`...).
+pub const SHIELD_ARMOR: &str = "energy_shield_thin";
+pub const BODY_ARMOR: &str = "hard_metal_thin";
 const WEAP_ZOOM_LEVELS: usize = 0x1FE;
 const WEAP_ZOOM_RANGE: usize = 0x200;
 const WEAP_AUTOAIM_ANGLE: usize = 0x208;
@@ -154,12 +170,73 @@ pub struct Projectile {
     pub acceleration_range: (f32, f32),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Damage {
     pub radius: (f32, f32),
     pub lower_bound: f32,
     pub upper_bound: (f32, f32),
     pub instantaneous_acceleration: f32,
+    /// Times the damage to a multiplayer player's shields and body, from
+    /// the damage table (plasma eats shields, explosions less so...).
+    pub vs_shield: f32,
+    pub vs_body: f32,
+}
+
+impl Default for Damage {
+    fn default() -> Damage {
+        Damage {
+            radius: (0.0, 0.0),
+            lower_bound: 0.0,
+            upper_bound: (0.0, 0.0),
+            instantaneous_acceleration: 0.0,
+            vs_shield: 1.0,
+            vs_body: 1.0,
+        }
+    }
+}
+
+/// A group of the damage table: its name, and the multiplier for each kind
+/// of armour it names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DamageGroup {
+    pub name: String,
+    pub armor: Vec<(String, f32)>,
+}
+
+impl DamageGroup {
+    pub fn against(&self, armor: &str) -> Option<f32> {
+        self.armor.iter().find(|a| a.0 == armor).map(|a| a.1)
+    }
+}
+
+/// The globals' damage table: how much each kind of damage hurts each kind
+/// of armour.
+pub fn damage_table(set: &mut MapSet) -> Result<Vec<DamageGroup>> {
+    let (src, _, data) = set.tag_data(set.map.globals)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let table = file.read_block(region, &data, MATG_DAMAGE_TABLE, DAMAGE_TABLE_SIZE)?;
+    let Some(table) = table.as_chunks::<DAMAGE_TABLE_SIZE>().0.first() else {
+        return Ok(Vec::new());
+    };
+    let sid = |file: &crate::mapset::Map, b: &[u8]| {
+        file.string_id(u32_at(b, 0)).unwrap_or("").to_string()
+    };
+    let groups = file.read_block(region, table, 0, DAMAGE_GROUP_SIZE)?;
+    let mut out = Vec::new();
+    for g in groups.as_chunks::<DAMAGE_GROUP_SIZE>().0 {
+        let modifiers = file.read_block(region, g, DAMAGE_GROUP_ARMOR, ARMOR_MODIFIER_SIZE)?;
+        out.push(DamageGroup {
+            name: sid(file, g),
+            armor: modifiers
+                .as_chunks::<ARMOR_MODIFIER_SIZE>()
+                .0
+                .iter()
+                .map(|m| (sid(file, m), f32_at(m, 4)))
+                .collect(),
+        });
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -394,14 +471,26 @@ pub fn read_projectile(set: &mut MapSet, proj: DatumIndex) -> Result<Projectile>
 }
 
 pub fn read_damage(set: &mut MapSet, jpt: DatumIndex) -> Result<Damage> {
-    let (_, tag, d) = set.tag_data(jpt)?;
-    if d.len() < 0x44 {
+    let (src, tag, d) = set.tag_data(jpt)?;
+    if d.len() < JPT_SPECIFIC_DAMAGE + 4 {
         return Err(Error::Corrupt(format!("damage tag {} too short", tag.name)));
     }
+    let file = set.get(src);
+    let sid = |at: usize| file.string_id(u32_at(&d, at)).unwrap_or("").to_string();
+    let names = [sid(JPT_SPECIFIC_DAMAGE), sid(JPT_GENERAL_DAMAGE)];
+    // Damage the table doesn't know hurts as it says.
+    let table = damage_table(set).unwrap_or_default();
+    let group = names
+        .iter()
+        .filter(|n| !n.is_empty())
+        .find_map(|n| table.iter().find(|g| &g.name == n));
+    let against = |armor: &str| group.and_then(|g| g.against(armor)).unwrap_or(1.0);
     Ok(Damage {
         radius: range(&d, 0x0),
         lower_bound: f32_at(&d, 0x1C),
         upper_bound: range(&d, 0x20),
         instantaneous_acceleration: f32_at(&d, 0x40),
+        vs_shield: against(SHIELD_ARMOR),
+        vs_body: against(BODY_ARMOR),
     })
 }

@@ -19,6 +19,8 @@ install. No game files are included in this repository.
   vehicles (wheels with suspension, hovering, flight, seats, turrets, splatters
   and wrecks),
   weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
+  with Halo 2's damage table (sniper rounds twice as hard on shields, plasma
+  1.5 times on shields but a third on bodies, explosions half on shields),
   the rules of every Halo 2 game type: Slayer, Capture the Flag, King of the
   Hill, Oddball, Juggernaut, Territories and Assault, with team versions of
   Slayer, King and Oddball (shields, health, grenades, pickups, respawns,

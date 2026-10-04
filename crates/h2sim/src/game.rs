@@ -7,7 +7,7 @@
 use crate::collision::{KillZone, World};
 use crate::player::{Input, Player};
 use crate::vehicle::{Vehicle, VehicleDef};
-use crate::weapon::{Blast, WeaponDef, WeaponInput, WeaponState};
+use crate::weapon::{ArmorScale, Blast, WeaponDef, WeaponInput, WeaponState};
 use blam_cache::physics::{BipedPhysics, PlayerMovement};
 use glam::{Vec2, Vec3};
 
@@ -397,6 +397,7 @@ pub struct GrenadeDef {
     pub damage: f32,
     /// Full damage inside the first radius, none beyond the second.
     pub radius: (f32, f32),
+    pub armor: ArmorScale,
 }
 
 impl Default for Rules {
@@ -421,6 +422,7 @@ impl Default for Rules {
                 sticks: false,
                 damage: 150.0,
                 radius: (0.75, 1.75),
+                armor: ArmorScale::EXPLOSION,
             },
             plasma: GrenadeDef {
                 speed: 7.0,
@@ -428,6 +430,7 @@ impl Default for Rules {
                 sticks: true,
                 damage: 120.0,
                 radius: (0.75, 1.5),
+                armor: ArmorScale::EXPLOSION,
             },
             headshot_weapons: Vec::new(),
             lunge_weapons: Vec::new(),
@@ -1343,7 +1346,7 @@ impl Game {
             (Some((j, t, head)), v) if v.is_none_or(|v| t <= v.1) => {
                 let damage = WeaponState::damage_at(def, t);
                 let headshot = head && self.rules.headshot_weapons.contains(&weapon);
-                self.damage(j, Some(i), damage, headshot);
+                self.hurt(j, Some(i), damage, headshot, def.armor);
                 (Some((eye + dir * t, -dir)), Some(j))
             }
             (_, Some((v, t))) => {
@@ -1511,6 +1514,7 @@ impl Game {
             damage: (0.0, def.damage),
             radius: def.radius,
             push: GRENADE_PUSH,
+            armor: def.armor,
         };
         self.blast(world, g.position, g.owner, blast, g.stuck);
         self.events.push(Event::Exploded {
@@ -1521,6 +1525,19 @@ impl Game {
 
     /// Apply damage: shields first, then health.
     pub fn damage(&mut self, victim: usize, attacker: Option<usize>, amount: f32, headshot: bool) {
+        self.hurt(victim, attacker, amount, headshot, ArmorScale::default());
+    }
+
+    /// Apply damage of a kind that hits shields and bodies harder or softer
+    /// (`armor`).
+    pub fn hurt(
+        &mut self,
+        victim: usize,
+        attacker: Option<usize>,
+        amount: f32,
+        headshot: bool,
+        armor: ArmorScale,
+    ) {
         let rules_health = self.rules.health;
         let teammate = attacker.is_some_and(|a| a != victim && !self.is_enemy(a, victim));
         if teammate && !self.rules.friendly_fire {
@@ -1532,11 +1549,19 @@ impl Game {
             return;
         }
         p.since_damage = 0.0;
-        let absorbed = amount.min(p.shield);
-        p.shield -= absorbed;
-        let rest = amount - absorbed;
+        // What gets past the shields (all of it once they're down).
+        let past = if p.shield <= 0.0 {
+            amount
+        } else if armor.shield <= 0.0 {
+            0.0
+        } else {
+            let absorbed = (amount * armor.shield).min(p.shield);
+            p.shield -= absorbed;
+            (amount - absorbed / armor.shield).max(0.0)
+        };
+        let rest = past * armor.body;
         // A headshot kills once the shields are gone.
-        let killing_headshot = headshot && p.shield <= 0.0 && absorbed < amount.max(1e-3);
+        let killing_headshot = headshot && p.shield <= 0.0 && past > 1e-3;
         p.health -= if killing_headshot { rules_health } else { rest };
         self.events.push(Event::Damaged {
             player: victim,
@@ -1935,6 +1960,40 @@ pub(crate) mod tests {
             .events
             .iter()
             .any(|e| matches!(e, Event::Killed { headshot: true, .. })));
+    }
+
+    #[test]
+    fn kinds_of_damage_hit_shields_and_bodies_differently() {
+        let mut g = game();
+        for _ in 0..4 {
+            g.add_player();
+        }
+        // Sniper rounds: twice as hard on shields, so two body shots kill.
+        let sniper = ArmorScale {
+            shield: 2.0,
+            body: 1.0,
+        };
+        g.hurt(1, Some(0), 45.0, false, sniper);
+        assert_eq!(g.players[1].shield, 0.0);
+        assert!((g.players[1].health - 35.0).abs() < 1e-3);
+        g.hurt(1, Some(0), 45.0, false, sniper);
+        assert!(!g.players[1].alive);
+
+        // A grenade at your feet leaves you alive from full shields.
+        g.hurt(2, Some(0), 150.0, false, ArmorScale::EXPLOSION);
+        assert!(g.players[2].alive);
+        assert!((g.players[2].health - 35.0).abs() < 1e-3);
+
+        // Plasma: shields melt, bodies barely suffer.
+        let plasma = ArmorScale {
+            shield: 1.5,
+            body: 0.35,
+        };
+        g.hurt(3, Some(0), 10.0, false, plasma);
+        assert!((g.players[3].shield - 55.0).abs() < 1e-3);
+        g.players[3].shield = 0.0;
+        g.hurt(3, Some(0), 10.0, false, plasma);
+        assert!((g.players[3].health - 41.5).abs() < 1e-3);
     }
 
     #[test]

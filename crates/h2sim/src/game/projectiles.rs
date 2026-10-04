@@ -215,7 +215,7 @@ impl Game {
         let sticky = def.flight.and_then(|f| f.sticky);
         let hit_player = match what {
             Struck::Player(j) => {
-                self.damage(j, Some(p.owner), damage, false);
+                self.hurt(j, Some(p.owner), damage, false, def.armor);
                 if let (Some(s), true) = (sticky, self.players[j].alive) {
                     self.stick(p, j, s);
                 }
@@ -272,14 +272,14 @@ impl Game {
         self.stuck.retain(|r| r.victim != j);
         let q = &self.players[j];
         let at = q.body.position + Vec3::Z * q.body.height() * 0.5;
-        self.damage(j, Some(owner), s.super_damage, false);
+        self.hurt(j, Some(owner), s.super_damage, false, s.super_armor);
         if let Some(b) = s.super_blast {
             // The blast's own reach (no level to shield anyone this close).
             for k in 0..self.players.len() {
                 let other = &self.players[k];
                 let d = (other.body.position + Vec3::Z * other.body.height() * 0.5).distance(at);
                 if k != j && other.alive && d < b.radius.1 {
-                    self.damage(k, Some(owner), b.damage_at(d), false);
+                    self.hurt(k, Some(owner), b.damage_at(d), false, b.armor);
                 }
             }
         }
@@ -312,7 +312,7 @@ impl Game {
                 continue;
             }
             let at = q.body.position + r.offset;
-            self.damage(r.victim, Some(r.owner), s.damage, false);
+            self.hurt(r.victim, Some(r.owner), s.damage, false, s.armor);
             self.events.push(Event::Impact {
                 weapon: r.weapon,
                 position: at,
@@ -369,7 +369,7 @@ impl Game {
                     body.grounded = false;
                 }
             }
-            self.damage(j, Some(owner), b.damage_at(d), false);
+            self.hurt(j, Some(owner), b.damage_at(d), false, b.armor);
         }
         self.blast_vehicles(at, owner, b.damage.1, b.radius);
     }
@@ -400,6 +400,7 @@ mod tests {
                     damage: (75.0, 200.0),
                     radius: (1.0, 2.0),
                     push: 2.0,
+                    armor: Default::default(),
                 }),
                 sticky: None,
             }),
@@ -454,8 +455,10 @@ mod tests {
         let s = Sticky {
             fuse: (0.5, 0.7),
             damage: 2.0,
+            armor: Default::default(),
             supercombine: 3,
             super_damage: 400.0,
+            super_armor: Default::default(),
             super_blast: None,
         };
         let needler = WeaponDef {

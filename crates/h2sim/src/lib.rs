@@ -15,4 +15,4 @@ pub use game::{Command, Flag, FlagEvent, Game, GameType, ItemKind, ItemSpawn, Ru
 pub use nav::NavGraph;
 pub use player::{Input, Player};
 pub use vehicle::{Vehicle, VehicleDef};
-pub use weapon::{Shot, WeaponDef, WeaponInput, WeaponState};
+pub use weapon::{ArmorScale, Shot, WeaponDef, WeaponInput, WeaponState};

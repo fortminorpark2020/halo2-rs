@@ -47,6 +47,7 @@ fn rifle() -> WeaponDef {
         melee_damage: None,
         dual: None,
         flight: None,
+        armor: Default::default(),
     }
 }
 
