@@ -3,7 +3,9 @@
 //! join a party that's open, up to 16 people with splitscreen guests. The
 //! leader can remove members, hand over the lead and make the party invite
 //! only; if the leader leaves, the member who has been in it longest leads
-//! it. Everyone signed in sees everyone else, and their party.
+//! it. Everyone signed in sees everyone else, and their party. A party
+//! that changes while it searches has to search again, and no one can join
+//! one playing a match.
 
 use super::{Party, Pc, Server};
 use h2net::live::{self, Activity, OnlinePlayer, PartyInfo, PartyMember, Privacy, ToPc, MAX_PARTY};
@@ -20,6 +22,7 @@ const PARTY_FULL: &str = "THE PARTY IS FULL";
 const PARTY_GONE: &str = "THAT PARTY HAS BROKEN UP";
 const INVITE_ONLY: &str = "THAT PARTY IS INVITE ONLY";
 const REMOVED: &str = "YOU WERE REMOVED FROM THE PARTY";
+const IN_A_MATCH: &str = "THAT PARTY IS IN A MATCH";
 
 impl Party {
     fn new(leader: u64) -> Party {
@@ -29,6 +32,10 @@ impl Party {
             members: vec![leader],
             invited: Vec::new(),
             booted: Vec::new(),
+            activity: Activity::Lobby,
+            playlist: live::QUICKMATCH,
+            previous_map: None,
+            custom_map: String::new(),
         }
     }
 
@@ -58,7 +65,8 @@ impl Server {
     }
 
     /// Take `account` out of party `id`. If they led it, the member there
-    /// longest leads it now; if they were the last, it's gone.
+    /// longest leads it now (and any custom game they hosted is over); if
+    /// they were the last, it's gone.
     pub(super) fn remove_member(&mut self, id: u64, account: u64) {
         let Some(party) = self.parties.get_mut(&id) else {
             return;
@@ -68,10 +76,24 @@ impl Server {
             Some(&first) => {
                 if party.leader == account {
                     party.leader = first;
+                    if party.activity == Activity::Custom {
+                        self.close_custom(id);
+                    }
+                } else if party.activity == Activity::Custom {
+                    // Their way into the custom game, if they hadn't come.
+                    self.unlink(id, Some(account));
                 }
                 self.party_changed(id);
+                self.party_changed_searching(id);
             }
             None => {
+                match self.parties[&id].activity {
+                    Activity::Searching => {
+                        self.matchmaker.cancel(id);
+                    }
+                    Activity::Custom => self.close_custom(id),
+                    _ => {}
+                }
                 self.parties.remove(&id);
             }
         }
@@ -89,19 +111,19 @@ impl Server {
     }
 
     /// The party `account` is in, and its number.
-    fn party_of(&self, account: u64) -> Option<(u64, &Party)> {
+    pub(super) fn party_of(&self, account: u64) -> Option<(u64, &Party)> {
         let id = self.pcs[self.pc_of(account)?].party;
         Some((id, self.parties.get(&id)?))
     }
 
     /// The party `account` leads, if they lead one, and its number.
-    fn led_by(&mut self, account: u64) -> Option<(u64, &mut Party)> {
+    pub(super) fn led_by(&mut self, account: u64) -> Option<(u64, &mut Party)> {
         let id = self.pcs[self.pc_of(account)?].party;
         let party = self.parties.get_mut(&id)?;
         (party.leader == account).then_some((id, party))
     }
 
-    fn notice(&mut self, account: u64, text: &str) {
+    pub(super) fn notice(&mut self, account: u64, text: &str) {
         self.tell(account, &ToPc::Notice(text.into()));
     }
 
@@ -131,13 +153,17 @@ impl Server {
     }
 
     /// `me` joins party `id`, leaving their own: by invite, or because it's
-    /// open (and they weren't removed from it).
+    /// open (and they weren't removed from it). In a custom game, they're
+    /// linked to its host.
     pub(super) fn join_party(&mut self, me: u64, id: u64) {
         let Some(party) = self.parties.get(&id) else {
             return self.notice(me, PARTY_GONE);
         };
         if party.members.contains(&me) {
             return;
+        }
+        if party.activity == Activity::Playing {
+            return self.notice(me, IN_A_MATCH);
         }
         let closed = party.privacy == Privacy::InviteOnly || party.booted.contains(&me);
         if closed && !party.has_invited(me) {
@@ -157,6 +183,12 @@ impl Server {
         }
         self.pcs[k].party = id;
         self.party_changed(id);
+        self.party_changed_searching(id);
+        if let Some(party) = self.parties.get(&id) {
+            if party.activity == Activity::Custom {
+                self.join_custom(id, party.leader, me);
+            }
+        }
     }
 
     /// `me` turns down an invite to party `id`; whoever asked hears.
@@ -203,13 +235,16 @@ impl Server {
         self.notice(who, REMOVED);
     }
 
-    /// The leader makes `who` leader.
+    /// The leader makes `who` leader (ending any custom game they host).
     pub(super) fn promote(&mut self, me: u64, who: u64) {
         let Some((id, party)) = self.led_by(me) else {
             return;
         };
-        if party.members.contains(&who) {
+        if party.members.contains(&who) && who != me {
             party.leader = who;
+            if party.activity == Activity::Custom {
+                self.close_custom(id);
+            }
             self.party_changed(id);
         }
     }
@@ -235,6 +270,7 @@ impl Server {
             self.pcs[k].guests = guests;
         }
         self.party_changed(id);
+        self.party_changed_searching(id);
     }
 
     /// Tell the members of every party that changed how it is now.
@@ -254,14 +290,21 @@ impl Server {
     }
 
     fn party_info(&self, id: u64, party: &Party) -> PartyInfo {
+        let playlist = self.playlists.iter().find(|p| p.id == party.playlist);
         let members = party.members.iter().filter_map(|&a| {
             let account = self.accounts.get(&a)?;
+            // Their level in the ranked playlist the party searches or
+            // plays, if it does; otherwise their best.
+            let level = match playlist.filter(|p| p.ranked) {
+                Some(p) => account.stats(&p.key).map_or(1, |s| s.rank.level),
+                None => account.best_level(),
+            };
             Some(PartyMember {
                 account: a,
                 gamertag: account.gamertag.clone(),
                 look: account.look,
                 best: account.best_level(),
-                level: account.best_level(),
+                level,
                 guests: self.guests(a) as u8,
             })
         });
@@ -269,8 +312,8 @@ impl Server {
             id,
             leader: party.leader,
             privacy: party.privacy,
-            activity: Activity::Lobby,
-            playlist: live::QUICKMATCH,
+            activity: party.activity,
+            playlist: party.playlist,
             members: members.collect(),
             maps: self.shared_maps(party),
         }
@@ -278,7 +321,7 @@ impl Server {
 
     /// The maps every member of `party` has, the same file, as the
     /// longest-standing member's PC names them.
-    fn shared_maps(&self, party: &Party) -> Vec<String> {
+    pub(super) fn shared_maps(&self, party: &Party) -> Vec<String> {
         let pcs: Vec<&Pc> = party
             .members
             .iter()
@@ -326,7 +369,7 @@ impl Server {
                 gamertag: account.gamertag.clone(),
                 look: account.look,
                 best: account.best_level(),
-                activity: Activity::Lobby,
+                activity: party.activity,
                 party: pc.party,
                 open,
                 size: size as u8,

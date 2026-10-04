@@ -598,32 +598,37 @@ fn the_server_keeps_its_limits() {
     w.run(2.0);
     assert_eq!(w.server.connections(), before);
 
-    // A relay leg says which it is before anything else.
+    // A relay leg says which it is before anything else, and names a link
+    // the server gave out.
     let (server_end, mut leg) = Connection::pair();
     w.server.accept(server_end, Route::Link, ip(6), w.now);
     ToServer::Ping(1).send(&mut leg);
     leg.flush().unwrap();
-    assert_eq!(w.server.connections(), before + 1);
+    let (server_end, mut made_up) = Connection::pair();
+    w.server.accept(server_end, Route::Link, ip(6), w.now);
+    let hello = ToServer::LinkHello {
+        token: [1; 16],
+        account: 1,
+    };
+    hello.send(&mut made_up);
+    made_up.flush().unwrap();
+    assert_eq!(w.server.connections(), before + 2);
     w.step();
     assert_eq!(w.server.connections(), before);
 
     // Legs count too, and wait 20 seconds for their other end.
     let mut legs = Vec::new();
     while w.server.connections() < MAX_CONNECTIONS {
-        let (server_end, mut pc_end) = Connection::pair();
+        let (server_end, pc_end) = Connection::pair();
         w.server.accept(server_end, Route::Link, ip(6), w.now);
-        ToServer::LinkHello {
-            token: [1; 16],
-            account: 1,
-        }
-        .send(&mut pc_end);
-        pc_end.flush().unwrap();
         legs.push(pc_end);
     }
     let full = w.connect(7, "Late");
     w.step();
     assert_eq!(w.refused(full), Some(live::SERVER_FULL));
-    w.run(20.0);
+    w.run(19.0);
+    assert_eq!(w.server.connections(), MAX_CONNECTIONS);
+    w.run(1.0);
     assert_eq!(w.server.connections(), before);
     w.sign_in(7, "Late");
 }
@@ -872,3 +877,5 @@ fn everyone_online_is_listed_at_most_once_a_second() {
     w.until(|w| w.pcs[b].view.online.len() == 1);
     assert_eq!(w.members(b), [w.id(b)]);
 }
+
+mod matches;

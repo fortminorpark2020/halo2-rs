@@ -1,8 +1,9 @@
 //! The online service. PCs sign in to it over a control link, and it keeps
-//! their accounts and their parties (see `party`). It runs on one thread:
-//! the caller hands it each new connection (`accept`) and calls `poll`
-//! often, passing the time in seconds since it started, so tests can run
-//! minutes in an instant.
+//! their accounts and their parties (see `party`), finds them matches and
+//! sees them through (`matches`), and passes their games between them
+//! (`relay`). It runs on one thread: the caller hands it each new
+//! connection (`accept`) and calls `poll` often, passing the time in
+//! seconds since it started, so tests can run minutes in an instant.
 //!
 //! Signing in: a PC sends LOGIN with its public key, the server answers
 //! with a random challenge, and the PC signs it (PROVE). An account is
@@ -17,24 +18,25 @@
 //! data folder, say.
 
 use crate::card;
+use crate::matchmaker::Matchmaker;
 use crate::playlists::{self, Playlist};
 use crate::store::{self, Account};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use h2net::live::{self, Login, PlaylistInfo, Privacy, ToPc, ToServer, Welcome};
+use h2net::live::{self, Activity, Login, PlaylistInfo, Privacy, ToPc, ToServer, Welcome};
 use h2net::Connection;
 use h2sim::game::{clean_name, Look};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+mod matches;
 mod party;
+mod relay;
 
 /// Most connections at once.
 pub const MAX_CONNECTIONS: usize = 500;
 /// Most sign-ins from one address in a minute.
 pub const SIGN_INS_PER_MINUTE: usize = 10;
-/// A relay leg waits this long (seconds) for its other end.
-const LEG_WAIT: f64 = 20.0;
 /// A dropped connection is kept this long (seconds), so what was last sent
 /// to it (why it was turned away, say) gets there.
 const LINGER: f64 = 2.0;
@@ -122,14 +124,13 @@ struct Party {
     invited: Vec<(u64, u64)>,
     /// Members the leader removed, who need an invite to come back.
     booted: Vec<u64>,
-}
-
-/// A relay leg, waiting for its other end.
-struct Leg {
-    conn: Connection,
-    since: f64,
-    /// Said which leg it is (LINK_HELLO).
-    hello: bool,
+    /// What it's doing, and the playlist it searches or plays.
+    activity: Activity,
+    playlist: u8,
+    /// The map of its last match, which its next won't be on.
+    previous_map: Option<String>,
+    /// The map of its custom game, while it plays one.
+    custom_map: String,
 }
 
 pub struct Server {
@@ -142,7 +143,20 @@ pub struct Server {
     /// Sent with every challenge.
     motd: String,
     pcs: Vec<Pc>,
-    legs: Vec<Leg>,
+    /// Relay legs waiting for their other end, legs joined, and links
+    /// given out whose legs haven't both come (see `relay`).
+    legs: Vec<relay::Leg>,
+    links: Vec<relay::Link>,
+    tokens: HashMap<[u8; 16], relay::Token>,
+    /// Bytes relayed for each match (or party's custom game) so far.
+    relayed: HashMap<u64, u64>,
+    matchmaker: Matchmaker,
+    /// Matches formed and not yet over (see `matches`).
+    matches: Vec<matches::Match>,
+    /// People searching and playing each playlist, as players were last
+    /// told, and when.
+    counts_sent: Vec<(u16, u16)>,
+    playlists_sent: f64,
     /// Dropped connections, and when to let them go.
     lingering: Vec<(Connection, f64)>,
     /// When each address started signing in, in the last minute.
@@ -175,14 +189,23 @@ impl Server {
         let epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
+        let mut seed = [0; 8];
+        getrandom::fill(&mut seed).expect("random numbers");
         Ok(Server {
             dir: dir.to_path_buf(),
             key,
+            matchmaker: Matchmaker::new(playlists.clone(), u64::from_le_bytes(seed)),
+            counts_sent: vec![(0, 0); playlists.len()],
             playlists,
             accounts: accounts.into_iter().map(|a| (a.id, a)).collect(),
             motd: motd.trim().to_string(),
             pcs: Vec::new(),
             legs: Vec::new(),
+            links: Vec::new(),
+            tokens: HashMap::new(),
+            relayed: HashMap::new(),
+            matches: Vec::new(),
+            playlists_sent: f64::NEG_INFINITY,
             lingering: Vec::new(),
             sign_ins: HashMap::new(),
             parties: HashMap::new(),
@@ -196,7 +219,7 @@ impl Server {
 
     /// Connections open now (control links and relay legs).
     pub fn connections(&self) -> usize {
-        self.pcs.len() + self.legs.len()
+        self.pcs.len() + self.legs.len() + 2 * self.links.len()
     }
 
     /// Players signed in now.
@@ -228,11 +251,7 @@ impl Server {
             return self.linger(conn, now);
         }
         match route {
-            Route::Link => self.legs.push(Leg {
-                conn,
-                since: now,
-                hello: false,
-            }),
+            Route::Link => self.legs.push(relay::Leg::new(conn, now)),
             Route::Live => {
                 let recent = self.sign_ins.entry(ip).or_default();
                 recent.retain(|&t| now - t < 60.0);
@@ -246,14 +265,18 @@ impl Server {
         }
     }
 
-    /// Read and answer everything that arrived, ping, drop connections that
-    /// went quiet, and tell players what changed, at time `now`.
+    /// Read and answer everything that arrived, pass games on, find
+    /// matches and see them through, ping, drop connections that went
+    /// quiet, and tell players what changed, at time `now`.
     pub fn poll(&mut self, now: f64) {
         for k in 0..self.pcs.len() {
             self.read_pc(k, now);
         }
         self.read_legs(now);
+        self.relay(now);
         self.keep_up(now);
+        self.matchmake(now);
+        self.run_matches(now);
         let mut k = 0;
         while k < self.pcs.len() {
             if self.pcs[k].gone.is_some() {
@@ -265,6 +288,7 @@ impl Server {
         }
         self.send_parties();
         self.send_online(now);
+        self.send_playlists(now);
         for pc in &mut self.pcs {
             // A failure shows up when reading, next time.
             let _ = pc.conn.flush();
@@ -293,7 +317,7 @@ impl Server {
         }
     }
 
-    /// Drop PC `k`, signing it out of its party.
+    /// Drop PC `k`, signing it out of its party and out of any match.
     fn drop_pc(&mut self, k: usize, why: &str) {
         let pc = &mut self.pcs[k];
         if pc.gone.is_some() {
@@ -308,6 +332,7 @@ impl Server {
         if let Some(id) = account {
             self.remove_member(party, id);
             self.online_changed = true;
+            self.gone(id);
         }
     }
 
@@ -381,18 +406,16 @@ impl Server {
             (Some(me), ToServer::Promote(who)) => self.promote(me, who),
             (Some(me), ToServer::Privacy(privacy)) => self.set_privacy(me, privacy),
             (Some(me), ToServer::Guests(n)) => self.set_guests(me, n),
-            // Matchmaking and matches aren't served yet.
-            (
-                Some(_),
-                ToServer::Search(_)
-                | ToServer::Cancel
-                | ToServer::Custom
-                | ToServer::CustomMap(_)
-                | ToServer::Hosting(_)
-                | ToServer::Result { .. }
-                | ToServer::LeftMatch { .. }
-                | ToServer::Back,
-            ) => {}
+            (Some(me), ToServer::Search(playlist)) => self.search(me, playlist, now),
+            (Some(me), ToServer::Cancel) => self.cancel(me),
+            (Some(me), ToServer::Custom) => self.custom(me),
+            (Some(me), ToServer::CustomMap(map)) => self.custom_map(me, &map),
+            (Some(me), ToServer::Hosting(id)) => self.hosting(me, id, now),
+            (Some(me), ToServer::Result { id, players }) => self.result(me, id, players),
+            (Some(me), ToServer::LeftMatch { id, host_lost }) => {
+                self.left_match(me, id, host_lost);
+            }
+            (Some(me), ToServer::Back) => self.back(me),
             _ => return false,
         }
         true
@@ -438,7 +461,7 @@ impl Server {
             self.accounts[&id].gamertag, pc.ip
         );
         self.welcome(id);
-        let playlists = ToPc::Playlists(self.playlists_for(id));
+        let playlists = ToPc::Playlists(self.playlists_for(id, &self.playlist_counts()));
         self.tell(id, &playlists);
         self.new_party(id);
     }
@@ -472,17 +495,28 @@ impl Server {
 
     /// Keep `account` as it is now, if it changed: with a new seq, saved
     /// to accounts.txt. True if it changed.
-    fn update(&mut self, mut account: Account) -> bool {
-        if self.accounts.get(&account.id) == Some(&account) {
-            return false;
+    fn update(&mut self, account: Account) -> bool {
+        self.update_all(vec![account])
+    }
+
+    /// Keep each of `accounts` as it is now, as `update` does, saving
+    /// accounts.txt once. True if any changed.
+    fn update_all(&mut self, accounts: Vec<Account>) -> bool {
+        let mut changed = false;
+        for mut account in accounts {
+            if self.accounts.get(&account.id) != Some(&account) {
+                account.seq += 1;
+                self.accounts.insert(account.id, account);
+                changed = true;
+            }
         }
-        account.seq += 1;
-        self.accounts.insert(account.id, account);
         let path = self.dir.join("accounts.txt");
-        if let Err(e) = store::save(&path, self.accounts.values()) {
-            println!("live: can't save {}: {e}", path.display());
+        if changed {
+            if let Err(e) = store::save(&path, self.accounts.values()) {
+                println!("live: can't save {}: {e}", path.display());
+            }
         }
-        true
+        changed
     }
 
     /// Tell a player who they're signed in as.
@@ -504,12 +538,14 @@ impl Server {
         self.tell(id, &ToPc::Welcome(welcome));
     }
 
-    /// The playlists, as a player sees them.
-    fn playlists_for(&self, id: u64) -> Vec<PlaylistInfo> {
+    /// The playlists as a player sees them, with how many people search
+    /// and play each.
+    fn playlists_for(&self, id: u64, counts: &[(u16, u16)]) -> Vec<PlaylistInfo> {
         let account = self.accounts.get(&id);
         self.playlists
             .iter()
-            .map(|p| {
+            .zip(counts)
+            .map(|(p, &(searching, playing))| {
                 let stats = account.and_then(|a| a.stats(&p.key));
                 PlaylistInfo {
                     id: p.id,
@@ -521,8 +557,8 @@ impl Server {
                     min: p.min,
                     max: p.max,
                     party_max: p.party_max,
-                    searching: 0,
-                    playing: 0,
+                    searching,
+                    playing,
                     level: match stats {
                         _ if !p.ranked => 0,
                         Some(s) => s.rank.level,
@@ -555,25 +591,6 @@ impl Server {
                 pc.pinged = now;
             }
         }
-    }
-
-    /// Relay legs say which they are, then wait for their other end; one
-    /// that says anything else, or waits too long, is dropped. (They're
-    /// paired up once the server has matches to relay.)
-    fn read_legs(&mut self, now: f64) {
-        self.legs.retain_mut(|leg| {
-            let Ok(messages) = leg.conn.receive() else {
-                return false;
-            };
-            for (kind, body) in messages {
-                let hello = matches!(ToServer::read(kind, &body), Ok(ToServer::LinkHello { .. }));
-                if leg.hello || !hello {
-                    return false;
-                }
-                leg.hello = true;
-            }
-            now - leg.since < LEG_WAIT
-        });
     }
 }
 
