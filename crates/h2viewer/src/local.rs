@@ -750,7 +750,7 @@ impl LocalPlayer {
                         model: pole * Mat4::from_translation(at),
                         light,
                         colors: Some(crate::objective::flag_colors(f.team)),
-                        emblem: None,
+                        emblem: crate::objective::flag_emblem(game, f.team),
                     });
                 }
                 // The left hand's gun: the same arm and gun, mirrored.

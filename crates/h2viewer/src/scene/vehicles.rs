@@ -373,7 +373,9 @@ impl Loader {
         let name = self.set.locate(vehi)?.1.name;
         let loaded = vehicle::read_vehicle(&mut self.set, vehi).and_then(|tag| {
             let model = vehicle::read_model(&mut self.set, tag.model)?;
-            let variant = model::object_variant(&mut self.set, vehi).ok().flatten();
+            let variant = model::named_variant(&mut self.set, vehi, variant)
+                .ok()
+                .flatten();
             let render = model::read_render_model_variant(
                 &mut self.set,
                 model.render_model,

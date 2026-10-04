@@ -132,6 +132,12 @@ fn object_model_ref(set: &mut MapSet, object: DatumIndex, field: usize) -> Resul
 /// An object's look as the game shows it by default: its model's
 /// "default" variant (or first), if the model has variants.
 pub fn object_variant(set: &mut MapSet, object: DatumIndex) -> Result<Option<Variant>> {
+    named_variant(set, object, "default")
+}
+
+/// An object's model variant called `name` (a vehicle collection's gauss
+/// Warthog), else its default one (see `object_variant`).
+pub fn named_variant(set: &mut MapSet, object: DatumIndex, name: &str) -> Result<Option<Variant>> {
     let (_, _, obj) = set.tag_data(object)?;
     let hlmt = DatumIndex(u32_at(&obj, OBJECT_MODEL + 4));
     if hlmt == DatumIndex::NONE {
@@ -142,9 +148,9 @@ pub fn object_variant(set: &mut MapSet, object: DatumIndex) -> Result<Option<Var
     let region = file.meta_region();
     let variants = file.read_block(region, &model, HLMT_VARIANTS, VARIANT_SIZE)?;
     let variants = variants.as_chunks::<VARIANT_SIZE>().0;
-    let Some(v) = variants
-        .iter()
-        .find(|v| sid_name(file, &v[..]) == "default")
+    let called = |n: &str| variants.iter().find(|v| sid_name(file, &v[..]) == n);
+    let Some(v) = called(name)
+        .or_else(|| called("default"))
         .or(variants.first())
     else {
         return Ok(None);

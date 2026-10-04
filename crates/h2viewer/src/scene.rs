@@ -1187,10 +1187,33 @@ impl Loader {
             ..Material::default()
         });
         let material = self.materials.len() - 1;
+        // Over it, a team player's emblem (Halo 2's emblem_flag shader).
+        self.materials.push(Material {
+            texture: white,
+            aux: white,
+            aux_kind: AuxKind::Emblem,
+            tint: [1.0; 3],
+            opacity: 1.0,
+            ..Material::default()
+        });
+        let emblem = self.materials.len() - 1;
         let (cols, rows) = cloth.grid;
         let n = cols * rows;
         let rest: Vec<Vec3> = cloth.vertices.iter().map(|v| Vec3::from(v.0)).collect();
-        let uvs: Vec<[f32; 2]> = cloth.vertices.iter().map(|v| v.1).collect();
+        // The emblem stands upright in the middle of the cloth (its colour
+        // needs no texture coordinates).
+        let height = rest.iter().map(|p| p.x).fold(0.0f32, f32::max);
+        let width = rest.iter().map(|p| -p.z).fold(0.0f32, f32::max);
+        let size = width.min(height).max(0.01) * 0.9;
+        let uvs: Vec<[f32; 2]> = rest
+            .iter()
+            .map(|p| {
+                [
+                    (-p.z - width * 0.5) / size + 0.5,
+                    (height * 0.5 - p.x) / size + 0.5,
+                ]
+            })
+            .collect();
         let mut mesh = MeshData::default();
         for side in 0..2 {
             for k in 0..n {
@@ -1213,12 +1236,18 @@ impl Loader {
                     .extend([a + o, b + o, d + o, b + o, e + o, d + o]);
             }
         }
-        mesh.batches = vec![Batch {
-            material,
-            lightmap: 0,
-            first_index: 0,
-            index_count: mesh.indices.len() as u32,
-        }];
+        let count = mesh.indices.len() as u32;
+        mesh.indices.extend_from_within(..);
+        mesh.batches = [material, emblem]
+            .iter()
+            .enumerate()
+            .map(|(k, &material)| Batch {
+                material,
+                lightmap: 0,
+                first_index: k as u32 * count,
+                index_count: count,
+            })
+            .collect();
         meshes.push(mesh);
         let cloth_mesh = meshes.len() - 1;
         let stand = self

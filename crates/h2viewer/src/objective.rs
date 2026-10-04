@@ -11,7 +11,9 @@ use crate::scene::{FlagAssets, Scene, Vertex};
 use crate::App;
 use blam_cache::scenario::NetgameFlagKind;
 use glam::{Mat4, Vec3};
-use h2sim::game::{Event, FlagEvent, Hill, HillControl, HillEvent, Territory, NEUTRAL, TEAMS};
+use h2sim::game::{
+    Emblem, Event, FlagEvent, Hill, HillControl, HillEvent, Territory, NEUTRAL, TEAMS,
+};
 use h2sim::{Game, GameType};
 use std::collections::BTreeMap;
 
@@ -187,6 +189,14 @@ pub fn flag_colors(team: u8) -> [[f32; 3]; 2] {
     [TEAM_COLORS[team as usize % TEAM_COLORS.len()], [1.0; 3]]
 }
 
+/// The emblem on a team's flag: its first player's.
+pub fn flag_emblem(game: &Game, team: u8) -> Option<Emblem> {
+    game.players
+        .iter()
+        .find(|p| p.team == team)
+        .map(|p| p.look.emblem)
+}
+
 /// The cloth this frame. Its points are laid out with x up the pole from
 /// the attachment marker and z out from the pole (negative); a wave rolls
 /// out to the free edge, which droops a little.
@@ -304,7 +314,7 @@ impl App {
                     model: pole * Mat4::from_translation(flag.attach),
                     light,
                     colors: Some(flag_colors(f.team)),
-                    emblem: None,
+                    emblem: flag_emblem(game, f.team),
                 });
             }
         }
@@ -378,7 +388,7 @@ pub fn carried_cloth(scene: &Scene, game: &Game, player: usize, pole: Mat4) -> O
         model: pole * Mat4::from_translation(flag.attach),
         light: None,
         colors: Some(flag_colors(f.team)),
-        emblem: None,
+        emblem: flag_emblem(game, f.team),
     })
 }
 
