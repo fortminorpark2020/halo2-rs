@@ -14,12 +14,16 @@ use glam::{Vec2, Vec3};
 mod ctf;
 mod dual;
 mod juggernaut;
+mod options;
 mod projectiles;
+mod sensor;
 mod sync;
 mod vehicles;
 mod zones;
 pub use ctf::{Flag, FlagEvent, NEUTRAL};
+pub use options::{MapWeapons, Options};
 pub use projectiles::{Homing, Projectile, StuckRound};
+pub use sensor::{Blip, SENSOR_RANGE};
 pub use sync::{Malformed, Reader, Writer};
 pub use vehicles::{VehicleAction, VehicleSpawn};
 pub use zones::{Hill, HillControl, HillEvent, Territory};
@@ -343,6 +347,8 @@ pub struct Rules {
     /// Seconds a team stands in a territory alone to take it.
     pub territory_capture_time: f32,
     pub falling: FallingDamage,
+    /// Game variant settings every PC needs (see `Game::apply_options`).
+    pub options: Options,
 }
 
 impl Rules {
@@ -442,6 +448,7 @@ impl Default for Rules {
                 damage: 125.0,
                 deadly: 14.0,
             },
+            options: Options::default(),
         }
     }
 }

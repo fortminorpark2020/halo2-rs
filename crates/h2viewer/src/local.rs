@@ -170,6 +170,12 @@ pub fn armor_colors(look: Look) -> [[f32; 3]; 2] {
         .map(|c| crate::profile::COLORS[c as usize % crate::profile::COLORS.len()].1)
 }
 
+/// How much of the motion sensor's art its range spans, the colour of
+/// teammates on it, and its pulses per second.
+const SENSOR_FILL: f32 = 0.82;
+const SENSOR_ALLY: [f32; 4] = [1.0, 0.85, 0.25, 0.95];
+const SENSOR_PULSE: f32 = 1.0;
+
 /// Red and blue team armour (the game's multiplayer globals).
 pub const TEAM_COLORS: [[f32; 3]; 2] = [[0.757, 0.243, 0.243], [0.212, 0.224, 0.788]];
 pub const TEAM_NAMES: [&str; 2] = ["RED", "BLUE"];
@@ -838,6 +844,36 @@ impl LocalPlayer {
         camera::projection(aspect, 1.0, 0.005, 10.0) * self.camera.view()
     }
 
+    /// Dots on the motion sensor in `rect` (window pixels), forward up.
+    fn sensor_blips(&self, hb: &mut HudBuilder, scene: &Scene, game: &Game, rect: [f32; 4]) {
+        let Some(texture) = scene.blip else {
+            return;
+        };
+        let me = self.me(game);
+        let center = [(rect[0] + rect[2]) * 0.5, (rect[1] + rect[3]) * 0.5];
+        let radius = (rect[2] - rect[0]) * SENSOR_FILL * 0.5;
+        let (sin, cos) = me.yaw.sin_cos();
+        // Dots swell and fade with the sensor's pulse.
+        let pulse = 1.0 - (game.time as f32 * SENSOR_PULSE).fract();
+        for b in game.sensor_blips(self.player) {
+            let ahead = b.offset.x * cos + b.offset.y * sin;
+            let right = b.offset.x * sin - b.offset.y * cos;
+            let k = radius / h2sim::game::SENSOR_RANGE;
+            let [x, y] = [center[0] + right * k, center[1] - ahead * k];
+            let size = radius * if b.vehicle { 0.24 } else { 0.15 } * (0.85 + 0.15 * pulse);
+            let mut color = if b.ally { SENSOR_ALLY } else { hud::RED };
+            color[3] *= 0.6 + 0.4 * pulse;
+            hb.quad(
+                texture,
+                [x - size, y - size, x + size, y + size],
+                [0.0, 0.0, 1.0, 1.0],
+                color,
+                hud_mode::PLAIN,
+                0.0,
+            );
+        }
+    }
+
     pub fn build_hud(&self, scene: &Scene, game: &Game, w: f32, h: f32) -> Vec<gpu::HudBatch> {
         let mut hb = HudBuilder::new(w, h);
         let font = scene.hud_font;
@@ -852,6 +888,8 @@ impl LocalPlayer {
                 "motion_tracker_background" if !drew_tracker => {
                     drew_tracker = true;
                     hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0);
+                    let rect = hb.widget_rect(widget);
+                    self.sensor_blips(&mut hb, scene, game, rect);
                 }
                 "shield_meter" => {
                     let color = if flash { hud::RED } else { hud::BLUE };

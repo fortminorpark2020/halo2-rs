@@ -610,6 +610,8 @@ pub struct Scene {
     pub flag_icon: Option<usize>,
     pub ball_icon: Option<usize>,
     pub bomb_icon: Option<usize>,
+    /// The motion sensor's dot.
+    pub blip: Option<usize>,
     /// Pits and drops that kill.
     pub kill_volumes: Vec<scenario::KillVolume>,
     pub falling: Option<FallingDamage>,
@@ -1639,6 +1641,13 @@ impl Scene {
         let flag_icon = loader.hud_bitmap("ui\\hud\\bitmaps\\new_hud\\reset_flag");
         let ball_icon = loader.hud_bitmap("ui\\hud\\bitmaps\\new_hud\\reset_ball");
         let bomb_icon = loader.hud_bitmap("ui\\hud\\bitmaps\\new_hud\\reset_bomb");
+        let blip = loader.hud_bitmap("ui\\hud\\bitmaps\\hud_sensor_blip");
+        // Its dot is white on black: make the black see-through.
+        if let Some(img) = blip.and_then(|b| loader.hud_textures.get_mut(b)) {
+            for px in img.rgba.as_chunks_mut::<4>().0 {
+                *px = [255, 255, 255, px[0]];
+            }
+        }
         if loader.failures > 0 {
             println!("warning: {} textures couldn't be decoded", loader.failures);
         }
@@ -1674,6 +1683,7 @@ impl Scene {
             flag_icon,
             ball_icon,
             bomb_icon,
+            blip,
             kill_volumes,
             falling,
             vehicles,

@@ -5,6 +5,7 @@
 
 use crate::gpu::hud_mode;
 use crate::hud::HudBuilder;
+use crate::options::{presets, GameOptions, RESPAWN_TIMES};
 use crate::profile::{color_name, Profile};
 use h2net::LanGame;
 use h2sim::game::{
@@ -17,6 +18,8 @@ use std::path::{Path, PathBuf};
 pub enum Screen {
     Main,
     Lobby,
+    /// The lobby's game options.
+    Options,
     SystemLink,
     Profile,
     Pause,
@@ -166,6 +169,7 @@ pub struct Settings {
     /// In the game type's `scores`.
     pub score: usize,
     pub bots: usize,
+    pub options: GameOptions,
 }
 
 impl Settings {
@@ -280,6 +284,17 @@ enum Row {
     Map,
     Score,
     Bots,
+    GameOptions,
+    Variant,
+    MapWeapons,
+    StartPrimary,
+    StartSecondary,
+    StartGrenades,
+    Shields,
+    Radar,
+    Vehicles,
+    Respawn,
+    FriendlyFire,
     StartGame,
     Join(usize),
     Searching,
@@ -340,6 +355,10 @@ const DIM: [f32; 4] = [0.5, 0.62, 0.8, 0.9];
 const PANEL: [f32; 4] = [0.02, 0.07, 0.14, 0.72];
 const HIGHLIGHT: [f32; 4] = [0.2, 0.45, 0.85, 0.9];
 const WARNING: [f32; 4] = [1.0, 0.55, 0.3, 1.0];
+
+fn on_off(on: bool) -> String {
+    if on { "ON" } else { "OFF" }.into()
+}
 
 /// "1ST", "2ND"...
 pub fn place(n: usize) -> String {
@@ -406,6 +425,7 @@ impl Menu {
         match self.screen {
             Screen::Main => "HALO 2",
             Screen::Lobby => "MULTIPLAYER",
+            Screen::Options => "GAME OPTIONS",
             Screen::SystemLink => "SYSTEM LINK",
             Screen::Profile => "PLAYER PROFILE",
             Screen::Pause => "PAUSED",
@@ -432,7 +452,20 @@ impl Menu {
                 Row::Map,
                 Row::Score,
                 Row::Bots,
+                Row::GameOptions,
                 Row::StartGame,
+            ],
+            Screen::Options => vec![
+                Row::Variant,
+                Row::MapWeapons,
+                Row::StartPrimary,
+                Row::StartSecondary,
+                Row::StartGrenades,
+                Row::Shields,
+                Row::Radar,
+                Row::Vehicles,
+                Row::Respawn,
+                Row::FriendlyFire,
             ],
             Screen::SystemLink if ctx.lan.is_empty() => vec![Row::Searching],
             Screen::SystemLink => (0..ctx.lan.len().min(8)).map(Row::Join).collect(),
@@ -517,6 +550,51 @@ impl Menu {
                 }),
             ),
             Row::Bots => ("BOTS".into(), Some(s.bots.to_string())),
+            Row::GameOptions => (
+                "GAME OPTIONS".into(),
+                Some(
+                    s.options
+                        .preset()
+                        .map_or("CUSTOM", |k| presets()[k].0)
+                        .into(),
+                ),
+            ),
+            Row::Variant => (
+                "VARIANT".into(),
+                Some(
+                    s.options
+                        .preset()
+                        .map_or("CUSTOM", |k| presets()[k].0)
+                        .into(),
+                ),
+            ),
+            Row::MapWeapons => (
+                "WEAPONS ON MAP".into(),
+                Some(s.options.map_weapons.label().into()),
+            ),
+            Row::StartPrimary => (
+                "PRIMARY WEAPON".into(),
+                Some(s.options.primary.label().into()),
+            ),
+            Row::StartSecondary => (
+                "SECONDARY WEAPON".into(),
+                Some(s.options.secondary.label().into()),
+            ),
+            Row::StartGrenades => ("STARTING GRENADES".into(), Some(on_off(s.options.grenades))),
+            Row::Shields => ("SHIELDS".into(), Some(on_off(s.options.shields))),
+            Row::Radar => ("MOTION SENSOR".into(), Some(on_off(s.options.radar))),
+            Row::Vehicles => ("VEHICLES".into(), Some(on_off(s.options.vehicles))),
+            Row::Respawn => (
+                "RESPAWN TIME".into(),
+                Some(match s.options.respawn_seconds() {
+                    0 => "INSTANT".into(),
+                    n => format!("{n} SECONDS"),
+                }),
+            ),
+            Row::FriendlyFire => (
+                "FRIENDLY FIRE".into(),
+                Some(on_off(s.options.friendly_fire)),
+            ),
             Row::StartGame => ("START GAME".into(), None),
             Row::Join(i) => {
                 let g = &ctx.lan[i];
@@ -612,6 +690,24 @@ impl Menu {
                 s.game_type = cycle(s.game_type, GAME_TYPES.len());
                 s.score = scores(s.game_type()).1;
             }
+            Row::Variant => {
+                let all = presets();
+                let next = match s.options.preset() {
+                    Some(k) => cycle(k, all.len()),
+                    None if step > 0 => 0,
+                    None => all.len() - 1,
+                };
+                s.options = all[next].1.clone();
+            }
+            Row::MapWeapons => s.options.map_weapons = s.options.map_weapons.step(step),
+            Row::StartPrimary => s.options.primary = s.options.primary.step(step),
+            Row::StartSecondary => s.options.secondary = s.options.secondary.step(step),
+            Row::StartGrenades => s.options.grenades ^= true,
+            Row::Shields => s.options.shields ^= true,
+            Row::Radar => s.options.radar ^= true,
+            Row::Vehicles => s.options.vehicles ^= true,
+            Row::Respawn => s.options.respawn = cycle(s.options.respawn, RESPAWN_TIMES.len()),
+            Row::FriendlyFire => s.options.friendly_fire ^= true,
             Row::Model => self.profile.look.elite = !self.profile.look.elite,
             Row::Primary | Row::Secondary => {
                 let c = &mut self.profile.look.colors[(row == Row::Secondary) as usize];
@@ -656,7 +752,21 @@ impl Menu {
                 self.sound = Some(Sound::Forward);
                 Action::None
             }
-            Row::GameType | Row::Map | Row::Score | Row::Bots => {
+            Row::GameOptions => forward(self, Screen::Options),
+            Row::GameType
+            | Row::Map
+            | Row::Score
+            | Row::Bots
+            | Row::Variant
+            | Row::MapWeapons
+            | Row::StartPrimary
+            | Row::StartSecondary
+            | Row::StartGrenades
+            | Row::Shields
+            | Row::Radar
+            | Row::Vehicles
+            | Row::Respawn
+            | Row::FriendlyFire => {
                 if self.adjust(row, 1, ctx) {
                     self.sound = Some(Sound::Cursor);
                 }
@@ -755,6 +865,12 @@ impl Menu {
                 self.sound = Some(Sound::Back);
                 Action::None
             }
+            Screen::Options => {
+                self.show(Screen::Lobby);
+                self.cursor = 4;
+                self.sound = Some(Sound::Back);
+                Action::None
+            }
             Screen::Lobby | Screen::SystemLink => {
                 let from = self.screen;
                 self.show(Screen::Main);
@@ -775,8 +891,14 @@ impl Menu {
     }
 
     fn row_rect(&self, k: usize) -> [f32; 4] {
-        let wide = matches!(self.screen, Screen::SystemLink);
-        let y = ROW_Y + k as f32 * ROW_STEP + self.rows_offset();
+        let wide = matches!(self.screen, Screen::SystemLink | Screen::Options);
+        // The game options' ten rows sit closer to fit above the hint.
+        let step = if self.screen == Screen::Options {
+            ROW_STEP - 3.0
+        } else {
+            ROW_STEP
+        };
+        let y = ROW_Y + k as f32 * step + self.rows_offset();
         let w = if wide { 400.0 } else { ROW_W };
         [ROW_X, y, ROW_X + w, y + ROW_H]
     }
@@ -851,7 +973,11 @@ impl Menu {
         let s = f.s;
         // Darken behind the menu so it reads over any map.
         match self.screen {
-            Screen::Main | Screen::Lobby | Screen::SystemLink | Screen::Profile => {
+            Screen::Main
+            | Screen::Lobby
+            | Screen::Options
+            | Screen::SystemLink
+            | Screen::Profile => {
                 hb.quad(
                     white,
                     [0.0, 0.0, w, h],
@@ -1256,6 +1382,7 @@ mod tests {
                 map: 0,
                 score: 3,
                 bots: 3,
+                options: GameOptions::default(),
             },
             Profile::default(),
         );
@@ -1272,6 +1399,20 @@ mod tests {
         m.input(Input::Down, &c);
         m.input(Input::Left, &c);
         assert_eq!(m.settings.bots, 2);
+        // Game options: pick a variant, then change one thing.
+        m.input(Input::Down, &c);
+        m.input(Input::Select, &c);
+        assert_eq!(m.screen, Screen::Options);
+        m.input(Input::Right, &c);
+        assert_eq!(m.label(Row::Variant, &c).1.as_deref(), Some("SWAT"));
+        assert!(!m.settings.options.shields);
+        m.input(Input::Down, &c);
+        m.input(Input::Down, &c);
+        m.input(Input::Right, &c);
+        assert_ne!(m.settings.options.primary, presets()[1].1.primary);
+        assert_eq!(m.label(Row::Variant, &c).1.as_deref(), Some("CUSTOM"));
+        m.input(Input::Back, &c);
+        assert_eq!(m.screen, Screen::Lobby);
         m.input(Input::Down, &c);
         assert_eq!(m.input(Input::Select, &c), Action::Start);
         assert_eq!(m.sound, Some(Sound::Advance));
@@ -1290,6 +1431,7 @@ mod tests {
                 map: 0,
                 score: 3,
                 bots: 3,
+                options: GameOptions::default(),
             },
             Profile::default(),
         );
@@ -1350,6 +1492,7 @@ mod tests {
                 map: 0,
                 score: 3,
                 bots: 3,
+                options: GameOptions::default(),
             },
             Profile::default(),
         );

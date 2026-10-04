@@ -5,6 +5,7 @@ use crate::input::PadPress;
 use crate::lan::Net;
 use crate::local::{player_colors, LocalPlayer, TEAM_COLORS, TEAM_NAMES};
 use crate::menu::{self, Action, Input, MapChoice, Menu, ScoreLine, Screen, SeatInfo};
+use crate::options::GameOptions;
 use crate::{
     level_focus, load_level, new_game, scene, App, Level, Loading, Mode, Then, MUSIC_VOLUME,
 };
@@ -365,13 +366,19 @@ impl App {
             }
         };
         self.reset_match();
-        self.game = self.fresh_game();
+        self.game = self.fresh_game(&self.menu.settings.options);
     }
 
-    /// A game with no one in it yet, under the lobby's settings.
-    fn fresh_game(&self) -> Game {
+    /// A game with no one in it yet, under the lobby's settings and
+    /// `options`.
+    fn fresh_game(&self, options: &GameOptions) -> Game {
         let settings = &self.menu.settings;
-        new_game(&self.scene, settings.game_type(), settings.score_to_win())
+        new_game(
+            &self.scene,
+            settings.game_type(),
+            settings.score_to_win(),
+            options,
+        )
     }
 
     /// Clear away the last game: its players, effects and sounds.
@@ -391,9 +398,9 @@ impl App {
     }
 
     /// A fresh game for the people here; `bots` computer players join them.
-    fn seat_players(&mut self, bots: usize) {
+    fn seat_players(&mut self, bots: usize, options: &GameOptions) {
         self.reset_match();
-        self.game = self.fresh_game();
+        self.game = self.fresh_game(options);
         let seats = self.seats.clone();
         let teams = self.game.rules.game_type.teams();
         for (k, seat) in seats.into_iter().enumerate() {
@@ -460,13 +467,16 @@ impl App {
 
     /// Play the lobby's game here, open to the network.
     pub(crate) fn start_game(&mut self) {
-        self.seat_players(self.menu.settings.bots);
+        let options = self.menu.settings.options.clone();
+        self.seat_players(self.menu.settings.bots, &options);
         self.start_hosting();
     }
 
     /// Join a LAN game on the map that's loaded.
     pub(crate) fn begin_join(&mut self, game: &LanGame) {
-        self.seat_players(0);
+        // The host's options arrive with its game; start from the map as
+        // it comes.
+        self.seat_players(0, &GameOptions::default());
         self.connect(game);
     }
 
@@ -493,7 +503,7 @@ impl App {
             }
         }
         self.reset_match();
-        self.game = self.fresh_game();
+        self.game = self.fresh_game(&self.menu.settings.options);
         self.mode = Mode::Menu;
         self.menu_open = false;
         self.menu.show(Screen::Lobby);

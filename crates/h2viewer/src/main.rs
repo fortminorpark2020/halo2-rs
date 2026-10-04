@@ -40,6 +40,7 @@ mod local;
 mod mapinfo;
 mod menu;
 mod objective;
+mod options;
 mod probe;
 mod profile;
 mod rig;
@@ -188,8 +189,13 @@ fn level_spawns(scene: &Scene) -> Vec<(Vec3, f32)> {
     spawns
 }
 
-/// A game on the scene's level, with no one in it yet.
-fn new_game(scene: &Scene, game_type: GameType, score_to_win: u32) -> Game {
+/// A game on the scene's level under `options`, with no one in it yet.
+fn new_game(
+    scene: &Scene,
+    game_type: GameType,
+    score_to_win: u32,
+    options: &options::GameOptions,
+) -> Game {
     let items = scene
         .items
         .iter()
@@ -205,7 +211,7 @@ fn new_game(scene: &Scene, game_type: GameType, score_to_win: u32) -> Game {
         flag_weapon: scene.flag.as_ref().map(|f| f.weapon),
         ball_weapon: scene.ball,
         bomb_weapon: scene.bomb,
-        ..rules(scene)
+        ..options.rules(scene, rules(scene))
     };
     let mut game = Game::new(
         rules,
@@ -223,6 +229,7 @@ fn new_game(scene: &Scene, game_type: GameType, score_to_win: u32) -> Game {
     game.territories = objective::territories(scene);
     game.kill_zones = kill_zones(scene);
     game.set_vehicles(scene.vehicles.defs.clone(), scene.vehicles.spawns.clone());
+    game.apply_options(options.shared(scene));
     game
 }
 
@@ -269,8 +276,13 @@ fn load_level(path: &Path) -> Result<Level, String> {
         for w in &scene.weapons {
             let hud: Vec<&str> = w.hud.iter().map(|h| h.name.as_str()).collect();
             println!(
-                "weapon {} autoaim {:.1} flight sound {:?} hud {hud:?}",
-                w.def.name, w.autoaim_range, w.round.flight
+                "weapon {} autoaim {:.1} range {:.1} damage {:.0} over {:?} flight sound {:?} hud {hud:?}",
+                w.def.name,
+                w.autoaim_range,
+                w.def.range,
+                w.def.damage,
+                w.def.damage_range,
+                w.round.flight
             );
         }
     }
@@ -333,7 +345,7 @@ fn drive_test(level: &Level, spec: &str) {
         println!("H2_DRIVE wants \"vehicle forward right yaw seconds\"");
         return;
     };
-    let mut game = new_game(&level.scene, GameType::Slayer, 0);
+    let mut game = new_game(&level.scene, GameType::Slayer, 0, &Default::default());
     let me = game.add_player();
     let v = v as usize;
     let mut cmd = Command::default();
@@ -418,7 +430,12 @@ fn drive_test(level: &Level, spec: &str) {
 /// Bots only, no window: play `seconds` of a game and print the kills, flag
 /// moves and score.
 fn simulate(level: &Level, settings: &Settings, seconds: f32) {
-    let mut game = new_game(&level.scene, settings.game_type(), settings.score_to_win());
+    let mut game = new_game(
+        &level.scene,
+        settings.game_type(),
+        settings.score_to_win(),
+        &settings.options,
+    );
     // H2_SEED=<n> plays a different game.
     let seed: u32 = std::env::var("H2_SEED")
         .ok()
@@ -1302,8 +1319,16 @@ impl App {
                 emblem: None,
             });
         }
-        for (item, timer) in scene.items.iter().zip(&self.game.item_timers) {
-            if let (Some(mesh), true) = (item.mesh, *timer <= 0.0) {
+        let spots = self.game.item_spawns.iter().zip(&self.game.item_timers);
+        for (item, (spot, timer)) in scene.items.iter().zip(spots) {
+            // The game options may put another weapon on the spot.
+            let mesh = match spot.kind {
+                ItemKind::Weapon(w) if spot.kind != item.kind => {
+                    scene.weapons.get(w).and_then(|w| w.world_mesh)
+                }
+                _ => item.mesh,
+            };
+            if let (Some(mesh), true) = (mesh, *timer <= 0.0) {
                 world.push(DrawCall {
                     mesh,
                     model: item.transform,
@@ -1855,11 +1880,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let game_type = env("H2_GAME")
         .and_then(|g| menu::GAME_TYPES.iter().position(|t| t.2 == g))
         .unwrap_or(0);
+    // H2_VARIANT=swat, rockets, snipers, swords or shotguns: those game
+    // options (for testing).
+    let options = env("H2_VARIANT")
+        .and_then(|v| {
+            let all = options::presets();
+            all.into_iter().find(|p| p.0.eq_ignore_ascii_case(&v))
+        })
+        .map(|p| p.1)
+        .unwrap_or_default();
     let settings = Settings {
         game_type,
         map: 0,
         score: menu::scores(menu::GAME_TYPES[game_type].0).1,
         bots,
+        options,
     };
     // H2_SIM=<seconds> plays bots against each other without a window and
     // prints what happens (for testing).
@@ -1882,7 +1917,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
-        game: new_game(&level.scene, GameType::Slayer, 0),
+        game: new_game(&level.scene, GameType::Slayer, 0, &Default::default()),
         scene: level.scene,
         world: level.world,
         bots: Vec::new(),

@@ -45,7 +45,12 @@ Double-click `h2viewer.exe` to open Halo 2's menus over Lockout from
 with Halo 2's main menu music. Multiplayer opens the lobby: pick the game
 type (Slayer, Team Slayer, Capture the Flag, King of the Hill, Team King,
 Oddball, Team Oddball, Juggernaut, Territories or Assault), the map (every multiplayer map in the maps and dlc
-folders, with Halo 2's own picture and description from `mainmenu.map`), score to win and number of bots, then Start Game. In team games, T
+folders, with Halo 2's own picture and description from `mainmenu.map`), score to win and number of bots, then Start Game. Game Options holds
+Halo 2's variant settings: the weapons on the map, primary and secondary
+starting weapons, starting grenades, shields, motion sensor, vehicles, respawn
+time and friendly fire, plus the SWAT, Rockets, Snipers, Swords and Shotguns
+variants. The motion sensor shows teammates (yellow) and enemies (red) within
+25 metres who move faster than a crouch-walk or fire. In team games, T
 (or X on a controller) puts you on the red or blue team; bots fill the smaller
 team. System Link lists games other PCs on the network are hosting.
 Menus work with the arrow keys or WASD, Enter and Esc, the mouse, or a

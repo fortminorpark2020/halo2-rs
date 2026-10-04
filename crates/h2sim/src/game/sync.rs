@@ -608,6 +608,7 @@ impl Game {
         w.index(self.winner);
         w.u8(self.rules.game_type as u8);
         w.u32(self.rules.score_to_win);
+        self.rules.options.write(w);
         w.u8(self.winning_team.unwrap_or(u8::MAX));
         w.u16(self.item_timers.len() as u16);
         for &t in &self.item_timers {
@@ -745,6 +746,11 @@ impl Game {
         let winner = r.index()?;
         self.rules.game_type = *GameType::ALL.get(r.u8()? as usize).ok_or(Malformed)?;
         self.rules.score_to_win = r.u32()?;
+        // The host's options, set up here the first time they arrive.
+        let options = super::Options::read(r, weapons)?;
+        if options != self.rules.options {
+            self.apply_options(options);
+        }
         self.winning_team = match r.u8()? {
             u8::MAX => None,
             t if t < TEAMS => Some(t),
@@ -1166,6 +1172,21 @@ mod tests {
         assert_eq!(joined.time, host.time);
         assert_eq!(joined.rules.game_type, GameType::TeamSlayer);
         assert_eq!(joined.players[1].team, 1);
+
+        // The host's game options reach the joined PC with the next state.
+        let swat = crate::game::Options {
+            map_weapons: crate::game::MapWeapons::None,
+            vehicles: false,
+            shields: false,
+            radar: false,
+        };
+        host.apply_options(swat);
+        let mut w = Writer::default();
+        host.write_state(&mut w);
+        joined.read_state(&mut Reader::new(&w.0)).unwrap();
+        assert_eq!(joined.rules.options, swat);
+        assert_eq!(joined.rules.shield, 0.0);
+        assert_eq!(joined.item_timers, host.item_timers);
 
         // Truncated or garbage data is refused without panicking.
         for cut in [1, 10, w.0.len() / 2] {

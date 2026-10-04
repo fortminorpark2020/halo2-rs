@@ -23,6 +23,8 @@ const REACTION: f32 = 0.35;
 const TURN_RATE: f32 = 5.0;
 /// Within this angle of its target a bot pulls the trigger.
 const FIRE_CONE: f32 = 0.06;
+/// Guns that reach no farther than this (the shotgun) are used up close.
+const SHORT_RANGE: f32 = 10.0;
 /// Close enough to a route point to head for the next one.
 const ARRIVED: f32 = 0.5;
 /// Seconds without getting closer to the next route point before a bot
@@ -494,10 +496,12 @@ impl Bot {
                 cmd.throw_grenade = true;
                 self.grenade_wait = 4.0 + self.random() * 6.0;
             }
-            // Close in from afar, back off when too close, strafe always.
-            let fwd = if melee_only || dist > 8.0 {
+            // Close in from afar (right up close with a short-range gun
+            // like the shotgun), back off when too close, strafe always.
+            let short = def.is_some_and(|d| d.range < SHORT_RANGE);
+            let fwd = if melee_only || dist > 8.0 || (short && dist > 2.0) {
                 1.0
-            } else if dist < 2.5 {
+            } else if dist < 2.5 && !short {
                 -1.0
             } else {
                 0.0
