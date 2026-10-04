@@ -730,8 +730,30 @@ fn mission(path: &str) -> Res {
             .and_then(|n| names.get(n as usize))
             .map_or("", |n| n.name.as_str());
         println!(
-            "machine {i} {name} {tag} at {:?} auto {} device {:x} machine {:x} {:?}",
-            m.position, m.automatic, m.device_flags, m.machine_flags, mach
+            "machine {i} {name} {tag} at {:?} rot {:?} auto {} device {:x} machine {:x} power {:?} position {:?} {:?}",
+            m.position, m.rotation, m.automatic, m.device_flags, m.machine_flags, m.power_group, m.position_group, mach
+        );
+    }
+    let controls = scenario::placements(&mut set, scenario::PlacedKind::Control)?;
+    for (i, c) in controls.iter().enumerate() {
+        let tag = set
+            .locate(c.object)
+            .map(|(_, t)| t.name)
+            .unwrap_or_default();
+        let ctrl = scenario::control(&mut set, c.object).unwrap_or_default();
+        let name = c
+            .name
+            .and_then(|n| names.get(n as usize))
+            .map_or("", |n| n.name.as_str());
+        println!(
+            "control {i} {name} {tag} at {:?} auto {} device {:x} control {:x} power {:?} position {:?} {:?}",
+            c.position, c.automatic, c.device_flags, c.machine_flags, c.power_group, c.position_group, ctrl
+        );
+    }
+    for (i, g) in scenario::device_groups(&mut set)?.iter().enumerate() {
+        println!(
+            "device group {i} {} initial {} once {}",
+            g.name, g.initial, g.once
         );
     }
     Ok(())

@@ -45,6 +45,8 @@ pub struct CampaignAi {
     pub name_positions: Vec<Option<Vec3>>,
     /// Each named machine (door, lift): how it moves.
     pub machines: Vec<Option<scenario::Machine>>,
+    /// The device groups switches and scripts set.
+    pub device_groups: Vec<scenario::DeviceGroup>,
     /// The sounds scripts play (dialogue), by tag: in `Scene::sounds`.
     pub sounds: HashMap<u32, usize>,
     /// The music and loops scripts start, by tag.
@@ -199,6 +201,7 @@ impl Loader {
             })
             .collect();
         out.bsp_switches = scenario::bsp_switches(set).unwrap_or_default();
+        out.device_groups = scenario::device_groups(set).unwrap_or_default();
         let placed: Vec<(PlacedKind, Vec<scenario::Placement>)> = PlacedKind::ALL
             .iter()
             .map(|&k| (k, scenario::placements(set, k).unwrap_or_default()))

@@ -1,8 +1,10 @@
-//! Static level collision: a triangle soup in a uniform grid, queried with capsules.
+//! Level collision: a triangle soup in a uniform grid, queried with
+//! capsules, plus doors that block while shut and movers (lifts) that slide
+//! around the level.
 
 use glam::Vec3;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 const CELL: f32 = 1.0;
 /// Triangles spanning more grid cells than this (a map's floors and walls
@@ -10,6 +12,8 @@ const CELL: f32 = 1.0;
 /// even for that in a list tested by every query.
 const LARGE: u64 = 4096;
 const COARSE_CELL: f32 = 16.0;
+/// A mover's grid is at most this many cells across.
+const MOVER_CELLS: f32 = 32.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Triangle {
@@ -68,6 +72,67 @@ pub struct World {
     owner: Vec<u16>,
     /// Each door: shut (it blocks) or open.
     shut: Vec<AtomicBool>,
+    movers: Vec<Mover>,
+}
+
+/// A part of the level that moves (a lift): its triangles where they were
+/// placed, and how far they've moved since.
+struct Mover {
+    triangles: Vec<Triangle>,
+    grid: Grid,
+    lo: Vec3,
+    hi: Vec3,
+    offset: [AtomicU32; 3],
+    present: AtomicBool,
+}
+
+impl Mover {
+    fn offset(&self) -> Vec3 {
+        Vec3::from(
+            self.offset
+                .each_ref()
+                .map(|a| f32::from_bits(a.load(Ordering::Relaxed))),
+        )
+    }
+
+    /// Where a ray from `origin` (relative to the mover where placed)
+    /// first hits it.
+    fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Hit {
+        // Only the stretch of the ray inside its bounds.
+        let (mut near, mut far) = (0.0f32, max);
+        for k in 0..3 {
+            let (o, d) = (origin[k], dir[k]);
+            if d.abs() < 1e-9 {
+                if o < self.lo[k] || o > self.hi[k] {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = ((self.lo[k] - o) / d, (self.hi[k] - o) / d);
+            near = near.max(a.min(b));
+            far = far.min(a.max(b));
+        }
+        if near > far {
+            return None;
+        }
+        let start = origin + dir * near;
+        let mut best: Hit = None;
+        let test = |id: u32, best: &mut Hit| {
+            let t = &self.triangles[id as usize];
+            if let Some(d) = ray_triangle(start, dir, t) {
+                if d <= far - near && best.is_none_or(|b| d < b.0) {
+                    let n = if t.normal.dot(dir) > 0.0 {
+                        -t.normal
+                    } else {
+                        t.normal
+                    };
+                    *best = Some((d, n));
+                }
+            }
+        };
+        self.grid.walk(start, dir, far - near, &mut best, test);
+        best.map(|(d, n)| (d + near, n))
+    }
 }
 
 /// The owner of the level's own triangles.
@@ -223,7 +288,71 @@ impl World {
             min,
             max,
             shut: Vec::new(),
+            movers: Vec::new(),
         }
+    }
+
+    /// Add a mover: triangles (where they start) that a lift carries
+    /// around with [`World::move_mover`].
+    pub fn add_mover(&mut self, triangles: &[[Vec3; 3]]) -> usize {
+        let mut kept = Vec::new();
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for &[a, b, c] in triangles {
+            let n = (b - a).cross(c - a);
+            if n.length_squared() < 1e-12 {
+                continue;
+            }
+            lo = lo.min(a.min(b).min(c));
+            hi = hi.max(a.max(b).max(c));
+            kept.push(Triangle {
+                a,
+                b,
+                c,
+                normal: n.normalize(),
+            });
+        }
+        // Big movers (a ship flying by) get bigger cells.
+        let mut grid = Grid::new(CELL.max((hi - lo).max_element() / MOVER_CELLS));
+        for (id, t) in kept.iter().enumerate() {
+            grid.insert(id as u32, t.a.min(t.b).min(t.c), t.a.max(t.b).max(t.c));
+        }
+        self.movers.push(Mover {
+            triangles: kept,
+            grid,
+            lo,
+            hi,
+            offset: [0.0f32; 3].map(|v| AtomicU32::new(v.to_bits())),
+            present: AtomicBool::new(true),
+        });
+        self.movers.len() - 1
+    }
+
+    /// Put a mover `offset` away from where it started; one not `present`
+    /// (not in the level just now) blocks nothing.
+    pub fn move_mover(&self, mover: usize, offset: Vec3, present: bool) {
+        if let Some(m) = self.movers.get(mover) {
+            for (a, v) in m.offset.iter().zip(offset.to_array()) {
+                a.store(v.to_bits(), Ordering::Relaxed);
+            }
+            m.present.store(present, Ordering::Relaxed);
+        }
+    }
+
+    /// The mover right under `feet` (standing on it), if any is nearer
+    /// than the level.
+    pub fn mover_under(&self, feet: Vec3, reach: f32) -> Option<usize> {
+        const ABOVE: f32 = 0.25;
+        let origin = feet + Vec3::Z * ABOVE;
+        let max = reach + ABOVE;
+        let (k, d) = self
+            .movers
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.present.load(Ordering::Relaxed))
+            .filter_map(|(k, m)| Some((k, m.raycast(origin - m.offset(), Vec3::NEG_Z, max)?.0)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        let level = self.raycast_level(origin, Vec3::NEG_Z, d);
+        level.is_none_or(|(l, _)| l >= d - 1e-3).then_some(k)
     }
 
     /// Add a door (shut): triangles that block until it opens.
@@ -305,34 +434,35 @@ impl World {
         out.clear();
         let mut ids = Vec::new();
         let pad = Vec3::splat(radius);
-        self.candidates(p0.min(p1) - pad, p0.max(p1) + pad, &mut ids);
+        let (lo, hi) = (p0.min(p1) - pad, p0.max(p1) + pad);
+        self.candidates(lo, hi, &mut ids);
         for id in ids {
-            if !self.solid(id) {
+            if self.solid(id) {
+                out.extend(contact(p0, p1, radius, &self.triangles[id as usize]));
+            }
+        }
+        let mut ids = Vec::new();
+        for m in &self.movers {
+            if !m.present.load(Ordering::Relaxed) {
                 continue;
             }
-            let t = &self.triangles[id as usize];
-            let (on_seg, on_tri) = closest_segment_triangle(p0, p1, t);
-            let d = on_seg - on_tri;
-            let dist = d.length();
-            if dist >= radius {
+            let off = m.offset();
+            let (lo, hi) = (lo - off, hi - off);
+            if lo.cmpgt(m.hi).any() || hi.cmplt(m.lo).any() {
                 continue;
             }
-            // Push out along the separating direction; for (near-)touching or
-            // intersecting cases use the face normal, toward the capsule.
-            let normal = if dist > 1e-4 {
-                d / dist
-            } else {
-                let mid = (p0 + p1) * 0.5;
-                if (mid - t.a).dot(t.normal) >= 0.0 {
-                    t.normal
-                } else {
-                    -t.normal
-                }
-            };
-            out.push(Contact {
-                normal,
-                depth: radius - dist,
-            });
+            ids.clear();
+            m.grid.overlapping(lo, hi, &mut ids);
+            ids.sort_unstable();
+            ids.dedup();
+            for &id in &ids {
+                out.extend(contact(
+                    p0 - off,
+                    p1 - off,
+                    radius,
+                    &m.triangles[id as usize],
+                ));
+            }
         }
     }
 
@@ -343,6 +473,21 @@ impl World {
 
     /// Like [`World::raycast`], also returning the surface normal facing the ray.
     pub fn raycast_hit(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<(f32, Vec3)> {
+        let mut best = self.raycast_level(origin, dir, max);
+        for m in &self.movers {
+            if !m.present.load(Ordering::Relaxed) {
+                continue;
+            }
+            let reach = best.map_or(max, |b| b.0);
+            if let Some(hit) = m.raycast(origin - m.offset(), dir, reach) {
+                best = Some(hit);
+            }
+        }
+        best
+    }
+
+    /// The same, against the level and its doors only.
+    fn raycast_level(&self, origin: Vec3, dir: Vec3, max: f32) -> Hit {
         let mut best: Hit = None;
         let test = |id: u32, best: &mut Hit| {
             if !self.solid(id) {
@@ -377,6 +522,32 @@ impl World {
             .filter(|&d| d <= max)
             .min_by(f32::total_cmp)
     }
+}
+
+/// A capsule's contact with a triangle, if they touch.
+fn contact(p0: Vec3, p1: Vec3, radius: f32, t: &Triangle) -> Option<Contact> {
+    let (on_seg, on_tri) = closest_segment_triangle(p0, p1, t);
+    let d = on_seg - on_tri;
+    let dist = d.length();
+    if dist >= radius {
+        return None;
+    }
+    // Push out along the separating direction; for (near-)touching or
+    // intersecting cases use the face normal, toward the capsule.
+    let normal = if dist > 1e-4 {
+        d / dist
+    } else {
+        let mid = (p0 + p1) * 0.5;
+        if (mid - t.a).dot(t.normal) >= 0.0 {
+            t.normal
+        } else {
+            -t.normal
+        }
+    };
+    Some(Contact {
+        normal,
+        depth: radius - dist,
+    })
 }
 
 /// Möller–Trumbore; hits from either side.
@@ -599,6 +770,38 @@ mod tests {
         assert_eq!(ray(&w), None);
         assert!(!touching(&w));
         assert_eq!(floors, w.floors(0.7).count(), "doors aren't floors");
+    }
+
+    #[test]
+    fn movers_block_where_they_are_and_carry_what_stands_on_them() {
+        let w0 = floor();
+        let mut w = floor();
+        // A platform 1 x 1 at z = 1 around (5, 0).
+        let (a, b, c, d) = (
+            Vec3::new(4.5, -0.5, 1.0),
+            Vec3::new(5.5, -0.5, 1.0),
+            Vec3::new(5.5, 0.5, 1.0),
+            Vec3::new(4.5, 0.5, 1.0),
+        );
+        let lift = w.add_mover(&[[a, b, c], [a, c, d]]);
+        let down = |w: &World, x: f32| w.raycast(Vec3::new(x, 0.0, 5.0), Vec3::NEG_Z, 10.0);
+        assert_eq!(down(&w, 5.0), Some(4.0));
+        assert_eq!(
+            down(&w, 3.0),
+            down(&w0, 3.0),
+            "the level as it was elsewhere"
+        );
+        assert_eq!(w.mover_under(Vec3::new(5.0, 0.0, 1.0), 0.1), Some(lift));
+        assert_eq!(w.mover_under(Vec3::new(3.0, 0.0, 0.0), 0.1), None);
+        w.move_mover(lift, Vec3::new(0.0, 0.0, 2.0), true);
+        assert_eq!(down(&w, 5.0), Some(2.0));
+        assert_eq!(w.mover_under(Vec3::new(5.0, 0.0, 3.0), 0.1), Some(lift));
+        let mut out = Vec::new();
+        let feet = Vec3::new(5.0, 0.0, 2.9);
+        w.capsule_contacts(feet + Vec3::Z * 0.2, feet + Vec3::Z * 0.6, 0.2, &mut out);
+        assert!(out.iter().any(|c| c.normal.z > 0.9), "standing on it");
+        w.move_mover(lift, Vec3::ZERO, false);
+        assert_eq!(down(&w, 5.0), down(&w0, 5.0), "gone");
     }
 
     #[test]

@@ -619,6 +619,11 @@ pub struct Spartan {
 }
 
 impl Spartan {
+    /// Whether the action button was held last tick.
+    pub fn holding_action(&self) -> bool {
+        self.last.action
+    }
+
     /// What's in hand: a flag being carried, or the current weapon.
     pub fn held(&self) -> Option<&HeldWeapon> {
         self.objective.as_ref().or(self.weapons.get(self.current))

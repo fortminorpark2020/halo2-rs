@@ -295,12 +295,14 @@ fn load_level(path: &Path) -> Result<Level, String> {
     );
     if !scene.ai.squads.is_empty() {
         println!(
-            "{} squads, {} characters, {} actor bodies, {} scripts, {} doors",
+            "{} squads, {} characters, {} actor bodies, {} scripts, {} doors, {} lifts, {} switches",
             scene.ai.squads.len(),
             scene.ai.characters.len(),
             scene.ai.bodies.len(),
             scene.ai.scripts.scripts.len(),
-            scene.doors.len()
+            scene.doors.len(),
+            scene.lifts.len(),
+            scene.switches.len()
         );
     }
     // H2_LIST_WEAPONS=1: each weapon's crosshair range and HUD pieces.
@@ -359,6 +361,13 @@ fn load_level(path: &Path) -> Result<Level, String> {
     for d in &scene.doors {
         let k = world.add_door(&d.triangles);
         world.set_door(k, !d.open);
+    }
+    // Lifts carry whoever stands on them (the mission moves them).
+    for part in scene.lifts.iter().flat_map(|l| &l.parts) {
+        if let Some(m) = part.mover {
+            let k = world.add_mover(&part.triangles);
+            debug_assert_eq!(k, m);
+        }
     }
     println!(
         "bot routes: {} points, {} links, {} through teleporters ({:.1?})",
@@ -518,11 +527,26 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             bots.extend(placed.into_iter().filter_map(|(i, b)| Some((i, b?))));
         }
     }
+    // H2_SIM_POS="x y z": the player starts there and stands still (for
+    // testing lifts and the like).
+    let still = std::env::var("H2_SIM_POS").ok().and_then(|v| {
+        let n: Vec<f32> = v
+            .split_whitespace()
+            .filter_map(|x| x.parse().ok())
+            .collect();
+        (n.len() == 3).then(|| Vec3::new(n[0], n[1], n[2]))
+    });
+    if let Some(at) = still {
+        game.players[0].body.position = at;
+    }
     let mut won = false;
     let mut kills_with = std::collections::HashMap::<String, u32>::new();
     for tick in 0..(seconds / TICK) as usize {
         let mut commands = vec![Command::default(); game.players.len()];
         for (i, bot) in &mut bots {
+            if *i == 0 && still.is_some() {
+                continue;
+            }
             commands[*i] = bot.think(&game, &level.world, &level.nav, *i);
         }
         game.step(&level.world, &commands);
@@ -596,8 +620,13 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             println!("{t:6.1} game over");
             break;
         }
-        // H2_SIM_WHERE=1: where everyone is every 20 seconds.
-        if std::env::var_os("H2_SIM_WHERE").is_some() && tick % (20 * 60) == 0 {
+        // H2_SIM_WHERE=<seconds>: where everyone is that often (1: every
+        // 20 seconds).
+        let every = std::env::var("H2_SIM_WHERE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .map(|s| if s == 1.0 { 20.0 } else { s });
+        if every.is_some_and(|s| tick % ((s / TICK) as usize).max(1) == 0) {
             let at: Vec<String> = game
                 .players
                 .iter()
@@ -1496,10 +1525,24 @@ impl App {
             if !shown {
                 continue;
             }
+            let carried = self
+                .mission
+                .as_ref()
+                .map_or(Mat4::IDENTITY, |m| m.carried(scene, k));
             world.push(DrawCall {
                 mesh: o.mesh,
-                model: o.transform,
+                model: carried * o.transform,
                 light: o.light,
+                colors: None,
+                emblem: None,
+                fx: Fx::default(),
+            });
+        }
+        for (mesh, model, light) in self.mission.iter().flat_map(|m| m.lift_draws(scene)) {
+            world.push(DrawCall {
+                mesh,
+                model,
+                light,
                 colors: None,
                 emblem: None,
                 fx: Fx::default(),
@@ -1724,6 +1767,17 @@ impl App {
             } else {
                 l.build_hud(&self.scene, &self.game, vw, vh)
             };
+            let prompt = self
+                .mission
+                .as_ref()
+                .and_then(|m| m.switch_prompt(&self.scene, &self.game, l.player, l.keyboard));
+            if let Some(text) = prompt.filter(|_| !self.menu_open) {
+                let mut hb = HudBuilder::new(vw, vh);
+                let s = hb.scale();
+                let at = [vw * 0.5, vh * 0.5 + 76.0 * s];
+                hb.text(self.scene.hud_font, at, 9.0 * s, &text, hud::BLUE);
+                hud.extend(hb.finish());
+            }
             // The scoreboard while Tab or Back is held.
             let held = (l.keyboard && self.keys.contains(&KeyCode::Tab))
                 || l.pad

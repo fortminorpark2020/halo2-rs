@@ -11,6 +11,8 @@ const SCNR_TRIGGER_VOLUMES: usize = 0x108;
 const SCNR_NETGAME_FLAGS: usize = 0x118;
 const SCNR_BSP_SWITCHES: usize = 0x130;
 const BSP_SWITCH_SIZE: usize = 0xE;
+const SCNR_DEVICE_GROUPS: usize = 0xA0;
+const DEVICE_GROUP_SIZE: usize = 0x28;
 const SCNR_NETGAME_EQUIPMENT: usize = 0x120;
 const NETGAME_FLAG_SIZE: usize = 0x20;
 const TRIGGER_VOLUME_SIZE: usize = 0x44;
@@ -86,11 +88,15 @@ pub struct Placement {
     pub automatic: bool,
     /// The model variant to show (vehicles, bipeds, weapons and scenery).
     pub variant: String,
-    /// Machines: their device flags (bit 0 initially open, 1 initially
-    /// off) and machine flags (bit 0 doesn't operate automatically, 5
-    /// doesn't close automatically).
+    /// Machines and controls: their device flags (bit 0 initially open, 1
+    /// initially off) and machine flags (bit 0 doesn't operate
+    /// automatically, 5 doesn't close automatically) or control flags.
     pub device_flags: u32,
     pub machine_flags: u32,
+    /// Machines and controls: the device groups their power and position
+    /// follow.
+    pub power_group: Option<u16>,
+    pub position_group: Option<u16>,
 }
 
 /// An object name scripts use, and the instance it names.
@@ -212,6 +218,7 @@ pub fn placements(set: &mut MapSet, kind: PlacedKind) -> Result<Vec<Placement>> 
         .map(|p| DatumIndex(u32_at(p, 4)))
         .collect();
     let instances = map.read_block(meta, &data, block, size)?;
+    let device = matches!(kind, PlacedKind::Machine | PlacedKind::Control);
     Ok(instances
         .chunks_exact(size)
         .map(|e| {
@@ -236,16 +243,14 @@ pub fn placements(set: &mut MapSet, kind: PlacedKind) -> Result<Vec<Placement>> 
                 } else {
                     String::new()
                 },
-                device_flags: if kind == PlacedKind::Machine {
-                    u32_at(e, 0x38)
-                } else {
-                    0
-                },
-                machine_flags: if kind == PlacedKind::Machine {
-                    u32_at(e, 0x3C)
-                } else {
-                    0
-                },
+                device_flags: if device { u32_at(e, 0x38) } else { 0 },
+                machine_flags: if device { u32_at(e, 0x3C) } else { 0 },
+                power_group: device
+                    .then(|| u16::try_from(i16_at(e, 0x34)).ok())
+                    .flatten(),
+                position_group: device
+                    .then(|| u16::try_from(i16_at(e, 0x36)).ok())
+                    .flatten(),
             }
         })
         .collect())
@@ -455,6 +460,79 @@ pub fn item_collection(set: &mut MapSet, itmc: DatumIndex) -> Result<Vec<(f32, D
         .collect())
 }
 
+/// Device tags keep their transition times as rates (1 / seconds).
+fn seconds(rate: f32) -> f32 {
+    if rate > 0.0 {
+        1.0 / rate
+    } else {
+        0.0
+    }
+}
+
+/// A device group: devices (and the switches that move them) sharing a
+/// value scripts read and set.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DeviceGroup {
+    pub name: String,
+    pub initial: f32,
+    /// It can only change once.
+    pub once: bool,
+}
+
+pub fn device_groups(set: &mut MapSet) -> Result<Vec<DeviceGroup>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let groups = map.read_block(meta, &data, SCNR_DEVICE_GROUPS, DEVICE_GROUP_SIZE)?;
+    Ok(groups
+        .as_chunks::<DEVICE_GROUP_SIZE>()
+        .0
+        .iter()
+        .map(|g| DeviceGroup {
+            name: ascii(&g[..0x20]),
+            initial: f32_at(g, 0x20),
+            once: u32_at(g, 0x24) & 1 != 0,
+        })
+        .collect())
+}
+
+/// What kind of switch a control is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ControlKind {
+    /// Flips its group between 0 and 1.
+    #[default]
+    Toggle,
+    /// Sets its group to 1.
+    On,
+    /// Sets its group to 0.
+    Off,
+    /// Sets its group to its call value.
+    Call,
+}
+
+/// A switch the player uses, from its `ctrl` tag.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Control {
+    pub kind: ControlKind,
+    pub call_value: f32,
+}
+
+pub fn control(set: &mut MapSet, tag: DatumIndex) -> Result<Control> {
+    let (_, _, data) = set.tag_data(tag)?;
+    if data.len() < 0x124 {
+        return Err(Error::Corrupt("control tag too small".into()));
+    }
+    Ok(Control {
+        kind: match i16_at(&data, 0x11C) {
+            1 => ControlKind::On,
+            2 => ControlKind::Off,
+            3 => ControlKind::Call,
+            _ => ControlKind::Toggle,
+        },
+        call_value: f32_at(&data, 0x120),
+    })
+}
+
 /// How a machine (a door, a lift) moves, from its `mach` tag.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Machine {
@@ -475,7 +553,7 @@ pub fn machine(set: &mut MapSet, tag: DatumIndex) -> Result<Machine> {
         return Err(Error::Corrupt("machine tag too small".into()));
     }
     Ok(Machine {
-        position_time: f32_at(&data, 0xC8),
+        position_time: seconds(f32_at(&data, 0xC8)),
         kind: i16_at(&data, 0x11C) as u16,
         activation_radius: f32_at(&data, 0x118),
         door_open_time: f32_at(&data, 0x120),

@@ -28,8 +28,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod actors;
+mod lifts;
 mod vehicles;
+
 pub use actors::CampaignAi;
+pub use lifts::{Lift, Switch};
 pub use vehicles::Vehicles;
 
 #[repr(C)]
@@ -632,6 +635,9 @@ pub struct Scene {
     pub objects: Vec<SceneObject>,
     /// A campaign level's doors.
     pub doors: Vec<Door>,
+    /// Its lifts, and the switches players use.
+    pub lifts: Vec<Lift>,
+    pub switches: Vec<Switch>,
     pub items: Vec<MapItem>,
     /// What picking up a power-up or an ammo pack sounds like.
     pub item_sounds: Vec<(ItemKind, Option<usize>)>,
@@ -1716,11 +1722,21 @@ impl Scene {
                 .collect()
         };
         let mut doors = Vec::new();
+        let (mut lifts, mut switches, mut movers) = (Vec::new(), Vec::new(), 0);
         for (kind, p) in placed {
             let Some(mesh) = loader.object_mesh(p.object, &mut meshes) else {
                 continue;
             };
             let light = level_light.at(&loader.textures, Vec3::from(p.position) + Vec3::Z * 0.2);
+            if kind == PlacedKind::Machine {
+                if let Some(lift) = loader.lift(&p, mesh, &mut meshes, light, &mut movers) {
+                    lifts.push(lift);
+                    continue;
+                }
+            }
+            if kind == PlacedKind::Control {
+                switches.push(Switch::new(&mut loader.set, &p));
+            }
             let transform = placement_matrix(p.position, p.rotation, p.scale);
             let door = (kind == PlacedKind::Machine)
                 .then(|| loader.door(&p, &meshes[mesh], transform))
@@ -2002,6 +2018,8 @@ impl Scene {
             grenades,
             objects,
             doors,
+            lifts,
+            switches,
             items,
             item_sounds,
             overshield_time,

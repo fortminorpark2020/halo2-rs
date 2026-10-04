@@ -4,13 +4,14 @@
 
 use crate::scene::Scene;
 use blam_cache::ai::AiTeam;
+use blam_cache::scenario::ControlKind;
 use blam_cache::script::value_type;
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use h2sim::bot::ActorMind;
 use h2sim::game::ActorSpawn;
 use h2sim::script::{Host, Obj, Value, Vm};
 use h2sim::{Bot, Game, World};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Seconds a machine takes to open when its tag doesn't say.
 const MACHINE_TIME: f32 = 1.5;
@@ -20,6 +21,14 @@ const SEE_RANGE: f32 = 60.0;
 const DOOR_REACH: f32 = 3.0;
 /// The middle of a door, above where it's placed.
 const DOOR_MIDDLE: f32 = 1.0;
+/// Standing this close above a lift, it carries you.
+const CARRY_REACH: f32 = 0.15;
+/// A switch is in reach this close to a player's middle.
+const SWITCH_REACH: f32 = 1.2;
+/// A player's middle, above their feet.
+const MIDDLE: f32 = 0.4;
+/// A switch with no device group calls the nearest lift this close.
+const CALL_REACH: f32 = 10.0;
 
 /// The team of a squad that says which side it's on.
 fn squad_team(team: AiTeam) -> Option<u8> {
@@ -173,6 +182,23 @@ struct State {
     doors: Vec<Device>,
     door_named: HashMap<u16, usize>,
     device_groups: HashMap<u16, f32>,
+    /// Device groups that change only once and have.
+    spent: HashSet<u16>,
+    /// The level's lifts (`Scene::lifts`), which name each has, and how
+    /// each one's nodes have moved (`Lift::poses`) for which position.
+    lifts: Vec<Device>,
+    lift_named: HashMap<u16, usize>,
+    lift_poses: Vec<(f32, Vec<Mat4>)>,
+    /// The lift and node each of the world's movers is.
+    mover_lift: HashMap<usize, (usize, usize)>,
+    /// The switches (`Scene::switches`) and which name each has.
+    switches: Vec<Device>,
+    switch_named: HashMap<u16, usize>,
+    /// Objects scripts attached to others: the child's name to the
+    /// parent's.
+    attached: HashMap<u16, u16>,
+    /// Whether each player held the action button the tick before.
+    held: Vec<bool>,
     /// Named objects scripts created (true) or destroyed (false).
     created: HashMap<u16, bool>,
     /// Actors the scripts placed in each squad.
@@ -221,6 +247,47 @@ impl Mission {
             door_named: (0..scene.doors.len())
                 .filter_map(|k| Some((scene.doors[k].name?, k)))
                 .collect(),
+            device_groups: (0..scene.ai.device_groups.len())
+                .map(|g| (g as u16, scene.ai.device_groups[g].initial))
+                .collect(),
+            lifts: scene
+                .lifts
+                .iter()
+                .map(|l| {
+                    let at = if l.open { 1.0 } else { 0.0 };
+                    Device {
+                        position: at,
+                        target: at,
+                        power: if l.powered { 1.0 } else { 0.0 },
+                        automatic: false,
+                    }
+                })
+                .collect(),
+            lift_named: (0..scene.lifts.len())
+                .filter_map(|k| Some((scene.lifts[k].name?, k)))
+                .collect(),
+            lift_poses: vec![(f32::NAN, Vec::new()); scene.lifts.len()],
+            mover_lift: scene
+                .lifts
+                .iter()
+                .enumerate()
+                .flat_map(|(k, l)| {
+                    l.parts
+                        .iter()
+                        .filter_map(move |p| Some((p.mover?, (k, p.node))))
+                })
+                .collect(),
+            switches: scene
+                .switches
+                .iter()
+                .map(|s| Device {
+                    power: if s.powered { 1.0 } else { 0.0 },
+                    ..Device::default()
+                })
+                .collect(),
+            switch_named: (0..scene.switches.len())
+                .filter_map(|k| Some((scene.switches[k].name?, k)))
+                .collect(),
             ..State::default()
         };
         let mut ctx = Ctx {
@@ -234,6 +301,36 @@ impl Mission {
                 ctx.place(s, None);
             }
         }
+        // H2_LIFTS="k=position,..." sends lifts somewhere (for testing).
+        for (k, to) in std::env::var("H2_LIFTS")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|kv| kv.split_once('='))
+            .filter_map(|(k, v)| {
+                Some((
+                    k.trim().parse::<usize>().ok()?,
+                    v.trim().parse::<f32>().ok()?,
+                ))
+            })
+        {
+            if let Some(d) = ctx.st.lifts.get_mut(k) {
+                d.target = to;
+            }
+        }
+        if log {
+            for (k, l) in scene.lifts.iter().enumerate() {
+                let name = l.name.and_then(|n| scene.ai.object_names.get(n as usize));
+                println!(
+                    "lift {k} {} at {:.1}: {} parts, {} triangles, {:.1}s, open {}",
+                    name.map_or("", String::as_str),
+                    l.transform.w_axis.truncate(),
+                    l.parts.len(),
+                    l.parts.iter().map(|p| p.triangles.len()).sum::<usize>(),
+                    l.time,
+                    l.open
+                );
+            }
+        }
         let mut vm = Vm::new(&scene.ai.scripts, &mut ctx);
         vm.log = log;
         Mission {
@@ -243,9 +340,9 @@ impl Mission {
         }
     }
 
-    /// One game tick: the players may cross into another part of the
-    /// level, doors and machines move, and every other tick the scripts
-    /// run.
+    /// One game tick: lifts move (carrying whoever's on them), players
+    /// use switches and may cross into another part of the level, doors
+    /// and machines move, and every other tick the scripts run.
     pub fn step(
         &mut self,
         scene: &Scene,
@@ -254,16 +351,18 @@ impl Mission {
         bots: &mut Vec<(usize, Bot)>,
     ) {
         self.ticks += 1;
-        if self.ticks % 2 == 1 {
-            return;
-        }
-        let dt = 1.0 / h2sim::script::TICKS_PER_SECOND as f32;
         let mut ctx = Ctx {
             st: &mut self.state,
             scene,
             game,
             bots,
         };
+        ctx.move_lifts(world, h2sim::game::TICK);
+        ctx.use_switches();
+        if self.ticks % 2 == 1 {
+            return;
+        }
+        let dt = 1.0 / h2sim::script::TICKS_PER_SECOND as f32;
         ctx.follow_bsp();
         ctx.move_devices(dt);
         ctx.move_doors(world, dt);
@@ -279,6 +378,44 @@ impl Mission {
         self.state.exists(o.name, o.automatic)
             && o.door
                 .is_none_or(|d| self.state.doors.get(d).is_none_or(|d| d.position < 0.5))
+    }
+
+    /// The lifts' parts to draw: mesh, model matrix and light.
+    pub fn lift_draws(&self, scene: &Scene) -> Vec<(usize, Mat4, Option<[f32; 3]>)> {
+        let mut out = Vec::new();
+        for (k, lift) in scene.lifts.iter().enumerate() {
+            if !self.state.exists(lift.name, lift.placed) {
+                continue;
+            }
+            let poses = &self.state.lift_poses[k].1;
+            for part in &lift.parts {
+                let moved = poses.get(part.node).copied().unwrap_or(Mat4::IDENTITY);
+                out.push((part.mesh, moved * lift.transform, lift.light));
+            }
+        }
+        out
+    }
+
+    /// How far an object has moved with the lift a script attached it to.
+    pub fn carried(&self, scene: &Scene, object: usize) -> Mat4 {
+        scene
+            .objects
+            .get(object)
+            .and_then(|o| o.name)
+            .map_or(Mat4::IDENTITY, |n| self.state.moved(n))
+    }
+
+    /// What holding the action button would do here, for a player.
+    pub fn switch_prompt(
+        &self,
+        scene: &Scene,
+        game: &Game,
+        player: usize,
+        keyboard: bool,
+    ) -> Option<String> {
+        switch_near(&self.state, scene, game, player)?;
+        let button = if keyboard { "E" } else { "X" };
+        Some(format!("PRESS {button} TO USE THE SWITCH"))
     }
 
     /// The sounds the scripts played since last asked.
@@ -304,6 +441,41 @@ impl State {
         name.and_then(|n| self.created.get(&n).copied())
             .unwrap_or(automatic)
     }
+
+    /// How far a named object has moved: a lift, or what's attached to
+    /// one, goes with the lift's base.
+    fn moved(&self, name: u16) -> Mat4 {
+        let lift = self.attached.get(&name).unwrap_or(&name);
+        self.lift_named
+            .get(lift)
+            .and_then(|&k| self.lift_poses[k].1.first())
+            .copied()
+            .unwrap_or(Mat4::IDENTITY)
+    }
+}
+
+/// The switch a player could use: a powered one in reach.
+fn switch_near(st: &State, scene: &Scene, game: &Game, player: usize) -> Option<usize> {
+    let p = game
+        .players
+        .get(player)
+        .filter(|p| p.alive && p.seat.is_none())?;
+    let middle = p.body.position + Vec3::Z * MIDDLE;
+    (0..scene.switches.len())
+        .filter(|&k| {
+            let s = &scene.switches[k];
+            st.switches[k].power > 0.0 && st.exists(s.name, s.placed)
+        })
+        .map(|k| {
+            let s = &scene.switches[k];
+            let at = s
+                .name
+                .map_or(s.position, |n| st.moved(n).transform_point3(s.position));
+            (k, at.distance(middle))
+        })
+        .filter(|&(_, d)| d < SWITCH_REACH)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(k, _)| k)
 }
 
 /// The BSP the players start in: the one their starting location is in.
@@ -408,12 +580,14 @@ impl Ctx<'_> {
                 if self.st.created.get(&n) == Some(&false) {
                     return None;
                 }
-                self.scene
+                let placed = self
+                    .scene
                     .ai
                     .name_positions
                     .get(n as usize)
                     .copied()
-                    .flatten()
+                    .flatten()?;
+                Some(self.st.moved(n).transform_point3(placed))
             }
         }
     }
@@ -446,6 +620,133 @@ impl Ctx<'_> {
                 self.st.bsp = to;
                 return;
             }
+        }
+    }
+
+    /// Lifts move toward where they're sent (or where their device group
+    /// says), carrying whoever stands on them.
+    fn move_lifts(&mut self, world: &World, dt: f32) {
+        let scene = self.scene;
+        for (k, lift) in scene.lifts.iter().enumerate() {
+            let group = lift
+                .position_group
+                .and_then(|g| self.st.device_groups.get(&g));
+            if let Some(&v) = group {
+                self.st.lifts[k].target = v;
+            }
+            let d = &mut self.st.lifts[k];
+            if d.power > 0.0 {
+                let step = dt / lift.time.max(0.05);
+                d.position += (d.target - d.position).clamp(-step, step);
+            }
+            let (at, target) = (d.position, d.target);
+            let exists = self.st.exists(lift.name, lift.placed);
+            if self.st.lift_poses[k].0 != at {
+                let poses = lift.poses(at);
+                if exists && !self.st.lift_poses[k].1.is_empty() {
+                    self.carry(world, k, &poses);
+                }
+                let was = self.st.lift_poses[k].0;
+                if self.st.log && !was.is_nan() && (at == target) != (was == target) {
+                    let what = if at == target { "stops" } else { "moves" };
+                    println!(
+                        "lift {k} at {:.1} {what} ({at:.2})",
+                        lift.transform.w_axis.truncate()
+                    );
+                }
+                self.st.lift_poses[k] = (at, poses);
+            }
+            let poses = &self.st.lift_poses[k].1;
+            for part in &lift.parts {
+                if let Some(m) = part.mover {
+                    world.move_mover(m, lift.offset(poses, part), exists);
+                }
+            }
+        }
+    }
+
+    /// Whoever stands on lift `k` goes where it's going.
+    fn carry(&mut self, world: &World, k: usize, poses: &[Mat4]) {
+        let was = &self.st.lift_poses[k].1;
+        for p in &mut self.game.players {
+            if !p.alive || p.seat.is_some() {
+                continue;
+            }
+            let on = world
+                .mover_under(p.body.position, CARRY_REACH)
+                .and_then(|m| self.st.mover_lift.get(&m));
+            let Some(&(_, node)) = on.filter(|on| on.0 == k) else {
+                continue;
+            };
+            let resting = was[node].inverse().transform_point3(p.body.position);
+            p.body.position = poses[node].transform_point3(resting);
+        }
+    }
+
+    /// Players pressing the action button by a switch use it.
+    fn use_switches(&mut self) {
+        let n = self.game.players.len();
+        self.st.held.resize(n, false);
+        for i in self.humans() {
+            let held = self.game.players[i].holding_action();
+            let pressed = held && !self.st.held[i];
+            self.st.held[i] = held;
+            if !pressed {
+                continue;
+            }
+            if let Some(k) = switch_near(self.st, self.scene, self.game, i) {
+                self.flip(k);
+            }
+        }
+    }
+
+    /// Use a switch: it sets its device group, or calls the lift nearest it.
+    fn flip(&mut self, k: usize) {
+        let s = &self.scene.switches[k];
+        if self.st.log {
+            println!("switch {k} at {:.1} used", s.position);
+        }
+        let Some(g) = s.position_group else {
+            let at = s.position;
+            let nearest = (0..self.scene.lifts.len())
+                .filter(|&l| {
+                    self.st
+                        .exists(self.scene.lifts[l].name, self.scene.lifts[l].placed)
+                })
+                .map(|l| {
+                    (
+                        l,
+                        self.scene.lifts[l].transform.w_axis.truncate().distance(at),
+                    )
+                })
+                .filter(|&(_, d)| d < CALL_REACH)
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((l, _)) = nearest {
+                let d = &mut self.st.lifts[l];
+                d.target = if d.position > 0.5 { 0.0 } else { 1.0 };
+            }
+            return;
+        };
+        if self.st.spent.contains(&g) {
+            return;
+        }
+        let now = self.st.device_groups.get(&g).copied().unwrap_or(0.0);
+        let to = match s.kind {
+            ControlKind::Toggle if now > 0.5 => 0.0,
+            ControlKind::Toggle | ControlKind::On => 1.0,
+            ControlKind::Off => 0.0,
+            ControlKind::Call => s.call_value,
+        };
+        self.st.device_groups.insert(g, to);
+        self.st.switches[k].position = to;
+        if self
+            .scene
+            .ai
+            .device_groups
+            .get(g as usize)
+            .is_some_and(|d| d.once)
+        {
+            self.st.spent.insert(g);
         }
     }
 
@@ -506,6 +807,12 @@ impl Ctx<'_> {
         };
         if let Some(&k) = self.st.door_named.get(&name) {
             return self.st.doors.get_mut(k);
+        }
+        if let Some(&k) = self.st.lift_named.get(&name) {
+            return self.st.lifts.get_mut(k);
+        }
+        if let Some(&k) = self.st.switch_named.get(&name) {
+            return self.st.switches.get_mut(k);
         }
         Some(self.st.devices.entry(name).or_default())
     }
@@ -852,6 +1159,21 @@ impl Host for Ctx<'_> {
                 let on = arg(1).truthy();
                 if let Some(d) = self.device(args.first()) {
                     d.automatic = on;
+                }
+                Value::Void
+            }
+            // (objects_attach parent marker child child_marker)
+            "objects_attach" => {
+                if let (Some(&Obj::Name(parent)), Some(&Obj::Name(child))) =
+                    (objects(0).first(), objects(2).first())
+                {
+                    self.st.attached.insert(child, parent);
+                }
+                Value::Void
+            }
+            "objects_detach" => {
+                if let Some(&Obj::Name(child)) = objects(1).first() {
+                    self.st.attached.remove(&child);
                 }
                 Value::Void
             }
