@@ -165,10 +165,13 @@ new controller takes over player one; in the lobby, Start on another
 controller adds a splitscreen player (up to four) and Back takes them out
 again. Start on a new controller during a game drops them straight in.
 
-LAN: every game is open to other PCs on the same network (allow h2viewer through
-Windows Firewall when asked); System Link lists them and joins the one you
-pick, loading its map first if it's another one. The host runs the game and its
-bots; if the host leaves, the joined PCs go back to System Link.
+LAN: every lobby and game is open to other PCs on the same network (allow
+h2viewer through Windows Firewall when asked); System Link lists them and joins
+the one you pick. Joined PCs wait in the host's lobby, seeing its choices and
+everyone in it, and follow the host into each game it starts (loading the map
+if needed; the game holds its start for them) and back to the lobby after it.
+The host runs the game and its bots (fewer bots when more people join); if the
+host leaves, the joined PCs go back to System Link.
 
 Sound: weapons, reloads, grenades, footsteps, landings, shield recharge, the
 low shield alarm and rockets in flight play from the game's own sound files, placed left or right and

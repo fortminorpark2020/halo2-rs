@@ -2,7 +2,7 @@
 //! host sends back.
 
 use crate::conn::Connection;
-use crate::{kind, MAGIC, PROTOCOL};
+use crate::{kind, Lobby, MAGIC, PROTOCOL};
 use h2sim::game::{Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
 use std::net::{SocketAddr, TcpStream};
@@ -24,6 +24,11 @@ pub enum ClientEvent {
     Added(usize),
     /// The connection to the host is gone.
     Lost(String),
+    /// The host is in its lobby (or changed it): wait there. Our players
+    /// are gone with the game.
+    Lobby(Lobby),
+    /// The host started a game on this map: load it, then `rejoin`.
+    Start(String),
 }
 
 pub struct Client {
@@ -33,7 +38,26 @@ pub struct Client {
     pub players: Vec<usize>,
     /// Game states received so far.
     pub snapshots: u64,
+    /// In the host's game (rather than its lobby).
+    pub in_game: bool,
+    /// The gamertag and look we join with.
+    me: (String, Look),
     gone: bool,
+}
+
+/// What we say to the host to join its game, or its lobby.
+fn hello(game: &Game, map: &str, locals: usize, (name, look): (&str, Look)) -> Writer {
+    let mut w = Writer::default();
+    w.u32(MAGIC);
+    w.u32(PROTOCOL);
+    w.str(map);
+    w.u16(game.weapons.len() as u16);
+    w.u16(game.item_spawns.len() as u16);
+    w.u8(locals.clamp(1, 4) as u8);
+    w.str(&crate::computer_name());
+    w.str(name);
+    look.write(&mut w);
+    w
 }
 
 impl Client {
@@ -44,29 +68,30 @@ impl Client {
         game: &Game,
         map: &str,
         locals: usize,
-        (name, look): (&str, Look),
+        me: (&str, Look),
     ) -> std::io::Result<Client> {
         let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)?;
         let mut conn = Connection::new(stream)?;
-        let mut w = Writer::default();
-        w.u32(MAGIC);
-        w.u32(PROTOCOL);
-        w.str(map);
-        w.u16(game.weapons.len() as u16);
-        w.u16(game.item_spawns.len() as u16);
-        w.u8(locals.clamp(1, 4) as u8);
-        w.str(&crate::computer_name());
-        w.str(name);
-        look.write(&mut w);
-        conn.send(kind::HELLO, &w.0);
+        conn.send(kind::HELLO, &hello(game, map, locals, me).0);
         conn.flush().map_err(std::io::Error::other)?;
         Ok(Client {
             conn,
             address,
             players: Vec::new(),
             snapshots: 0,
+            in_game: false,
+            me: (me.0.to_string(), me.1),
             gone: false,
         })
+    }
+
+    /// Join the game the host started (`ClientEvent::Start`), once `game`
+    /// is its map.
+    pub fn rejoin(&mut self, game: &Game, map: &str, locals: usize) {
+        let me = (self.me.0.as_str(), self.me.1);
+        let w = hello(game, map, locals, me);
+        self.conn.send(kind::HELLO, &w.0);
+        self.flush();
     }
 
     /// Take on everything the host sent. Returns what happened to the
@@ -96,6 +121,7 @@ impl Client {
                         .map(|_| r.index_below(256))
                         .collect::<Result<Vec<_>, _>>()?;
                     self.players = players.clone();
+                    self.in_game = true;
                     out.push(ClientEvent::Welcomed { computer, players });
                     Ok(())
                 })(),
@@ -107,6 +133,18 @@ impl Client {
                     self.players.push(p);
                     out.push(ClientEvent::Added(p));
                 }),
+                kind::LOBBY => Lobby::read(&mut r).map(|lobby| {
+                    self.in_game = false;
+                    self.players.clear();
+                    out.push(ClientEvent::Lobby(lobby));
+                }),
+                kind::START => r.str().map(|map| {
+                    self.in_game = false;
+                    self.players.clear();
+                    out.push(ClientEvent::Start(map));
+                }),
+                // The last of a game that's over.
+                kind::SNAPSHOT if !self.in_game => Ok(()),
                 kind::SNAPSHOT => (|| {
                     game.read_state(&mut r)?;
                     self.snapshots += 1;

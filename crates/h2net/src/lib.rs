@@ -3,18 +3,23 @@
 //! controls every frame; the host sends back the state of the game and what
 //! happened in it after every tick. Games announce themselves on the network
 //! so other PCs can list and join them without typing addresses.
+//!
+//! PCs stay together between games: they wait in the host's lobby, and
+//! when the host starts a game they load its map and join it.
 
 mod client;
 mod conn;
 mod discovery;
 mod host;
+mod lobby;
 
 pub use client::{Client, ClientEvent};
 pub use discovery::{local_ip, Browser, LanGame};
 pub use host::{Host, HostEvent};
+pub use lobby::{Lobby, LobbyPlayer};
 
 /// Bumped whenever the messages change; PCs on different versions can't play.
-pub const PROTOCOL: u32 = 16;
+pub const PROTOCOL: u32 = 17;
 /// The host listens here (or the next free port above it).
 pub const GAME_PORT: u16 = 47040;
 /// Hosts announce their games to this port.
@@ -34,6 +39,10 @@ mod kind {
     pub const REFUSED: u8 = 102;
     pub const ADDED: u8 = 103;
     pub const SNAPSHOT: u8 = 104;
+    /// The host is in its lobby (sent on joining and when it changes).
+    pub const LOBBY: u8 = 105;
+    /// The host started a game on this map: load it and say hello again.
+    pub const START: u8 = 106;
 }
 
 /// What this PC is called on the network.

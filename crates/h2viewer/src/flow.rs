@@ -74,14 +74,20 @@ impl App {
     /// Run `f` with the menu and what it shows.
     pub(crate) fn with_menu<R>(&mut self, f: impl FnOnce(&mut Menu, &menu::Context) -> R) -> R {
         let scores = self.score_lines();
-        let seats = self.seat_infos();
+        let seats = self.lobby_seats();
         let joined = self.joined();
+        let host_lobby = match &self.net {
+            Net::Joined { lobby, .. } => lobby.as_ref(),
+            _ => None,
+        };
         let ctx = menu::Context {
             maps: &self.maps,
             lan: &self.lan_games,
             seats: &seats,
+            local: self.seats.len(),
             scores: &scores,
             joined,
+            host_lobby,
         };
         f(&mut self.menu, &ctx)
     }
@@ -128,6 +134,7 @@ impl App {
                 self.set_capture(true);
             }
             Action::EndGame => self.end_game(),
+            Action::Leave => self.leave_game(),
             Action::Quit => self.quit = true,
         }
     }
@@ -185,7 +192,8 @@ impl App {
 
     /// Put someone at this PC on the other team, in team games.
     pub(crate) fn change_team(&mut self, seat: usize) {
-        if !self.menu.settings.game_type().teams() {
+        // Joined, the host puts us on teams.
+        if !self.menu.settings.game_type().teams() || self.joined() {
             return;
         }
         if let Some(s) = self.seats.get_mut(seat) {
@@ -195,7 +203,7 @@ impl App {
     }
 
     /// How each person at this PC plays, for the lobby.
-    fn seat_infos(&self) -> Vec<SeatInfo> {
+    pub(crate) fn seat_infos(&self) -> Vec<SeatInfo> {
         let profile = &self.menu.profile;
         self.seats
             .iter()
@@ -291,15 +299,24 @@ impl App {
             self.begin_join(game);
             return;
         }
-        let path = self.map_path.with_file_name(format!("{}.map", game.map));
-        if !path.exists() {
+        let Some(path) = self.map_named(&game.map) else {
             self.menu.notice = Some(format!("YOU DON'T HAVE {}", menu::map_title(&game.map)));
             return;
-        }
+        };
         self.begin_load(path, Then::Join(game.clone()));
     }
 
-    fn begin_load(&mut self, path: PathBuf, then: Then) {
+    /// The file of the map LAN games call `name`, if this PC has it.
+    pub(crate) fn map_named(&self, name: &str) -> Option<PathBuf> {
+        let listed = self.maps.iter().find(|m| m.name.eq_ignore_ascii_case(name));
+        let path = listed.map_or_else(
+            || self.map_path.with_file_name(format!("{name}.map")),
+            |m| m.path.clone(),
+        );
+        path.exists().then_some(path)
+    }
+
+    pub(crate) fn begin_load(&mut self, path: PathBuf, then: Then) {
         println!("loading {}", path.display());
         let title = MapChoice::new(&path).title;
         let (tx, rx) = mpsc::channel();
@@ -332,11 +349,17 @@ impl App {
                 match loading.then {
                     Then::Play => self.start_game(),
                     Then::Join(game) => self.begin_join(&game),
+                    Then::Rejoin => self.rejoin_host(),
                 }
             }
             Err(e) => {
                 println!("couldn't load the map: {e}");
-                self.menu.notice = Some(format!("COULDN'T LOAD {}", loading.title));
+                let why = format!("COULDN'T LOAD {}", loading.title);
+                if matches!(loading.then, Then::Rejoin) {
+                    self.drop_out(why);
+                } else {
+                    self.menu.notice = Some(why);
+                }
             }
         }
     }
@@ -398,7 +421,7 @@ impl App {
     }
 
     /// A fresh game for the people here; `bots` computer players join them.
-    fn seat_players(&mut self, bots: usize, options: &GameOptions) {
+    pub(crate) fn seat_players(&mut self, bots: usize, options: &GameOptions) {
         self.reset_match();
         self.game = self.fresh_game(options);
         let seats = self.seats.clone();
@@ -465,11 +488,25 @@ impl App {
         self.set_capture(true);
     }
 
-    /// Play the lobby's game here, open to the network.
+    /// Play the lobby's game here, open to the network; PCs in the lobby
+    /// load the map and join it.
     pub(crate) fn start_game(&mut self) {
         let options = self.menu.settings.options.clone();
-        self.seat_players(self.menu.settings.bots, &options);
-        self.start_hosting();
+        // Bots make way for people.
+        let people = self.seats.len() + self.lan_players();
+        let bots = self
+            .menu
+            .settings
+            .bots
+            .min(scene::MAX_BODIES.saturating_sub(people));
+        self.seat_players(bots, &options);
+        match &mut self.net {
+            Net::Hosting(host) => {
+                host.start(&self.map_name);
+                self.lan_wait = 0.0;
+            }
+            _ => self.start_hosting(),
+        }
     }
 
     /// Join a LAN game on the map that's loaded.
@@ -480,9 +517,14 @@ impl App {
         self.connect(game);
     }
 
-    /// Leave the game for the lobby, everyone here staying together.
+    /// End the game for the lobby, everyone here (and on PCs that joined)
+    /// staying together.
     pub(crate) fn end_game(&mut self) {
-        self.net = Net::Offline;
+        self.back_to_lobby();
+    }
+
+    /// Back to the lobby, keeping who plays here and their teams.
+    pub(crate) fn back_to_lobby(&mut self) {
         if self.mode == Mode::Playing {
             let seat = |l: &LocalPlayer| Seat {
                 pad: l.pad,
@@ -512,7 +554,8 @@ impl App {
 
     /// Back to the menus because a LAN game went wrong.
     pub(crate) fn drop_out(&mut self, why: String) {
-        self.end_game();
+        self.net = Net::Offline;
+        self.back_to_lobby();
         self.menu.show(Screen::SystemLink);
         self.menu.notice = Some(why);
     }
@@ -538,7 +581,7 @@ impl App {
             }
         }
         let wanted = self.mode == Mode::Menu
-            && !matches!(&self.loading, Some(l) if matches!(l.then, Then::Play | Then::Join(_)));
+            && !matches!(&self.loading, Some(l) if matches!(l.then, Then::Play | Then::Join(_) | Then::Rejoin));
         match (wanted, self.music_voice, &self.music) {
             (true, None, Some(m)) => {
                 let voice = self

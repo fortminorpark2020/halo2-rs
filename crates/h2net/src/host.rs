@@ -1,9 +1,11 @@
 //! Hosting: accept PCs that join, give each of their players a Spartan, run
-//! their controls through the game and send everyone the result.
+//! their controls through the game and send everyone the result. Between
+//! games the host is in its lobby: joined PCs wait there, and say hello
+//! again (with the map loaded) when a game starts.
 
 use crate::conn::Connection;
 use crate::discovery::Beacon;
-use crate::{kind, MAGIC, PROTOCOL};
+use crate::{kind, Lobby, MAGIC, PROTOCOL};
 use h2sim::game::{guest_name, Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
 use std::net::{SocketAddr, TcpListener};
@@ -15,7 +17,9 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Things the host's game should show or act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostEvent {
-    /// A PC joined with these players.
+    /// A PC came into the lobby.
+    Arrived { computer: String },
+    /// A PC joined the game with these players.
     Joined {
         computer: String,
         players: Vec<usize>,
@@ -37,11 +41,16 @@ struct Remote {
     conn: Connection,
     address: SocketAddr,
     computer: String,
-    /// The gamertag of the person at that PC, and how they look.
+    /// The gamertag of the person at that PC, how they look, and how many
+    /// play there.
     name: String,
     look: Look,
+    locals: usize,
     since: Instant,
+    /// Said hello and was let in (to the lobby or the game).
     welcomed: bool,
+    /// Has players in the game being played.
+    in_game: bool,
     /// Needs the whole game now (just joined).
     fresh: bool,
     /// Each player's latest controls, and buttons pressed since the last tick.
@@ -55,6 +64,8 @@ pub struct Host {
     beacon: Beacon,
     map: String,
     computer: String,
+    /// The lobby, while there's no game on.
+    lobby: Option<Lobby>,
 }
 
 /// A player's controls before their PC sends any: stand still, facing the
@@ -69,14 +80,28 @@ fn seat(game: &Game, player: usize) -> (usize, Command, Command) {
 
 /// What a joining PC said about itself.
 struct Hello {
+    /// The map the joining PC has loaded, and how many weapons and item
+    /// spots it has there.
+    map: String,
+    weapons: usize,
+    items: usize,
     computer: String,
     name: String,
     look: Look,
     locals: usize,
 }
 
-/// Why a hello can't be accepted.
-fn check_hello(r: &mut Reader, game: &Game, map: &str) -> Result<Hello, String> {
+impl Hello {
+    /// Sent for this game: the same map, with the same contents.
+    fn fits(&self, game: &Game, map: &str) -> bool {
+        self.map.eq_ignore_ascii_case(map)
+            && self.weapons == game.weapons.len()
+            && self.items == game.item_spawns.len()
+    }
+}
+
+/// Read a hello, or why it can't be accepted.
+fn read_hello(r: &mut Reader) -> Result<Hello, String> {
     let bad = |_| "not a Halo 2 Rust game".to_string();
     if r.u32().map_err(bad)? != MAGIC {
         return Err("not a Halo 2 Rust game".into());
@@ -84,24 +109,14 @@ fn check_hello(r: &mut Reader, game: &Game, map: &str) -> Result<Hello, String> 
     if r.u32().map_err(bad)? != PROTOCOL {
         return Err("DIFFERENT GAME VERSION, UPDATE BOTH PCS".into());
     }
-    let their_map = r.str().map_err(bad)?;
-    let weapons = r.u16().map_err(bad)? as usize;
-    let items = r.u16().map_err(bad)? as usize;
-    let locals = (r.u8().map_err(bad)? as usize).max(1);
-    let computer = r.str().map_err(bad)?;
-    let name = r.str().map_err(bad)?;
-    let look = Look::read(r).map_err(bad)?;
-    if !their_map.eq_ignore_ascii_case(map)
-        || weapons != game.weapons.len()
-        || items != game.item_spawns.len()
-    {
-        return Err(format!("HOST IS PLAYING {}", map.to_uppercase()));
-    }
     Ok(Hello {
-        computer,
-        name,
-        look,
-        locals,
+        map: r.str().map_err(bad)?,
+        weapons: r.u16().map_err(bad)? as usize,
+        items: r.u16().map_err(bad)? as usize,
+        locals: (r.u8().map_err(bad)? as usize).max(1),
+        computer: r.str().map_err(bad)?,
+        name: r.str().map_err(bad)?,
+        look: Look::read(r).map_err(bad)?,
     })
 }
 
@@ -122,6 +137,7 @@ impl Host {
                         beacon: Beacon::new(session, port),
                         map: map.to_string(),
                         computer,
+                        lobby: None,
                     });
                 }
                 Err(e) => last = Some(e),
@@ -137,6 +153,60 @@ impl Host {
     /// How many PCs have joined.
     pub fn joined(&self) -> usize {
         self.remotes.iter().filter(|r| r.welcomed).count()
+    }
+
+    /// The PCs that joined: the gamertag there, its look, and how many
+    /// play there.
+    pub fn members(&self) -> Vec<(String, Look, usize)> {
+        self.remotes
+            .iter()
+            .filter(|r| r.welcomed)
+            .map(|r| (r.name.clone(), r.look, r.locals))
+            .collect()
+    }
+
+    /// PCs from the lobby still loading the game's map (not in it yet).
+    pub fn joining(&self) -> usize {
+        self.remotes
+            .iter()
+            .filter(|r| r.welcomed && !r.in_game)
+            .count()
+    }
+
+    /// Wait in the lobby (leaving any game: joined PCs' players are no
+    /// longer theirs). Joined PCs are told whenever the lobby changes.
+    pub fn set_lobby(&mut self, lobby: Lobby) {
+        if self.lobby.is_none() {
+            for r in &mut self.remotes {
+                r.in_game = false;
+                r.players.clear();
+            }
+        }
+        if self.lobby.as_ref() == Some(&lobby) {
+            return;
+        }
+        self.map = lobby.map.clone();
+        let mut w = Writer::default();
+        lobby.write(&mut w);
+        for r in self.remotes.iter_mut().filter(|r| r.welcomed) {
+            r.conn.send(kind::LOBBY, &w.0);
+            let _ = r.conn.flush();
+        }
+        self.lobby = Some(lobby);
+    }
+
+    /// Start a game on `map`: joined PCs load it and say hello again.
+    pub fn start(&mut self, map: &str) {
+        self.lobby = None;
+        self.map = map.to_string();
+        let mut w = Writer::default();
+        w.str(map);
+        for r in self.remotes.iter_mut().filter(|r| r.welcomed) {
+            r.in_game = false;
+            r.players.clear();
+            r.conn.send(kind::START, &w.0);
+            let _ = r.conn.flush();
+        }
     }
 
     /// Whether a joined PC controls this player.
@@ -158,8 +228,10 @@ impl Host {
                     computer: address.ip().to_string(),
                     name: String::new(),
                     look: Look::default(),
+                    locals: 1,
                     since: Instant::now(),
                     welcomed: false,
+                    in_game: false,
                     fresh: false,
                     players: Vec::new(),
                 }),
@@ -183,8 +255,12 @@ impl Host {
                 }
             }
         }
-        let players = game.players.len().min(255) as u8;
-        self.beacon.announce(&self.map, &self.computer, players);
+        let players = match &self.lobby {
+            Some(l) => l.players.len(),
+            None => game.players.len(),
+        };
+        self.beacon
+            .announce(&self.map, &self.computer, players.min(255) as u8);
         events
     }
 
@@ -202,9 +278,21 @@ impl Host {
         for (kind, body) in r.conn.receive()? {
             let mut rd = Reader::new(&body);
             match kind {
-                kind::HELLO if !r.welcomed => {
-                    let hello = match check_hello(&mut rd, game, &self.map) {
-                        Ok(v) => v,
+                kind::HELLO if !r.in_game => {
+                    // The lobby takes any map; a game, only its own.
+                    let checked = read_hello(&mut rd).and_then(|h| {
+                        if self.lobby.is_some() || h.fits(game, &self.map) {
+                            Ok(Some(h))
+                        } else if r.welcomed && !h.map.eq_ignore_ascii_case(&self.map) {
+                            // Sent from the lobby as the game started.
+                            Ok(None)
+                        } else {
+                            Err(format!("HOST IS PLAYING {}", self.map.to_uppercase()))
+                        }
+                    });
+                    let hello = match checked {
+                        Ok(Some(v)) => v,
+                        Ok(None) => continue,
                         Err(why) => {
                             let mut w = Writer::default();
                             w.str(&why);
@@ -218,7 +306,25 @@ impl Host {
                         name,
                         look,
                         locals,
+                        ..
                     } = hello;
+                    let arriving = !r.welcomed;
+                    r.computer = computer.clone();
+                    r.name = name.clone();
+                    r.look = look;
+                    r.locals = locals;
+                    r.welcomed = true;
+                    if let Some(lobby) = &self.lobby {
+                        // Wait in the lobby for the next game.
+                        let mut w = Writer::default();
+                        lobby.write(&mut w);
+                        r.conn.send(kind::LOBBY, &w.0);
+                        if arriving {
+                            println!("lan: {computer} ({}) is in the lobby", r.address);
+                            events.push(HostEvent::Arrived { computer });
+                        }
+                        continue;
+                    }
                     if game.players.len() + locals > max_players {
                         let mut w = Writer::default();
                         w.str("THE GAME IS FULL");
@@ -238,16 +344,13 @@ impl Host {
                         w.index(Some(p));
                     }
                     r.conn.send(kind::WELCOME, &w.0);
-                    r.computer = computer.clone();
-                    r.name = name;
-                    r.look = look;
-                    r.welcomed = true;
+                    r.in_game = true;
                     r.fresh = true;
                     r.players = players.iter().map(|&p| seat(game, p)).collect();
                     println!("lan: {computer} ({}) joined", r.address);
                     events.push(HostEvent::Joined { computer, players });
                 }
-                kind::INPUT if r.welcomed => {
+                kind::INPUT if r.in_game => {
                     let n = rd.u8().map_err(|e| e.to_string())?;
                     for _ in 0..n {
                         let player = rd.index().map_err(|e| e.to_string())?;
@@ -258,7 +361,7 @@ impl Host {
                         }
                     }
                 }
-                kind::ADD_LOCAL if r.welcomed => {
+                kind::ADD_LOCAL if r.in_game => {
                     if game.players.len() < max_players && r.players.len() < 4 {
                         let p = game.add_player();
                         game.set_name(p, &guest_name(&r.name, r.players.len()));
@@ -270,7 +373,7 @@ impl Host {
                         events.push(HostEvent::Added { player: p });
                     }
                 }
-                kind::REMOVE_LOCAL if r.welcomed => {
+                kind::REMOVE_LOCAL if r.in_game => {
                     let player = rd.index().map_err(|e| e.to_string())?;
                     if r.players.len() > 1 {
                         if let Some(i) = r.players.iter().position(|p| Some(p.0) == player) {
@@ -279,6 +382,8 @@ impl Host {
                         }
                     }
                 }
+                // Controls still on their way from a game that's over.
+                kind::INPUT | kind::ADD_LOCAL | kind::REMOVE_LOCAL if r.welcomed => {}
                 _ => return Err(format!("unexpected message {kind}")),
             }
         }
@@ -304,7 +409,7 @@ impl Host {
         if !self
             .remotes
             .iter()
-            .any(|r| r.welcomed && (changed || r.fresh))
+            .any(|r| r.in_game && (changed || r.fresh))
         {
             return;
         }
@@ -315,7 +420,7 @@ impl Host {
             e.write(&mut w);
         }
         for r in &mut self.remotes {
-            if r.welcomed && (changed || r.fresh) {
+            if r.in_game && (changed || r.fresh) {
                 r.fresh = false;
                 r.conn.send(kind::SNAPSHOT, &w.0);
                 // A failure shows up as a departure on the next poll.

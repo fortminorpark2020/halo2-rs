@@ -192,3 +192,90 @@ fn hosted_games_can_be_found() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+#[test]
+fn joined_pcs_wait_in_the_lobby_between_games() {
+    let mut hg = game();
+    hg.add_player();
+    let mut host = Host::new("lockout", 12).unwrap();
+    let lobby = Lobby {
+        map: "lockout".into(),
+        game_type: "SLAYER".into(),
+        score: "25".into(),
+        options: "DEFAULT".into(),
+        teams: false,
+        players: vec![LobbyPlayer {
+            name: "HOST".into(),
+            look: Look::default(),
+            team: 0,
+            remote: false,
+        }],
+        bots: 2,
+    };
+    host.set_lobby(lobby.clone());
+    // Any map will do for the lobby.
+    let mut cg = game();
+    let mut client = Client::connect(address(&host), &cg, "midship", 2, me()).unwrap();
+    let mut arrived = false;
+    let mut seen = None;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |he, ce, _| {
+        arrived |= he.iter().any(|e| matches!(e, HostEvent::Arrived { .. }));
+        for e in ce {
+            match e {
+                ClientEvent::Lobby(l) => seen = Some(l.clone()),
+                other => panic!("{other:?}"),
+            }
+        }
+        arrived && seen.is_some()
+    });
+    assert_eq!(seen.as_ref(), Some(&lobby));
+    assert_eq!(
+        host.members(),
+        vec![("TESTER".to_string(), Look::default(), 2)]
+    );
+    assert_eq!(hg.players.len(), 1);
+
+    // Changes reach them.
+    let fewer = Lobby { bots: 1, ..lobby };
+    host.set_lobby(fewer.clone());
+    let mut seen = None;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        if let Some(ClientEvent::Lobby(l)) = ce.first() {
+            seen = Some(l.clone());
+        }
+        seen.is_some()
+    });
+    assert_eq!(seen, Some(fewer.clone()));
+
+    // The host starts a game: they load the map and join it.
+    host.start("lockout");
+    let mut started = None;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        if let Some(ClientEvent::Start(map)) = ce.first() {
+            started = Some(map.clone());
+        }
+        started.is_some()
+    });
+    assert_eq!(started.as_deref(), Some("lockout"));
+    client.rejoin(&cg, "lockout", 2);
+    let mut mine = Vec::new();
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, cg| {
+        if let Some(ClientEvent::Welcomed { players, .. }) = ce.first() {
+            mine = players.clone();
+        }
+        !mine.is_empty() && cg.players.len() == 3
+    });
+    assert_eq!(mine.len(), 2);
+    assert!(client.in_game);
+    assert!(host.is_remote(mine[0]));
+
+    // Back to the lobby: their players are gone with the game.
+    host.set_lobby(fewer);
+    let mut back = false;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        back |= ce.iter().any(|e| matches!(e, ClientEvent::Lobby(_)));
+        back
+    });
+    assert!(!client.in_game);
+    assert!(!host.is_remote(mine[0]));
+}

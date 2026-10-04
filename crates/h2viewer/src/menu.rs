@@ -7,7 +7,7 @@ use crate::gpu::hud_mode;
 use crate::hud::HudBuilder;
 use crate::options::{presets, GameOptions, RESPAWN_TIMES};
 use crate::profile::{color_name, Profile};
-use h2net::LanGame;
+use h2net::{LanGame, Lobby};
 use h2sim::game::{
     clean_name, Emblem, Look, EMBLEM_BACKGROUNDS, EMBLEM_FOREGROUNDS, MAX_NAME, PROFILE_COLORS,
 };
@@ -201,16 +201,20 @@ pub struct ScoreLine {
     pub header: bool,
 }
 
-/// Someone at this PC, in the lobby.
+/// Someone in the lobby.
 #[derive(Clone, Debug)]
 pub struct SeatInfo {
     /// Their gamertag.
     pub name: String,
-    /// "KEYBOARD" or "CONTROLLER".
+    /// "KEYBOARD", "CONTROLLER", "SYSTEM LINK"...
     pub how: &'static str,
+    /// Their team, or `NO_TEAM` until the game puts them on one.
     pub team: u8,
     pub look: Look,
 }
+
+/// A player in the lobby whose team the game will choose.
+pub const NO_TEAM: u8 = u8::MAX;
 
 /// What the game should do after a menu input.
 #[derive(Clone, Debug, PartialEq)]
@@ -222,8 +226,10 @@ pub enum Action {
     /// The player changed their profile: keep it.
     SaveProfile,
     Resume,
-    /// Back to the lobby (ending or leaving the game).
+    /// Back to the lobby (ending the game).
     EndGame,
+    /// Leave the game or lobby joined on another PC.
+    Leave,
     Quit,
 }
 
@@ -258,11 +264,15 @@ pub enum Sound {
 pub struct Context<'a> {
     pub maps: &'a [MapChoice],
     pub lan: &'a [LanGame],
-    /// People at this PC.
+    /// Everyone in the lobby.
     pub seats: &'a [SeatInfo],
+    /// How many people play at this PC.
+    pub local: usize,
     pub scores: &'a [ScoreLine],
     /// Playing in another PC's game.
     pub joined: bool,
+    /// Joined: the host's lobby, while waiting there for its next game.
+    pub host_lobby: Option<&'a Lobby>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,6 +308,8 @@ enum Row {
     StartGame,
     Join(usize),
     Searching,
+    /// In another PC's lobby, until its game starts.
+    Waiting,
     Resume,
     EndGame,
     Continue,
@@ -305,7 +317,7 @@ enum Row {
 
 impl Row {
     fn selectable(self) -> bool {
-        self != Row::Searching
+        !matches!(self, Row::Searching | Row::Waiting)
     }
 
     /// A profile setting stepped with left and right.
@@ -355,6 +367,19 @@ const DIM: [f32; 4] = [0.5, 0.62, 0.8, 0.9];
 const PANEL: [f32; 4] = [0.02, 0.07, 0.14, 0.72];
 const HIGHLIGHT: [f32; 4] = [0.2, 0.45, 0.85, 0.9];
 const WARNING: [f32; 4] = [1.0, 0.55, 0.3, 1.0];
+
+/// The lobby's score to win, as it shows it.
+pub fn score_label(settings: &Settings) -> String {
+    match settings.score_to_win() {
+        0 => "NO LIMIT".into(),
+        n => crate::local::score_text(n as i32, settings.game_type().timed()),
+    }
+}
+
+/// The game options' variant name, or CUSTOM.
+pub fn options_label(options: &GameOptions) -> &'static str {
+    options.preset().map_or("CUSTOM", |k| presets()[k].0)
+}
 
 fn on_off(on: bool) -> String {
     if on { "ON" } else { "OFF" }.into()
@@ -447,6 +472,14 @@ impl Menu {
                 Row::EmblemSecondary,
                 Row::EmblemBackColor,
             ],
+            Screen::Lobby if ctx.host_lobby.is_some() => vec![
+                Row::GameType,
+                Row::Map,
+                Row::Score,
+                Row::Bots,
+                Row::GameOptions,
+                Row::Waiting,
+            ],
             Screen::Lobby => vec![
                 Row::GameType,
                 Row::Map,
@@ -476,6 +509,20 @@ impl Menu {
 
     fn label(&self, row: Row, ctx: &Context) -> (String, Option<String>) {
         let s = &self.settings;
+        if let Some(l) = ctx.host_lobby {
+            // The host's choices.
+            let value = match row {
+                Row::GameType => Some(l.game_type.clone()),
+                Row::Map => Some(map_title(&l.map)),
+                Row::Score => Some(l.score.clone()),
+                Row::Bots => Some(l.bots.to_string()),
+                Row::GameOptions => Some(l.options.clone()),
+                _ => None,
+            };
+            if let Some(v) = value {
+                return (self.label_name(row, ctx), Some(v));
+            }
+        }
         match row {
             Row::Multiplayer => ("MULTIPLAYER".into(), None),
             Row::SystemLink => ("SYSTEM LINK".into(), None),
@@ -542,32 +589,13 @@ impl Menu {
                         .map_or("NONE".into(), |m| m.title.clone()),
                 ),
             ),
-            Row::Score => (
-                "SCORE TO WIN".into(),
-                Some(match s.score_to_win() {
-                    0 => "NO LIMIT".into(),
-                    n => crate::local::score_text(n as i32, s.game_type().timed()),
-                }),
-            ),
+            Row::Score => ("SCORE TO WIN".into(), Some(score_label(s))),
             Row::Bots => ("BOTS".into(), Some(s.bots.to_string())),
             Row::GameOptions => (
                 "GAME OPTIONS".into(),
-                Some(
-                    s.options
-                        .preset()
-                        .map_or("CUSTOM", |k| presets()[k].0)
-                        .into(),
-                ),
+                Some(options_label(&s.options).into()),
             ),
-            Row::Variant => (
-                "VARIANT".into(),
-                Some(
-                    s.options
-                        .preset()
-                        .map_or("CUSTOM", |k| presets()[k].0)
-                        .into(),
-                ),
-            ),
+            Row::Variant => ("VARIANT".into(), Some(options_label(&s.options).into())),
             Row::MapWeapons => (
                 "WEAPONS ON MAP".into(),
                 Some(s.options.map_weapons.label().into()),
@@ -604,11 +632,24 @@ impl Menu {
                 )
             }
             Row::Searching => ("SEARCHING FOR GAMES...".into(), None),
+            Row::Waiting => ("WAITING FOR THE HOST TO START".into(), None),
             Row::Resume => ("RESUME".into(), None),
             Row::EndGame if ctx.joined => ("LEAVE GAME".into(), None),
             Row::EndGame => ("END GAME".into(), None),
             Row::Continue => ("CONTINUE".into(), None),
         }
+    }
+
+    /// A row's name, without its value.
+    fn label_name(&self, row: Row, ctx: &Context) -> String {
+        let (name, _) = self.label(
+            row,
+            &Context {
+                host_lobby: None,
+                ..*ctx
+            },
+        );
+        name
     }
 
     /// Keep the cursor on a row that's there and can be chosen.
@@ -629,6 +670,13 @@ impl Menu {
         if self.editing {
             return match input {
                 Input::Select | Input::Back => self.typed(Typed::Done),
+                _ => Action::None,
+            };
+        }
+        if self.screen == Screen::Lobby && ctx.host_lobby.is_some() {
+            // Only the host changes its lobby.
+            return match input {
+                Input::Back => self.back(ctx),
                 _ => Action::None,
             };
         }
@@ -668,7 +716,7 @@ impl Menu {
                 Some(r) => self.choose(r, ctx),
                 None => Action::None,
             },
-            Input::Back => self.back(),
+            Input::Back => self.back(ctx),
         }
     }
 
@@ -800,15 +848,26 @@ impl Menu {
                 }
                 None => Action::None,
             },
-            Row::Searching => Action::None,
+            Row::Searching | Row::Waiting => Action::None,
             Row::Resume => {
                 self.sound = Some(Sound::Back);
                 Action::Resume
             }
-            Row::EndGame | Row::Continue => {
-                self.sound = Some(Sound::Forward);
-                Action::EndGame
+            Row::EndGame | Row::Continue => self.end_game(ctx),
+        }
+    }
+
+    /// Leave the game (or the carnage report) for the lobby: the host's
+    /// lobby when joined, once the host is back there.
+    fn end_game(&mut self, ctx: &Context) -> Action {
+        self.sound = Some(Sound::Forward);
+        match (ctx.joined, self.screen) {
+            (true, Screen::PostGame) => {
+                self.notice = Some("WAITING FOR THE HOST".into());
+                Action::None
             }
+            (true, _) => Action::Leave,
+            (false, _) => Action::EndGame,
         }
     }
 
@@ -856,8 +915,12 @@ impl Menu {
         }
     }
 
-    fn back(&mut self) -> Action {
+    fn back(&mut self, ctx: &Context) -> Action {
         match self.screen {
+            Screen::Lobby if ctx.joined => {
+                self.sound = Some(Sound::Back);
+                Action::Leave
+            }
             Screen::Main => Action::None,
             Screen::Profile => {
                 self.show(Screen::Main);
@@ -883,10 +946,7 @@ impl Menu {
                 self.sound = Some(Sound::Back);
                 Action::Resume
             }
-            Screen::PostGame => {
-                self.sound = Some(Sound::Forward);
-                Action::EndGame
-            }
+            Screen::PostGame => self.end_game(ctx),
         }
     }
 
@@ -1018,7 +1078,8 @@ impl Menu {
         let rows = self.rows(ctx);
         for (k, &row) in rows.iter().enumerate() {
             let rect = self.row_rect(k);
-            let selected = k == self.cursor && row.selectable();
+            let fixed = self.screen == Screen::Lobby && ctx.host_lobby.is_some();
+            let selected = k == self.cursor && row.selectable() && !fixed;
             let (label, value) = self.label(row, ctx);
             let (bg, fg) = if selected {
                 (HIGHLIGHT, BRIGHT)
@@ -1148,10 +1209,15 @@ impl Menu {
     ) {
         let s = f.s;
         let (x, mut y) = (PANEL_X, top);
-        let teams = self.settings.game_type().teams();
-        let lines = ctx.seats.len() + (self.settings.bots > 0) as usize;
-        let invite = ctx.seats.len() < crate::MAX_LOCAL;
-        let hints = invite as usize * 2 + teams as usize;
+        let (teams, bots) = match ctx.host_lobby {
+            Some(l) => (l.teams, l.bots as usize),
+            None => (self.settings.game_type().teams(), self.settings.bots),
+        };
+        let lines = ctx.seats.len() + (bots > 0) as usize;
+        let invite = ctx.local < crate::MAX_LOCAL;
+        // Joined PCs' teams are the host's to choose.
+        let pick_teams = teams && !ctx.joined;
+        let hints = invite as usize * 2 + pick_teams as usize;
         let height = 34.0 + 16.0 * lines as f32 + 6.0 + 11.0 * hints as f32;
         hb.quad(
             white,
@@ -1164,7 +1230,7 @@ impl Menu {
         hb.text_left(font, f.at(x, y), 11.0 * s, "PLAYERS", BRIGHT);
         y += 24.0;
         for seat in ctx.seats {
-            let c = if teams {
+            let c = if teams && seat.team != NO_TEAM {
                 crate::local::TEAM_COLORS[seat.team.min(1) as usize]
             } else {
                 crate::local::armor_colors(seat.look)[0]
@@ -1179,14 +1245,13 @@ impl Menu {
             hb.text_left(font, f.at(x + 21.0, y), 9.0 * s, &line, TEXT);
             y += 16.0;
         }
-        let bots = self.settings.bots;
         if bots > 0 {
             let line = format!("+ {bots} BOT{}", if bots == 1 { "" } else { "S" });
             hb.text_left(font, f.at(x + 21.0, y), 9.0 * s, &line, DIM);
             y += 16.0;
         }
         y += 6.0;
-        if teams {
+        if pick_teams {
             hb.text_left(font, f.at(x, y), 7.0 * s, "T OR X: CHANGE TEAM", DIM);
             y += 11.0;
         }
@@ -1350,8 +1415,10 @@ mod tests {
                 team: 0,
                 look: Look::default(),
             }]),
+            local: 1,
             scores: &[],
             joined: false,
+            host_lobby: None,
         }
     }
 
@@ -1509,5 +1576,43 @@ mod tests {
         m.click([x0 + 4.0, middle[1]], 1280.0, 720.0, &c);
         assert_eq!(m.settings.map, 0);
         assert_eq!(m.click([1.0, 1.0], 1280.0, 720.0, &c), Action::None);
+    }
+
+    #[test]
+    fn a_hosts_lobby_shows_its_choices_and_only_leaves() {
+        let maps = maps();
+        let lobby = Lobby {
+            map: "midship".into(),
+            game_type: "TEAM SLAYER".into(),
+            score: "50".into(),
+            options: "SWAT".into(),
+            teams: true,
+            players: Vec::new(),
+            bots: 3,
+        };
+        let c = Context {
+            joined: true,
+            host_lobby: Some(&lobby),
+            ..ctx(&maps, &[])
+        };
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Lobby);
+        assert_eq!(
+            m.label(Row::Map, &c),
+            ("MAP".into(), Some("MIDSHIP".into()))
+        );
+        assert_eq!(
+            m.label(Row::GameOptions, &c),
+            ("GAME OPTIONS".into(), Some("SWAT".into()))
+        );
+        assert!(!m.rows(&c).contains(&Row::StartGame));
+        assert_eq!(m.input(Input::Right, &c), Action::None);
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.settings.bots, 0);
+        assert_eq!(m.input(Input::Back, &c), Action::Leave);
+        // Joined, the carnage report waits for the host.
+        m.show(Screen::PostGame);
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert!(m.notice.is_some());
     }
 }

@@ -543,6 +543,8 @@ struct Loading {
 enum Then {
     Play,
     Join(h2net::LanGame),
+    /// Join the game the host we're with started.
+    Rejoin,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -600,6 +602,11 @@ struct App {
     preview_pose: Option<BodyPose>,
     /// LAN play: hosting, or joined to another PC's game.
     net: Net,
+    /// Hosting works here (false once it failed).
+    can_host: bool,
+    /// Seconds a hosted game has waited for PCs from the lobby
+    /// (`lan::LAN_WAIT` once it no longer waits).
+    lan_wait: f32,
     browser: h2net::Browser,
     lan_games: Vec<h2net::LanGame>,
     /// Tells this running game apart from others on the network.
@@ -787,6 +794,9 @@ impl App {
         self.lan_games = self.browser.poll().to_vec();
         self.menu_time += dt;
         if self.mode == Mode::Menu || self.loading.is_some() {
+            if self.loading.is_none() {
+                self.update_lobby_net();
+            }
             if self.menu.screen == Screen::Profile {
                 self.animate_preview(dt);
             }
@@ -871,6 +881,9 @@ impl App {
     /// this PC, bots, and players on PCs that joined).
     fn step_game(&mut self, dt: f32) {
         self.poll_host();
+        if self.waiting_for_lan(dt) {
+            return;
+        }
         self.pending += dt;
         let mut ticked = false;
         while self.pending >= TICK {
@@ -1942,6 +1955,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         preview: BodyAnimator::default(),
         preview_pose: None,
         net: Net::Offline,
+        can_host: true,
+        lan_wait: lan::LAN_WAIT,
         browser: h2net::Browser::new(session),
         lan_games: Vec::new(),
         session,

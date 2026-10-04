@@ -1,12 +1,20 @@
-//! LAN play in the game: every game is open for other PCs on the network to
-//! join (System Link in the menus lists the games other PCs host).
+//! LAN play in the game: every lobby and game is open for other PCs on the
+//! network to join (System Link in the menus lists the games other PCs
+//! host). Joined PCs wait in the host's lobby between games and follow it
+//! into each game it starts.
 
 use crate::flow::bot_for;
 use crate::local::{Keyboard, LocalPlayer};
-use crate::{scene, App};
+use crate::menu::{self, Screen, SeatInfo, NO_TEAM};
+use crate::options::GameOptions;
+use crate::{scene, App, Mode, Then};
 use gilrs::GamepadId;
-use h2net::{Client, ClientEvent, Host, HostEvent, LanGame};
+use h2net::{Client, ClientEvent, Host, HostEvent, LanGame, Lobby, LobbyPlayer};
+use h2sim::game::guest_name;
 use h2sim::Command;
+
+/// Longest a new game waits for PCs from the lobby to load its map.
+pub const LAN_WAIT: f32 = 20.0;
 
 pub enum Net {
     /// Can't host (no network); playing alone.
@@ -22,6 +30,10 @@ pub enum Net {
         seated: bool,
         /// Controllers waiting for the host to add their player.
         waiting_pads: Vec<Option<GamepadId>>,
+        /// The host's lobby, while waiting there for its next game.
+        lobby: Option<Lobby>,
+        /// How many play here, as last told to the host.
+        locals_sent: usize,
     },
 }
 
@@ -41,8 +53,157 @@ impl App {
             Err(e) => {
                 println!("lan: can't host: {e}");
                 self.net = Net::Offline;
+                self.can_host = false;
             }
         }
+    }
+
+    /// The menus' LAN work: hosting the lobby (other PCs can join it while
+    /// it's up), or waiting in the lobby of the PC we joined.
+    pub(crate) fn update_lobby_net(&mut self) {
+        if self.joined() {
+            let Net::Joined { client, .. } = &mut self.net else {
+                return;
+            };
+            let (status, _) = client.poll(&mut self.game);
+            if !self.client_status(status) || self.loading.is_some() {
+                return;
+            }
+            // Splitscreen players coming and going here show in the host's
+            // lobby.
+            let here = self.seats.len();
+            if let Net::Joined {
+                client,
+                lobby: Some(_),
+                locals_sent,
+                ..
+            } = &mut self.net
+            {
+                if *locals_sent != here {
+                    *locals_sent = here;
+                    client.rejoin(&self.game, &self.map_name, here);
+                }
+            }
+            return;
+        }
+        let in_lobby = matches!(self.menu.screen, Screen::Lobby | Screen::Options);
+        if !in_lobby {
+            // Leaving the lobby closes it.
+            self.net = Net::Offline;
+            return;
+        }
+        if matches!(self.net, Net::Offline) && self.can_host {
+            self.start_hosting();
+        }
+        let lobby = self.lobby_info();
+        let Net::Hosting(host) = &mut self.net else {
+            return;
+        };
+        host.set_lobby(lobby);
+        for e in host.poll(&mut self.game, scene::MAX_BODIES) {
+            let sound = match e {
+                HostEvent::Arrived { .. } => menu::Sound::Advance,
+                HostEvent::Left { .. } => menu::Sound::Back,
+                _ => continue,
+            };
+            self.sound.play_ui(&self.scene, sound);
+        }
+    }
+
+    /// Players on PCs that joined our lobby.
+    fn lan_members(&self) -> Vec<SeatInfo> {
+        let Net::Hosting(host) = &self.net else {
+            return Vec::new();
+        };
+        let mut seats = Vec::new();
+        for (name, look, locals) in host.members() {
+            for k in 0..locals {
+                seats.push(SeatInfo {
+                    name: guest_name(&name, k),
+                    look: look.guest(k),
+                    how: "SYSTEM LINK",
+                    team: NO_TEAM,
+                });
+            }
+        }
+        seats
+    }
+
+    /// Everyone in the lobby, as the menus list them.
+    pub(crate) fn lobby_seats(&self) -> Vec<SeatInfo> {
+        if let Net::Joined {
+            lobby: Some(lobby), ..
+        } = &self.net
+        {
+            return lobby
+                .players
+                .iter()
+                .map(|p| SeatInfo {
+                    name: p.name.clone(),
+                    look: p.look,
+                    how: if p.remote { "SYSTEM LINK" } else { "HOST" },
+                    team: p.team,
+                })
+                .collect();
+        }
+        let mut seats = self.seat_infos();
+        seats.extend(self.lan_members());
+        seats
+    }
+
+    /// Our lobby, for PCs that joined it.
+    fn lobby_info(&self) -> Lobby {
+        let s = &self.menu.settings;
+        let players = self
+            .lobby_seats()
+            .into_iter()
+            .map(|seat| LobbyPlayer {
+                remote: seat.how == "SYSTEM LINK",
+                name: seat.name,
+                look: seat.look,
+                team: seat.team,
+            })
+            .collect();
+        Lobby {
+            map: self
+                .maps
+                .get(s.map)
+                .map_or(String::new(), |m| m.name.clone()),
+            game_type: menu::GAME_TYPES[s.game_type.min(menu::GAME_TYPES.len() - 1)]
+                .1
+                .into(),
+            score: menu::score_label(s),
+            options: menu::options_label(&s.options).into(),
+            teams: s.game_type().teams(),
+            players,
+            bots: s.bots.min(255) as u8,
+        }
+    }
+
+    /// Hosting: how many play on PCs that joined the lobby.
+    pub(crate) fn lan_players(&self) -> usize {
+        match &self.net {
+            Net::Hosting(host) => host.members().iter().map(|m| m.2).sum(),
+            _ => 0,
+        }
+    }
+
+    /// Hosting a game just started: hold it while PCs from the lobby load
+    /// the map (for a while at most).
+    pub(crate) fn waiting_for_lan(&mut self, dt: f32) -> bool {
+        let Net::Hosting(host) = &self.net else {
+            return false;
+        };
+        if self.lan_wait >= LAN_WAIT {
+            return false;
+        }
+        if host.joining() == 0 {
+            self.lan_wait = LAN_WAIT;
+            return false;
+        }
+        self.lan_wait += dt;
+        self.pending = 0.0;
+        true
     }
 
     /// Hosting: let PCs join and read their players' controls.
@@ -52,6 +213,7 @@ impl App {
         };
         for e in host.poll(&mut self.game, scene::MAX_BODIES) {
             match e {
+                HostEvent::Arrived { .. } => {}
                 HostEvent::Joined { players, .. } => {
                     for p in players {
                         self.announce(&format!("{} JOINED", self.game.name(p)));
@@ -102,25 +264,8 @@ impl App {
         let before = client.snapshots;
         let (status, events) = client.poll(&mut self.game);
         let fresh = client.snapshots != before;
-        for s in status {
-            match s {
-                ClientEvent::Welcomed { computer, players } => {
-                    if let Net::Joined { computer: name, .. } = &mut self.net {
-                        *name = computer;
-                    }
-                    self.welcome = Some(players);
-                }
-                ClientEvent::Added(player) => self.seat_added(player),
-                ClientEvent::Refused(why) => {
-                    self.drop_out(format!("COULDN'T JOIN: {why}"));
-                    return;
-                }
-                ClientEvent::Lost(why) => {
-                    println!("lan: lost the host: {why}");
-                    self.drop_out("LOST CONNECTION TO THE HOST".into());
-                    return;
-                }
-            }
+        if !self.client_status(status) || self.mode != Mode::Playing || self.loading.is_some() {
+            return;
         }
         if let Some(players) = self.welcome.take() {
             if players.iter().all(|&p| p < self.game.players.len()) {
@@ -168,6 +313,99 @@ impl App {
             l.taps = Default::default();
         }
         self.handle_events();
+    }
+
+    /// Act on what the host said. False once we're no longer joined.
+    fn client_status(&mut self, status: Vec<ClientEvent>) -> bool {
+        for s in status {
+            match s {
+                ClientEvent::Welcomed { computer, players } => {
+                    if let Net::Joined { computer: name, .. } = &mut self.net {
+                        *name = computer;
+                    }
+                    self.welcome = Some(players);
+                }
+                ClientEvent::Added(player) => self.seat_added(player),
+                ClientEvent::Refused(why) => {
+                    self.drop_out(format!("COULDN'T JOIN: {why}"));
+                    return false;
+                }
+                ClientEvent::Lost(why) => {
+                    println!("lan: lost the host: {why}");
+                    self.drop_out("LOST CONNECTION TO THE HOST".into());
+                    return false;
+                }
+                ClientEvent::Lobby(lobby) => self.wait_in_lobby(lobby),
+                ClientEvent::Start(map) => {
+                    self.follow_host(&map);
+                    if !self.joined() {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// The host is in its lobby: wait there with it.
+    fn wait_in_lobby(&mut self, lobby: Lobby) {
+        // Its map's picture.
+        if let Some(k) = self.maps.iter().position(|m| m.name == lobby.map) {
+            self.menu.settings.map = k;
+        }
+        if let Net::Joined {
+            lobby: waiting,
+            seated,
+            ..
+        } = &mut self.net
+        {
+            *waiting = Some(lobby);
+            *seated = false;
+        }
+        if self.mode == Mode::Playing {
+            self.back_to_lobby();
+        }
+    }
+
+    /// The host started a game: load its map, then join it.
+    fn follow_host(&mut self, map: &str) {
+        if let Net::Joined { lobby, .. } = &mut self.net {
+            *lobby = None;
+        }
+        if map.eq_ignore_ascii_case(&self.map_name) {
+            self.rejoin_host();
+            return;
+        }
+        match self.map_named(map) {
+            Some(path) => self.begin_load(path, Then::Rejoin),
+            None => self.drop_out(format!("YOU DON'T HAVE {}", menu::map_title(map))),
+        }
+    }
+
+    /// The host's game is on the map loaded here: join it.
+    pub(crate) fn rejoin_host(&mut self) {
+        if !self.joined() {
+            return;
+        }
+        // The host's options arrive with its game.
+        self.seat_players(0, &GameOptions::default());
+        let here = self.locals.len();
+        if let Net::Joined {
+            client,
+            locals_sent,
+            ..
+        } = &mut self.net
+        {
+            client.rejoin(&self.game, &self.map_name, here);
+            *locals_sent = here;
+        }
+    }
+
+    /// Leave the PC we joined, for the list of games on the network.
+    pub(crate) fn leave_game(&mut self) {
+        self.net = Net::Offline;
+        self.back_to_lobby();
+        self.menu.show(Screen::SystemLink);
     }
 
     /// The host has our players: play them instead of our own game.
@@ -256,6 +494,8 @@ impl App {
                     computer: game.computer.clone(),
                     seated: false,
                     waiting_pads: Vec::new(),
+                    lobby: None,
+                    locals_sent: self.locals.len(),
                 };
             }
             Err(e) => {
@@ -273,6 +513,9 @@ impl App {
                 computer,
                 ..
             } => Some(format!("JOINING {}...", computer.to_uppercase())),
+            Net::Hosting(host) if self.lan_wait < LAN_WAIT && host.joining() > 0 => {
+                Some("WAITING FOR PLAYERS...".into())
+            }
             _ => None,
         }
     }
