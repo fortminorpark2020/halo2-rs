@@ -1497,8 +1497,9 @@ fn draw_scores(
         ROW_X + 360.0,
         ROW_X + 430.0,
     ];
-    // Rank icons centred under LEVEL, between the names and scores.
-    let level_x = ROW_X + 235.0;
+    // Rank icons centred under LEVEL, between the names and scores (on a
+    // whole pixel at 720p, like the other columns).
+    let level_x = ROW_X + 236.0;
     let levels = scores.iter().any(|l| l.level.is_some());
     let mut y = top;
     for (x, h) in cols
