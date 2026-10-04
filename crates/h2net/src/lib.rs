@@ -1,8 +1,9 @@
 //! LAN games, like Halo 2's system link: one PC hosts and runs the game,
 //! others join over the local network. Joined PCs send their players'
 //! controls every tick; the host sends back the state of the game and what
-//! happened in it after every tick. Games announce themselves on the network
-//! so other PCs can list and join them without typing addresses.
+//! happened in it after every tick, mostly as how it changed since the last.
+//! Games announce themselves on the network so other PCs can list and join
+//! them without typing addresses.
 //!
 //! PCs stay together between games: they wait in the host's lobby, and
 //! when the host starts a game they load its map and join it.
@@ -13,6 +14,7 @@
 
 mod client;
 mod conn;
+mod delta;
 mod discovery;
 mod host;
 mod lobby;
@@ -52,6 +54,7 @@ mod kind {
     pub const WELCOME: u8 = 101;
     pub const REFUSED: u8 = 102;
     pub const ADDED: u8 = 103;
+    /// The game, numbered, then what happened since the last.
     pub const SNAPSHOT: u8 = 104;
     /// The host is in its lobby (sent on joining and when it changes).
     pub const LOBBY: u8 = 105;
@@ -59,6 +62,9 @@ mod kind {
     pub const START: u8 = 106;
     /// The host is still here.
     pub const HOST_ALIVE: u8 = 107;
+    /// A snapshot as how it differs from the one before: its number, its
+    /// length, and the change (see `delta`).
+    pub const SNAPSHOT_DELTA: u8 = 108;
 }
 
 /// What this PC is called on the network.

@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Snapshots a second in online games, whose links are slower than a LAN.
 const ONLINE_RATE: u32 = 30;
+/// A PC with this much still waiting to go to it is behind: it misses
+/// snapshots (but not what happened in them) until it catches up.
+const BEHIND: usize = 32 << 10;
 
 /// Things the host's game should show or act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +78,13 @@ struct Remote {
     fresh: bool,
     /// Each player's latest controls, and buttons pressed since the last tick.
     players: Vec<(usize, Command, Command)>,
+    /// The number of the last snapshot it got, if the next can go as how
+    /// it differs from that one.
+    has: Option<u32>,
+    /// What happened in snapshots it missed being behind, and since when
+    /// it has been.
+    missed: Vec<Event>,
+    behind: Option<Instant>,
 }
 
 impl Remote {
@@ -97,6 +107,9 @@ impl Remote {
             in_game: false,
             fresh: false,
             players: Vec::new(),
+            has: None,
+            missed: Vec::new(),
+            behind: None,
         }
     }
 }
@@ -118,6 +131,21 @@ pub struct Host {
     snapshots: Pace,
     changed: bool,
     held: Vec<Event>,
+    /// The last snapshot's number, and the snapshot itself.
+    seq: u32,
+    last: Vec<u8>,
+    /// Bytes of snapshots sent so far.
+    sent: u64,
+}
+
+/// A snapshot: the numbered game, then what happened.
+fn snapshot(state: &[u8], events: &[Event]) -> Vec<u8> {
+    let mut w = Writer(state.to_vec());
+    w.u16(events.len().min(u16::MAX as usize) as u16);
+    for e in events.iter().take(u16::MAX as usize) {
+        e.write(&mut w);
+    }
+    w.0
 }
 
 /// A player's controls before their PC sends any: stand still, facing the
@@ -260,6 +288,9 @@ impl Host {
             snapshots: Pace::new(0.0),
             changed: false,
             held: Vec::new(),
+            seq: 0,
+            last: Vec::new(),
+            sent: 0,
         }
     }
 
@@ -287,6 +318,11 @@ impl Host {
         let computer = verified.gamertag.clone();
         self.remotes
             .push(Remote::new(conn, address, computer, Some(verified)));
+    }
+
+    /// Bytes of snapshots sent to joined PCs so far.
+    pub fn sent(&self) -> u64 {
+        self.sent
     }
 
     /// How many PCs have joined.
@@ -350,6 +386,9 @@ impl Host {
         for r in &mut self.remotes {
             r.in_game = false;
             r.players.clear();
+            r.has = None;
+            r.missed.clear();
+            r.behind = None;
         }
         self.changed = false;
         self.held.clear();
@@ -540,6 +579,9 @@ impl Host {
         if r.conn.since_heard() > self.timeout {
             return Err("timed out".into());
         }
+        if r.behind.is_some_and(|t| t.elapsed() > self.timeout) {
+            return Err("connection too slow".into());
+        }
         r.conn.keep_alive(kind::HOST_ALIVE, self.timeout / 10);
         r.conn.flush()
     }
@@ -584,19 +626,57 @@ impl Host {
         if !self.remotes.iter().any(|r| r.in_game && (due || r.fresh)) {
             return;
         }
-        let mut w = Writer::default();
-        game.write_state(&mut w);
-        w.u16(events.len().min(u16::MAX as usize) as u16);
-        for e in events.iter().take(u16::MAX as usize) {
-            e.write(&mut w);
+        let prev = self.seq;
+        if due {
+            self.seq = self.seq.wrapping_add(1);
         }
+        let mut w = Writer::default();
+        w.u32(self.seq);
+        game.write_state(&mut w);
+        let state = w.0;
+        let body = snapshot(&state, &events);
+        // PCs that got the last snapshot get how this one differs; others
+        // (just joined, or behind) get all of it.
+        let mut delta = None;
         for r in &mut self.remotes {
-            if r.in_game && (due || r.fresh) {
-                r.fresh = false;
-                r.conn.send(kind::SNAPSHOT, &w.0);
-                // A failure shows up as a departure on the next poll.
-                let _ = r.conn.flush();
+            if !r.in_game || !(due || r.fresh) {
+                continue;
             }
+            // A failure shows up as a departure on the next poll.
+            let _ = r.conn.flush();
+            if r.conn.backlog() > BEHIND {
+                r.missed.extend_from_slice(&events);
+                r.has = None;
+                r.behind.get_or_insert_with(Instant::now);
+                continue;
+            }
+            let mine;
+            let (kind, message, shared) = if due && r.has == Some(prev) {
+                let d = delta.get_or_insert_with(|| {
+                    let mut w = Writer::default();
+                    w.u32(self.seq);
+                    w.u32(body.len() as u32);
+                    w.0.extend_from_slice(&crate::delta::encode(&self.last, &body));
+                    w.0
+                });
+                (kind::SNAPSHOT_DELTA, &*d, true)
+            } else if r.missed.is_empty() {
+                (kind::SNAPSHOT, &body, due)
+            } else {
+                r.missed.extend_from_slice(&events);
+                mine = snapshot(&state, &std::mem::take(&mut r.missed));
+                (kind::SNAPSHOT, &mine, false)
+            };
+            r.conn.send(kind, message);
+            self.sent += message.len() as u64;
+            r.has = shared.then_some(self.seq);
+            r.fresh = false;
+            r.behind = None;
+            // A failure shows up as a departure on the next poll.
+            let _ = r.conn.flush();
+        }
+        if due {
+            self.last = body;
         }
     }
 }

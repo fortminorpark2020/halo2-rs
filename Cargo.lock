@@ -697,6 +697,7 @@ dependencies = [
 name = "h2net"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "glam",
  "h2sim",
  "socket2",

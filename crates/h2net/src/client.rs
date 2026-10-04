@@ -3,7 +3,7 @@
 
 use crate::conn::Connection;
 use crate::{kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
-use h2sim::game::{Event, Look, Reader, Writer, TICK};
+use h2sim::game::{Event, Look, Malformed, Reader, Writer, TICK};
 use h2sim::{Command, Game};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -47,6 +47,9 @@ pub struct Client {
     /// The controls we last sent; they go once a tick.
     sent: Vec<(usize, Command)>,
     input: Pace,
+    /// The last snapshot, and its number: the next may come as how it
+    /// differs from this one.
+    last: Option<(u32, Vec<u8>)>,
 }
 
 /// A command's buttons, without where it aims or moves.
@@ -119,6 +122,7 @@ impl Client {
             timeout: crate::TIMEOUT,
             sent: Vec::new(),
             input: Pace::new(TICK),
+            last: None,
         }
     }
 
@@ -171,6 +175,7 @@ impl Client {
                         .collect::<Result<Vec<_>, _>>()?;
                     self.players = players.clone();
                     self.in_game = true;
+                    self.last = None;
                     out.push(ClientEvent::Welcomed { computer, players });
                     Ok(())
                 })(),
@@ -185,28 +190,24 @@ impl Client {
                 kind::LOBBY => Lobby::read(&mut r).map(|lobby| {
                     self.in_game = false;
                     self.players.clear();
+                    self.last = None;
                     out.push(ClientEvent::Lobby(lobby));
                 }),
                 kind::START => r.str().map(|map| {
                     self.in_game = false;
                     self.players.clear();
+                    self.last = None;
                     out.push(ClientEvent::Start(map));
                 }),
-                // The last of a game that's over.
                 kind::HOST_ALIVE => Ok(()),
-                kind::SNAPSHOT if !self.in_game => Ok(()),
-                kind::SNAPSHOT => (|| {
-                    game.read_state(&mut r)?;
-                    self.snapshots += 1;
-                    let n = r.u16()?;
-                    for _ in 0..n {
-                        let (p, w, v) =
-                            (game.players.len(), game.weapons.len(), game.vehicles.len());
-                        events.push(Event::read(&mut r, p, w, v)?);
-                    }
-                    Ok(())
-                })(),
-                _ => Err(h2sim::game::Malformed),
+                // The last of a game that's over.
+                kind::SNAPSHOT | kind::SNAPSHOT_DELTA if !self.in_game => Ok(()),
+                kind::SNAPSHOT => self.take_snapshot(game, body, &mut events),
+                kind::SNAPSHOT_DELTA => match self.undelta(&body) {
+                    Some(snapshot) => self.take_snapshot(game, snapshot, &mut events),
+                    None => Err(Malformed),
+                },
+                _ => Err(Malformed),
             };
             if result.is_err() {
                 self.gone = true;
@@ -228,6 +229,37 @@ impl Client {
             self.conn.keep_alive(kind::ALIVE, self.timeout / 10);
             self.flush();
         }
+    }
+
+    /// Take on a snapshot: the game, and what happened since the last.
+    fn take_snapshot(
+        &mut self,
+        game: &mut Game,
+        snapshot: Vec<u8>,
+        events: &mut Vec<Event>,
+    ) -> Result<(), Malformed> {
+        let mut r = Reader::new(&snapshot);
+        let seq = r.u32()?;
+        game.read_state(&mut r)?;
+        self.snapshots += 1;
+        let n = r.u16()?;
+        for _ in 0..n {
+            let (p, w, v) = (game.players.len(), game.weapons.len(), game.vehicles.len());
+            events.push(Event::read(&mut r, p, w, v)?);
+        }
+        self.last = Some((seq, snapshot));
+        Ok(())
+    }
+
+    /// A snapshot sent as how it differs from the last one.
+    fn undelta(&self, message: &[u8]) -> Option<Vec<u8>> {
+        let mut r = Reader::new(message);
+        let (seq, len) = (r.u32().ok()?, r.u32().ok()? as usize);
+        let (last_seq, last) = self.last.as_ref()?;
+        if seq != last_seq.wrapping_add(1) {
+            return None;
+        }
+        crate::delta::decode(last, &message[8..], len)
     }
 
     /// Our players' controls for this frame. They go to the host once a

@@ -777,3 +777,159 @@ fn online_hosts_send_the_game_30_times_a_second() {
         hg.players[shooter].body.position
     );
 }
+
+// Snapshots as how they differ from the last.
+
+/// The game as a snapshot carries it.
+fn state(game: &h2sim::Game) -> Vec<u8> {
+    let mut w = h2sim::game::Writer::default();
+    game.write_state(&mut w);
+    w.0
+}
+
+/// Bots playing on the test floor: a host with `bots` of them, and a PC
+/// joined to it (whose player a bot on the host plays too).
+struct BotGame {
+    world: h2sim::World,
+    nav: h2sim::NavGraph,
+    hg: h2sim::Game,
+    cg: h2sim::Game,
+    host: Host,
+    client: Client,
+    bots: Vec<(usize, h2sim::Bot)>,
+}
+
+impl BotGame {
+    fn new(bots: usize) -> BotGame {
+        let world = floor();
+        let points: Vec<glam::Vec3> = (-4..=4)
+            .flat_map(|x| {
+                (-4..=4).map(move |y| glam::Vec3::new(x as f32 * 3.0, y as f32 * 3.0, 0.0))
+            })
+            .collect();
+        let nav = h2sim::NavGraph::build(&world, &points);
+        let mut hg = game();
+        hg.rules.score_to_win = 0;
+        for _ in 0..bots {
+            hg.add_player();
+        }
+        let mut cg = game();
+        let who = verified("TESTER", ANY_TEAM);
+        let (mut host, mut client) = online("testmap", &cg, "testmap", &[ANY_TEAM], me(), who);
+        let mut welcomed = false;
+        pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+            welcomed |= matches!(ce.first(), Some(ClientEvent::Welcomed { .. }));
+            welcomed
+        });
+        let bots = (0..hg.players.len())
+            .map(|i| (i, h2sim::Bot::new(i as u32 * 31 + 5)))
+            .collect();
+        BotGame {
+            world,
+            nav,
+            hg,
+            cg,
+            host,
+            client,
+            bots,
+        }
+    }
+
+    /// Run a tick on the host and send it. What happened in it.
+    fn tick(&mut self) -> Vec<Event> {
+        let mut commands = vec![Command::default(); self.hg.players.len()];
+        for (i, bot) in &mut self.bots {
+            commands[*i] = bot.think(&self.hg, &self.world, &self.nav, *i);
+        }
+        self.hg.step(&self.world, &commands);
+        let events = std::mem::take(&mut self.hg.events);
+        self.host.send(&self.hg, &events, true);
+        events
+    }
+}
+
+#[test]
+fn delta_snapshots_rebuild_the_hosts_game() {
+    let mut g = BotGame::new(5);
+    // Every tick, to check every snapshot.
+    g.host.set_rate(0);
+    let (mut full, mut events_made, mut events_got) = (0, 0, 0);
+    let sent = g.host.sent();
+    for _ in 0..1000 {
+        let events = g.tick();
+        // A whole snapshot: its number, the game, and what happened.
+        let mut w = h2sim::game::Writer::default();
+        for e in &events {
+            e.write(&mut w);
+        }
+        full += 4 + state(&g.hg).len() + 2 + w.0.len();
+        events_made += events.len();
+        let (ce, got) = g.client.poll(&mut g.cg);
+        assert!(ce.is_empty(), "{ce:?}");
+        assert_eq!(got, events);
+        events_got += got.len();
+        // Rebuilt from the change, the game is as the host has it.
+        assert_eq!(state(&g.cg), state(&g.hg));
+    }
+    assert!(events_made > 100, "{events_made}");
+    assert_eq!(events_got, events_made);
+    let sent = (g.host.sent() - sent) as usize;
+    println!(
+        "{} players: {} bytes a snapshot in full, {} as changes",
+        g.hg.players.len(),
+        full / 1000,
+        sent / 1000
+    );
+    assert!(sent * 10 < full * 4, "{sent} bytes for {full}");
+}
+
+#[test]
+fn a_pc_behind_misses_snapshots_but_not_what_happened() {
+    let mut g = BotGame::new(5);
+    g.host.set_rate(0);
+    // The joined PC stops reading for a while: the host stops sending it
+    // the game once it's well behind.
+    let mut made = Vec::new();
+    let mut sent = Vec::new();
+    for _ in 0..1000 {
+        let before = g.host.sent();
+        made.extend(g.tick());
+        sent.push(g.host.sent() - before);
+        assert!(g.host.poll(&mut g.hg, 16).is_empty());
+    }
+    let skipped = sent.iter().rev().take_while(|&&n| n == 0).count();
+    assert!(skipped > 100, "{skipped}");
+    // It catches up: what happened meanwhile comes with the whole game.
+    let mut got = Vec::new();
+    for _ in 0..50 {
+        let (ce, events) = g.client.poll(&mut g.cg);
+        assert!(ce.is_empty(), "{ce:?}");
+        got.extend(events);
+        made.extend(g.tick());
+    }
+    let (_, events) = g.client.poll(&mut g.cg);
+    got.extend(events);
+    assert_eq!(got, made);
+    assert_eq!(state(&g.cg), state(&g.hg));
+    assert!(g.client.snapshots < 1050);
+}
+
+#[test]
+fn a_pc_that_never_catches_up_is_dropped() {
+    let mut g = BotGame::new(3);
+    g.host.set_rate(0);
+    g.host.set_timeout(SHORT);
+    g.client.set_timeout(SHORT);
+    // Its window is minimized, say: it says it's there, but reads nothing.
+    let start = Instant::now();
+    let reason = loop {
+        g.tick();
+        g.client.keep_alive();
+        if let Some(HostEvent::Left { reason, .. }) = g.host.poll(&mut g.hg, 16).first() {
+            break reason.clone();
+        }
+        assert!(start.elapsed() < SHORT * 10, "still there");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(reason, "connection too slow");
+}

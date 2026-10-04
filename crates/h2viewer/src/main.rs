@@ -509,6 +509,119 @@ fn drive_test(level: &Level, spec: &str) {
     }
 }
 
+/// A PC joined to a simulated game in memory, as online: the game goes to
+/// it as a host sends it, and must arrive as if sent whole (H2_SIM_NET).
+struct SimNet {
+    host: h2net::Host,
+    client: h2net::Client,
+    joined: Game,
+    /// Another copy that takes the game whole each time. Vehicles turn a
+    /// hair on the way (rotations arrive normalized), so the joined game
+    /// is held to this rather than to the host's.
+    reference: Game,
+    /// Ticks between snapshots, and what happened since the last.
+    every: usize,
+    events: Vec<Event>,
+    /// Snapshots sent, the bytes they'd be whole, and how many arrived
+    /// wrong.
+    snapshots: usize,
+    whole: u64,
+    wrong: usize,
+}
+
+/// The game as a snapshot carries it.
+fn game_state(game: &Game) -> Vec<u8> {
+    let mut w = h2sim::game::Writer::default();
+    game.write_state(&mut w);
+    w.0
+}
+
+impl SimNet {
+    /// Join `game` (on copies of it as it started, `joined` and
+    /// `reference`) with a player a bot here plays, sending the game `hz`
+    /// times a second.
+    fn join(
+        game: &mut Game,
+        [mut joined, reference]: [Game; 2],
+        hz: usize,
+        bots: &mut Vec<(usize, Bot)>,
+    ) -> SimNet {
+        // Paced in game time here, not real time.
+        let mut host = h2net::Host::online("sim");
+        host.set_rate(0);
+        let (a, b) = h2net::Connection::pair();
+        let who = h2net::Verified {
+            account: 1,
+            gamertag: "JOINED".into(),
+            level: 1,
+            team: h2net::ANY_TEAM,
+        };
+        host.add_connection(a, who);
+        let me = ("JOINED", bot_look(game.players.len()));
+        let mut client = h2net::Client::over(b, &joined, "sim", &[h2net::ANY_TEAM], me);
+        while client.players.is_empty() || joined.players.len() < game.players.len() {
+            host.poll(game, scene::MAX_BODIES);
+            host.send(game, &[], false);
+            let (status, _) = client.poll(&mut joined);
+            if let Some(s) = status.first() {
+                println!("net: {s:?}");
+            }
+        }
+        let p = client.players[0];
+        bots.push((p, Bot::new(p as u32 * 7919 + 13)));
+        SimNet {
+            host,
+            client,
+            joined,
+            reference,
+            every: (60 / hz.clamp(1, 60)).max(1),
+            events: Vec::new(),
+            snapshots: 0,
+            whole: 0,
+            wrong: 0,
+        }
+    }
+
+    /// After a tick: send the game if it's time, and check what arrives.
+    fn tick(&mut self, game: &Game, tick: usize) {
+        self.events.extend_from_slice(&game.events);
+        if !tick.is_multiple_of(self.every) {
+            return;
+        }
+        let events = std::mem::take(&mut self.events);
+        self.host.send(game, &events, true);
+        let (status, got) = self.client.poll(&mut self.joined);
+        let mut w = h2sim::game::Writer::default();
+        for e in &events {
+            e.write(&mut w);
+        }
+        let state = game_state(game);
+        self.snapshots += 1;
+        self.whole += (4 + state.len() + 2 + w.0.len()) as u64;
+        let whole = self
+            .reference
+            .read_state(&mut h2sim::game::Reader::new(&state));
+        if !status.is_empty()
+            || got != events
+            || whole.is_err()
+            || game_state(&self.joined) != game_state(&self.reference)
+        {
+            self.wrong += 1;
+        }
+    }
+
+    fn report(&self) {
+        let n = self.snapshots.max(1) as u64;
+        let (whole, sent) = (self.whole / n, self.host.sent() / n);
+        println!(
+            "net: {} snapshots: {whole} bytes whole, {sent} sent ({}%), {} arrived wrong",
+            self.snapshots,
+            sent * 100 / whole.max(1),
+            self.wrong
+        );
+    }
+}
+
 /// Bots only, no window: play `seconds` of a game and print the kills, flag
 /// moves and score.
 fn simulate(level: &Level, settings: &Settings, seconds: f32) {
@@ -545,6 +658,23 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             (i, Bot::new(i as u32 * 7919 + 13 + seed * 104_729))
         })
         .collect();
+    // H2_SIM_NET=<snapshots a second>: and a PC joins in memory, its
+    // player a bot here too, and gets the game as a host sends it.
+    let mut net = std::env::var("H2_SIM_NET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|_| !campaign)
+        .map(|hz| {
+            let copy = || {
+                new_game(
+                    &level.scene,
+                    settings.game_type(),
+                    settings.score_to_win(),
+                    &settings.options,
+                )
+            };
+            SimNet::join(&mut game, [copy(), copy()], hz, &mut bots)
+        });
     // The mission's scripts place its squads as the player gets to them
     // (H2_SQUADS=<names> places those at the start too, "all" for every
     // one).
@@ -623,6 +753,9 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         }
         game.step(&level.world, &commands);
         h2sim::bot::alert_actors(&mut bots, &game, &game.events);
+        if let Some(net) = &mut net {
+            net.tick(&game, tick);
+        }
         match step {
             Some(Some(at)) => {
                 if game.players[0].seat.is_some() {
@@ -761,6 +894,9 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
     }
     let scores: Vec<i32> = game.players.iter().map(|p| p.score).collect();
     println!("scores {scores:?}");
+    if let Some(net) = &net {
+        net.report();
+    }
     let mut kills_with: Vec<_> = kills_with.into_iter().collect();
     kills_with.sort_by_key(|(w, n)| (std::cmp::Reverse(*n), w.clone()));
     println!("kills by weapon {kills_with:?}");

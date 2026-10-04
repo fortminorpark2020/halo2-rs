@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::{Duration, Instant};
 
 /// Larger messages mean a broken or hostile peer.
-const MAX_MESSAGE: usize = 1 << 20;
+pub(crate) const MAX_MESSAGE: usize = 1 << 20;
 /// A peer that falls this far behind is dropped.
 const MAX_BACKLOG: usize = 8 << 20;
 /// Messages on their way between the two ends of a pair, as a socket's
@@ -109,7 +109,7 @@ impl Connection {
     }
 
     /// Bytes sent that the network (or the other end) hasn't taken yet.
-    fn backlog(&self) -> usize {
+    pub(crate) fn backlog(&self) -> usize {
         match &self.link {
             Link::Tcp { outbox, .. } => outbox.len(),
             Link::Memory { queued, .. } => *queued,
