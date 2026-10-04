@@ -55,8 +55,8 @@ Oddball, Team Oddball, Juggernaut, Territories or Assault), the map (every multi
 folders, with Halo 2's own picture and description from `mainmenu.map`), score to win and number of bots, then Start Game. Game Options holds
 Halo 2's variant settings: the weapons on the map, primary and secondary
 starting weapons, starting grenades, shields, motion sensor, vehicles, respawn
-time and friendly fire, plus the SWAT, Rockets, Snipers, Swords and Shotguns
-variants. The motion sensor shows teammates (yellow) and enemies (red) within
+time, friendly fire and a time limit (none, or 5 to 30 minutes), plus the SWAT,
+Rockets, Snipers, Swords and Shotguns variants. The motion sensor shows teammates (yellow) and enemies (red) within
 25 metres who move faster than a crouch-walk or fire. In team games, T
 (or X on a controller) puts you on the red or blue team; bots fill the smaller
 team. System Link lists games other PCs on the network are hosting.
@@ -68,7 +68,9 @@ Space to jump, Ctrl or C to crouch, hold Tab for the scoreboard, Esc for the
 pause menu (resume, end the game, quit). ` (backquote) switches between walking
 and flying (flying: Space / C up / down, Shift fast). When someone reaches the
 score to win, the game stops and the carnage report shows everyone's kills and
-deaths; Continue goes back to the lobby.
+deaths; Continue goes back to the lobby. With a time limit, a clock above the
+score counts down, and when it reaches 0:00 the game stops too: the best score
+wins, and a tie for the best is a draw.
 
 Player Profile (main menu): type your gamertag, choose Spartan or Elite and
 your primary and secondary armour colours from Halo 2's 18, and build your
@@ -196,6 +198,10 @@ and `H2_BOTS=<n>` start a game straight away, and `H2_SIM=<seconds>` plays the
 bots against each other without a window, printing kills, objective events and
 the score and kills by weapon (`H2_SEED=<n>` varies the run, `H2_SIM_WHERE=1` also prints where
 every bot is, what it carries and what it is doing every 20 seconds).
+`H2_TIME_LIMIT=<seconds>` gives games that time limit. `H2_TEST_LEVELS=1`
+gives every player a level, so the lobby and the scoreboard's LEVEL column
+show Halo 2's rank icons (read from `mainmenu.map`), which otherwise show only
+for players whose level is known.
 
 ```
 h2tool scan  "C:\Games\Halo 2 Project Cartographer\maps"
