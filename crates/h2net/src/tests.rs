@@ -491,31 +491,49 @@ fn taps_between_ticks_are_not_lost_over(pair: (Connection, Connection)) {
 }
 
 #[test]
-fn an_online_pc_on_another_map_is_turned_away() {
-    a_pc_on_another_map_is_turned_away_over(Connection::pair());
+fn an_online_pc_on_another_map_is_told_to_load_the_game() {
+    loads_the_hosts_game_over(Connection::pair());
 }
 
 #[test]
-fn a_websocket_pc_on_another_map_is_turned_away() {
-    a_pc_on_another_map_is_turned_away_over(ws_pair());
+fn a_websocket_pc_on_another_map_is_told_to_load_the_game() {
+    loads_the_hosts_game_over(ws_pair());
 }
 
-fn a_pc_on_another_map_is_turned_away_over(pair: (Connection, Connection)) {
+/// Online, a PC that comes during a game (to a custom game, say) loads it
+/// and joins, as if it had been in the lobby when the game started.
+fn loads_the_hosts_game_over(pair: (Connection, Connection)) {
     let mut hg = game();
     hg.add_player();
     let mut cg = game();
     let who = verified("TESTER", ANY_TEAM);
     let (mut host, mut client) =
         online_over(pair, "lockout", &cg, "midship", &[ANY_TEAM], me(), who);
-    let mut refused = None;
-    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
-        if let Some(ClientEvent::Refused(why)) = ce.first() {
-            refused = Some(why.clone());
+    let mut arrived = None;
+    let mut start = None;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |he, ce, _| {
+        if let Some(HostEvent::Arrived { computer }) = he.first() {
+            arrived = Some(computer.clone());
         }
-        refused.is_some()
+        if let Some(ClientEvent::Start(map)) = ce.first() {
+            start = Some(map.clone());
+        }
+        arrived.is_some() && start.is_some()
     });
-    assert_eq!(refused.as_deref(), Some("HOST IS PLAYING LOCKOUT"));
+    assert_eq!(arrived.as_deref(), Some("TESTER"));
+    assert_eq!(start.as_deref(), Some("lockout"));
     assert_eq!(hg.players.len(), 1);
+    // Loaded: in it goes.
+    client.rejoin(&cg, "lockout", &[ANY_TEAM]);
+    let mut mine = None;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        if let Some(ClientEvent::Welcomed { players, .. }) = ce.first() {
+            mine = Some(players[0]);
+        }
+        mine.is_some()
+    });
+    assert_eq!(hg.players.len(), 2);
+    assert_eq!(hg.players[mine.unwrap()].name, "TESTER");
 }
 
 #[test]
@@ -690,6 +708,28 @@ fn online_pcs_are_who_the_service_says() {
     let added = added.unwrap();
     assert_eq!(hg.players[added].team, 1);
     assert_eq!(hg.players[added].name, "RED(1)");
+}
+
+#[test]
+fn online_pcs_on_any_team_choose_their_own() {
+    // A custom game: the service leaves teams to the players.
+    let mut hg = game();
+    hg.rules.game_type = h2sim::GameType::TeamSlayer;
+    hg.add_player_on(0);
+    hg.add_player_on(1);
+    hg.add_player_on(1);
+    let mut cg = game();
+    let who = verified("BLUE", ANY_TEAM);
+    let (mut host, mut client) = online("testmap", &cg, "testmap", &[1], me(), who);
+    let mut mine = None;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        if let Some(ClientEvent::Welcomed { players, .. }) = ce.first() {
+            mine = Some(players[0]);
+        }
+        mine.is_some()
+    });
+    // On the team they picked, though the other is smaller.
+    assert_eq!(hg.players[mine.unwrap()].team, 1);
 }
 
 // Heartbeats, with a short timeout instead of the real ten seconds.
