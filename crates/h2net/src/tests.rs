@@ -573,3 +573,115 @@ fn online_pcs_wait_in_the_lobby_between_games() {
     assert!(!client.in_game);
     assert!(!host.is_remote(mine[0]));
 }
+
+// Heartbeats, with a short timeout instead of the real ten seconds.
+
+const SHORT: Duration = Duration::from_millis(300);
+
+#[test]
+fn a_silent_host_is_lost_within_the_timeout() {
+    let cg = game();
+    let (mut silent, end) = Connection::pair();
+    let mut client = Client::over(end, &cg, "testmap", &[ANY_TEAM], me());
+    client.set_timeout(SHORT);
+    let mut cg = game();
+    let start = Instant::now();
+    let why = loop {
+        let (ce, _) = client.poll(&mut cg);
+        if let Some(ClientEvent::Lost(why)) = ce.first() {
+            break why.clone();
+        }
+        assert!(start.elapsed() < SHORT * 3, "still waiting");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(why, "timed out");
+    assert!(start.elapsed() >= SHORT);
+    // Meanwhile it said hello, then that it was still there.
+    let said: Vec<u8> = silent.receive().unwrap().iter().map(|m| m.0).collect();
+    assert_eq!(said[0], kind::HELLO);
+    assert!(said[1..].len() >= 5 && said[1..].iter().all(|&k| k == kind::ALIVE));
+}
+
+#[test]
+fn a_silent_pc_is_dropped_within_the_timeout() {
+    let mut hg = game();
+    hg.add_player();
+    let mut cg = game();
+    let who = verified("TESTER", ANY_TEAM);
+    let (mut host, mut client) = online("testmap", &cg, "testmap", &[ANY_TEAM], me(), who);
+    host.set_timeout(SHORT);
+    let mut mine = None;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        if let Some(ClientEvent::Welcomed { players, .. }) = ce.first() {
+            mine = Some(players[0]);
+        }
+        mine.is_some()
+    });
+    // The PC stops sending anything (but stays connected).
+    let start = Instant::now();
+    let (players, reason) = loop {
+        if let Some(HostEvent::Left {
+            players, reason, ..
+        }) = host.poll(&mut hg, 16).first()
+        {
+            break (players.clone(), reason.clone());
+        }
+        assert!(start.elapsed() < SHORT * 3, "still there");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(players, vec![mine.unwrap()]);
+    assert_eq!(reason, "timed out");
+    assert!(start.elapsed() >= SHORT / 2);
+}
+
+#[test]
+fn an_idle_lobby_stays_connected() {
+    let mut hg = game();
+    hg.add_player();
+    let mut host = Host::bind("lockout", 30, "127.0.0.1:0".parse().unwrap(), false).unwrap();
+    host.set_timeout(SHORT);
+    host.set_lobby(Lobby::default());
+    let mut cg = game();
+    let mut client = Client::connect(address(&host), &cg, "midship", &[ANY_TEAM], me()).unwrap();
+    client.set_timeout(SHORT);
+    // Ten timeouts with nothing to say but that they're still there.
+    let start = Instant::now();
+    while start.elapsed() < SHORT * 10 {
+        for e in host.poll(&mut hg, 16) {
+            assert!(matches!(e, HostEvent::Arrived { .. }), "{e:?}");
+        }
+        let (ce, _) = client.poll(&mut cg);
+        assert!(
+            ce.iter().all(|e| matches!(e, ClientEvent::Lobby(_))),
+            "{ce:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(host.joined(), 1);
+}
+
+#[test]
+fn heartbeats_go_out_while_the_game_cannot_run() {
+    let mut hg = game();
+    let mut cg = game();
+    let who = verified("TESTER", ANY_TEAM);
+    let (mut host, mut client) = online("lockout", &cg, "lockout", &[ANY_TEAM], me(), who);
+    host.set_timeout(SHORT);
+    client.set_timeout(SHORT);
+    host.set_lobby(Lobby::default());
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        matches!(ce.first(), Some(ClientEvent::Lobby(_)))
+    });
+    // The host's window is minimized for a while: it can't read, but it
+    // still says it's there.
+    let start = Instant::now();
+    while start.elapsed() < SHORT * 4 {
+        host.keep_alive();
+        let (ce, _) = client.poll(&mut cg);
+        assert!(ce.is_empty(), "{ce:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // And the joined PC's ones, read late, still count.
+    assert!(host.poll(&mut hg, 16).is_empty());
+    assert_eq!(host.joined(), 1);
+}

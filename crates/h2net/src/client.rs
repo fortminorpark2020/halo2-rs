@@ -42,6 +42,8 @@ pub struct Client {
     /// The gamertag and look we join with.
     me: (String, Look),
     gone: bool,
+    /// The host is gone if not heard from for this long.
+    timeout: Duration,
 }
 
 /// What we say to the host to join its game, or its lobby: the map we have
@@ -100,7 +102,14 @@ impl Client {
             in_game: false,
             me: (me.0.to_string(), me.1),
             gone: false,
+            timeout: crate::TIMEOUT,
         }
+    }
+
+    /// Give up on the host if not heard from for this long (`TIMEOUT`
+    /// unless set).
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
     }
 
     /// Join the game the host started (`ClientEvent::Start`), once `game`
@@ -121,7 +130,13 @@ impl Client {
         if self.gone {
             return (out, events);
         }
-        let messages = match self.conn.receive() {
+        let received = self.conn.receive().and_then(|m| {
+            if self.conn.since_heard() > self.timeout {
+                return Err("timed out".to_string());
+            }
+            Ok(m)
+        });
+        let messages = match received {
             Ok(m) => m,
             Err(why) => {
                 self.gone = true;
@@ -162,6 +177,7 @@ impl Client {
                     out.push(ClientEvent::Start(map));
                 }),
                 // The last of a game that's over.
+                kind::HOST_ALIVE => Ok(()),
                 kind::SNAPSHOT if !self.in_game => Ok(()),
                 kind::SNAPSHOT => (|| {
                     game.read_state(&mut r)?;
@@ -185,7 +201,17 @@ impl Client {
                 break;
             }
         }
+        self.keep_alive();
         (out, events)
+    }
+
+    /// Tell the host we're still here, without reading what it sent: for
+    /// while the game can't run (its window is minimized, say).
+    pub fn keep_alive(&mut self) {
+        if !self.gone {
+            self.conn.keep_alive(kind::ALIVE, self.timeout / 10);
+            self.flush();
+        }
     }
 
     /// Our players' controls for this frame.

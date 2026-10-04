@@ -16,6 +16,8 @@ mod discovery;
 mod host;
 mod lobby;
 
+use std::time::Duration;
+
 pub use client::{Client, ClientEvent};
 pub use conn::Connection;
 pub use discovery::{local_ip, Browser, LanGame};
@@ -23,13 +25,16 @@ pub use host::{Host, HostEvent, Verified};
 pub use lobby::{Lobby, LobbyPlayer};
 
 /// Bumped whenever the messages change; PCs on different versions can't play.
-pub const PROTOCOL: u32 = 20;
+pub const PROTOCOL: u32 = 21;
 /// A joining player's team when the host is to choose it.
 pub const ANY_TEAM: u8 = u8::MAX;
 /// The host listens here (or the next free port above it).
 pub const GAME_PORT: u16 = 47040;
 /// Hosts announce their games to this port.
 pub const BEACON_PORT: u16 = 47039;
+/// A PC not heard from for this long is gone. Each end says it's still
+/// there when it has sent nothing for a tenth of this.
+pub const TIMEOUT: Duration = Duration::from_secs(10);
 
 const MAGIC: u32 = u32::from_le_bytes(*b"H2RS");
 
@@ -40,6 +45,8 @@ mod kind {
     pub const INPUT: u8 = 2;
     pub const ADD_LOCAL: u8 = 3;
     pub const REMOVE_LOCAL: u8 = 4;
+    /// Still here (after a while with nothing else to say).
+    pub const ALIVE: u8 = 5;
     // Host to joined PC.
     pub const WELCOME: u8 = 101;
     pub const REFUSED: u8 = 102;
@@ -49,6 +56,8 @@ mod kind {
     pub const LOBBY: u8 = 105;
     /// The host started a game on this map: load it and say hello again.
     pub const START: u8 = 106;
+    /// The host is still here.
+    pub const HOST_ALIVE: u8 = 107;
 }
 
 /// What this PC is called on the network.

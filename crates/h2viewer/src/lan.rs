@@ -111,6 +111,16 @@ impl App {
         }
     }
 
+    /// Tell the PCs we play with that we're still here, while the game
+    /// isn't running.
+    pub(crate) fn keep_alive(&mut self) {
+        match &mut self.net {
+            Net::Hosting(host) => host.keep_alive(),
+            Net::Joined { client, .. } => client.keep_alive(),
+            Net::Offline => {}
+        }
+    }
+
     /// Players on PCs that joined our lobby.
     fn lan_members(&self) -> Vec<SeatInfo> {
         let Net::Hosting(host) = &self.net else {

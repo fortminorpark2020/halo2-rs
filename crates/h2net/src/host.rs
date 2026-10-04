@@ -109,6 +109,8 @@ pub struct Host {
     computer: String,
     /// The lobby, while there's no game on.
     lobby: Option<Lobby>,
+    /// Joined PCs not heard from for this long are dropped.
+    timeout: Duration,
 }
 
 /// A player's controls before their PC sends any: stand still, facing the
@@ -241,7 +243,13 @@ impl Host {
             map: map.to_string(),
             computer: crate::computer_name(),
             lobby: None,
+            timeout: crate::TIMEOUT,
         }
+    }
+
+    /// Drop joined PCs not heard from for this long (`TIMEOUT` unless set).
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
     }
 
     /// The port PCs join at (0 if they come through `add_connection`).
@@ -496,10 +504,24 @@ impl Host {
                 }
                 // Controls still on their way from a game that's over.
                 kind::INPUT | kind::ADD_LOCAL | kind::REMOVE_LOCAL if r.welcomed => {}
+                kind::ALIVE => {}
                 _ => return Err(format!("unexpected message {kind}")),
             }
         }
+        if r.conn.since_heard() > self.timeout {
+            return Err("timed out".into());
+        }
+        r.conn.keep_alive(kind::HOST_ALIVE, self.timeout / 10);
         r.conn.flush()
+    }
+
+    /// Tell joined PCs we're still here, without reading what they sent:
+    /// for while the game can't run (its window is minimized, say).
+    pub fn keep_alive(&mut self) {
+        for r in &mut self.remotes {
+            r.conn.keep_alive(kind::HOST_ALIVE, self.timeout / 10);
+            let _ = r.conn.flush();
+        }
     }
 
     /// This tick's controls for a player on a joined PC: their latest

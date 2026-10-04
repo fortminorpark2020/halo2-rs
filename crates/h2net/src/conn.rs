@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::time::{Duration, Instant};
 
 /// Larger messages mean a broken or hostile peer.
 const MAX_MESSAGE: usize = 1 << 20;
@@ -21,6 +22,9 @@ type Message = (u8, Vec<u8>);
 pub struct Connection {
     link: Link,
     closed: Option<String>,
+    /// When we last sent something, and last heard something.
+    sent: Instant,
+    heard: Instant,
 }
 
 enum Link {
@@ -68,10 +72,29 @@ impl Connection {
     }
 
     fn over(link: Link) -> Connection {
-        Connection { link, closed: None }
+        Connection {
+            link,
+            closed: None,
+            sent: Instant::now(),
+            heard: Instant::now(),
+        }
+    }
+
+    /// How long since something last arrived.
+    pub fn since_heard(&self) -> Duration {
+        self.heard.elapsed()
+    }
+
+    /// After `quiet` with nothing sent, send an empty `kind` message so the
+    /// other end knows we're still here.
+    pub fn keep_alive(&mut self, kind: u8, quiet: Duration) {
+        if self.sent.elapsed() >= quiet {
+            self.send(kind, &[]);
+        }
     }
 
     pub fn send(&mut self, kind: u8, body: &[u8]) {
+        self.sent = Instant::now();
         match &mut self.link {
             Link::Tcp { outbox, .. } => {
                 outbox.extend_from_slice(&(body.len() as u32 + 1).to_le_bytes());
@@ -143,6 +166,9 @@ impl Connection {
                 }
             },
         };
+        if !out.is_empty() {
+            self.heard = Instant::now();
+        }
         if let Some(why) = ended {
             self.closed = Some(why.clone());
             if out.is_empty() {

@@ -76,7 +76,7 @@ use std::f32::consts::FRAC_PI_2;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -87,6 +87,9 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 pub(crate) const MAX_LOCAL: usize = 4;
 /// Seconds between someone winning and the carnage report.
 const GAME_OVER_DELAY: f32 = 4.0;
+/// Frames this far apart mean the window isn't being drawn (it's
+/// minimized, say).
+const NOT_DRAWING: Duration = Duration::from_millis(250);
 const MUSIC_VOLUME: f32 = 0.5;
 
 const DEFAULT_MAP_DIRS: &[&str] = &[
@@ -1117,9 +1120,8 @@ impl App {
         self.lan_games = self.browser.poll().to_vec();
         self.menu_time += dt;
         if self.mode == Mode::Menu || self.loading.is_some() {
-            if self.loading.is_none() {
-                self.update_lobby_net();
-            }
+            // While a map loads too, so other PCs keep hearing from us.
+            self.update_lobby_net();
             if self.menu.screen == Screen::Profile {
                 self.animate_preview(dt);
             }
@@ -2293,6 +2295,10 @@ impl ApplicationHandler for App {
         if self.quit {
             event_loop.exit();
             return;
+        }
+        // No frames, no game; but the PCs we play with still hear from us.
+        if self.last_frame.elapsed() > NOT_DRAWING {
+            self.keep_alive();
         }
         if let Some(w) = &self.window {
             w.request_redraw();
