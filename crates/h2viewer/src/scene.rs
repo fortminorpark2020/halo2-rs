@@ -27,7 +27,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+mod actors;
 mod vehicles;
+pub use actors::CampaignAi;
 pub use vehicles::Vehicles;
 
 #[repr(C)]
@@ -546,7 +548,17 @@ const ELITE_ARMS: &str = "objects\\characters\\elite\\fp_arms\\fp_arms";
 /// The Spartan's and the Elite's first person arms skeletons.
 type Arms2<'a> = [Option<&'a Skeleton>; 2];
 
-/// A multiplayer Spartan or Elite seen in third person.
+/// Which of the scene's bodies someone shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BodyKind {
+    Spartan,
+    Elite,
+    /// A campaign actor's, by index into the mission's bodies.
+    Actor(usize),
+}
+
+/// A multiplayer Spartan or Elite (or a campaign actor) seen in third
+/// person.
 pub struct Body {
     pub rig: BodyRig,
     /// One copy of the mesh per Spartan on screen.
@@ -628,6 +640,8 @@ pub struct Scene {
     pub vehicles: Vehicles,
     /// A campaign mission's start, on campaign maps.
     pub campaign: Option<CampaignStart>,
+    /// A campaign mission's characters and squads.
+    pub ai: CampaignAi,
 }
 
 /// Capture the Flag's flag: carried in hand like a weapon, with a cloth
@@ -1402,6 +1416,24 @@ impl Loader {
     /// markers its hands hold weapons by.
     fn body(&mut self, bipd: &str, hands: [&str; 2], meshes: &mut Vec<MeshData>) -> Option<Body> {
         let tag = self.find("bipd", bipd)?;
+        self.body_of(tag, hands, MAX_BODIES, meshes)
+    }
+
+    /// A biped's body with `copies` of its mesh to pose. A hand without
+    /// the named marker takes the first whose name starts the same
+    /// (`right_hand_jackal`).
+    fn body_of(
+        &mut self,
+        tag: DatumIndex,
+        hands: [&str; 2],
+        copies: usize,
+        meshes: &mut Vec<MeshData>,
+    ) -> Option<Body> {
+        let bipd = self
+            .set
+            .locate(tag)
+            .map(|(_, t)| t.name)
+            .unwrap_or_default();
         let loaded = model::read_object_render_model(&mut self.set, tag).and_then(|m| {
             let jmad = model::object_animations(&mut self.set, tag)?;
             Ok((m, animation::read_animation_graph(&mut self.set, jmad)?))
@@ -1416,18 +1448,21 @@ impl Loader {
         let mesh = self.model_mesh(&m);
         let skin = SkinnedMesh::new(&mesh);
         let first = meshes.len();
-        for _ in 0..=MAX_BODIES {
+        for _ in 0..=copies {
             meshes.push(mesh.clone());
         }
+        let hand = |h: &str| {
+            m.marker(h).copied().or_else(|| {
+                m.markers
+                    .iter()
+                    .find(|g| g.name.starts_with(h))
+                    .and_then(|g| g.markers.first().copied())
+            })
+        };
         Some(Body {
-            rig: BodyRig::new(
-                graph,
-                Skeleton::new(&m.nodes),
-                skin,
-                hands.map(|h| m.marker(h).copied()),
-            ),
-            meshes: (first..first + MAX_BODIES).collect(),
-            preview: first + MAX_BODIES,
+            rig: BodyRig::new(graph, Skeleton::new(&m.nodes), skin, hands.map(hand)),
+            meshes: (first..first + copies).collect(),
+            preview: first + copies,
         })
     }
 
@@ -1465,13 +1500,24 @@ impl WeaponAssets {
 }
 
 impl Scene {
-    /// The third person body for a Spartan or an Elite (the Spartan's if
-    /// the map has no Elite).
-    pub fn body_for(&self, elite: bool) -> Option<&Body> {
-        if elite {
-            self.elite.as_ref().or(self.body.as_ref())
-        } else {
-            self.body.as_ref()
+    /// Which body someone shows: an actor its character's, a player the
+    /// Spartan or the Elite.
+    pub fn body_kind(&self, p: &h2sim::game::Spartan) -> BodyKind {
+        let actor = p
+            .actor
+            .and_then(|a| self.ai.body_of.get(a.character).copied().flatten());
+        match actor {
+            Some(b) => BodyKind::Actor(b),
+            None if p.look.elite && self.elite.is_some() => BodyKind::Elite,
+            None => BodyKind::Spartan,
+        }
+    }
+
+    pub fn body_of_kind(&self, kind: BodyKind) -> Option<&Body> {
+        match kind {
+            BodyKind::Spartan => self.body.as_ref(),
+            BodyKind::Elite => self.elite.as_ref(),
+            BodyKind::Actor(b) => self.ai.bodies.get(b),
         }
     }
 
@@ -1693,6 +1739,11 @@ impl Scene {
             });
         }
         let vehicles = loader.vehicles(campaign, &mut weapons, &mut meshes);
+        let ai = if campaign {
+            loader.campaign_ai(biped, &mut weapons, skeletons, &mut meshes)
+        } else {
+            CampaignAi::default()
+        };
         let campaign = campaign.then(|| campaign_start(&mut loader.set, &weapons));
         let grenades = ["frag_grenade", "plasma_grenade"].map(|g| {
             let name = format!("objects\\weapons\\grenade\\{g}\\{g}");
@@ -1848,6 +1899,7 @@ impl Scene {
         }
         Ok(Scene {
             campaign,
+            ai,
             textures: loader.textures,
             materials: loader.materials,
             meshes,

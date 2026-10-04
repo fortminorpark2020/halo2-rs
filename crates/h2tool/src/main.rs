@@ -49,6 +49,7 @@ fn main() -> ExitCode {
         Some("shader") if args.len() >= 3 => shader_dump(&args[1], &args[2]),
         Some("lightmap") if args.len() >= 2 => lightmap_dump(&args[1]),
         Some("objects") if args.len() >= 2 => objects(&args[1]),
+        Some("squads") if args.len() >= 2 => squads(&args[1]),
         Some("sound") if args.len() >= 3 => {
             sound(&args[1], &args[2], args.get(3).map(String::as_str))
         }
@@ -658,6 +659,76 @@ fn objects(path: &str) -> Res {
             i.position,
             i.respawn_seconds
         );
+    }
+    Ok(())
+}
+
+fn squads(path: &str) -> Res {
+    use blam_cache::{ai, MapSet};
+    let mut set = MapSet::open(path)?;
+    let name = |set: &MapSet, d: blam_cache::DatumIndex| {
+        set.locate(d)
+            .map(|(_, t)| t.name)
+            .unwrap_or_else(|| format!("{:08x}", d.0))
+    };
+    let characters = ai::character_palette(&mut set)?;
+    let weapons = ai::weapon_palette(&mut set)?;
+    for (i, &c) in characters.iter().enumerate() {
+        match ai::read_character(&mut set, c) {
+            Ok(ch) => {
+                let unit = ch.unit.map(|u| name(&set, u)).unwrap_or_default();
+                let weapon = ch
+                    .weapon
+                    .and_then(|w| w.weapon)
+                    .map(|w| name(&set, w))
+                    .unwrap_or_default();
+                println!(
+                    "character {i} {} ({:?}) unit {unit} weapon {weapon}",
+                    ch.name, ch.kind
+                );
+                println!("    {:?}", ch.vitality);
+                println!("    {:?}", ch.perception);
+                println!("    {:?}", ch.weapon);
+                println!(
+                    "    {:?} melee {} {}",
+                    ch.grenades, ch.melee_range, ch.melee_chance
+                );
+            }
+            Err(e) => println!("character {i} {}: {e}", name(&set, c)),
+        }
+    }
+    for (i, &w) in weapons.iter().enumerate() {
+        println!("weapon {i} {}", name(&set, w));
+    }
+    for (i, s) in ai::squads(&mut set)?.iter().enumerate() {
+        println!(
+            "squad {i} {:?} {:?} placed {} counts {:?} char {:?} weap {:?}/{:?} veh {:?}{}{}{}",
+            s.name,
+            s.team,
+            s.initially_placed,
+            s.counts,
+            s.character,
+            s.weapon,
+            s.secondary,
+            s.vehicle,
+            if s.blind { " blind" } else { "" },
+            if s.deaf { " deaf" } else { "" },
+            if s.braindead { " braindead" } else { "" },
+        );
+        for l in &s.locations {
+            println!(
+                "    {:<12} at {:7.2?} facing {:5.2} char {:?} weap {:?} veh {:?}{}{}{}",
+                l.name,
+                l.position,
+                l.facing,
+                l.character,
+                l.weapon,
+                l.vehicle,
+                if l.asleep { " asleep" } else { "" },
+                if l.always { " always" } else { "" },
+                if l.hidden { " hidden" } else { "" },
+            );
+        }
     }
     Ok(())
 }

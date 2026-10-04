@@ -28,6 +28,7 @@
 mod audio;
 mod body;
 mod camera;
+mod campaign;
 mod effects;
 mod emblem;
 mod flow;
@@ -68,8 +69,8 @@ use input::{PadPress, Pads};
 use lan::Net;
 use local::{display_name, kill_message, player_colors, Keyboard, LocalPlayer, Taps};
 use menu::{MapChoice, Menu, Screen, Settings};
-use scene::Scene;
-use std::collections::HashSet;
+use scene::{BodyKind, Scene};
+use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -249,6 +250,8 @@ fn campaign_game(scene: &Scene) -> Game {
     game.rules.starting_weapons = start.weapons;
     game.rules.starting_frags = start.frags;
     game.rules.starting_plasmas = start.plasmas;
+    game.rules.friendly_fire = true;
+    game.characters = scene.ai.characters.clone();
     game
 }
 
@@ -290,6 +293,14 @@ fn load_level(path: &Path) -> Result<Level, String> {
         scene.netgame_flags.len(),
         scene.kill_volumes.len(),
     );
+    if !scene.ai.squads.is_empty() {
+        println!(
+            "{} squads, {} characters, {} actor bodies",
+            scene.ai.squads.len(),
+            scene.ai.characters.len(),
+            scene.ai.bodies.len()
+        );
+    }
     // H2_LIST_WEAPONS=1: each weapon's crosshair range and HUD pieces.
     if std::env::var_os("H2_LIST_WEAPONS").is_some() {
         for w in &scene.weapons {
@@ -458,19 +469,27 @@ fn drive_test(level: &Level, spec: &str) {
 /// Bots only, no window: play `seconds` of a game and print the kills, flag
 /// moves and score.
 fn simulate(level: &Level, settings: &Settings, seconds: f32) {
-    let mut game = new_game(
-        &level.scene,
-        settings.game_type(),
-        settings.score_to_win(),
-        &settings.options,
-    );
+    let campaign = level.scene.campaign.is_some();
+    let mut game = if campaign {
+        campaign_game(&level.scene)
+    } else {
+        new_game(
+            &level.scene,
+            settings.game_type(),
+            settings.score_to_win(),
+            &settings.options,
+        )
+    };
     // H2_SEED=<n> plays a different game.
     let seed: u32 = std::env::var("H2_SEED")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     game.reseed(seed);
-    let mut bots: Vec<(usize, Bot)> = (0..settings.bots.max(2))
+    // A mission has one player (a bot here) against its squads
+    // (H2_SQUADS=<names>, "all" for every one).
+    let players = if campaign { 1 } else { settings.bots.max(2) };
+    let mut bots: Vec<(usize, Bot)> = (0..players)
         .map(|_| {
             let i = game.add_player();
             game.set_name(i, bot_name(i));
@@ -478,13 +497,22 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             (i, Bot::new(i as u32 * 7919 + 13 + seed * 104_729))
         })
         .collect();
+    if let (true, Ok(names)) = (campaign, std::env::var("H2_SQUADS")) {
+        for s in campaign::squads_named(&level.scene, &names) {
+            let placed = campaign::place_squad(&mut game, &level.scene, s, 1, 0);
+            let name = &level.scene.ai.squads[s].name;
+            println!("placed {name}: {} actors", placed.len());
+            bots.extend(placed.into_iter().filter_map(|(i, b)| Some((i, b?))));
+        }
+    }
     let mut kills_with = std::collections::HashMap::<String, u32>::new();
     for tick in 0..(seconds / TICK) as usize {
-        let commands: Vec<Command> = bots
-            .iter_mut()
-            .map(|(i, bot)| bot.think(&game, &level.world, &level.nav, *i))
-            .collect();
+        let mut commands = vec![Command::default(); game.players.len()];
+        for (i, bot) in &mut bots {
+            commands[*i] = bot.think(&game, &level.world, &level.nav, *i);
+        }
         game.step(&level.world, &commands);
+        h2sim::bot::alert_actors(&mut bots, &game, &game.events);
         let t = tick as f32 * TICK;
         for e in std::mem::take(&mut game.events) {
             match e {
@@ -589,11 +617,14 @@ enum Mode {
     Playing,
 }
 
+/// Bodies farther than this from the camera aren't posed or drawn.
+const BODY_RANGE: f32 = 80.0;
+
 /// A Spartan's body posed for this frame.
 struct BodyPose {
-    /// Which body: the Spartan's or the Elite's mesh for this player.
+    /// Which body, and the copy of its mesh posed for this player.
     mesh: usize,
-    elite: bool,
+    kind: BodyKind,
     vertices: Vec<scene::Vertex>,
     object: Mat4,
     /// Where the weapons go in the right and left hands.
@@ -948,6 +979,7 @@ impl App {
             }
             self.remote_commands(&mut commands);
             self.game.step(&self.world, &commands);
+            h2sim::bot::alert_actors(&mut self.bots, &self.game, &self.game.events);
             if !ticked {
                 for l in &mut self.locals {
                     l.taps = Taps::default();
@@ -1090,8 +1122,12 @@ impl App {
                         kill_message(&self.game, usize::MAX, killer, victim, betrayal)
                             .to_lowercase()
                     );
+                    // The campaign has no kill messages.
+                    let campaign = self.game.rules.game_type == GameType::Campaign;
                     for l in &mut self.locals {
-                        l.message(kill_message(&self.game, l.player, killer, victim, betrayal));
+                        if !campaign {
+                            l.message(kill_message(&self.game, l.player, killer, victim, betrayal));
+                        }
                         if victim == l.player {
                             // The death camera starts behind and above the body.
                             l.camera.pitch = -0.6;
@@ -1181,25 +1217,46 @@ impl App {
         }
     }
 
-    /// Pose every Spartan's body. Each view leaves out its own player's
-    /// body while it looks through their eyes.
+    /// Pose every Spartan's body (the closest, while each kind of body
+    /// has copies of its mesh to go round). Each view leaves out its own
+    /// player's body while it looks through their eyes.
     fn animate_bodies(&mut self, dt: f32) {
         let actions = std::mem::take(&mut self.body_actions);
-        let n = self.game.players.len().min(scene::MAX_BODIES);
+        let n = self.game.players.len();
         self.bodies.resize_with(n, BodyAnimator::default);
         self.body_poses.resize_with(n, || None);
-        for (i, p) in self.game.players.iter().enumerate().take(n) {
-            let Some(body) = self.scene.body_for(p.look.elite) else {
+        let eye = self
+            .locals
+            .first()
+            .map_or(Vec3::ZERO, |l| l.camera.position);
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| {
+            let d = |i: usize| self.game.players[i].body.position.distance_squared(eye);
+            d(a).total_cmp(&d(b))
+        });
+        let mut used: HashMap<BodyKind, usize> = HashMap::new();
+        for i in order {
+            let p = &self.game.players[i];
+            // Out of sight anyway.
+            if p.body.position.distance_squared(eye) > BODY_RANGE * BODY_RANGE {
+                self.body_poses[i] = None;
+                continue;
+            }
+            let kind = self.scene.body_kind(p);
+            let Some(body) = self.scene.body_of_kind(kind) else {
+                self.body_poses[i] = None;
                 continue;
             };
+            let copy = used.entry(kind).or_insert(0);
+            let Some(&mesh) = body.meshes.get(*copy) else {
+                self.body_poses[i] = None;
+                continue;
+            };
+            *copy += 1;
             let rig = &body.rig;
-            // The two species have their own animation graphs: start over
+            // Each kind of body has its own animation graph: start over
             // when a player's changes.
-            let elite = self.scene.elite.is_some() && p.look.elite;
-            if self.body_poses[i]
-                .as_ref()
-                .is_some_and(|b| b.elite != elite)
-            {
+            if self.body_poses[i].as_ref().is_some_and(|b| b.kind != kind) {
                 self.bodies[i] = BodyAnimator::default();
             }
             let mut style = p
@@ -1261,8 +1318,8 @@ impl App {
             let pose = self.bodies[i].update(rig, &input, dt);
             let world = rig.world(&pose);
             self.body_poses[i] = Some(BodyPose {
-                mesh: body.meshes[i],
-                elite,
+                mesh,
+                kind,
                 vertices: rig.skin.pose(&rig.skin_matrices(&world)),
                 object,
                 weapons: [false, true].map(|left| rig.weapon_frame(&world, left)),
@@ -1274,12 +1331,16 @@ impl App {
     /// Battle Rifle.
     fn animate_preview(&mut self, dt: f32) {
         let look = self.menu.profile.look;
-        let Some(body) = self.scene.body_for(look.elite) else {
+        let kind = if look.elite && self.scene.elite.is_some() {
+            BodyKind::Elite
+        } else {
+            BodyKind::Spartan
+        };
+        let Some(body) = self.scene.body_of_kind(kind) else {
             self.preview_pose = None;
             return;
         };
-        let elite = self.scene.elite.is_some() && look.elite;
-        if self.preview_pose.as_ref().is_some_and(|p| p.elite != elite) {
+        if self.preview_pose.as_ref().is_some_and(|p| p.kind != kind) {
             self.preview = BodyAnimator::default();
         }
         let rig = &body.rig;
@@ -1296,7 +1357,7 @@ impl App {
         let world = rig.world(&pose);
         self.preview_pose = Some(BodyPose {
             mesh: body.preview,
-            elite,
+            kind,
             vertices: rig.skin.pose(&rig.skin_matrices(&world)),
             object: Mat4::IDENTITY,
             weapons: [false, true].map(|left| rig.weapon_frame(&world, left)),
@@ -1470,12 +1531,17 @@ impl App {
             .scene
             .level_light
             .at(&self.scene.textures, p.body.position + Vec3::Z * 0.2);
+        // Actors wear their rank's colours.
+        let colors = p
+            .actor
+            .and_then(|a| self.scene.ai.colors.get(a.character).copied())
+            .unwrap_or_else(|| player_colors(&self.game, player));
         let mut out = vec![DrawCall {
             mesh: pose.mesh,
             model: pose.object,
             light,
-            colors: Some(player_colors(&self.game, player)),
-            emblem: Some(p.look.emblem),
+            colors: Some(colors),
+            emblem: p.actor.is_none().then_some(p.look.emblem),
             fx: local::player_fx(&self.game, player),
         }];
         // Drivers and gunners hold the controls, not their guns.
@@ -2071,6 +2137,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         app.start_campaign();
     } else if env("H2_PLAY").is_some() {
         app.start_game();
+    }
+    // H2_CAM="x y z yaw pitch" (degrees): look from there with a free
+    // camera (for testing).
+    let cam: Vec<f32> = env("H2_CAM")
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|x| x.parse().ok())
+        .collect();
+    if let (Some(l), &[x, y, z, yaw, pitch]) = (app.locals.first_mut(), &cam[..]) {
+        l.flying = true;
+        l.camera.position = Vec3::new(x, y, z);
+        l.camera.yaw = yaw.to_radians();
+        l.camera.pitch = pitch.to_radians();
     }
     event_loop.run_app(&mut app)?;
     Ok(())

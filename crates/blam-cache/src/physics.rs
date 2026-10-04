@@ -169,6 +169,11 @@ pub fn biped_physics(set: &mut MapSet, name: &str) -> Result<Option<BipedPhysics
     else {
         return Ok(None);
     };
+    biped_physics_of(set, datum)
+}
+
+/// Physics of a biped tag.
+pub fn biped_physics_of(set: &mut MapSet, datum: DatumIndex) -> Result<Option<BipedPhysics>> {
     let (_, _, d) = set.tag_data(datum)?;
     if d.len() < 0x2A0 {
         return Ok(None);

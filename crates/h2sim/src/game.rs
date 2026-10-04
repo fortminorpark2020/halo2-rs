@@ -11,6 +11,7 @@ use crate::weapon::{ArmorScale, Blast, WeaponDef, WeaponInput, WeaponState};
 use blam_cache::physics::{BipedPhysics, PlayerMovement};
 use glam::{Vec2, Vec3};
 
+mod campaign;
 mod ctf;
 mod dual;
 mod juggernaut;
@@ -22,6 +23,7 @@ mod sync;
 mod teleporters;
 mod vehicles;
 mod zones;
+pub use campaign::{ActorSpawn, CharacterDef, Mind, Side};
 pub use ctf::{Flag, FlagEvent, NEUTRAL};
 pub use options::{MapWeapons, Options};
 pub use powerups::Powerup;
@@ -526,6 +528,24 @@ pub enum GrenadeKind {
     Plasma,
 }
 
+/// How tough someone is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vitality {
+    pub shield: f32,
+    pub health: f32,
+    /// Seconds for empty shields to charge fully.
+    pub recharge: f32,
+}
+
+/// What makes a player slot a campaign actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Actor {
+    /// Index into the game's characters.
+    pub character: usize,
+    /// The scenario squad it was placed with.
+    pub squad: u16,
+}
+
 #[derive(Debug, Clone)]
 pub struct Spartan {
     /// The gamertag shown in the scoreboard and kill messages.
@@ -538,6 +558,11 @@ pub struct Spartan {
     /// Above the rules' shield while an overshield lasts.
     pub shield: f32,
     pub health: f32,
+    /// Shields and health when full, and seconds for shields to recharge.
+    pub full: Vitality,
+    /// A campaign actor (a Grunt, a Marine...): not a player, and never
+    /// respawns.
+    pub actor: Option<Actor>,
     since_damage: f32,
     /// Shield an overshield picked up has yet to charge.
     overshield_charge: f32,
@@ -838,6 +863,11 @@ pub struct Game {
     /// The player who won (in team games, whose kill won it).
     pub winner: Option<usize>,
     pub winning_team: Option<u8>,
+    /// Campaign: the kinds of actor the mission has.
+    pub characters: Vec<CharacterDef>,
+    /// Campaign: where a player who dies comes back.
+    pub checkpoint: Option<(Vec3, f32)>,
+    since_checkpoint: f32,
     rng: u32,
 }
 
@@ -914,6 +944,9 @@ impl Game {
             events: Vec::new(),
             winner: None,
             winning_team: None,
+            characters: Vec::new(),
+            checkpoint: None,
+            since_checkpoint: 0.0,
             rng: 0x2545_F491,
         }
     }
@@ -1020,6 +1053,12 @@ impl Game {
             pitch: 0.0,
             shield: self.rules.shield,
             health: self.rules.health,
+            full: Vitality {
+                shield: self.rules.shield,
+                health: self.rules.health,
+                recharge: self.rules.shield_recharge,
+            },
+            actor: None,
             since_damage: f32::INFINITY,
             overshield_charge: 0.0,
             camo: 0.0,
@@ -1090,7 +1129,7 @@ impl Game {
                 best = (score, (pos, yaw));
             }
         }
-        let (pos, yaw) = best.1;
+        let (pos, yaw) = self.checkpoint_spawn().unwrap_or(best.1);
         let old = &mut self.players[player];
         let (team, score, kills, deaths) = (old.team, old.score, old.kills, old.deaths);
         let name = std::mem::take(&mut old.name);
@@ -1126,13 +1165,15 @@ impl Game {
         self.step_flags(world, dt);
         self.step_hills(dt);
         self.step_territories(dt);
+        self.step_checkpoint(dt);
     }
 
     fn step_player(&mut self, world: &World, i: usize, cmd: Command, dt: f32) {
         if !self.players[i].alive {
             let p = &mut self.players[i];
             p.respawn_in -= dt;
-            if p.respawn_in <= 0.0 {
+            // Actors stay dead.
+            if p.respawn_in <= 0.0 && p.actor.is_none() {
                 self.respawn(i);
             }
             return;
@@ -1159,9 +1200,9 @@ impl Game {
             }
             // Shields recharge after a while without damage.
             p.since_damage += dt;
-            if p.since_damage > self.rules.shield_delay && p.shield < self.rules.shield {
-                p.shield = (p.shield + self.rules.shield / self.rules.shield_recharge * dt)
-                    .min(self.rules.shield);
+            let full = p.full;
+            if p.since_damage > self.rules.shield_delay && p.shield < full.shield {
+                p.shield = (p.shield + full.shield / full.recharge.max(0.1) * dt).min(full.shield);
             }
             powerups::step(p, &self.rules, dt);
             p.readying = (p.readying - dt).max(0.0);
@@ -1586,9 +1627,10 @@ impl Game {
         headshot: bool,
         armor: ArmorScale,
     ) {
-        let rules_health = self.rules.health;
         let teammate = attacker.is_some_and(|a| a != victim && !self.is_enemy(a, victim));
-        if teammate && !self.rules.friendly_fire {
+        // Actors never hurt their own side.
+        let actor = attacker.is_some_and(|a| self.players[a].actor.is_some());
+        if teammate && (!self.rules.friendly_fire || actor) {
             return;
         }
         let amount = self.juggernaut_damage(victim, amount);
@@ -1611,7 +1653,11 @@ impl Game {
         let rest = past * armor.body;
         // A headshot kills once the shields are gone.
         let killing_headshot = headshot && p.shield <= 0.0 && past > 1e-3;
-        p.health -= if killing_headshot { rules_health } else { rest };
+        p.health -= if killing_headshot {
+            p.full.health
+        } else {
+            rest
+        };
         self.events.push(Event::Damaged {
             player: victim,
             amount,
@@ -1622,7 +1668,11 @@ impl Game {
     }
 
     fn kill(&mut self, victim: usize, killer: Option<usize>, headshot: bool) {
-        let respawn = self.rules.respawn_time;
+        let respawn = if self.players[victim].actor.is_some() {
+            self.corpse_time()
+        } else {
+            self.rules.respawn_time
+        };
         self.leave_seat(victim);
         if self.players[victim].objective.is_some() {
             self.players[victim].alive = false;
@@ -1656,6 +1706,13 @@ impl Game {
             victim,
             headshot,
         });
+        // The campaign keeps no score.
+        if self.rules.game_type == GameType::Campaign {
+            if let Some(k) = killer.filter(|&k| self.is_enemy(k, victim)) {
+                self.players[k].kills += 1;
+            }
+            return;
+        }
         let leaders = self.leaders();
         let kills_score = self.rules.game_type.kills_score();
         // Outside Slayer, kills don't change the score.

@@ -1,6 +1,7 @@
 //! The game's flow: menus, loading maps in the background, starting and
 //! ending games, and the menu music.
 
+use crate::campaign;
 use crate::input::PadPress;
 use crate::lan::Net;
 use crate::local::{player_colors, LocalPlayer, TEAM_COLORS, TEAM_NAMES};
@@ -346,6 +347,23 @@ impl App {
             look.elite = false;
             look.colors = [CHIEF_OLIVE; 2];
             self.game.set_look(l.player, look);
+        }
+        // H2_SQUADS=<names>: place those squads at the start.
+        if let Ok(names) = std::env::var("H2_SQUADS") {
+            let squads = campaign::squads_named(&self.scene, &names);
+            self.place_squads(&squads);
+        }
+    }
+
+    /// Bring a mission's squads into play.
+    pub(crate) fn place_squads(&mut self, squads: &[usize]) {
+        let difficulty = self.menu.difficulty as u8;
+        for &s in squads {
+            let placed = campaign::place_squad(&mut self.game, &self.scene, s, difficulty, 0);
+            self.bots
+                .retain(|(i, _)| !placed.iter().any(|(j, _)| j == i));
+            self.bots
+                .extend(placed.into_iter().filter_map(|(i, b)| Some((i, b?))));
         }
     }
 

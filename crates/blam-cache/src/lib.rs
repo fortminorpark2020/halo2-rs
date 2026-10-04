@@ -604,6 +604,7 @@ fn cstr(b: &[u8]) -> String {
     String::from_utf8_lossy(&b[..end]).into_owned()
 }
 
+pub mod ai;
 pub mod animation;
 pub mod bitmap;
 pub mod colors;

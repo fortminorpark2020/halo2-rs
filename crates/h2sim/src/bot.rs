@@ -11,8 +11,10 @@ use crate::weapon::WeaponDef;
 use blam_cache::weapon::TriggerBehavior;
 use glam::{Vec2, Vec3};
 
+mod actor;
 mod arms;
 mod ride;
+pub use actor::{alert_actors, ActorMind};
 use ride::Riding;
 
 /// How far a bot sees.
@@ -79,6 +81,10 @@ pub struct Bot {
     /// The weapon being fetched and for how long; ones given up on.
     fetching: Option<(Vec3, f32)>,
     shunned_weapons: Vec<Vec3>,
+    /// A campaign actor's character and what it knows.
+    pub actor: Option<ActorMind>,
+    /// Stood still on purpose last tick (not stuck).
+    idle: bool,
 }
 
 /// Computer players' names, picked by player number.
@@ -165,6 +171,8 @@ impl Bot {
             switch_wait: 0.0,
             fetching: None,
             shunned_weapons: Vec::new(),
+            actor: None,
+            idle: false,
         };
         let rides = bot.random() < RIDES;
         bot.riding.reset(rides);
@@ -410,7 +418,7 @@ impl Bot {
             self.shunned_weapons.clear();
             self.yaw = p.yaw;
             self.pitch = 0.0;
-            let rides = self.random() < RIDES;
+            let rides = self.random() < RIDES && self.actor.is_none();
             self.riding.reset(rides);
             return Command {
                 yaw: p.yaw,
@@ -427,7 +435,7 @@ impl Bot {
         // Stuck against something: hop, then give up on the route.
         let moved = (feet - self.last_position).truncate().length();
         self.last_position = feet;
-        if moved < 0.4 * dt {
+        if moved < 0.4 * dt && !self.idle {
             self.stuck_for += dt;
         } else {
             self.stuck_for = 0.0;
@@ -443,10 +451,21 @@ impl Bot {
 
         // A flag carrier runs for home, fighting only those in its way.
         let carrying = p.objective.is_some();
-        let target = self
-            .find_target(game, world, me)
-            .filter(|&t| !carrying || game.players[t].body.position.distance(feet) < 2.5);
+        let found = if self.actor.is_some() {
+            self.actor_target(game, world, me)
+        } else {
+            self.find_target(game, world, me)
+        };
+        let target =
+            found.filter(|&t| !carrying || game.players[t].body.position.distance(feet) < 2.5);
         if target != self.target {
+            // An actor that loses sight of someone goes to look for them.
+            let lost = self
+                .target
+                .filter(|&t| target.is_none() && game.players[t].alive);
+            if let (Some(a), Some(t)) = (&mut self.actor, lost) {
+                a.alert = Some((game.players[t].body.position, 0.0));
+            }
             self.target = target;
             self.seen_for = 0.0;
             self.aim_error = Vec2::new(self.random() - 0.5, self.random() - 0.5) * 0.4;
@@ -466,7 +485,11 @@ impl Bot {
         let mut on_route = false;
         if let Some(t) = target {
             self.seen_for += dt;
-            self.aim_error *= 1.0 - (2.5 * dt).min(1.0);
+            if self.actor.is_some() {
+                self.actor_aim(dt);
+            } else {
+                self.aim_error *= 1.0 - (2.5 * dt).min(1.0);
+            }
             let q = &game.players[t];
             let def = p.held().and_then(|h| game.weapons.get(h.weapon));
             let to = Bot::aim_point(def, eye, q) - eye;
@@ -482,7 +505,15 @@ impl Bot {
             let too_close = def
                 .and_then(|d| d.flight?.blast)
                 .is_some_and(|b| dist < b.radius.1 + 0.5);
-            if self.seen_for > REACTION && off < FIRE_CONE && !melee_only && !too_close {
+            // Actors hold fire beyond their weapon's range.
+            let too_far = self
+                .actor
+                .as_ref()
+                .is_some_and(|a| dist > a.mind.fire_range.max(8.0) * 1.25);
+            let (actor_fwd, charging) = self.actor_range(dist, dt);
+            let melee_only = melee_only || charging;
+            if self.seen_for > REACTION && off < FIRE_CONE && !melee_only && !too_close && !too_far
+            {
                 // Semi-automatic weapons need the trigger released between shots.
                 cmd.fire = match def.map(|d| d.behavior) {
                     Some(TriggerBehavior::Spew) | None => true,
@@ -504,14 +535,18 @@ impl Bot {
                 cmd.melee = self.pulse;
             }
             let has_grenade = p.frags + p.plasmas > 0 && p.left.is_none();
-            if has_grenade && self.grenade_wait <= 0.0 && (4.0..12.0).contains(&dist) {
+            if self.actor.is_some() {
+                cmd.throw_grenade |= has_grenade && self.actor_grenade(dist, dt);
+            } else if has_grenade && self.grenade_wait <= 0.0 && (4.0..12.0).contains(&dist) {
                 cmd.throw_grenade = true;
                 self.grenade_wait = 4.0 + self.random() * 6.0;
             }
             // Close in from afar (right up close with a short-range gun
             // like the shotgun), back off when too close, strafe always.
             let short = def.is_some_and(|d| d.range < SHORT_RANGE);
-            let fwd = if melee_only || dist > 8.0 || (short && dist > 2.0) {
+            let fwd = if self.actor.is_some() {
+                actor_fwd
+            } else if melee_only || dist > 8.0 || (short && dist > 2.0) {
                 1.0
             } else if dist < 2.5 && !short {
                 -1.0
@@ -523,7 +558,7 @@ impl Bot {
                 cmd.reload = true;
             }
             // An enemy sitting in a slow vehicle close by: board it.
-            if !carrying {
+            if !carrying && self.actor.is_none() {
                 walk_to = Bot::board_point(game, me, t);
             }
         } else if let Some((v, _, entry)) = self
@@ -538,14 +573,19 @@ impl Bot {
             boarding = Bot::board_now(game, me, v);
         } else {
             // A better weapon lying close by comes first.
-            let weapon = if carrying {
+            let actor = self.actor.is_some();
+            let weapon = if carrying || actor {
                 None
             } else {
                 self.weapon_to_fetch(game, world, me, dt)
             };
-            let objective = weapon
-                .map(|at| (at, false))
-                .or_else(|| Bot::objective(game, me));
+            let objective = if actor {
+                self.actor_goal(game, world, me, dt).map(|at| (at, false))
+            } else {
+                weapon
+                    .map(|at| (at, false))
+                    .or_else(|| Bot::objective(game, me))
+            };
             if let Some(o) = objective {
                 walk_to = self.walk_to_objective(nav, world, feet, o);
                 if weapon.is_some() && self.no_way {
@@ -554,7 +594,7 @@ impl Bot {
             } else {
                 self.heading_for = None;
             }
-            if self.route.is_empty() && walk_to.is_none() {
+            if self.route.is_empty() && walk_to.is_none() && !actor {
                 self.new_route(nav, world, feet, true);
             }
             while let Some(&next) = self.route.first() {
@@ -586,6 +626,10 @@ impl Bot {
             }
             // Reload while nothing is around.
             cmd.reload = self.held_partly_empty(game, me);
+            // An actor with nowhere to go stands facing its way.
+            if let (None, Some(facing)) = (walk_to, self.actor_facing()) {
+                self.turn_to(facing, 0.0, dt);
+            }
         }
         if let Some(goal) = walk_to {
             let to = (goal - feet).truncate();
@@ -606,13 +650,14 @@ impl Bot {
                 let takes = game.can_take(me, f) || (flag.armed.is_some() && flag.team != team);
                 takes && flag.position.distance(feet) < 1.5
             }) && p.objective.is_none();
-        if target.is_none() && !boarding {
+        if target.is_none() && !boarding && self.actor.is_none() {
             self.pick_up(game, me, &mut cmd);
         }
         if !on_route {
             let drift = game.players[me].body.velocity.truncate();
             cmd.movement = self.keep_off_ledges(world, feet, drift, cmd.movement);
         }
+        self.idle = target.is_none() && cmd.movement == Vec2::ZERO;
         cmd.yaw = self.yaw;
         cmd.pitch = self.pitch;
         cmd
