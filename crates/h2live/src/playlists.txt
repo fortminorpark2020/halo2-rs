@@ -79,7 +79,7 @@ maps burial_mounds turf dune
 playlist 6 small_team_unranked Team Training
 ranked no
 humans 2 8
-party 8
+party 4
 guests yes
 bots fill 8
 variant team_slayer default 50 720
