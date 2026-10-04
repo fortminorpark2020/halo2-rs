@@ -184,6 +184,7 @@ enum Builtin {
     ListCount,
     RandomRange,
     RealRandomRange,
+    Pin,
 }
 
 fn form_of(name: &str) -> Form {
@@ -218,6 +219,7 @@ fn form_of(name: &str) -> Form {
         "list_count" => ListCount,
         "random_range" => RandomRange,
         "real_random_range" => RealRandomRange,
+        "pin" => Pin,
         _ => return Form::Host,
     })
 }
@@ -899,6 +901,7 @@ impl Vm {
                 let t = (self.random() % 10_000) as f32 / 10_000.0;
                 Value::Real(n(0) + (n(1) - n(0)) * t)
             }
+            Pin => real(n(0).max(n(1)).min(n(2))),
         }
     }
 }

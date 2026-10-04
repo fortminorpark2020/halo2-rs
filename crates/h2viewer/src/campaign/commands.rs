@@ -21,9 +21,23 @@ const THERE: f32 = 1.0;
 pub(super) const AI_ACTOR: u32 = 2 << 30;
 pub(super) const AI_LOCATION: u32 = 3 << 30;
 /// Combat status (as `cs_abort_on_combat_status` counts it) of an actor
-/// fighting, and of one searching.
-const ENGAGED: i16 = 8;
-const SEARCHING: i16 = 4;
+/// fighting, of one searching, and of one at ease.
+pub(super) const ENGAGED: i16 = 8;
+pub(super) const SEARCHING: i16 = 4;
+pub(super) const IDLE: i16 = 1;
+/// The levels' names (`ai_combat_status_alert`...), from 0.
+const STATUS_NAMES: [&str; 10] = [
+    "asleep",
+    "idle",
+    "alert",
+    "active",
+    "uninspected",
+    "definite",
+    "certain",
+    "visible",
+    "clear_los",
+    "dangerous",
+];
 
 #[derive(Debug, Default)]
 pub(super) struct Commands {
@@ -51,6 +65,17 @@ struct Command {
     /// it's hurt (below this health and shield).
     abort_status: Option<i16>,
     abort_hurt: Option<f32>,
+}
+
+/// How roused an actor is.
+pub(super) fn combat_status(b: &h2sim::Bot) -> i16 {
+    if b.target().is_some() {
+        ENGAGED
+    } else if b.fighting() {
+        SEARCHING
+    } else {
+        IDLE
+    }
 }
 
 impl Ctx<'_> {
@@ -265,9 +290,14 @@ impl Ctx<'_> {
         })
     }
 
-    /// `ai_current_actor` and `ai_current_squad`.
+    /// `ai_current_actor` and `ai_current_squad`, and the combat status
+    /// levels.
     pub(super) fn current_ai(&self, name: &str) -> Option<Value> {
         let none = Value::Handle(u32::MAX);
+        if let Some(level) = name.strip_prefix("ai_combat_status_") {
+            let k = STATUS_NAMES.iter().position(|&n| n == level)?;
+            return Some(Value::Real(k as f32));
+        }
         match name {
             "ai_current_actor" => Some(
                 self.st
@@ -309,16 +339,7 @@ impl Ctx<'_> {
         let status: HashMap<usize, i16> = self
             .bots
             .iter()
-            .map(|(i, b)| {
-                let s = if b.target().is_some() {
-                    ENGAGED
-                } else if b.fighting() {
-                    SEARCHING
-                } else {
-                    0
-                };
-                (*i, s)
-            })
+            .map(|(i, b)| (*i, combat_status(b)))
             .collect();
         let game = &*self.game;
         let log = self.st.log;

@@ -743,6 +743,14 @@ impl Ctx<'_> {
             .collect()
     }
 
+    /// The player or actor an object is, if it's one.
+    fn unit(&self, o: Obj) -> Option<usize> {
+        match o {
+            Obj::Unit(i) => Some(i).filter(|&i| i < self.game.players.len()),
+            Obj::Name(_) => None,
+        }
+    }
+
     /// Where an object is, if it's in the level.
     fn position(&self, o: Obj) -> Option<Vec3> {
         match o {
@@ -1249,6 +1257,57 @@ impl Host for Ctx<'_> {
                 units(self.actors(&arg(0)).into_iter().take(1).collect())
             }
             "ai_actors" => units(self.actors(&arg(0))),
+            "ai_combat_status" => {
+                let actors = self.actors(&arg(0));
+                let status = self
+                    .bots
+                    .iter()
+                    .filter(|(i, _)| actors.contains(i))
+                    .map(|(_, b)| commands::combat_status(b))
+                    .max()
+                    .unwrap_or(0);
+                Value::Real(status as f32)
+            }
+            "object_cannot_die" => {
+                let on = arg(1).truthy();
+                for &o in objects(0) {
+                    if let Some(a) = self
+                        .unit(o)
+                        .and_then(|i| self.game.players[i].actor.as_mut())
+                    {
+                        a.immortal = on;
+                    }
+                }
+                Value::Void
+            }
+            "unit_has_weapon" => {
+                let tag = arg(1).handle();
+                let has = objects(0)
+                    .first()
+                    .and_then(|&o| self.unit(o))
+                    .is_some_and(|i| {
+                        self.game.players[i].weapons.iter().any(|h| {
+                            self.scene
+                                .weapons
+                                .get(h.weapon)
+                                .is_some_and(|w| Some(w.tag.0) == tag)
+                        })
+                    });
+                Value::Bool(has)
+            }
+            // Bookkeeping the game here doesn't need.
+            "ai_renew"
+            | "ai_disposable"
+            | "ai_allegiance"
+            | "ai_dialogue_enable"
+            | "data_mine_set_mission_segment"
+            | "cache_block_for_one_frame"
+            | "object_type_predict"
+            | "camera_predict_resources_at_point"
+            | "game_can_use_flashlights"
+            | "weapon_enable_warthog_chaingun_light"
+            | "pvs_set_object"
+            | "pvs_clear" => Value::Void,
             "ai_cannot_die" => {
                 let on = arg(1).truthy();
                 for i in self.actors(&arg(0)) {

@@ -4,6 +4,7 @@
 //! of a squad are left and how hurt, whether a player has come into a
 //! volume, what a script says.
 
+use super::commands::combat_status;
 use super::{in_group, Ctx};
 use blam_cache::orders::{Combine, Condition, Rule, TriggerRef};
 use glam::Vec3;
@@ -14,11 +15,6 @@ use std::collections::{HashMap, HashSet};
 const EVERY: u32 = 3;
 /// Close enough to its firing position to have arrived.
 const ARRIVED: f32 = 1.0;
-/// Combat status, as the triggers count it: idle, searching, and with an
-/// enemy in clear sight.
-const IDLE: i16 = 1;
-const SEARCHING: i16 = 4;
-const ENGAGED: i16 = 8;
 
 /// A squad's order, and how far along it is.
 #[derive(Debug, Clone, Default)]
@@ -328,20 +324,7 @@ impl Ctx<'_> {
                 .filter(|(i, _)| actors.contains(i))
                 .map(|(_, b)| b)
         };
-        let status = || {
-            bots()
-                .map(|b| {
-                    if b.target().is_some() {
-                        ENGAGED
-                    } else if b.fighting() {
-                        SEARCHING
-                    } else {
-                        IDLE
-                    }
-                })
-                .max()
-                .unwrap_or(0)
-        };
+        let status = || bots().map(combat_status).max().unwrap_or(0);
         let fighting = || bots().filter(|b| b.target().is_some()).count() as i16;
         let a = c.a;
         let in_volume = |all: bool| {
