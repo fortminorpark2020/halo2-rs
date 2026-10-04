@@ -325,7 +325,6 @@ pub struct Context<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Row {
-    Campaign,
     Difficulty,
     Mission(usize),
     NoMissions,
@@ -366,6 +365,9 @@ enum Row {
     EndGame,
     Continue,
 }
+
+/// The main menu. The campaign is left off: multiplayer only.
+const MAIN_ROWS: [Row; 4] = [Row::Multiplayer, Row::SystemLink, Row::Profile, Row::Quit];
 
 impl Row {
     fn selectable(self) -> bool {
@@ -516,13 +518,7 @@ impl Menu {
 
     fn rows(&self, ctx: &Context) -> Vec<Row> {
         match self.screen {
-            Screen::Main => vec![
-                Row::Campaign,
-                Row::Multiplayer,
-                Row::SystemLink,
-                Row::Profile,
-                Row::Quit,
-            ],
+            Screen::Main => MAIN_ROWS.to_vec(),
             Screen::Campaign if ctx.missions.is_empty() => vec![Row::Difficulty, Row::NoMissions],
             Screen::Campaign => std::iter::once(Row::Difficulty)
                 .chain((0..ctx.missions.len()).map(Row::Mission))
@@ -590,7 +586,6 @@ impl Menu {
             }
         }
         match row {
-            Row::Campaign => ("CAMPAIGN".into(), None),
             Row::Difficulty => (
                 "DIFFICULTY".into(),
                 Some(DIFFICULTIES[self.difficulty.min(3)].into()),
@@ -870,7 +865,6 @@ impl Menu {
             Action::None
         };
         match row {
-            Row::Campaign => forward(self, Screen::Campaign),
             Row::Difficulty => {
                 if self.adjust(row, 1, ctx) {
                     self.sound = Some(Sound::Cursor);
@@ -1006,6 +1000,13 @@ impl Menu {
         }
     }
 
+    /// Back on the main menu, on the item that led here.
+    fn back_to_main(&mut self, from: Row) {
+        self.show(Screen::Main);
+        self.cursor = MAIN_ROWS.iter().position(|&r| r == from).unwrap_or(0);
+        self.sound = Some(Sound::Back);
+    }
+
     fn back(&mut self, ctx: &Context) -> Action {
         match self.screen {
             Screen::Lobby if ctx.joined => {
@@ -1014,14 +1015,11 @@ impl Menu {
             }
             Screen::Main => Action::None,
             Screen::Profile => {
-                self.show(Screen::Main);
-                self.cursor = 3;
-                self.sound = Some(Sound::Back);
+                self.back_to_main(Row::Profile);
                 Action::None
             }
             Screen::Campaign => {
-                self.show(Screen::Main);
-                self.sound = Some(Sound::Back);
+                self.back_to_main(Row::Multiplayer);
                 Action::None
             }
             Screen::Options => {
@@ -1030,12 +1028,12 @@ impl Menu {
                 self.sound = Some(Sound::Back);
                 Action::None
             }
-            Screen::Lobby | Screen::SystemLink => {
-                let from = self.screen;
-                self.show(Screen::Main);
-                // Back on the item that led here.
-                self.cursor = 1 + (from == Screen::SystemLink) as usize;
-                self.sound = Some(Sound::Back);
+            Screen::Lobby => {
+                self.back_to_main(Row::Multiplayer);
+                Action::None
+            }
+            Screen::SystemLink => {
+                self.back_to_main(Row::SystemLink);
                 Action::None
             }
             Screen::Pause => {
@@ -1595,7 +1593,6 @@ mod tests {
             },
             Profile::default(),
         );
-        m.input(Input::Down, &c);
         assert_eq!(m.input(Input::Select, &c), Action::None);
         assert_eq!(m.screen, Screen::Lobby);
         m.input(Input::Down, &c);
@@ -1630,7 +1627,6 @@ mod tests {
         assert_eq!(m.screen, Screen::Main);
         assert_eq!(m.rows(&c)[m.cursor], Row::Multiplayer);
         m.input(Input::Up, &c);
-        m.input(Input::Up, &c);
         assert_eq!(m.input(Input::Select, &c), Action::Quit);
     }
 
@@ -1646,8 +1642,8 @@ mod tests {
             ..ctx(&maps, &[])
         };
         let mut m = Menu::new(Settings::default(), Profile::default());
-        assert_eq!(m.input(Input::Select, &c), Action::None);
-        assert_eq!(m.screen, Screen::Campaign);
+        assert!(!m.rows(&c).iter().any(|r| matches!(r, Row::Difficulty)));
+        m.show(Screen::Campaign);
         assert_eq!(m.label(Row::Difficulty, &c).1.as_deref(), Some("NORMAL"));
         m.input(Input::Right, &c);
         m.input(Input::Right, &c);
