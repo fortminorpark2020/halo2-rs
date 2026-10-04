@@ -635,7 +635,13 @@ impl App {
                     self.sound.play_ui(&self.scene, Sound::Advance);
                 }
                 LiveEvent::Notice(text) => self.menu.notice = Some(text.to_uppercase()),
-                LiveEvent::Other(_) => {}
+                // Matches aren't played from the menus yet.
+                LiveEvent::Match(_)
+                | LiveEvent::HostMatch(_)
+                | LiveEvent::Link(_)
+                | LiveEvent::Go(_)
+                | LiveEvent::MatchOver(_)
+                | LiveEvent::CustomOpen { .. } => {}
             }
         }
         let screen = self.menu.screen;
