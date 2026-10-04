@@ -33,7 +33,7 @@ install. No game files are included in this repository.
   that move, territories taken), falling damage and the map's kill zones from
   the game's own tags, and bots that play each objective, escort carriers and
   defend, finding their way over a walking graph sampled from each level's
-  floors, and in Slayer take the vehicles they come across (driving, running
+  floors (taking teleporters where they're the shorter way), and in Slayer take the vehicles they come across (driving, running
   people over, manning turrets and a teammate's Warthog gun). Bots go for
   power weapons and power-ups lying nearby, dual wield, switch to the gun
   that suits the fight, and only spot a camouflaged player close up or when

@@ -319,11 +319,17 @@ fn load_level(path: &Path) -> Result<Level, String> {
     spots.extend(scene.items.iter().map(|i| i.position));
     spots.extend(objective::objective_points(&scene));
     let started = Instant::now();
-    let nav = NavGraph::for_level(&world, &spots, &kill_zones(&scene));
+    let nav = NavGraph::for_level(
+        &world,
+        &spots,
+        &kill_zones(&scene),
+        &objective::teleporters(&scene),
+    );
     println!(
-        "bot routes: {} points, {} links ({:.1?})",
+        "bot routes: {} points, {} links, {} through teleporters ({:.1?})",
         nav.points.len(),
         nav.links.iter().map(Vec::len).sum::<usize>(),
+        nav.hops.len(),
         started.elapsed()
     );
     Ok(Level {

@@ -364,8 +364,9 @@ impl Bot {
             .unwrap_or_default();
     }
 
-    /// Pick somewhere to go and plan the way there.
-    fn new_route(&mut self, nav: &NavGraph, world: &World, from: Vec3) {
+    /// Pick somewhere to go and plan the way there (one with no
+    /// teleporters in a vehicle).
+    fn new_route(&mut self, nav: &NavGraph, world: &World, from: Vec3, on_foot: bool) {
         self.route.clear();
         let Some(start) = nav.nearest(world, from) else {
             return;
@@ -373,7 +374,12 @@ impl Bot {
         for _ in 0..4 {
             let goal = (self.random() * nav.points.len() as f32) as usize;
             let goal = goal.min(nav.points.len() - 1);
-            if let Some(route) = nav.path_avoiding(start, goal, &self.blocked) {
+            let route = if on_foot {
+                nav.path_avoiding(start, goal, &self.blocked)
+            } else {
+                nav.drive_path(start, goal)
+            };
+            if let Some(route) = route {
                 if route.len() > 1 {
                     self.route = nav.smooth(world, &route);
                     return;
@@ -549,11 +555,21 @@ impl Bot {
                 self.heading_for = None;
             }
             if self.route.is_empty() && walk_to.is_none() {
-                self.new_route(nav, world, feet);
+                self.new_route(nav, world, feet, true);
             }
             while let Some(&next) = self.route.first() {
                 let point = nav.points[next];
-                if (point - feet).truncate().length() < ARRIVED && (point.z - feet.z).abs() < 1.0 {
+                // A teleporter pad is passed once out of the far side; till
+                // then, walk right onto it.
+                let hop = self.route.get(1).filter(|&&after| nav.is_hop(next, after));
+                let arrived = match hop {
+                    Some(&after) => nav.points[after].distance(feet) < 1.0,
+                    None => {
+                        (point - feet).truncate().length() < ARRIVED
+                            && (point.z - feet.z).abs() < 1.0
+                    }
+                };
+                if arrived {
                     self.route.remove(0);
                 } else {
                     walk_to = Some(point);
@@ -830,7 +846,7 @@ mod tests {
             (Vec3::new(-2.0, 0.0, 0.0), 0.0),
             (Vec3::new(2.0, 0.0, 0.0), 0.0),
         ];
-        let nav = NavGraph::for_level(&world, &[Vec3::ZERO], &[]);
+        let nav = NavGraph::for_level(&world, &[Vec3::ZERO], &[], &[]);
         let mut bots: Vec<(usize, Bot)> = (0..2)
             .map(|k| (game.add_player(), Bot::new(k * 17 + 3)))
             .collect();
@@ -849,5 +865,43 @@ mod tests {
             }
         }
         assert!(game.players.iter().map(|p| p.kills).sum::<u32>() > 0);
+    }
+
+    #[test]
+    fn bots_take_teleporters_to_get_somewhere() {
+        use crate::game::{ItemKind, ItemSpawn, Powerup, Teleporter};
+        let world = crate::nav::tests::islands();
+        let pads = [
+            Teleporter {
+                entry: Vec3::new(2.0, 0.0, 0.35),
+                exit: Vec3::new(10.0, 0.0, 0.35),
+            },
+            Teleporter {
+                entry: Vec3::new(14.0, 0.0, 0.35),
+                exit: Vec3::new(-2.0, 0.0, 0.35),
+            },
+        ];
+        let overshield = Vec3::new(12.0, 1.0, 0.0);
+        let nav = NavGraph::for_level(&world, &[Vec3::new(-1.0, 1.0, 0.0), overshield], &[], &pads);
+        let mut game = crate::game::tests::game();
+        game.teleporters = pads.to_vec();
+        game.item_spawns = vec![ItemSpawn {
+            kind: ItemKind::Powerup(Powerup::Overshield),
+            position: overshield,
+            respawn: 1000.0,
+        }];
+        game.item_timers = vec![0.0];
+        let me = game.add_player();
+        game.players[me].body.position = Vec3::new(-1.0, 1.0, 0.0);
+        let mut bot = Bot::new(11);
+        for _ in 0..60 * 10 {
+            let cmd = bot.think(&game, &world, &nav, me);
+            game.step(&world, &[cmd]);
+            assert!(game.players[me].alive, "fell off");
+            if game.item_timers[0] > 0.0 {
+                return;
+            }
+        }
+        panic!("never got there: at {}", game.players[me].body.position);
     }
 }

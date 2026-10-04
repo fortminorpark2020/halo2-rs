@@ -402,11 +402,11 @@ impl Bot {
                 Some((goal, from)) => {
                     let to = nav.nearest(world, goal);
                     self.route = to
-                        .and_then(|to| nav.path(from, to))
+                        .and_then(|to| nav.drive_path(from, to))
                         .map(|r| nav.smooth(world, &r))
                         .unwrap_or_default();
                 }
-                None => self.new_route(nav, world, at),
+                None => self.new_route(nav, world, at, false),
             }
         }
         while let Some(&next) = self.route.first() {

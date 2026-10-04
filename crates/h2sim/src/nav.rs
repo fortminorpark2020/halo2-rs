@@ -1,9 +1,10 @@
 //! A walking graph for computer players: points on the floor (spread over
 //! the level's floors, plus spawn points and item spots) joined wherever a
 //! Spartan can walk straight from one to the other, up stairs and ramps and
-//! down drops.
+//! down drops, and through teleporters.
 
 use crate::collision::{KillZone, World};
+use crate::game::Teleporter;
 use crate::player::GRAVITY;
 use glam::Vec3;
 use std::cmp::Ordering;
@@ -33,6 +34,8 @@ const FLOOR_UP: f32 = 0.7;
 /// Room a Spartan needs: overhead, and around at waist height.
 const HEADROOM: f32 = 0.75;
 const ELBOW_ROOM: f32 = 0.3;
+/// What going through a teleporter costs a route, as a walking distance.
+const HOP_COST: f32 = 1.0;
 
 #[derive(Debug, Clone, Default)]
 pub struct NavGraph {
@@ -40,6 +43,9 @@ pub struct NavGraph {
     pub points: Vec<Vec3>,
     /// Outgoing links of each point (links over drops go one way).
     pub links: Vec<Vec<usize>>,
+    /// Links through teleporters, from the pad's point to the exit's (also
+    /// in `links`). Only walkers take them.
+    pub hops: Vec<(usize, usize)>,
 }
 
 /// The floor under `p` (within `depth` below a point `rise` above it).
@@ -145,6 +151,10 @@ fn floor_points(world: &World, lo: Vec3, hi: Vec3, avoid: &[KillZone]) -> Vec<Ve
                     (j as f32 + 1.0 / 3.0) / n as f32,
                 );
                 let p = a + (b - a) * u + (c - a) * v;
+                // Only the part of a big floor near the spots.
+                if p.cmplt(lo).any() || p.cmpgt(hi).any() {
+                    continue;
+                }
                 let cell = (
                     (p.x / SPACING).floor() as i32,
                     (p.y / SPACING).floor() as i32,
@@ -184,17 +194,30 @@ impl NavGraph {
                 }
             }
         }
-        NavGraph { points, links }
+        NavGraph {
+            points,
+            links,
+            hops: Vec::new(),
+        }
     }
 
     /// A graph over a whole level: points spread over its floors around
     /// `spots` (spawns, items, flags), plus the spots, each joined to its
-    /// near neighbours. Places in `avoid`, and ones that can't be reached
-    /// from the spots or left again, are left out.
-    pub fn for_level(world: &World, spots: &[Vec3], avoid: &[KillZone]) -> NavGraph {
+    /// near neighbours, and teleporter pads to their exits. Places in
+    /// `avoid`, and ones that can't be reached from the spots or left
+    /// again, are left out.
+    pub fn for_level(
+        world: &World,
+        spots: &[Vec3],
+        avoid: &[KillZone],
+        teleporters: &[Teleporter],
+    ) -> NavGraph {
+        let pads = teleporters.iter().flat_map(|t| [t.entry, t.exit]);
         let spots: Vec<Vec3> = spots
             .iter()
-            .filter_map(|&p| floor_below(world, p, 0.3, 2.0).map(|z| p.truncate().extend(z)))
+            .copied()
+            .chain(pads)
+            .filter_map(|p| floor_below(world, p, 0.3, 2.0).map(|z| p.truncate().extend(z)))
             .collect();
         if spots.is_empty() {
             return NavGraph::default();
@@ -232,13 +255,33 @@ impl NavGraph {
                 }
             }
         }
-        NavGraph { points, links }.keep_reachable(first_spot)
+        // Each pad to its exit, where both are over a floor.
+        let mut hops = Vec::new();
+        let on_floor = |p: Vec3| floor_below(world, p, 0.3, 2.0).map(|z| p.truncate().extend(z));
+        for t in teleporters {
+            let (Some(a), Some(b)) = (on_floor(t.entry), on_floor(t.exit)) else {
+                continue;
+            };
+            let find = |p: Vec3| (first_spot..points.len()).find(|&i| points[i] == p);
+            if let (Some(i), Some(j)) = (find(a), find(b)) {
+                if i != j && !links[i].contains(&j) {
+                    links[i].push(j);
+                }
+                hops.push((i, j));
+            }
+        }
+        NavGraph {
+            points,
+            links,
+            hops,
+        }
+        .keep_reachable(first_spot)
     }
 
     /// Only the points the spots lead to (points from `first_spot` on)
     /// that can get back to the level's main area (its largest group of
-    /// points that all reach each other), so that from anywhere in the
-    /// graph a bot can find its way around.
+    /// points that all reach each other and take in a spot: not a roof),
+    /// so that from anywhere in the graph a bot can find its way around.
     fn keep_reachable(self, first_spot: usize) -> NavGraph {
         let n = self.points.len();
         let mut back = vec![Vec::new(); n];
@@ -258,7 +301,7 @@ impl NavGraph {
             seen
         };
         let forward = flood(&self.links, (first_spot..n).collect());
-        let returns = flood(&back, self.main_area(&back));
+        let returns = flood(&back, self.main_area(&back, first_spot));
         let mut index = vec![usize::MAX; n];
         let mut points = Vec::new();
         for i in 0..n {
@@ -277,12 +320,23 @@ impl NavGraph {
                     .collect()
             })
             .collect();
-        NavGraph { points, links }
+        let hops = self
+            .hops
+            .iter()
+            .map(|&(a, b)| (index[a], index[b]))
+            .filter(|&(a, b)| a != usize::MAX && b != usize::MAX)
+            .collect();
+        NavGraph {
+            points,
+            links,
+            hops,
+        }
     }
 
     /// The largest group of points that can all reach each other (strongly
-    /// connected; Kosaraju's method), given the links reversed.
-    fn main_area(&self, back: &[Vec<usize>]) -> Vec<usize> {
+    /// connected; Kosaraju's method) with a spot in it, given the links
+    /// reversed.
+    fn main_area(&self, back: &[Vec<usize>], first_spot: usize) -> Vec<usize> {
         let n = self.points.len();
         // Points in the order their searches finish.
         let mut seen = vec![false; n];
@@ -326,7 +380,7 @@ impl NavGraph {
             }
             sizes.push(size);
         }
-        let biggest = (0..sizes.len()).max_by_key(|&g| sizes[g]);
+        let biggest = (first_spot..n).map(|i| group[i]).max_by_key(|&g| sizes[g]);
         (0..n).filter(|&i| Some(group[i]) == biggest).collect()
     }
 
@@ -369,11 +423,41 @@ impl NavGraph {
 
     /// Shortest route that doesn't go through any of the `blocked` points.
     pub fn path_avoiding(&self, from: usize, to: usize, blocked: &[usize]) -> Option<Vec<usize>> {
+        self.search(from, to, blocked, true)
+    }
+
+    /// Shortest route for a vehicle: teleporters only take people.
+    pub fn drive_path(&self, from: usize, to: usize) -> Option<Vec<usize>> {
+        self.search(from, to, &[], false)
+    }
+
+    /// Whether the link from `a` to `b` goes through a teleporter.
+    pub fn is_hop(&self, a: usize, b: usize) -> bool {
+        self.hops.contains(&(a, b))
+    }
+
+    fn search(&self, from: usize, to: usize, blocked: &[usize], hops: bool) -> Option<Vec<usize>> {
         let n = self.points.len();
         if from >= n || to >= n {
             return None;
         }
-        let h = |i: usize| self.points[i].distance(self.points[to]);
+        let hops = if hops { &self.hops[..] } else { &[] };
+        // A teleporter can make the way shorter than the straight line:
+        // the guess allows for walking to the nearest pad and on from the
+        // nearest exit, so it never over-estimates.
+        let goal = self.points[to];
+        let exit_to_goal = hops
+            .iter()
+            .map(|&(_, b)| self.points[b].distance(goal) + HOP_COST)
+            .fold(f32::INFINITY, f32::min);
+        let h = |i: usize| {
+            let p = self.points[i];
+            let via = hops
+                .iter()
+                .map(|&(a, _)| p.distance(self.points[a]))
+                .fold(f32::INFINITY, f32::min);
+            p.distance(goal).min(via + exit_to_goal)
+        };
         let mut cost = vec![f32::INFINITY; n];
         let mut came = vec![usize::MAX; n];
         let mut open = BinaryHeap::new();
@@ -394,7 +478,14 @@ impl NavGraph {
                 if j != to && blocked.contains(&j) {
                     continue;
                 }
-                let c = cost[i] + self.points[i].distance(self.points[j]);
+                let step = if !self.is_hop(i, j) {
+                    self.points[i].distance(self.points[j])
+                } else if hops.is_empty() {
+                    continue;
+                } else {
+                    HOP_COST
+                };
+                let c = cost[i] + step;
                 if c < cost[j] {
                     cost[j] = c;
                     came[j] = i;
@@ -407,7 +498,7 @@ impl NavGraph {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Two floors joined by a ramp, with a wall across the lower floor.
@@ -474,7 +565,7 @@ mod tests {
     fn level_graphs_cover_the_floors() {
         let w = level();
         let spots = [Vec3::new(2.0, 2.0, 0.1), Vec3::new(17.0, 0.0, 2.1)];
-        let g = NavGraph::for_level(&w, &spots, &[]);
+        let g = NavGraph::for_level(&w, &spots, &[], &[]);
         // Points all over both floors and the ramp, and none in the wall.
         assert!(g.points.len() > 50, "{}", g.points.len());
         assert!(g.points.iter().any(|p| p.z > 1.9 && p.x > 15.0));
@@ -494,7 +585,7 @@ mod tests {
             Vec3::Z,
             Vec3::new(3.0, 10.0, 2.0),
         );
-        let g = NavGraph::for_level(&w, &spots, &[pit]);
+        let g = NavGraph::for_level(&w, &spots, &[pit], &[]);
         assert!(g.points.iter().all(|p| !pit.contains(*p)));
     }
 
@@ -516,5 +607,56 @@ mod tests {
         // With a wide floor below it's fine.
         let beyond = [[6., -5., 0.], [12., -5., 0.], [12., 5., 0.], [6., 5., 0.]];
         assert!(walkable(&world(&[platform, strip, beyond]), top, below));
+    }
+
+    #[test]
+    fn a_big_roof_out_of_reach_is_not_the_level() {
+        // A 10x10 room's floor, under a much bigger roof.
+        let p = [
+            [0., 0., 0.],
+            [10., 0., 0.],
+            [10., 10., 0.],
+            [0., 10., 0.],
+            [-5., -5., 6.],
+            [15., -5., 6.],
+            [15., 15., 6.],
+            [-5., 15., 6.],
+        ];
+        let w = World::new(&p, &[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
+        let g = NavGraph::for_level(&w, &[Vec3::new(5.0, 5.0, 0.0)], &[], &[]);
+        assert!(g.points.len() > 50, "{}", g.points.len());
+        assert!(g.points.iter().all(|p| p.z < 1.0));
+    }
+
+    /// Two 6x6 islands, x -3..3 and 9..15, with nothing between.
+    pub(crate) fn islands() -> World {
+        let quad = |x0: f32, x1: f32| [[x0, -3., 0.], [x1, -3., 0.], [x1, 3., 0.], [x0, 3., 0.]];
+        let p: Vec<[f32; 3]> = [quad(-3., 3.), quad(9., 15.)].concat();
+        World::new(&p, &[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7])
+    }
+
+    #[test]
+    fn walkers_cross_by_teleporter_and_vehicles_dont() {
+        let w = islands();
+        // Across and back, from the islands' far ends.
+        let pads = [
+            Teleporter {
+                entry: Vec3::new(2.0, 0.0, 0.35),
+                exit: Vec3::new(10.0, 0.0, 0.35),
+            },
+            Teleporter {
+                entry: Vec3::new(14.0, 0.0, 0.35),
+                exit: Vec3::new(-2.0, 0.0, 0.35),
+            },
+        ];
+        let spots = [Vec3::new(-1.0, 1.0, 0.0), Vec3::new(12.0, 1.0, 0.0)];
+        let g = NavGraph::for_level(&w, &spots, &[], &pads);
+        assert_eq!(g.hops.len(), 2);
+        let a = g.nearest(&w, spots[0]).unwrap();
+        let b = g.nearest(&w, spots[1]).unwrap();
+        let route = g.path(a, b).expect("through the teleporter");
+        assert!(route.windows(2).any(|l| l == [g.hops[0].0, g.hops[0].1]));
+        assert!(g.path(b, a).is_some());
+        assert!(g.drive_path(a, b).is_none());
     }
 }
