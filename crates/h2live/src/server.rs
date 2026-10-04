@@ -260,7 +260,7 @@ impl Server {
             return self.linger(conn, now);
         }
         match route {
-            Route::Link => self.legs.push(relay::Leg::new(conn, now)),
+            Route::Link => self.add_leg(conn, ip, now),
             Route::Live => {
                 let recent = self.sign_ins.entry(ip).or_default();
                 recent.retain(|&t| now - t < 60.0);

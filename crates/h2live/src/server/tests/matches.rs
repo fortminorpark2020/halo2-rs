@@ -4,7 +4,7 @@
 use super::*;
 use crate::client::{results, RelayLeg};
 use crate::levels::{min_xp, Placed};
-use h2net::live::{MatchInfo, MatchOver, Stage, QUICKMATCH};
+use h2net::live::{LinkInfo, MatchInfo, MatchOver, Stage, QUICKMATCH};
 use h2net::{Client, ClientEvent, Host, HostEvent, Lobby, Verified};
 use h2sim::testing::{floor, game};
 use h2sim::{Bot, Command, Game, GameType, NavGraph};
@@ -532,6 +532,42 @@ impl Arena {
     fn games_log(&self) -> String {
         std::fs::read_to_string(self.w.data.0.join("games.log")).unwrap_or_default()
     }
+
+    /// The latest link PC `i` was given to `peer` (an account).
+    fn link(&self, i: usize, peer: u64) -> Option<LinkInfo> {
+        self.w.events[i].iter().rev().find_map(|e| match e {
+            LiveEvent::Link(link) if link.peer == peer => Some(link.clone()),
+            _ => None,
+        })
+    }
+
+    /// Open relay legs by hand for each PC and link, and run until the
+    /// server joins them: the connections to the other ends, in order.
+    fn join_by_hand(&mut self, links: Vec<(usize, LinkInfo)>) -> Vec<Connection> {
+        let mut legs = Vec::new();
+        for (i, link) in links {
+            let (server_end, pc_end) = Connection::pair();
+            self.w
+                .server
+                .accept(server_end, Route::Link, ip(i as u8 + 1), self.w.now);
+            legs.push(self.w.pcs[i].open_leg(link, pc_end));
+        }
+        let mut ends: Vec<Option<Connection>> = legs.iter().map(|_| None).collect();
+        while ends.iter().any(Option::is_none) {
+            self.step();
+            for (leg, end) in legs.iter_mut().zip(&mut ends) {
+                if end.is_none() {
+                    *end = leg.poll().unwrap();
+                }
+            }
+        }
+        ends.into_iter().flatten().collect()
+    }
+}
+
+/// Whether `conn` is closed, once what's on its way has been read.
+fn closed(conn: &mut Connection) -> bool {
+    (0..1000).any(|_| conn.receive().is_err())
 }
 
 #[test]
@@ -1042,7 +1078,7 @@ fn the_relay_drops_a_link_that_falls_behind_and_legs_left_waiting() {
     };
     a.until(5.0, |a| link(a, 0).is_some() && link(a, 1).is_some());
     let (host_link, joiner_link) = (link(&a, 0).unwrap(), link(&a, 1).unwrap());
-    assert_eq!(host_link.token, joiner_link.token);
+    assert_ne!(host_link.token, joiner_link.token);
     assert_eq!((host_link.joiner, joiner_link.joiner), (false, true));
     assert_eq!((host_link.peer, joiner_link.peer), (a.id(1), a.id(0)));
     let mut legs = Vec::new();
@@ -1116,4 +1152,80 @@ fn the_relay_drops_a_link_that_falls_behind_and_legs_left_waiting() {
     assert!(matches!(leg.poll(), Ok(None)));
     a.run(2.0);
     assert!(leg.poll().is_err());
+}
+
+#[test]
+fn a_host_cant_stand_in_for_the_pcs_joining_it() {
+    let mut a = Arena::new("stand-in", 2, None);
+    let party = a.w.party(0).id;
+    a.send(1, ToServer::JoinParty(party));
+    a.until(5.0, |a| a.w.members(0).len() == 2);
+    for g in &mut a.gamers {
+        g.wont_link = true;
+    }
+    a.send(0, ToServer::Custom);
+    let (leader, member) = (a.id(0), a.id(1));
+    a.until(5.0, |a| {
+        a.link(0, member).is_some() && a.link(1, leader).is_some()
+    });
+    let (host_link, joiner_link) = (a.link(0, member).unwrap(), a.link(1, leader).unwrap());
+    // Each end has a token of its own: the host can't say it's the other.
+    assert_ne!(host_link.token, joiner_link.token);
+    let (server_end, mut fake) = Connection::pair();
+    a.w.server.accept(server_end, Route::Link, ip(1), a.w.now);
+    let hello = ToServer::LinkHello {
+        token: host_link.token,
+        account: member,
+    };
+    hello.send(&mut fake);
+    fake.flush().unwrap();
+    a.step();
+    assert!(closed(&mut fake));
+    // The real legs are joined.
+    let ends = a.join_by_hand(vec![(0, host_link), (1, joiner_link)]);
+    assert_eq!(ends.len(), 2);
+}
+
+#[test]
+fn links_close_with_the_custom_game_they_were_for() {
+    let mut a = Arena::new("links-close", 3, None);
+    let party = a.w.party(0).id;
+    for i in [1, 2] {
+        a.send(i, ToServer::JoinParty(party));
+    }
+    a.until(5.0, |a| a.w.members(0).len() == 3);
+    for g in &mut a.gamers {
+        g.wont_link = true;
+    }
+    a.send(0, ToServer::Custom);
+    let ids = [a.id(0), a.id(1), a.id(2)];
+    a.until(5.0, |a| {
+        (1..3).all(|i| a.link(0, ids[i]).is_some() && a.link(i, ids[0]).is_some())
+    });
+    let links = vec![
+        (0, a.link(0, ids[1]).unwrap()),
+        (1, a.link(1, ids[0]).unwrap()),
+        (0, a.link(0, ids[2]).unwrap()),
+        (2, a.link(2, ids[0]).unwrap()),
+    ];
+    let [mut to_bravo, mut bravo, mut to_charlie, mut charlie] =
+        <[Connection; 4]>::try_from(a.join_by_hand(links))
+            .ok()
+            .unwrap();
+    // The leader removes Charlie: Charlie's link closes, Bravo's stays.
+    a.send(0, ToServer::Kick(ids[2]));
+    a.run(3.0);
+    assert!(closed(&mut charlie));
+    assert!(closed(&mut to_charlie));
+    to_bravo.send(7, b"still here");
+    to_bravo.flush().unwrap();
+    a.step();
+    assert_eq!(bravo.receive().unwrap(), [(7, b"still here".to_vec())]);
+    // The leader goes back to the party lobby: the game is over, and so is
+    // Bravo's link.
+    a.send(0, ToServer::Back);
+    a.run(3.0);
+    assert!(closed(&mut bravo));
+    assert!(closed(&mut to_bravo));
+    assert_eq!(a.w.server.connections(), 3);
 }

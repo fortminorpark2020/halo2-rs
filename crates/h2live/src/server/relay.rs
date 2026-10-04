@@ -1,24 +1,31 @@
 //! The relay: games go through the server, so no one has to open a port.
 //! For each PC that joins a match (or its party's custom game) the server
-//! makes up a token and sends it to that PC and to the host (LINK). Each
-//! dials `/link` and says the token first (LINK_HELLO); once both of the
-//! legs are there, both are told (LINKED), and from then on whatever one
-//! sends goes to the other as it is. A leg whose other end doesn't come
-//! within 20 seconds is closed, and so is a link with an end more than
-//! 2 MB behind.
+//! makes up a pair of tokens, and sends one to that PC and the other to the
+//! host (LINK). Each dials `/link` and says its token first (LINK_HELLO);
+//! once both of the legs are there, both are told (LINKED), and from then
+//! on whatever one sends goes to the other as it is. Since each end has a
+//! token of its own, neither can dial the other's leg. A leg whose other
+//! end doesn't come within 20 seconds is closed, and so is a link with an
+//! end more than 2 MB behind, or whose match or custom game is over.
 
 use super::Server;
 use h2net::live::{LinkInfo, ToPc, ToServer};
 use h2net::Connection;
+use std::net::IpAddr;
 
 /// A leg waits this long (seconds) for its other end.
 const LEG_WAIT: f64 = 20.0;
 /// A link is dropped when either end has this many bytes waiting to go.
 const MAX_BEHIND: usize = 2 << 20;
+/// Legs one address can have waiting at once: enough for a host with 15
+/// PCs joining it and a few more PCs behind the same router.
+pub(super) const LEGS_WAITING: usize = 32;
 
 /// A relay leg, waiting for its other end.
 pub(super) struct Leg {
     conn: Connection,
+    /// Where it came from, and when.
+    ip: IpAddr,
     since: f64,
     /// Which leg it said it is (LINK_HELLO): its token, and 0 for the
     /// host's end or 1 for the joining PC's.
@@ -26,9 +33,10 @@ pub(super) struct Leg {
 }
 
 impl Leg {
-    pub(super) fn new(conn: Connection, now: f64) -> Leg {
+    pub(super) fn new(conn: Connection, ip: IpAddr, now: f64) -> Leg {
         Leg {
             conn,
+            ip,
             since: now,
             end: None,
         }
@@ -38,37 +46,45 @@ impl Leg {
 /// Two legs joined: the host's end and the joining PC's.
 pub(super) struct Link {
     ends: [Connection; 2],
-    /// The match, or the party whose custom game it's for.
+    /// The match, or the party whose custom game it's for, and the
+    /// accounts at the ends (the host's first).
     id: u64,
+    accounts: [u64; 2],
 }
 
 /// A link given out (LINK) whose legs haven't both come.
+#[derive(Clone, Copy)]
 pub(super) struct Token {
     /// The match, or the party whose custom game it's for.
     pub id: u64,
-    /// The host's account, then the joining PC's.
+    /// The host's account, then the joining PC's, and the token each
+    /// one's leg says.
     pub accounts: [u64; 2],
+    pub tokens: [[u8; 16]; 2],
 }
 
 impl Server {
     /// Link `joiner` to `host` for match (or custom game) `id` on `map`:
-    /// tell both who's at the other end, with the token their legs say.
+    /// tell both who's at the other end, with the token their leg says.
     /// Each is an account, its level and its team.
     pub(super) fn link(&mut self, id: u64, map: &str, host: (u64, u8, u8), joiner: (u64, u8, u8)) {
-        let mut token = [0; 16];
-        getrandom::fill(&mut token).expect("random numbers");
-        self.tokens.insert(
-            token,
-            Token {
-                id,
-                accounts: [host.0, joiner.0],
-            },
-        );
-        for (me, (peer, level, team), joining) in [(host, joiner, false), (joiner, host, true)] {
+        let mut tokens = [[0; 16]; 2];
+        for token in &mut tokens {
+            getrandom::fill(token).expect("random numbers");
+        }
+        let t = Token {
+            id,
+            accounts: [host.0, joiner.0],
+            tokens,
+        };
+        for token in tokens {
+            self.tokens.insert(token, t);
+        }
+        for (end, me, (peer, level, team)) in [(0, host, joiner), (1, joiner, host)] {
             let link = LinkInfo {
-                token,
+                token: tokens[end],
                 id,
-                joiner: joining,
+                joiner: end == 1,
                 peer,
                 gamertag: self.gamertag(peer),
                 level,
@@ -79,11 +95,14 @@ impl Server {
         }
     }
 
-    /// Forget the links given out for `id` that haven't come, to `account`
-    /// or (if `None`) to anyone.
+    /// Close the links for `id`, given out or joined, to `account` or (if
+    /// `None`) to anyone: what they were for is over.
     pub(super) fn unlink(&mut self, id: u64, account: Option<u64>) {
-        self.tokens
-            .retain(|_, t| t.id != id || account.is_some_and(|a| !t.accounts.contains(&a)));
+        let theirs = |link: u64, accounts: &[u64; 2]| {
+            link == id && account.is_none_or(|a| accounts.contains(&a))
+        };
+        self.tokens.retain(|_, t| !theirs(t.id, &t.accounts));
+        self.links.retain(|l| !theirs(l.id, &l.accounts));
     }
 
     fn gamertag(&self, account: u64) -> String {
@@ -92,10 +111,17 @@ impl Server {
             .map_or(String::new(), |a| a.gamertag.clone())
     }
 
+    /// A new leg from `ip`, unless that address has too many waiting.
+    pub(super) fn add_leg(&mut self, conn: Connection, ip: IpAddr, now: f64) {
+        if self.legs.iter().filter(|l| l.ip == ip).count() < LEGS_WAITING {
+            self.legs.push(Leg::new(conn, ip, now));
+        }
+    }
+
     /// Relay legs say which they are, then wait for their other end, and
     /// are joined to it once it's there. A leg that says anything else
-    /// first, names a link that wasn't given out, or waits too long is
-    /// dropped.
+    /// first, names a link that wasn't given out (or the other end of
+    /// one), or waits too long is dropped.
     pub(super) fn read_legs(&mut self, now: f64) {
         let tokens = &self.tokens;
         self.legs.retain_mut(|leg| {
@@ -106,9 +132,10 @@ impl Server {
                 let Ok(ToServer::LinkHello { token, account }) = ToServer::read(kind, &body) else {
                     return false;
                 };
-                let end = tokens
-                    .get(&token)
-                    .and_then(|t| t.accounts.iter().position(|&a| a == account));
+                let end = tokens.get(&token).and_then(|t| {
+                    let end = t.tokens.iter().position(|&x| x == token)?;
+                    (t.accounts[end] == account).then_some(end)
+                });
                 match end {
                     Some(end) if leg.end.is_none() => leg.end = Some((token, end)),
                     _ => return false,
@@ -122,10 +149,11 @@ impl Server {
                 k += 1;
                 continue;
             };
-            let Some(j) = self
-                .legs
-                .iter()
-                .position(|l| l.end == Some((token, 1 - end)))
+            let other = self
+                .tokens
+                .get(&token)
+                .map(|t| (t.tokens[1 - end], 1 - end));
+            let Some(j) = other.and_then(|o| self.legs.iter().position(|l| l.end == Some(o)))
             else {
                 k += 1;
                 continue;
@@ -133,7 +161,7 @@ impl Server {
             let (first, second) = (k.max(j), k.min(j));
             let a = self.legs.remove(first);
             let b = self.legs.remove(second);
-            let (host, joiner) = if a.end == Some((token, 0)) {
+            let (host, joiner) = if a.end.is_some_and(|(_, end)| end == 0) {
                 (a, b)
             } else {
                 (b, a)
@@ -143,19 +171,26 @@ impl Server {
         }
     }
 
-    /// Both legs of `token` are here: tell them, and start passing what
-    /// each sends to the other.
+    /// Both legs of the link `token` names are here: tell them, and start
+    /// passing what each sends to the other.
     fn join(&mut self, token: [u8; 16], host: Connection, joiner: Connection) {
-        let Some(t) = self.tokens.remove(&token) else {
+        let Some(t) = self.tokens.get(&token).copied() else {
             return;
         };
+        for token in t.tokens {
+            self.tokens.remove(&token);
+        }
         let mut ends = [host, joiner];
         for end in &mut ends {
             ToPc::Linked.send(end);
             // A failure shows up when relaying, next time.
             let _ = end.flush();
         }
-        self.links.push(Link { ends, id: t.id });
+        self.links.push(Link {
+            ends,
+            id: t.id,
+            accounts: t.accounts,
+        });
         self.linked(t.id, t.accounts[1]);
     }
 

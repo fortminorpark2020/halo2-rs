@@ -678,12 +678,25 @@ fn the_server_keeps_its_limits() {
     w.step();
     assert_eq!(w.server.connections(), before);
 
-    // Legs count too, and wait 20 seconds for their other end.
+    // One address can only have so many legs waiting.
     let mut legs = Vec::new();
-    while w.server.connections() < MAX_CONNECTIONS {
+    let mut leg_from = |w: &mut World, n: u8| {
         let (server_end, pc_end) = Connection::pair();
-        w.server.accept(server_end, Route::Link, ip(6), w.now);
+        w.server.accept(server_end, Route::Link, ip(n), w.now);
         legs.push(pc_end);
+    };
+    for _ in 0..relay::LEGS_WAITING {
+        leg_from(&mut w, 6);
+    }
+    assert_eq!(w.server.connections(), before + relay::LEGS_WAITING);
+    leg_from(&mut w, 6);
+    assert_eq!(w.server.connections(), before + relay::LEGS_WAITING);
+    // Legs count toward the limit too, and wait 20 seconds for their other
+    // end.
+    let mut n = 0;
+    while w.server.connections() < MAX_CONNECTIONS {
+        leg_from(&mut w, 8 + (n / relay::LEGS_WAITING) as u8);
+        n += 1;
     }
     let full = w.connect(7, "Late");
     w.step();
