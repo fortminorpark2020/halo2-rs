@@ -9,6 +9,9 @@ use crate::nav::NavGraph;
 use blam_cache::weapon::TriggerBehavior;
 use glam::{Vec2, Vec3};
 
+mod ride;
+use ride::Riding;
+
 /// How far a bot sees.
 const SIGHT: f32 = 35.0;
 /// Seconds between seeing someone and shooting at them.
@@ -34,6 +37,8 @@ const LEDGE_LOOKAHEAD: f32 = 0.7;
 /// Ground no steeper than this (cosine of the slope) holds a Spartan.
 const STANDABLE: f32 = 0.64;
 const SAFE_DROP: f32 = 3.0;
+/// The share of lives a bot takes vehicles it comes across.
+const RIDES: f32 = 0.6;
 
 pub struct Bot {
     rng: u32,
@@ -61,6 +66,7 @@ pub struct Bot {
     blocked: Vec<usize>,
     /// The walking graph has no way to the objective: roam instead.
     no_way: bool,
+    riding: Riding,
 }
 
 fn wrap(a: f32) -> f32 {
@@ -70,7 +76,7 @@ fn wrap(a: f32) -> f32 {
 
 impl Bot {
     pub fn new(seed: u32) -> Bot {
-        Bot {
+        let mut bot = Bot {
             rng: seed.max(1).wrapping_mul(0x9E37_79B9) | 1,
             route: Vec::new(),
             target: None,
@@ -90,18 +96,23 @@ impl Bot {
             no_progress: 0.0,
             blocked: Vec::new(),
             no_way: false,
-        }
+            riding: Riding::default(),
+        };
+        let rides = bot.random() < RIDES;
+        bot.riding.reset(rides);
+        bot
     }
 
     /// What the bot is up to, for testing.
     pub fn describe(&self) -> String {
         format!(
-            "route {} heading {:?} target {:?} stuck {:.1} blocked {}",
+            "route {} heading {:?} target {:?} stuck {:.1} blocked {} {}",
             self.route.len(),
             self.heading_for,
             self.target,
             self.stuck_for,
-            self.blocked.len()
+            self.blocked.len(),
+            self.riding.describe()
         )
     }
 
@@ -319,11 +330,17 @@ impl Bot {
             self.target = None;
             self.yaw = p.yaw;
             self.pitch = 0.0;
+            let rides = self.random() < RIDES;
+            self.riding.reset(rides);
             return Command {
                 yaw: p.yaw,
                 ..Command::default()
             };
         }
+        if let Some(seat) = game.riding(me) {
+            return self.ride(game, world, nav, me, seat);
+        }
+        self.on_foot();
         let feet = p.body.position;
         let eye = p.eye();
         let mut cmd = Command::default();
@@ -363,6 +380,7 @@ impl Bot {
         self.pulse = !self.pulse;
 
         let mut walk_to: Option<Vec3> = None;
+        let mut boarding = false;
         // Route links were checked for drops when the graph was made.
         let mut on_route = false;
         if let Some(t) = target {
@@ -408,6 +426,16 @@ impl Bot {
             if self.held_empty(game, me) {
                 cmd.reload = true;
             }
+        } else if let Some((v, _, entry)) = self
+            .riding
+            .rides
+            .then(|| self.seat_nearby(game, world, me))
+            .flatten()
+            .filter(|_| !carrying && Bot::worth_a_ride(game, me))
+        {
+            // A vehicle to take: go to it, and get in.
+            walk_to = Some(entry);
+            boarding = Bot::board_now(game, me, v);
         } else {
             let objective = Bot::objective(game, me);
             if let Some(o) = objective {
@@ -449,11 +477,12 @@ impl Bot {
         // Take a flag (or the ball, or the team's bomb) on reaching it,
         // fighting or not, and defuse enemy bombs.
         let team = p.team;
-        cmd.action = (0..game.flags.len()).any(|f| {
-            let flag = &game.flags[f];
-            let takes = game.can_take(me, f) || (flag.armed.is_some() && flag.team != team);
-            takes && flag.position.distance(feet) < 1.5
-        }) && p.objective.is_none();
+        cmd.action = boarding
+            || (0..game.flags.len()).any(|f| {
+                let flag = &game.flags[f];
+                let takes = game.can_take(me, f) || (flag.armed.is_some() && flag.team != team);
+                takes && flag.position.distance(feet) < 1.5
+            }) && p.objective.is_none();
         if !on_route {
             let drift = game.players[me].body.velocity.truncate();
             cmd.movement = self.keep_off_ledges(world, feet, drift, cmd.movement);
@@ -643,6 +672,39 @@ mod tests {
         }
         assert!(taken, "the bot didn't take the flag");
         assert_eq!(game.team_score(0), 1, "the bot didn't score");
+    }
+
+    #[test]
+    fn bots_drive_vehicles_they_come_across() {
+        let world = crate::game::tests::floor();
+        let mut game = crate::game::tests::game();
+        game.set_vehicles(
+            vec![crate::vehicle::tests::jeep()],
+            vec![crate::game::VehicleSpawn {
+                def: 0,
+                position: Vec3::new(4.0, 0.0, 0.05),
+                yaw: 0.0,
+                respawn: 30.0,
+            }],
+        );
+        let points: Vec<Vec3> = (-8..=8)
+            .flat_map(|x| (-8..=8).map(move |y| Vec3::new(x as f32 * 3.0, y as f32 * 3.0, 0.0)))
+            .collect();
+        let nav = NavGraph::build(&world, &points);
+        let me = game.add_player();
+        game.players[me].body.position = Vec3::new(1.0, 2.0, 0.0);
+        let mut bot = Bot::new(3);
+        bot.riding.reset(true);
+        let mut drove = 0.0;
+        for _ in 0..60 * 20 {
+            let cmd = bot.think(&game, &world, &nav, me);
+            game.step(&world, &[cmd]);
+            if game.riding(me) == Some((0, 0)) && game.vehicles[0].speed() > 2.0 {
+                drove += crate::game::TICK;
+            }
+        }
+        assert!(drove > 3.0, "drove for {drove} s");
+        assert!(game.vehicles[0].up().z > 0.8, "kept it on its wheels");
     }
 
     #[test]

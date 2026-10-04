@@ -412,6 +412,11 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
                 Event::Hill { .. } | Event::Territory { .. } | Event::Juggernaut { .. } => {
                     println!("{t:6.1} {e:?}");
                 }
+                Event::Entered { .. }
+                | Event::Exited { .. }
+                | Event::Splattered { .. }
+                | Event::VehicleDestroyed { .. }
+                | Event::VehicleSpawned { .. } => println!("{t:6.1} {e:?}"),
                 _ => {}
             }
         }

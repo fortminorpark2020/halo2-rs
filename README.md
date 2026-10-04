@@ -27,7 +27,8 @@ install. No game files are included in this repository.
   that move, territories taken), falling damage and the map's kill zones from
   the game's own tags, and bots that play each objective, escort carriers and
   defend, finding their way over a walking graph sampled from each level's
-  floors.
+  floors, and in Slayer take the vehicles they come across (driving, running
+  people over, manning turrets and a teammate's Warthog gun).
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
@@ -101,7 +102,11 @@ model and physics tags; wheels turn and ride their suspension, turrets aim,
 and riders sit in Master Chief's seat animations. Vehicles run over and kill
 anyone in the way at speed, take damage (explosions hurt them most) and blow up
 with their riders, and come back where they started once wrecked or left
-behind. Engines sound faster the faster they go. `H2_DRIVE="<vehicle> <forward>
+behind. Engines sound faster the faster they go. In Slayer games, bots get into
+vehicles they pass: they drive where they're going (and at enemies to run them
+over), gun from turrets and behind a teammate driving a Warthog, back up when
+stuck and get out when there's nothing to do; in objective games they stay on
+foot to play the objective. `H2_DRIVE="<vehicle> <forward>
 <right> <look degrees> <seconds>"` drives one without a window for testing,
 and `H2_LIST_VEHICLES=1` lists them as a map loads.
 
