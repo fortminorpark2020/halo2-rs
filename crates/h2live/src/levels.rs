@@ -125,11 +125,12 @@ pub struct Finish {
 /// first, then the others by team score.
 pub fn places(finishes: &[Finish], teams: bool, winning_team: Option<u8>) -> Vec<u8> {
     if teams {
-        let team_score = |t: u8| -> i32 {
+        // Wide enough for any scores the PCs report.
+        let team_score = |t: u8| -> i64 {
             finishes
                 .iter()
                 .filter(|f| f.team == t)
-                .map(|f| f.score)
+                .map(|f| i64::from(f.score))
                 .sum()
         };
         // Lower is better.
@@ -389,12 +390,12 @@ mod tests {
         // Five levels apart: 70 for the expected win, 130 for the upset.
         assert_eq!(xp_changes(&[ffa(15, 0), ffa(10, 1)], false)[0], 70);
         assert_eq!(xp_changes(&[ffa(10, 0), ffa(15, 1)], false)[0], 130);
-        // Losing as the higher level costs the upset's amount (times level
-        // 15's factor, 65%), and as the lower level the expected amount
-        // (times level 10's 40%).
-        assert_eq!(xp_changes(&[ffa(10, 0), ffa(15, 1)], false)[1], -85); // 130 * 0.65 = 84.5
-        assert_eq!(xp_changes(&[ffa(15, 0), ffa(10, 1)], false)[1], -28); // 70 * 0.4
-                                                                          // Gaps over 15 count as 15.
+        // Losing as the higher level costs the upset's amount times level
+        // 15's factor (130 * 65% = 84.5), and as the lower level the
+        // expected amount times level 10's (70 * 40% = 28).
+        assert_eq!(xp_changes(&[ffa(10, 0), ffa(15, 1)], false)[1], -85);
+        assert_eq!(xp_changes(&[ffa(15, 0), ffa(10, 1)], false)[1], -28);
+        // Gaps over 15 count as 15.
         assert_eq!(xp_changes(&[ffa(40, 0), ffa(1, 1)], false)[0], 50);
         assert_eq!(xp_changes(&[ffa(1, 0), ffa(40, 1)], false)[0], 150);
     }
@@ -442,9 +443,10 @@ mod tests {
             on_team(20, 1, 1),
         ];
         let xp = xp_changes(&game, true);
-        assert_eq!(xp[0], 100); // two even wins
-        assert_eq!(xp[1], 150); // two upsets at the capped gap
-                                // (-100 - 150) / 2 times level 20's 77.5%: -96.875.
+        // Two even wins, and two upsets at the capped gap.
+        assert_eq!(xp[0], 100);
+        assert_eq!(xp[1], 150);
+        // (-100 - 150) / 2 times level 20's 77.5%: -96.875.
         assert_eq!(xp[2], -97);
     }
 
@@ -508,6 +510,19 @@ mod tests {
             .map(|(f, &place)| on_team(10, f.team, place))
             .collect();
         assert_eq!(xp_changes(&game, true), [100, 100, -40, -40]);
+    }
+
+    #[test]
+    fn huge_team_scores_still_add_up() {
+        // Scores come from the players' PCs, so they can be anything.
+        let finishes = [
+            finish(0, i32::MAX, false),
+            finish(0, i32::MAX, false),
+            finish(1, 5, false),
+        ];
+        assert_eq!(places(&finishes, true, None), [0, 0, 1]);
+        let finishes = [finish(0, i32::MIN, false), finish(1, i32::MIN, false)];
+        assert_eq!(places(&finishes, true, None), [0, 0]);
     }
 
     #[test]
