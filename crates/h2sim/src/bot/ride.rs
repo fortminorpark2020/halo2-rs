@@ -4,7 +4,7 @@
 
 use super::{wrap, Bot, FIRE_CONE, REACTION};
 use crate::collision::World;
-use crate::game::{Command, Game, VehicleAction, TICK};
+use crate::game::{Command, Game, Homing, VehicleAction, TICK};
 use crate::nav::NavGraph;
 use crate::vehicle::{Drive, SeatRole};
 use blam_cache::weapon::{TriggerBehavior, TriggerInput};
@@ -71,6 +71,19 @@ impl Riding {
 }
 
 impl Bot {
+    /// Where player `me` stands to board `target`'s seat, if they ride an
+    /// enemy vehicle close by and slow enough to jump on.
+    pub(super) fn board_point(game: &Game, me: usize, target: usize) -> Option<Vec3> {
+        let (v, s) = game.riding(target)?;
+        let veh = &game.vehicles[v];
+        let def = &game.vehicle_defs[veh.def];
+        let seat = &def.seats[s];
+        let feet = game.players[me].body.position;
+        let near = veh.center.distance(feet) < def.radius + 5.0;
+        (near && seat.role != SeatRole::Passenger && veh.speed() < 3.0 && !veh.destroyed)
+            .then(|| veh.to_world(def, seat.entry))
+    }
+
     /// An empty seat worth taking near player `me`: the vehicle, the seat,
     /// and where to stand to get in.
     pub(super) fn seat_nearby(
@@ -227,6 +240,17 @@ impl Bot {
         match seat.role {
             SeatRole::Driver if def.drive != Drive::Fixed => {
                 self.drive(game, world, nav, me, v, target, aiming, &mut cmd);
+                // A rocket closing on the Banshee: loop or roll out of its way.
+                let incoming = game.projectiles.iter().any(|r| {
+                    r.target == Some(Homing::Vehicle(v)) && r.position.distance(veh.center) < 20.0
+                });
+                if def.drive == Drive::Fly && incoming {
+                    cmd.jump = self.pulse;
+                    let roll = self.random();
+                    if roll < 0.66 {
+                        cmd.movement.x = if roll < 0.33 { -1.0 } else { 1.0 };
+                    }
+                }
             }
             _ => {
                 // A gunner (or a passenger) stays while there's something to

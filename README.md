@@ -108,6 +108,11 @@ the view while you drive, with the turret aimed at the crosshair: left mouse
 fires the Scorpion's cannon or lobs the Wraith's mortar, and G (the left
 trigger) fires the Scorpion's machine gun. F (B on a controller) drops the
 Banshee's fuel rod bomb. Every vehicle gun fires at what the crosshair is on.
+Space (A) loops the Banshee, or with A/D (the stick to one side) barrel rolls
+it aside; rockets locked on lose it. Holding E by an enemy driver or gunner
+boards their seat and throws them out; boarding a Scorpion or Wraith takes a
+second and kills the driver through the hatch. Master Chief's own sounds play
+getting in, getting out and boarding.
 Their speeds, seats, guns, hover pads, wheels and hulls come from the vehicle,
 model and physics tags; wheels turn and ride their suspension, turrets aim,
 and riders sit in Master Chief's seat animations. Vehicles run over and kill
@@ -116,8 +121,9 @@ with their riders, and come back where they started once wrecked or left
 behind. Engines sound faster the faster they go. In Slayer games, bots get into
 vehicles they pass: they drive where they're going (and at enemies to run them
 over), gun from turrets and behind a teammate driving a Warthog, back up when
-stuck and get out when there's nothing to do; in objective games they stay on
-foot to play the objective. `H2_DRIVE="<vehicle> <forward>
+stuck and get out when there's nothing to do, board enemies sitting in slow
+vehicles close by, and loop away from rockets in a Banshee; in objective games
+they stay on foot to play the objective. `H2_DRIVE="<vehicle> <forward>
 <right> <look degrees> <seconds>"` drives one without a window for testing,
 and `H2_LIST_VEHICLES=1` lists them as a map loads.
 

@@ -1,9 +1,10 @@
 //! Vehicles in the game: where they appear, getting in and out, driving and
 //! gunning, running people over, and blowing up.
 
+use super::projectiles::Homing;
 use super::{Command, Event, Game, SWAP_HOLD};
 use crate::collision::World;
-use crate::vehicle::{Controls, Drive, SeatRole, Vehicle, VehicleDef};
+use crate::vehicle::{Controls, Drive, SeatRole, TrickKind, Vehicle, VehicleDef};
 use crate::weapon::{WeaponDef, WeaponInput, WeaponState};
 use blam_cache::weapon::TriggerInput;
 use glam::{Vec2, Vec3};
@@ -22,6 +23,8 @@ const WRECK_DAMAGE: f32 = 100.0;
 const WRECK_RADIUS: f32 = 2.5;
 /// How far the crosshair reaches when it points at nothing.
 const CROSSHAIR_RANGE: f32 = 200.0;
+/// Seconds to hold the action key by an enemy tank to board it.
+const TANK_BOARD_HOLD: f32 = 1.0;
 
 /// A place a vehicle appears on the map.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,8 +40,19 @@ pub struct VehicleSpawn {
 /// What getting in or acting on a vehicle nearby would do (HUD prompt).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VehicleAction {
-    Enter { vehicle: usize, seat: usize },
-    Flip { vehicle: usize },
+    Enter {
+        vehicle: usize,
+        seat: usize,
+    },
+    /// Throw an enemy out of their seat (or, in a tank, finish them) and
+    /// take it.
+    Hijack {
+        vehicle: usize,
+        seat: usize,
+    },
+    Flip {
+        vehicle: usize,
+    },
 }
 
 impl Game {
@@ -152,9 +166,12 @@ impl Game {
                 continue;
             }
             for (s, seat) in def.seats.iter().enumerate() {
-                if veh.riders[s].is_some() {
-                    continue;
-                }
+                // An enemy driving or on the gun can be boarded.
+                let hijack = match veh.riders[s] {
+                    None => false,
+                    Some(r) if seat.role != SeatRole::Passenger && self.is_enemy(i, r) => true,
+                    Some(_) => continue,
+                };
                 // Hands full with the flag: ride along, nothing more.
                 if p.objective.is_some() && seat.role != SeatRole::Passenger {
                     continue;
@@ -177,13 +194,13 @@ impl Game {
                     SeatRole::Passenger => 20.0,
                 } + d;
                 if best.is_none_or(|b| rank < b.0) {
-                    best = Some((
-                        rank,
-                        VehicleAction::Enter {
-                            vehicle: v,
-                            seat: s,
-                        },
-                    ));
+                    let (vehicle, seat) = (v, s);
+                    let action = if hijack {
+                        VehicleAction::Hijack { vehicle, seat }
+                    } else {
+                        VehicleAction::Enter { vehicle, seat }
+                    };
+                    best = Some((rank, action));
                 }
             }
         }
@@ -192,25 +209,69 @@ impl Game {
 
     /// Hold the action key by a vehicle to get in (or flip it back over).
     /// Returns whether a vehicle took the key.
-    pub(super) fn board(&mut self, i: usize, action: bool, dt: f32) -> bool {
+    pub(super) fn board(&mut self, world: &World, i: usize, action: bool, dt: f32) -> bool {
         let Some(what) = self.vehicle_action(i) else {
             self.players[i].board_held = 0.0;
             return false;
         };
+        // Climbing onto a tank takes longer.
+        let hold = match what {
+            VehicleAction::Hijack { vehicle, .. }
+                if self.vehicle_defs[self.vehicles[vehicle].def].drive == Drive::Tank =>
+            {
+                TANK_BOARD_HOLD
+            }
+            _ => SWAP_HOLD,
+        };
         let p = &mut self.players[i];
         p.board_held = if action { p.board_held + dt } else { 0.0 };
-        if p.board_held < SWAP_HOLD {
+        if p.board_held < hold {
             return true;
         }
         p.board_held = f32::MIN;
         match what {
             VehicleAction::Enter { vehicle, seat } => self.enter(i, vehicle, seat),
+            VehicleAction::Hijack { vehicle, seat } => self.hijack(world, i, vehicle, seat),
             VehicleAction::Flip { vehicle } => self.vehicles[vehicle].right_itself(),
         }
         true
     }
 
+    /// Board an enemy's seat: they're thrown out onto the ground (in a
+    /// tank, beaten to death through the hatch) and the boarder takes it.
+    fn hijack(&mut self, world: &World, i: usize, v: usize, s: usize) {
+        let Some(victim) = self.vehicles[v].riders[s] else {
+            return self.enter(i, v, s);
+        };
+        if self.vehicle_defs[self.vehicles[v].def].drive == Drive::Tank {
+            self.kill(victim, Some(i), false);
+        } else {
+            self.exit(world, victim);
+            // Thrown clear.
+            let centre = self.vehicles[v].center;
+            let body = &mut self.players[victim].body;
+            let away = (body.position - centre).truncate().normalize_or_zero();
+            body.velocity += away.extend(0.0) * 3.0 + Vec3::Z * 2.0;
+        }
+        self.seat_rider(i, v, s);
+        self.events.push(Event::Hijacked {
+            player: i,
+            victim,
+            vehicle: v,
+            seat: s,
+        });
+    }
+
     fn enter(&mut self, i: usize, v: usize, s: usize) {
+        self.seat_rider(i, v, s);
+        self.events.push(Event::Entered {
+            player: i,
+            vehicle: v,
+            seat: s,
+        });
+    }
+
+    fn seat_rider(&mut self, i: usize, v: usize, s: usize) {
         let p = &mut self.players[i];
         p.seat = Some((v, s));
         p.board_held = f32::MIN;
@@ -226,11 +287,6 @@ impl Game {
             veh.last_driver = Some(i);
         }
         self.place_rider(i);
-        self.events.push(Event::Entered {
-            player: i,
-            vehicle: v,
-            seat: s,
-        });
     }
 
     /// Leave the seat without moving (dying in it).
@@ -289,6 +345,7 @@ impl Game {
         self.events.push(Event::Exited {
             player: i,
             vehicle: v,
+            seat: s,
         });
     }
 
@@ -357,6 +414,23 @@ impl Game {
                 };
                 veh.last_driver = Some(i);
                 veh.asleep = false;
+                // Jump: a Banshee loops, or rolls aside steering sideways.
+                if cmd.jump && !self.players[i].last.jump {
+                    let side = cmd.movement.x;
+                    let kind = if side.abs() > 0.5 {
+                        TrickKind::Roll(side.signum())
+                    } else {
+                        TrickKind::Flip
+                    };
+                    if veh.start_trick(def, kind) {
+                        // Homing rounds lose it.
+                        for r in &mut self.projectiles {
+                            if r.target == Some(Homing::Vehicle(v)) {
+                                r.target = None;
+                            }
+                        }
+                    }
+                }
             }
             SeatRole::Gunner => {}
             SeatRole::Passenger => return true,
@@ -605,7 +679,7 @@ impl Game {
 
             // Riders bail out of a vehicle on its roof.
             let veh = &mut self.vehicles[v];
-            veh.overturned = if veh.upside_down() {
+            veh.overturned = if veh.upside_down() && veh.trick.is_none() {
                 veh.overturned + dt
             } else {
                 0.0
@@ -1084,6 +1158,56 @@ mod tests {
         );
         g.add_player();
         g
+    }
+
+    /// Player 1 driving the parked vehicle, player 0 at its door.
+    fn carjack(mut g: Game) -> Game {
+        g.add_player();
+        hold(&mut g, Command::default(), 120);
+        g.enter(1, 0, 0);
+        walk_to_driver_door(&mut g);
+        g
+    }
+
+    fn act_alone(g: &mut Game, ticks: usize) {
+        let idle = Command::default();
+        let act = Command {
+            action: true,
+            ..idle
+        };
+        for _ in 0..ticks {
+            g.step(&floor(), &[act, idle]);
+        }
+    }
+
+    #[test]
+    fn hold_action_by_an_enemy_driver_to_throw_them_out() {
+        let mut g = carjack(with_jeep());
+        assert_eq!(
+            g.vehicle_action(0),
+            Some(VehicleAction::Hijack {
+                vehicle: 0,
+                seat: 0
+            })
+        );
+        act_alone(&mut g, 30);
+        assert_eq!(g.riding(0), Some((0, 0)));
+        assert_eq!(g.riding(1), None);
+        assert!(g.players[1].alive, "thrown out, not killed");
+        assert!(g
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Hijacked { victim: 1, .. })));
+    }
+
+    #[test]
+    fn boarding_a_tank_takes_longer_and_kills_the_driver() {
+        let mut g = carjack(with_tank());
+        act_alone(&mut g, 30);
+        assert_eq!(g.riding(1), Some((0, 0)), "still climbing on");
+        act_alone(&mut g, 40);
+        assert_eq!(g.riding(0), Some((0, 0)));
+        assert!(!g.players[1].alive);
     }
 
     #[test]

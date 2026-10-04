@@ -548,6 +548,14 @@ pub enum Event {
     Exited {
         player: usize,
         vehicle: usize,
+        seat: usize,
+    },
+    /// Boarded an enemy's seat, throwing them out (or killing them).
+    Hijacked {
+        player: usize,
+        victim: usize,
+        vehicle: usize,
+        seat: usize,
     },
     /// Run over by a vehicle.
     Splattered {
@@ -947,7 +955,7 @@ impl Game {
                 g => g,
             };
         }
-        let at_vehicle = !riding && self.board(i, cmd.action, dt);
+        let at_vehicle = !riding && self.board(world, i, cmd.action, dt);
         if self.players[i].seat.is_some() {
             self.players[i].last = cmd;
             return;

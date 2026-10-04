@@ -82,8 +82,11 @@ pub struct VehicleAssets {
     pub steering_wheel: Option<usize>,
     /// Each seat's rider animations ("warthog_d"...).
     pub seat_stances: Vec<&'static str>,
-    /// Getting into each seat (in `Scene::sounds`).
+    /// Getting into each seat, out of it, and boarding it from an enemy
+    /// (in `Scene::sounds`).
     pub enter_sounds: Vec<Option<usize>>,
+    pub exit_sounds: Vec<Option<usize>>,
+    pub board_sounds: Vec<Option<usize>>,
     /// The engine running, and boosting (looped).
     pub engine: Option<usize>,
     pub boost: Option<usize>,
@@ -247,19 +250,26 @@ impl Loader {
         )
     }
 
-    /// Master Chief's sound getting into a seat ("mc_warthog_d_enter").
-    fn enter_sound(&mut self, stance: &str) -> Option<usize> {
+    /// Master Chief's sound getting into a seat ("mc_warthog_d_enter"),
+    /// out of it ("exit") or boarding it ("board": "mc_warthog_b_d_board").
+    fn rider_sound(&mut self, stance: &str, what: &str) -> Option<usize> {
         let base = "sound\\characters\\masterchief\\mc_";
         let short = stance.strip_suffix("_d").unwrap_or(stance);
-        [
-            format!("{base}{stance}_enter"),
-            format!("{base}{short}_enter"),
-        ]
-        .iter()
-        .find_map(|n| self.sound_named(n))
-        .or_else(|| {
-            stance
-                .contains("turret")
+        let vehicle = stance.split('_').next().unwrap_or(stance);
+        let mut names = vec![
+            format!("{base}{stance}_{what}"),
+            format!("{base}{short}_{what}"),
+        ];
+        if what == "board" {
+            // The driver's, else the gunner's.
+            let order = match stance.ends_with("_d") {
+                true => ["b_d", "b_l", "b_b", "turret"],
+                false => ["turret", "b_d", "b_l", "b_b"],
+            };
+            names.extend(order.map(|s| format!("{base}{vehicle}_{s}_board")));
+        }
+        names.iter().find_map(|n| self.sound_named(n)).or_else(|| {
+            (what == "enter" && stance.contains("turret"))
                 .then(|| self.sound_named(&format!("{base}stationary_turret")))
                 .flatten()
         })
@@ -546,10 +556,19 @@ impl Loader {
             .map(|f| wheel_nodes(&render, f))
             .collect();
         let (engine, boost) = self.engine_sounds(&tag);
-        let enter_sounds = stances.iter().map(|s| self.enter_sound(s)).collect();
+        let mut sounds = |what| {
+            stances
+                .iter()
+                .map(|s| self.rider_sound(s, what))
+                .collect::<Vec<_>>()
+        };
+        let (enter_sounds, exit_sounds, board_sounds) =
+            (sounds("enter"), sounds("exit"), sounds("board"));
         let assets = VehicleAssets {
             name: display_name(&name),
             enter_sounds,
+            exit_sounds,
+            board_sounds,
             engine,
             boost,
             body,

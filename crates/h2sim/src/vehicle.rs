@@ -279,6 +279,46 @@ fn box_spheres(b: &HullBox) -> Vec<(Vec3, f32)> {
     out
 }
 
+/// Seconds a Banshee's loop takes.
+const FLIP_TIME: f32 = 1.0;
+/// Seconds a barrel roll takes.
+const ROLL_TIME: f32 = 0.7;
+/// Fastest sideways a barrel roll carries the Banshee (units a second).
+const ROLL_SLIDE: f32 = 6.0;
+
+/// A flying vehicle's stunt: a loop, or a barrel roll to one side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrickKind {
+    Flip,
+    /// +1 rolls right, -1 left.
+    Roll(f32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Trick {
+    pub kind: TrickKind,
+    pub time: f32,
+    /// Level, facing the way it flew in.
+    base: Quat,
+    /// How fast it flew in.
+    speed: f32,
+}
+
+impl Trick {
+    fn duration(&self) -> f32 {
+        match self.kind {
+            TrickKind::Flip => FLIP_TIME,
+            TrickKind::Roll(_) => ROLL_TIME,
+        }
+    }
+
+    /// How far round it has turned (radians), easing in and out.
+    fn angle(&self) -> f32 {
+        let t = (self.time / self.duration()).clamp(0.0, 1.0);
+        std::f32::consts::TAU * t * t * (3.0 - 2.0 * t)
+    }
+}
+
 /// A driver's (or a gunner's) controls for a tick.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Controls {
@@ -328,6 +368,8 @@ pub struct Vehicle {
     pub overturned: f32,
     /// Who drove it last, credited with its splatters.
     pub last_driver: Option<usize>,
+    /// A stunt under way (Banshee).
+    pub trick: Option<Trick>,
     still: f32,
     contacts: Vec<Contact>,
 }
@@ -358,6 +400,7 @@ impl Vehicle {
             abandoned: 0.0,
             overturned: 0.0,
             last_driver: None,
+            trick: None,
             still: 0.0,
             contacts: Vec::new(),
         }
@@ -483,6 +526,13 @@ impl Vehicle {
         for _ in 0..SUBSTEPS {
             self.substep(def, world, h);
         }
+        if let Some(trick) = &mut self.trick {
+            trick.time += dt;
+            // Over, or cut short by hitting something.
+            if trick.time >= trick.duration() || !self.controls.driven || self.impact > 2.0 {
+                self.trick = None;
+            }
+        }
         // Rest once lying still with no one driving.
         let calm = self.velocity.length() < 0.05 && self.spin.length() < 0.05;
         self.still = if calm && !self.controls.driven {
@@ -519,7 +569,48 @@ impl Vehicle {
         if turn.length_squared() > 1e-12 {
             self.rotation = (Quat::from_scaled_axis(turn) * self.rotation).normalize();
         }
+        if let Some(trick) = self.trick {
+            self.perform(trick);
+        }
         self.collide(def, world);
+    }
+
+    /// Start a stunt, if flying and not in one already. Returns whether it
+    /// started.
+    pub fn start_trick(&mut self, def: &VehicleDef, kind: TrickKind) -> bool {
+        if def.drive != Drive::Fly || self.trick.is_some() || !self.controls.driven {
+            return false;
+        }
+        self.trick = Some(Trick {
+            kind,
+            time: 0.0,
+            base: Quat::from_rotation_z(self.yaw()),
+            speed: self.velocity.length().max(4.0),
+        });
+        true
+    }
+
+    /// Mid-stunt: turned round the stunt's axis, moving round a loop or
+    /// sliding sideways.
+    fn perform(&mut self, trick: Trick) {
+        let angle = trick.angle();
+        let b = trick.base;
+        match trick.kind {
+            TrickKind::Flip => {
+                // Nose up and over, along the loop.
+                self.rotation = b * Quat::from_rotation_y(-angle);
+                self.velocity = b * Vec3::new(angle.cos(), 0.0, angle.sin()) * trick.speed;
+            }
+            TrickKind::Roll(side) => {
+                self.rotation = b * Quat::from_rotation_x(side * angle);
+                let t = (trick.time / trick.duration()).clamp(0.0, 1.0);
+                let ahead = b * Vec3::X * trick.speed;
+                let slide =
+                    b * Vec3::new(0.0, -side, 0.0) * ROLL_SLIDE * (std::f32::consts::PI * t).sin();
+                self.velocity = ahead + slide;
+            }
+        }
+        self.spin = Vec3::ZERO;
     }
 
     /// Driving force toward the target speed along `dir`, for a vehicle
@@ -728,6 +819,9 @@ impl Vehicle {
         let m = def.mass.max(1.0);
         // Hold height against gravity.
         force.z += GRAVITY * def.gravity_scale * m;
+        if self.trick.is_some() {
+            return;
+        }
         let pitch = c.pitch.clamp(-1.2, 1.2);
         let aim = Vec3::new(
             c.yaw.cos() * pitch.cos(),
@@ -935,6 +1029,37 @@ pub(crate) mod tests {
         for _ in 0..(seconds * 60.0) as usize {
             v.step(def, &world, 1.0 / 60.0);
         }
+    }
+
+    #[test]
+    fn a_banshee_loops_and_rolls_and_comes_out_level() {
+        let mut def = hovercraft();
+        def.drive = Drive::Fly;
+        let mut v = Vehicle::new(0, &def, Vec3::new(0.0, 0.0, 5.0), 0.0);
+        v.controls = Controls {
+            throttle: Vec2::new(0.0, 1.0),
+            driven: true,
+            ..Controls::default()
+        };
+        run(&mut v, &def, 1.0);
+        let start = v.center;
+        assert!(v.start_trick(&def, TrickKind::Flip));
+        assert!(!v.start_trick(&def, TrickKind::Roll(1.0)), "one at a time");
+        run(&mut v, &def, FLIP_TIME * 0.5);
+        assert!(v.forward().x < 0.0, "over the top of the loop");
+        assert!(v.center.z > start.z + 0.5, "{} from {start}", v.center);
+        run(&mut v, &def, FLIP_TIME * 0.5 + 0.05);
+        assert!(v.trick.is_none());
+        assert!(v.up().z > 0.9, "level again");
+        assert!(v.start_trick(&def, TrickKind::Roll(1.0)));
+        let y = v.center.y;
+        run(&mut v, &def, ROLL_TIME + 0.05);
+        assert!(
+            v.center.y < y - 1.0,
+            "rolled off to the right: {}",
+            v.center
+        );
+        assert!(v.up().z > 0.9);
     }
 
     #[test]

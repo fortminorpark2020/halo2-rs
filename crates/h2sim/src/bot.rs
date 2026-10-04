@@ -4,7 +4,7 @@
 //! Bots produce the same `Command`s as people.
 
 use crate::collision::World;
-use crate::game::{Command, Game, GameType, Spartan};
+use crate::game::{Command, Game, GameType, Spartan, VehicleAction};
 use crate::nav::NavGraph;
 use crate::player::GRAVITY;
 use crate::weapon::WeaponDef;
@@ -454,6 +454,10 @@ impl Bot {
             if self.held_empty(game, me) {
                 cmd.reload = true;
             }
+            // An enemy sitting in a slow vehicle close by: board it.
+            if !carrying {
+                walk_to = Bot::board_point(game, me, t);
+            }
         } else if let Some((v, _, entry)) = self
             .riding
             .rides
@@ -502,6 +506,8 @@ impl Bot {
             let dir = to.normalize_or_zero();
             cmd.movement = Vec2::new(dir.x * s - dir.y * c, dir.x * c + dir.y * s);
         }
+        // An enemy's vehicle in reach: board it.
+        boarding |= matches!(game.vehicle_action(me), Some(VehicleAction::Hijack { .. }));
         // Take a flag (or the ball, or the team's bomb) on reaching it,
         // fighting or not, and defuse enemy bombs.
         let team = p.team;

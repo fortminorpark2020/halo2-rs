@@ -260,7 +260,7 @@ fn load_level(path: &Path) -> Result<Level, String> {
             let def = &scene.vehicles.defs[s.def];
             let kind = &scene.vehicles.kinds[s.def];
             println!(
-                "vehicle {} at {:.2} facing {:.2} ({:?}, {} seats, radius {:.2}, engine {:?}, boost {:?}, enter {:?})",
+                "vehicle {} at {:.2} facing {:.2} ({:?}, {} seats, radius {:.2}, engine {:?}, boost {:?}, enter {:?}, exit {:?}, board {:?})",
                 def.name,
                 s.position,
                 s.yaw,
@@ -269,7 +269,9 @@ fn load_level(path: &Path) -> Result<Level, String> {
                 def.radius,
                 kind.engine,
                 kind.boost,
-                kind.enter_sounds
+                kind.enter_sounds,
+                kind.exit_sounds,
+                kind.board_sounds,
             );
         }
     }
@@ -429,6 +431,7 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
                 }
                 Event::Entered { .. }
                 | Event::Exited { .. }
+                | Event::Hijacked { .. }
                 | Event::Splattered { .. }
                 | Event::VehicleDestroyed { .. }
                 | Event::VehicleSpawned { .. } => println!("{t:6.1} {e:?}"),
@@ -947,6 +950,9 @@ impl App {
                     }
                 }
                 Event::Entered {
+                    player, vehicle, ..
+                }
+                | Event::Hijacked {
                     player, vehicle, ..
                 } => {
                     // The view swings round behind the vehicle (or the

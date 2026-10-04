@@ -927,6 +927,7 @@ impl LocalPlayer {
 fn vehicle_prompt(scene: &Scene, game: &Game, i: usize, keyboard: bool) -> Option<String> {
     let button = if keyboard { "E" } else { "X" };
     let (v, what) = match game.vehicle_action(i)? {
+        VehicleAction::Hijack { vehicle, .. } => (vehicle, "BOARD"),
         VehicleAction::Enter { vehicle, seat } => {
             let def = &game.vehicle_defs[game.vehicles[vehicle].def];
             let what = match def.seats[seat].role {

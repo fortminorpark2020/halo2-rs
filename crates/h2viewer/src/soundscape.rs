@@ -380,12 +380,30 @@ impl Soundscape {
                 player,
                 vehicle,
                 seat,
+            }
+            | Event::Exited {
+                player,
+                vehicle,
+                seat,
+            }
+            | Event::Hijacked {
+                player,
+                vehicle,
+                seat,
+                ..
             } => {
                 let s = game
                     .vehicles
                     .get(vehicle)
                     .and_then(|v| scene.vehicles.kinds.get(v.def))
-                    .and_then(|k| k.enter_sounds.get(seat).copied().flatten());
+                    .and_then(|k| {
+                        let sounds = match e {
+                            Event::Entered { .. } => &k.enter_sounds,
+                            Event::Exited { .. } => &k.exit_sounds,
+                            _ => &k.board_sounds,
+                        };
+                        sounds.get(seat).copied().flatten()
+                    });
                 self.play(scene, s, body(player), Some(player), listeners, 1.0);
             }
             Event::VehicleDestroyed { position, .. } => {

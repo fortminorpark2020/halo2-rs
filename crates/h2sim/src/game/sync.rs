@@ -392,10 +392,27 @@ impl Event {
                 w.index(Some(vehicle));
                 w.index(Some(seat));
             }
-            Event::Exited { player, vehicle } => {
+            Event::Exited {
+                player,
+                vehicle,
+                seat,
+            } => {
                 w.u8(18);
                 w.index(Some(player));
                 w.index(Some(vehicle));
+                w.index(Some(seat));
+            }
+            Event::Hijacked {
+                player,
+                victim,
+                vehicle,
+                seat,
+            } => {
+                w.u8(23);
+                w.index(Some(player));
+                w.index(Some(victim));
+                w.index(Some(vehicle));
+                w.index(Some(seat));
             }
             Event::Splattered { player, vehicle } => {
                 w.u8(19);
@@ -553,6 +570,13 @@ impl Event {
             18 => Event::Exited {
                 player: r.index_below(players)?,
                 vehicle: r.index_below(vehicles)?,
+                seat: r.index_below(MAX_SEATS)?,
+            },
+            23 => Event::Hijacked {
+                player: r.index_below(players)?,
+                victim: r.index_below(players)?,
+                vehicle: r.index_below(vehicles)?,
+                seat: r.index_below(MAX_SEATS)?,
             },
             19 => Event::Splattered {
                 player: r.index_below(players)?,
