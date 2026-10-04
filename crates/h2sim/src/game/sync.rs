@@ -253,6 +253,8 @@ fn flag_team(t: u8) -> Result<u8, Malformed> {
 
 /// Most flags, bombs and balls in a game.
 const MAX_FLAGS: usize = 4;
+/// Most seats in a vehicle.
+const MAX_SEATS: usize = 16;
 
 fn grenade_kind(v: u8) -> Result<GrenadeKind, Malformed> {
     match v {
@@ -267,6 +269,7 @@ impl Event {
         match *self {
             Event::Shot {
                 player,
+                weapon,
                 left,
                 origin,
                 direction,
@@ -275,6 +278,7 @@ impl Event {
             } => {
                 w.u8(0);
                 w.index(Some(player));
+                w.index(Some(weapon));
                 w.bool(left);
                 w.vec3(origin);
                 w.vec3(direction);
@@ -378,11 +382,46 @@ impl Event {
                 w.u8(16);
                 w.index(Some(player));
             }
+            Event::Entered {
+                player,
+                vehicle,
+                seat,
+            } => {
+                w.u8(17);
+                w.index(Some(player));
+                w.index(Some(vehicle));
+                w.index(Some(seat));
+            }
+            Event::Exited { player, vehicle } => {
+                w.u8(18);
+                w.index(Some(player));
+                w.index(Some(vehicle));
+            }
+            Event::Splattered { player, vehicle } => {
+                w.u8(19);
+                w.index(Some(player));
+                w.index(Some(vehicle));
+            }
+            Event::VehicleDestroyed { vehicle, position } => {
+                w.u8(20);
+                w.index(Some(vehicle));
+                w.vec3(position);
+            }
+            Event::VehicleSpawned { vehicle } => {
+                w.u8(21);
+                w.index(Some(vehicle));
+            }
         }
     }
 
-    /// An event about `players` players and `weapons` weapon kinds.
-    pub fn read(r: &mut Reader, players: usize, weapons: usize) -> Result<Event, Malformed> {
+    /// An event about `players` players, `weapons` weapon kinds and
+    /// `vehicles` vehicles.
+    pub fn read(
+        r: &mut Reader,
+        players: usize,
+        weapons: usize,
+        vehicles: usize,
+    ) -> Result<Event, Malformed> {
         let opt_player = |r: &mut Reader| -> Result<Option<usize>, Malformed> {
             match r.index()? {
                 Some(i) if i >= players => Err(Malformed),
@@ -392,6 +431,7 @@ impl Event {
         Ok(match r.u8()? {
             0 => {
                 let player = r.index_below(players)?;
+                let weapon = r.index_below(weapons)?;
                 let left = r.bool()?;
                 let origin = r.vec3()?;
                 let direction = r.vec3()?;
@@ -402,6 +442,7 @@ impl Event {
                 };
                 Event::Shot {
                     player,
+                    weapon,
                     left,
                     origin,
                     direction,
@@ -490,6 +531,26 @@ impl Event {
             16 => Event::Juggernaut {
                 player: r.index_below(players)?,
             },
+            17 => Event::Entered {
+                player: r.index_below(players)?,
+                vehicle: r.index_below(vehicles)?,
+                seat: r.index_below(MAX_SEATS)?,
+            },
+            18 => Event::Exited {
+                player: r.index_below(players)?,
+                vehicle: r.index_below(vehicles)?,
+            },
+            19 => Event::Splattered {
+                player: r.index_below(players)?,
+                vehicle: r.index_below(vehicles)?,
+            },
+            20 => Event::VehicleDestroyed {
+                vehicle: r.index_below(vehicles)?,
+                position: r.vec3()?,
+            },
+            21 => Event::VehicleSpawned {
+                vehicle: r.index_below(vehicles)?,
+            },
             _ => return Err(Malformed),
         })
     }
@@ -541,6 +602,8 @@ impl Game {
             w.u32(p.multi_kill);
             w.f64(p.last_kill);
             w.f32(p.readying);
+            w.index(p.seat.map(|s| s.0));
+            w.index(p.seat.map(|s| s.1));
         }
         w.u16(self.dropped.len() as u16);
         for d in &self.dropped {
@@ -586,6 +649,30 @@ impl Game {
             w.f32(so_far);
         }
         w.index(self.juggernaut);
+        w.u16(self.vehicles.len() as u16);
+        for v in &self.vehicles {
+            w.bool(v.destroyed);
+            w.vec3(v.center);
+            let q = v.rotation;
+            for c in [q.x, q.y, q.z, q.w] {
+                w.f32(c);
+            }
+            w.vec3(v.velocity);
+            w.vec3(v.spin);
+            w.f32(v.health);
+            w.vec2(v.aim);
+            w.f32(v.steer);
+            w.f32(v.roll);
+            w.u8(v.compression.len().min(16) as u8);
+            for &c in v.compression.iter().take(16) {
+                w.f32(c);
+            }
+            w.u8(v.riders.len().min(MAX_SEATS) as u8);
+            for &r in v.riders.iter().take(MAX_SEATS) {
+                w.index(r);
+            }
+            w.bool(v.controls.boost);
+        }
     }
 
     /// Take on the state another PC sent. Players are added as needed; on
@@ -672,6 +759,11 @@ impl Game {
             p.multi_kill = r.u32()?;
             p.last_kill = r.f64()?;
             p.readying = r.f32()?;
+            p.seat = match (r.index()?, r.index()?) {
+                (Some(v), Some(s)) => Some((v, s)),
+                (None, None) => None,
+                _ => return Err(Malformed),
+            };
         }
         self.winner = match winner {
             Some(w) if w >= count => return Err(Malformed),
@@ -756,6 +848,51 @@ impl Game {
             Some(i) if i >= count => return Err(Malformed),
             v => v,
         };
+        // Vehicles come from the map; their state is sent.
+        let n = r.u16()? as usize;
+        if n != self.vehicles.len() {
+            return Err(Malformed);
+        }
+        for v in &mut self.vehicles {
+            v.destroyed = r.bool()?;
+            v.center = r.vec3()?;
+            let q = glam::Quat::from_xyzw(r.f32()?, r.f32()?, r.f32()?, r.f32()?);
+            if !q.is_finite() || q.length() < 0.5 {
+                return Err(Malformed);
+            }
+            v.rotation = q.normalize();
+            v.velocity = r.vec3()?;
+            v.spin = r.vec3()?;
+            v.health = r.f32()?;
+            v.aim = r.vec2()?;
+            v.steer = r.f32()?;
+            v.roll = r.f32()?;
+            let k = r.u8()? as usize;
+            if k != v.compression.len().min(16) {
+                return Err(Malformed);
+            }
+            for c in v.compression.iter_mut().take(k) {
+                *c = r.f32()?;
+            }
+            let k = r.u8()? as usize;
+            if k != v.riders.len().min(MAX_SEATS) {
+                return Err(Malformed);
+            }
+            for rider in v.riders.iter_mut().take(k) {
+                *rider = match r.index()? {
+                    Some(i) if i >= count => return Err(Malformed),
+                    x => x,
+                };
+            }
+            v.controls.boost = r.bool()?;
+        }
+        for p in &self.players {
+            if let Some((v, s)) = p.seat {
+                if self.vehicles.get(v).is_none_or(|veh| s >= veh.riders.len()) {
+                    return Err(Malformed);
+                }
+            }
+        }
         // Carriers hold the flag in hand.
         for (i, p) in self.players.iter_mut().enumerate() {
             let carrying = self.flags.iter().any(|f| f.carrier == Some(i));
@@ -850,7 +987,7 @@ mod tests {
         }
         let mut r = Reader::new(&w.0);
         for e in &events {
-            assert_eq!(Event::read(&mut r, 2, 0), Ok(*e));
+            assert_eq!(Event::read(&mut r, 2, 0, 0), Ok(*e));
         }
         assert!(r.at_end());
     }
@@ -891,7 +1028,14 @@ mod tests {
         let mut r = Reader::new(&w.0);
         joined.read_state(&mut r).unwrap();
         let read: Vec<Event> = (0..events.len())
-            .map(|_| Event::read(&mut r, joined.players.len(), joined.weapons.len()).unwrap())
+            .map(|_| {
+                let (p, w, v) = (
+                    joined.players.len(),
+                    joined.weapons.len(),
+                    joined.vehicles.len(),
+                );
+                Event::read(&mut r, p, w, v).unwrap()
+            })
             .collect();
         assert!(r.at_end());
         assert_eq!(read, events);

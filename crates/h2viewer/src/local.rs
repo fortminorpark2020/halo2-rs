@@ -11,7 +11,8 @@ use crate::rig;
 use crate::scene::{Scene, Vertex, WeaponAssets};
 use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
-use h2sim::game::{GrenadeKind, Spartan, TICK};
+use h2sim::game::{GrenadeKind, Spartan, VehicleAction, TICK};
+use h2sim::vehicle::{SeatDef, SeatRole};
 use h2sim::{Command, Game, WeaponState, World};
 use std::collections::HashSet;
 use winit::keyboard::KeyCode;
@@ -278,6 +279,41 @@ pub struct ViewDraws {
     pub posed: Vec<(usize, Vec<Vertex>)>,
 }
 
+/// The seat player `i` rides in: vehicle, seat and the seat's kind.
+pub fn seat_of(game: &Game, i: usize) -> Option<(usize, usize, &SeatDef)> {
+    let p = game.players.get(i).filter(|p| p.alive)?;
+    let (v, s) = p.seat?;
+    let veh = game.vehicles.get(v)?;
+    Some((v, s, game.vehicle_defs.get(veh.def)?.seats.get(s)?))
+}
+
+/// Where player `i` sees from: their eyes, a seat's, or (in a seat with a
+/// camera following the vehicle) the point the camera circles.
+pub fn view_point(game: &Game, i: usize) -> Vec3 {
+    let Some((v, s, seat)) = seat_of(game, i) else {
+        return game.players[i].eye();
+    };
+    let veh = &game.vehicles[v];
+    let def = &game.vehicle_defs[veh.def];
+    match (seat.third_person, seat.pivot) {
+        (false, _) => veh.seat_eye(def, s),
+        // A turret's gunner: over the gun, to see past them.
+        (true, Some(_)) => veh.seat_eye(def, s) + Vec3::Z * 0.45,
+        (true, None) => veh.center + Vec3::Z * (def.radius * 0.3 + 0.35),
+    }
+}
+
+/// How far behind the view point the camera follows player `i`'s vehicle,
+/// if it does.
+fn chase_distance(game: &Game, i: usize) -> Option<f32> {
+    let (v, _, seat) = seat_of(game, i).filter(|s| s.2.third_person)?;
+    let radius = game.vehicle_defs[game.vehicles[v].def].radius;
+    Some(match seat.pivot {
+        Some(_) => 0.8 + radius * 0.6,
+        None => 1.2 + radius * 1.4,
+    })
+}
+
 pub struct LocalPlayer {
     /// The game player this person controls.
     pub player: usize,
@@ -339,9 +375,28 @@ impl LocalPlayer {
         &game.players[self.player]
     }
 
-    /// Seen in first person: alive and walking.
+    /// Seen in first person: alive and walking (or riding where the
+    /// rider looks out themselves).
     pub fn first_person(&self, game: &Game) -> bool {
-        !self.flying && self.me(game).alive
+        !self.flying && self.me(game).alive && chase_distance(game, self.player).is_none()
+    }
+
+    /// The gun fired from this player's seat (driving or gunning), and its
+    /// state; `Some(None)` in a seat without one.
+    pub fn seat_gun<'a>(
+        &self,
+        scene: &'a Scene,
+        game: &'a Game,
+    ) -> Option<Option<(&'a WeaponAssets, &'a WeaponState)>> {
+        let (v, s, seat) = seat_of(game, self.player)?;
+        if seat.role == SeatRole::Passenger {
+            return None;
+        }
+        let gun = seat.weapon.and_then(|w| {
+            let state = game.vehicles[v].weapons.get(s)?.as_ref()?;
+            Some((scene.weapons.get(w)?, state))
+        });
+        Some(gun)
     }
 
     pub fn current<'a>(
@@ -354,6 +409,9 @@ impl LocalPlayer {
     }
 
     pub fn magnification(&self, scene: &Scene, game: &Game) -> f32 {
+        if self.seat_gun(scene, game).is_some() {
+            return 1.0;
+        }
         self.current(scene, game)
             .map(|(w, s)| w.def.magnification(s.zoom))
             .unwrap_or(1.0)
@@ -425,10 +483,19 @@ impl LocalPlayer {
             return;
         }
         let me = self.me(game);
-        if me.alive {
+        if let (true, Some(dist)) = (me.alive, chase_distance(game, self.player)) {
+            // Following the vehicle, kept out of walls.
+            let a = (pending / TICK).clamp(0.0, 1.0);
+            let at = self.eyes.0.lerp(self.eyes.1, a);
+            let back = -self.camera.forward();
+            let d = world
+                .raycast(at, back, dist)
+                .map_or(dist, |t| (t - 0.2).max(0.2));
+            self.camera.position = at + back * d;
+        } else if me.alive {
             let a = (pending / TICK).clamp(0.0, 1.0);
             self.camera.position = self.eyes.0.lerp(self.eyes.1, a);
-            if me.body.grounded {
+            if me.body.grounded && me.seat.is_none() {
                 self.bob_phase += me.body.velocity.truncate().length() * dt * 4.5;
             }
         } else {
@@ -810,12 +877,31 @@ impl LocalPlayer {
             );
             return hb.finish();
         }
+        let riding = me.seat.is_some();
         let prompts = [
             (game.swap_prompt(self.player), ["E", "X"], "PICK UP"),
             (game.dual_prompt(self.player), ["Q", "Y"], "DUAL WIELD"),
         ];
         let mut y = h * 0.5 + 64.0 * s;
-        for (weapon, buttons, what) in prompts {
+        if let Some(text) = vehicle_prompt(scene, game, self.player, self.keyboard) {
+            hb.text(font, [w * 0.5, y], 9.0 * s, &text, hud::BLUE);
+            y += 12.0 * s;
+        }
+        if let Some(gun) = self.seat_gun(scene, game) {
+            if let Some((weapon, state)) = gun {
+                // A vehicle gun's HUD is its reticle (and one for aiming
+                // at friends).
+                weapon_hud(&mut hb, scene, weapon, state, |name, _| {
+                    if name.contains("friend") {
+                        HudRole::Hidden
+                    } else {
+                        HudRole::Static
+                    }
+                });
+            }
+            return hb.finish();
+        }
+        for (weapon, buttons, what) in prompts.into_iter().filter(|_| !riding) {
             if let Some(a) = weapon.and_then(|w| scene.weapons.get(w)) {
                 let button = buttons[!self.keyboard as usize];
                 let name = display_name(&a.def.name);
@@ -851,6 +937,26 @@ impl LocalPlayer {
         }
         hb.finish()
     }
+}
+
+/// What holding the action button would do to a vehicle nearby.
+fn vehicle_prompt(scene: &Scene, game: &Game, i: usize, keyboard: bool) -> Option<String> {
+    let button = if keyboard { "E" } else { "X" };
+    let (v, what) = match game.vehicle_action(i)? {
+        VehicleAction::Enter { vehicle, seat } => {
+            let def = &game.vehicle_defs[game.vehicles[vehicle].def];
+            let what = match def.seats[seat].role {
+                SeatRole::Driver if def.drive == h2sim::vehicle::Drive::Fixed => "USE",
+                SeatRole::Driver => "DRIVE",
+                SeatRole::Gunner => "GUN",
+                SeatRole::Passenger => "RIDE IN",
+            };
+            (vehicle, what)
+        }
+        VehicleAction::Flip { vehicle } => (vehicle, "FLIP"),
+    };
+    let name = &scene.vehicles.kinds.get(game.vehicles[v].def)?.name;
+    Some(format!("HOLD {button} TO {what} {name}"))
 }
 
 /// A weapon's HUD widgets: background with spare ammo, ammo meter,

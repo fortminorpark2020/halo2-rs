@@ -134,8 +134,8 @@ impl App {
         if fresh {
             self.pending = 0.0;
             for l in &mut self.locals {
-                if let Some(p) = self.game.players.get(l.player) {
-                    l.eyes = (l.eyes.1, p.eye());
+                if l.player < self.game.players.len() {
+                    l.eyes = (l.eyes.1, crate::local::view_point(&self.game, l.player));
                 }
             }
         } else {

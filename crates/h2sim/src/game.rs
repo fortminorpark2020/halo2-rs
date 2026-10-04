@@ -6,6 +6,7 @@
 
 use crate::collision::{KillZone, World};
 use crate::player::{Input, Player};
+use crate::vehicle::{Vehicle, VehicleDef};
 use crate::weapon::{WeaponDef, WeaponInput, WeaponState};
 use blam_cache::physics::{BipedPhysics, PlayerMovement};
 use glam::{Vec2, Vec3};
@@ -14,9 +15,11 @@ mod ctf;
 mod dual;
 mod juggernaut;
 mod sync;
+mod vehicles;
 mod zones;
 pub use ctf::{Flag, FlagEvent, NEUTRAL};
 pub use sync::{Malformed, Reader, Writer};
+pub use vehicles::{VehicleAction, VehicleSpawn};
 pub use zones::{Hill, HillControl, HillEvent, Territory};
 
 /// Simulation step: the game advances in fixed ticks so every machine in a
@@ -373,6 +376,11 @@ pub struct Spartan {
     action_held: f32,
     /// Seconds the switch button has been held (negative once acted on).
     switch_held: f32,
+    /// The vehicle and seat ridden in.
+    pub seat: Option<(usize, usize)>,
+    /// Seconds the action key has been held by a vehicle (negative once
+    /// acted on).
+    board_held: f32,
     last: Command,
 }
 
@@ -436,6 +444,8 @@ pub struct Grenade {
 pub enum Event {
     Shot {
         player: usize,
+        /// The weapon fired (index into the game's weapons).
+        weapon: usize,
         /// Fired by the left hand's weapon.
         left: bool,
         origin: Vec3,
@@ -517,6 +527,29 @@ pub enum Event {
     Juggernaut {
         player: usize,
     },
+    /// Got into a vehicle's seat.
+    Entered {
+        player: usize,
+        vehicle: usize,
+        seat: usize,
+    },
+    Exited {
+        player: usize,
+        vehicle: usize,
+    },
+    /// Run over by a vehicle.
+    Splattered {
+        player: usize,
+        vehicle: usize,
+    },
+    VehicleDestroyed {
+        vehicle: usize,
+        position: Vec3,
+    },
+    /// A vehicle back at its spawn point.
+    VehicleSpawned {
+        vehicle: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,6 +594,11 @@ pub struct Game {
     pub territories: Vec<Territory>,
     /// Juggernaut: who it is.
     pub juggernaut: Option<usize>,
+    /// The kinds of vehicle on the map, where each vehicle appears, and
+    /// the vehicles themselves (one per spawn point).
+    pub vehicle_defs: Vec<VehicleDef>,
+    pub vehicle_spawns: Vec<VehicleSpawn>,
+    pub vehicles: Vec<Vehicle>,
     pub movement: PlayerMovement,
     pub biped: BipedPhysics,
     pub time: f64,
@@ -632,6 +670,9 @@ impl Game {
             hill_control: HillControl::Empty,
             territories: Vec::new(),
             juggernaut: None,
+            vehicle_defs: Vec::new(),
+            vehicle_spawns: Vec::new(),
+            vehicles: Vec::new(),
             movement,
             biped,
             time: 0.0,
@@ -743,6 +784,8 @@ impl Game {
             grenade_cooldown: 0.0,
             action_held: 0.0,
             switch_held: f32::MIN,
+            seat: None,
+            board_held: 0.0,
             last: Command::default(),
         }
     }
@@ -808,6 +851,7 @@ impl Game {
             let cmd = commands.get(i).copied().unwrap_or_default();
             self.step_player(world, i, cmd, dt);
         }
+        self.step_vehicles(world, dt);
         self.step_grenades(world, dt);
         self.step_items(dt);
         self.step_flags(world, dt);
@@ -830,16 +874,20 @@ impl Game {
             let p = &mut self.players[i];
             p.yaw = cmd.yaw;
             p.pitch = cmd.pitch.clamp(-1.5, 1.5);
-            p.body.update(
-                world,
-                Input {
-                    movement: cmd.movement,
-                    yaw: cmd.yaw,
-                    jump: cmd.jump,
-                    crouch: cmd.crouch,
-                },
-                dt,
-            );
+            // Riders go where their vehicle takes them.
+            let riding = p.seat.is_some();
+            if !riding {
+                p.body.update(
+                    world,
+                    Input {
+                        movement: cmd.movement,
+                        yaw: cmd.yaw,
+                        jump: cmd.jump,
+                        crouch: cmd.crouch,
+                    },
+                    dt,
+                );
+            }
             // Shields recharge after a while without damage.
             p.since_damage += dt;
             if p.since_damage > self.rules.shield_delay && p.shield < self.rules.shield {
@@ -865,6 +913,15 @@ impl Game {
             }
         }
 
+        // In a vehicle: driving and gunning; passengers keep their guns.
+        let riding = self.players[i].seat.is_some();
+        if riding && !self.ride(world, i, cmd, dt) {
+            if let Some(p) = self.players.get_mut(i) {
+                p.last = cmd;
+            }
+            return;
+        }
+
         self.press_switch(i, cmd.switch_weapon, last.switch_weapon, dt);
         if pressed(cmd.switch_grenade, last.switch_grenade) {
             let p = &mut self.players[i];
@@ -874,18 +931,23 @@ impl Game {
                 g => g,
             };
         }
-        self.pick_up(i, cmd.action, dt);
-        self.touch_flags(i, cmd.action, dt);
+        let at_vehicle = !riding && self.board(i, cmd.action, dt);
+        if self.players[i].seat.is_some() {
+            self.players[i].last = cmd;
+            return;
+        }
+        self.pick_up(i, cmd.action && !at_vehicle && !riding, dt);
+        self.touch_flags(i, cmd.action && !at_vehicle, dt);
 
         let lunges = self.players[i]
             .held()
             .is_some_and(|h| self.rules.lunge_weapons.contains(&h.weapon));
-        if pressed(cmd.melee, last.melee) && self.players[i].melee_cooldown <= 0.0 {
+        if pressed(cmd.melee, last.melee) && self.players[i].melee_cooldown <= 0.0 && !riding {
             self.melee(i, lunges);
         }
         // Dual wielding, the grenade button is the left trigger.
         let dual = self.players[i].left.is_some();
-        if pressed(cmd.throw_grenade, last.throw_grenade) && !dual {
+        if pressed(cmd.throw_grenade, last.throw_grenade) && !dual && !riding {
             self.throw_grenade(i);
         }
 
@@ -920,8 +982,9 @@ impl Game {
                 reload: cmd.reload,
                 zoom: cmd.zoom && !dual,
             };
+            let w = gun.unwrap_or_default();
             for shot in held.state.update(&def, input, dt) {
-                shots.push((shot.direction(f, r, u), def.clone(), false));
+                shots.push((shot.direction(f, r, u), def.clone(), w, false));
             }
             if held.state.reloading.is_some() && !was.0 {
                 reloaded.push((false, was.1));
@@ -940,8 +1003,9 @@ impl Game {
                 reload: cmd.reload,
                 zoom: false,
             };
+            let w = left.unwrap_or_default();
             for shot in held.state.update(&def, input, dt) {
-                shots.push((shot.direction(f, r, u), def.clone(), true));
+                shots.push((shot.direction(f, r, u), def.clone(), w, true));
             }
             if held.state.reloading.is_some() && !was.0 {
                 reloaded.push((true, was.1));
@@ -958,8 +1022,8 @@ impl Game {
                 empty,
             });
         }
-        for (dir, def, left) in shots {
-            self.fire(world, i, eye, dir, &def, left);
+        for (dir, def, w, left) in shots {
+            self.fire(world, i, eye, dir, &def, w, left);
         }
         self.players[i].last = cmd;
     }
@@ -979,11 +1043,15 @@ impl Game {
     }
 
     /// Who a ray from `origin` hits first among living players other than
-    /// `shooter`: (player, distance, headshot).
+    /// `shooter` (and those riding with them): (player, distance, headshot).
     fn trace_players(&self, shooter: usize, origin: Vec3, dir: Vec3) -> Option<(usize, f32, bool)> {
+        let own = self.riding(shooter).map(|(v, _)| v);
         let mut best: Option<(usize, f32, bool)> = None;
         for (j, q) in self.players.iter().enumerate() {
-            if j == shooter || !q.alive {
+            if j == shooter || !q.alive || !self.exposed(j) {
+                continue;
+            }
+            if own.is_some() && q.seat.map(|(v, _)| v) == own {
                 continue;
             }
             let h = q.body.height();
@@ -998,26 +1066,45 @@ impl Game {
         best
     }
 
-    fn fire(&mut self, world: &World, i: usize, eye: Vec3, dir: Vec3, def: &WeaponDef, left: bool) {
+    /// Fire one round of `weapon` (`def`) from `eye` along `dir`: it hits
+    /// the level, a player or a vehicle, whichever is first.
+    #[allow(clippy::too_many_arguments)]
+    fn fire(
+        &mut self,
+        world: &World,
+        i: usize,
+        eye: Vec3,
+        dir: Vec3,
+        def: &WeaponDef,
+        weapon: usize,
+        left: bool,
+    ) {
         let range = def.range;
         let wall = world.raycast_hit(eye, dir, range);
+        let wall_t = wall.map_or(f32::MAX, |w| w.0);
         let target = self
             .trace_players(i, eye, dir)
-            .filter(|&(_, t, _)| t <= range && wall.is_none_or(|(wt, _)| t < wt));
-        let p = &self.players[i];
-        let weapon = if left { p.left.as_ref() } else { p.held() }.map(|h| h.weapon);
-        let (hit, hit_player) = match target {
-            Some((j, t, head)) => {
+            .filter(|&(_, t, _)| t <= range && t < wall_t);
+        let vehicle = self
+            .trace_vehicles(i, eye, dir)
+            .filter(|&(_, t)| t <= range && t < wall_t);
+        let (hit, hit_player) = match (target, vehicle) {
+            (Some((j, t, head)), v) if v.is_none_or(|v| t <= v.1) => {
                 let damage = WeaponState::damage_at(def, t);
-                let headshot =
-                    head && weapon.is_some_and(|w| self.rules.headshot_weapons.contains(&w));
+                let headshot = head && self.rules.headshot_weapons.contains(&weapon);
                 self.damage(j, Some(i), damage, headshot);
                 (Some((eye + dir * t, -dir)), Some(j))
             }
-            None => (wall.map(|(t, n)| (eye + dir * t, n)), None),
+            (_, Some((v, t))) => {
+                let damage = WeaponState::damage_at(def, t);
+                self.damage_vehicle(v, Some(i), damage);
+                (Some((eye + dir * t, -dir)), None)
+            }
+            _ => (wall.map(|(t, n)| (eye + dir * t, n)), None),
         };
         self.events.push(Event::Shot {
             player: i,
+            weapon,
             left,
             origin: eye,
             direction: dir,
@@ -1196,6 +1283,7 @@ impl Game {
             };
             self.damage(j, Some(g.owner), def.damage * falloff, false);
         }
+        self.blast_vehicles(g.position, g.owner, def.damage, def.radius);
         self.events.push(Event::Exploded {
             kind: g.kind,
             position: g.position,
@@ -1232,6 +1320,7 @@ impl Game {
 
     fn kill(&mut self, victim: usize, killer: Option<usize>, headshot: bool) {
         let respawn = self.rules.respawn_time;
+        self.leave_seat(victim);
         if self.players[victim].objective.is_some() {
             self.players[victim].alive = false;
             self.drop_flag(victim);

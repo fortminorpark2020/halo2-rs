@@ -10,11 +10,14 @@ install. No game files are included in this repository.
   names, tag groups, tag data, shared-map lookups, level collision and render
   geometry, shaders and bitmaps (DXT and uncompressed formats decoded to RGBA),
   render models with nodes, markers and skinning weights, animation graphs
-  (keyframe codecs decoded), weapons, projectiles, damage, HUD widgets, and
-  sounds (Xbox ADPCM and WMA).
+  (keyframe codecs decoded), weapons, projectiles, damage, HUD widgets,
+  vehicles (seats, speeds, hover and friction points, model variants, physics
+  hulls), and sounds (Xbox ADPCM and WMA).
 - `h2tool`: command-line inspector.
 - `h2sim`: game simulation (no rendering): level collision, Spartan movement
   using the speeds, jump velocity and size from the game's own globals and biped tags,
+  vehicles (wheels with suspension, hovering, flight, seats, turrets, splatters
+  and wrecks),
   weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
   the rules of every Halo 2 game type: Slayer, Capture the Flag, King of the
   Hill, Oddball, Juggernaut, Territories and Assault, with team versions of
@@ -87,6 +90,21 @@ and both ammo counters show. No grenades while dual wielding. In testing,
 pressing the number of the one-handed gun in hand gives a second one, and
 `H2_WEAPON=<n> H2_DUAL=1` starts with two.
 
+Vehicles: each map's own Warthogs (chaingun and gauss), Ghosts, Banshees and
+turrets, where the map places them (Zanzibar and Ascension have them). Walk up
+to one and hold E (X on a controller) to drive it, man its gun or ride along,
+and hold it again to get out; an overturned vehicle can be flipped back over
+the same way. The view follows the vehicle and it steers toward where you look;
+W/S (the left stick) drive, and G (the left trigger) boosts a Ghost or Banshee.
+Their speeds, seats, guns, hover pads, wheels and hulls come from the vehicle,
+model and physics tags; wheels turn and ride their suspension, turrets aim,
+and riders sit in Master Chief's seat animations. Vehicles run over and kill
+anyone in the way at speed, take damage (explosions hurt them most) and blow up
+with their riders, and come back where they started once wrecked or left
+behind. Engines sound faster the faster they go. `H2_DRIVE="<vehicle> <forward>
+<right> <look degrees> <seconds>"` drives one without a window for testing,
+and `H2_LIST_VEHICLES=1` lists them as a map loads.
+
 Controllers use Halo 2's layout (left stick move, right stick look, RT fire,
 LT grenade, A jump, B melee, X reload / hold to pick up, Y switch weapon, click
 sticks to crouch and zoom, Start pauses, hold Back for the scoreboard). A on a
@@ -126,6 +144,7 @@ h2tool level  lockout.map [texdir]      # render geometry, shaders, textures (op
 h2tool sim    lockout.map               # drop a Spartan at every spawn and walk (collision sanity check)
 h2tool model  lockout.map battle_rifle  # render model nodes and markers
 h2tool weapon lockout.map battle_rifle  # firing stats
+h2tool vehicle zanzibar.map warthog     # seats, speeds, model variants and physics hull
 h2tool hud    lockout.map battle_rifle [dir]  # HUD widgets
 h2tool jmad   lockout.map fp_battle_rifle  # animation graph: skeleton and animations
 h2tool jmadscan lockout.map             # decode every animation (reports failures)

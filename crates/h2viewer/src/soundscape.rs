@@ -65,6 +65,8 @@ pub struct Soundscape {
     announced_winner: bool,
     /// Per local player: the respawn countdown's whole second last ticked.
     respawn_ticks: Vec<(usize, u32)>,
+    /// Per vehicle: its engine and boost loops while someone drives.
+    engines: Vec<[Option<u64>; 2]>,
 }
 
 /// Volume at distance `d` for a sound carrying over `range`.
@@ -77,6 +79,32 @@ fn falloff(d: f32, (near, far): (f32, f32)) -> f32 {
     }
     let fade = ((far - d) / (far * 0.25)).min(1.0);
     near.max(0.01) / d * fade
+}
+
+/// Left/right gains for a sound at `at` heard over `distance`: the loudest
+/// any listener hears it (its owner hears it unplaced in first person).
+fn placed(
+    distance: (f32, f32),
+    at: Vec3,
+    owner: Option<usize>,
+    listeners: &[Listener],
+) -> [f32; 2] {
+    let mut best = [0.0f32; 2];
+    for l in listeners {
+        let gains = if l.first_person && owner == Some(l.player) {
+            [1.0, 1.0]
+        } else {
+            let to = at - l.position;
+            let d = to.length();
+            let g = falloff(d, distance);
+            let pan = if d > 1e-3 { to.dot(l.right) / d } else { 0.0 };
+            pan_gains(g, pan * 0.8)
+        };
+        if gains[0] + gains[1] > best[0] + best[1] {
+            best = gains;
+        }
+    }
+    best
 }
 
 /// Left/right gains for a sound to one side (-1 left .. 1 right).
@@ -98,6 +126,7 @@ impl Soundscape {
             announced_start: false,
             announced_winner: false,
             respawn_ticks: Vec::new(),
+            engines: Vec::new(),
         }
     }
 
@@ -111,6 +140,7 @@ impl Soundscape {
         self.announced_start = false;
         self.announced_winner = false;
         self.respawn_ticks.clear();
+        self.engines.clear();
     }
 
     /// A menu sound.
@@ -178,21 +208,7 @@ impl Soundscape {
         let Some(asset) = sound.and_then(|s| scene.sounds.get(s)) else {
             return;
         };
-        let mut best = [0.0f32; 2];
-        for l in listeners {
-            let gains = if l.first_person && owner == Some(l.player) {
-                [1.0, 1.0]
-            } else {
-                let to = at - l.position;
-                let d = to.length();
-                let g = falloff(d, asset.distance);
-                let pan = if d > 1e-3 { to.dot(l.right) / d } else { 0.0 };
-                pan_gains(g, pan * 0.8)
-            };
-            if gains[0] + gains[1] > best[0] + best[1] {
-                best = gains;
-            }
-        }
+        let best = placed(asset.distance, at, owner, listeners);
         let gain = asset.gain * volume;
         let clip = asset.clips[self.pick(asset.clips.len())].clone();
         self.audio
@@ -314,7 +330,7 @@ impl Soundscape {
             Event::Juggernaut { .. } => self.announce(a.new_juggernaut),
             Event::Shot {
                 player,
-                left,
+                weapon,
                 origin,
                 hit,
                 hit_player,
@@ -323,7 +339,11 @@ impl Soundscape {
                 if player >= self.players.len() {
                     self.players.resize(player + 1, PlayerSounds::default());
                 }
-                if let Some((sounds, burst)) = hand_sounds(player, left) {
+                let fired = scene
+                    .weapons
+                    .get(weapon)
+                    .map(|w| (w.sounds, w.def.shots_per_fire > 1));
+                if let Some((sounds, burst)) = fired {
                     let last = self.players[player].last_shot;
                     self.players[player].last_shot = game.time;
                     if !burst || game.time - last > BURST_GAP {
@@ -355,6 +375,21 @@ impl Soundscape {
             }
             Event::Thrown { player } => {
                 self.play(scene, g.throw, body(player), Some(player), listeners, 1.0);
+            }
+            Event::Entered {
+                player,
+                vehicle,
+                seat,
+            } => {
+                let s = game
+                    .vehicles
+                    .get(vehicle)
+                    .and_then(|v| scene.vehicles.kinds.get(v.def))
+                    .and_then(|k| k.enter_sounds.get(seat).copied().flatten());
+                self.play(scene, s, body(player), Some(player), listeners, 1.0);
+            }
+            Event::VehicleDestroyed { position, .. } => {
+                self.play(scene, g.explosion[0], position, None, listeners, 1.0);
             }
             Event::Exploded { kind, position } => {
                 let s = g.explosion[(kind == GrenadeKind::Plasma) as usize];
@@ -438,6 +473,7 @@ impl Soundscape {
         }
         self.shield_alarms(scene, game, listeners);
         self.respawn_countdown(scene, game, listeners);
+        self.engines(scene, game, listeners);
 
         // The game type as play begins, and the end of the game.
         let a = g.announcer;
@@ -456,6 +492,51 @@ impl Soundscape {
             }
         }
         self.speak(scene, dt);
+    }
+
+    /// Vehicles' engines while someone drives them, rising with speed, and
+    /// their boost.
+    fn engines(&mut self, scene: &Scene, game: &Game, listeners: &[Listener]) {
+        self.engines.resize(game.vehicles.len(), [None; 2]);
+        for (k, v) in game.vehicles.iter().enumerate() {
+            let (Some(def), Some(kind)) = (
+                game.vehicle_defs.get(v.def),
+                scene.vehicles.kinds.get(v.def),
+            ) else {
+                continue;
+            };
+            let driven = !v.destroyed
+                && def
+                    .driver_seat()
+                    .is_some_and(|d| v.riders.get(d).copied().flatten().is_some());
+            let pace = (v.speed() / def.max_forward_speed.max(1.0)).min(1.5);
+            for (slot, sound, on) in [
+                (0, kind.engine, driven),
+                (1, kind.boost, driven && v.controls.boost),
+            ] {
+                let voice = &mut self.engines[k][slot];
+                let asset = sound.and_then(|s| scene.sounds.get(s));
+                match (asset, on, *voice) {
+                    (Some(asset), true, playing) => {
+                        let g = placed(asset.distance, v.center, None, listeners)
+                            .map(|g| g * asset.gain);
+                        let pitch = 0.85 + 0.45 * pace;
+                        match playing {
+                            Some(id) => self.audio.adjust(id, g, pitch),
+                            None => {
+                                let clip = asset.clips[0].clone();
+                                *voice = Some(self.audio.play_loop(&clip, g, pitch));
+                            }
+                        }
+                    }
+                    (_, _, Some(id)) => {
+                        self.audio.fade_out(id, 0.4);
+                        *voice = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Ticks over the last seconds before a local player respawns.

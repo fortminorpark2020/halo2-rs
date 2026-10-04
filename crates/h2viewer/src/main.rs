@@ -14,6 +14,10 @@
 //! for the scoreboard, B add a bot, 1-9 take any weapon (testing), ` toggles
 //! walking / flying (fly: Space/C up/down, Shift fast), Esc the pause menu.
 //!
+//! Vehicles: hold E (X on a controller) by one to drive, gun or ride, and
+//! again to get out; the view follows the vehicle and it steers toward
+//! where you look. G (left trigger) boosts a Ghost or Banshee.
+//!
 //! Controllers (Halo 2's layout, see `input`): A takes over player one,
 //! Start joins as another splitscreen player (in a game: the pause menu),
 //! hold Back for the scoreboard.
@@ -39,6 +43,7 @@ mod probe;
 mod rig;
 mod scene;
 mod soundscape;
+mod vehicles;
 
 use blam_cache::geometry::Mesh;
 use blam_cache::PlayerSpawn;
@@ -49,6 +54,7 @@ use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use gpu::{hud_mode, DrawCall, Frame, HudBatch};
 use h2sim::game::{Event, GrenadeKind, HeldWeapon, TICK};
+use h2sim::vehicle::SeatRole;
 use h2sim::{
     Bot, Command, Game, GameType, ItemKind, ItemSpawn, KillZone, NavGraph, Rules, WeaponState,
     World,
@@ -206,6 +212,7 @@ fn new_game(scene: &Scene, game_type: GameType, score_to_win: u32) -> Game {
     game.hills = objective::hills(scene);
     game.territories = objective::territories(scene);
     game.kill_zones = kill_zones(scene);
+    game.set_vehicles(scene.vehicles.defs.clone(), scene.vehicles.spawns.clone());
     game
 }
 
@@ -238,14 +245,34 @@ struct Level {
 fn load_level(path: &Path) -> Result<Level, String> {
     let scene = Scene::load(path).map_err(|e| e.to_string())?;
     println!(
-        "{} triangles, {} textures, {} weapons, {} items, {} game type points, {} kill zones",
+        "{} triangles, {} textures, {} weapons, {} items, {} vehicles, {} game type points, {} kill zones",
         scene.triangle_count(),
         scene.textures.len() - 1,
         scene.weapons.len(),
         scene.items.len(),
+        scene.vehicles.spawns.len(),
         scene.netgame_flags.len(),
         scene.kill_volumes.len(),
     );
+    // H2_LIST_VEHICLES=1: where the map's vehicles are.
+    if std::env::var_os("H2_LIST_VEHICLES").is_some() {
+        for s in &scene.vehicles.spawns {
+            let def = &scene.vehicles.defs[s.def];
+            let kind = &scene.vehicles.kinds[s.def];
+            println!(
+                "vehicle {} at {:.2} facing {:.2} ({:?}, {} seats, radius {:.2}, engine {:?}, boost {:?}, enter {:?})",
+                def.name,
+                s.position,
+                s.yaw,
+                def.drive,
+                def.seats.len(),
+                def.radius,
+                kind.engine,
+                kind.boost,
+                kind.enter_sounds
+            );
+        }
+    }
     let world = World::new(&scene.collision.positions, &scene.collision.indices);
     let mut spots: Vec<Vec3> = level_spawns(&scene).iter().map(|s| s.0).collect();
     spots.extend(scene.items.iter().map(|i| i.position));
@@ -264,6 +291,90 @@ fn load_level(path: &Path) -> Result<Level, String> {
         nav,
         path: path.to_path_buf(),
     })
+}
+
+fn env_set(name: &str) -> bool {
+    std::env::var_os(name).is_some()
+}
+
+/// No window: player one gets into a vehicle's driver seat and drives,
+/// printing where the vehicle goes. `spec` is "vehicle forward right yaw
+/// seconds" (yaw in degrees: where the driver looks, relative to the
+/// vehicle).
+fn drive_test(level: &Level, spec: &str) {
+    let n: Vec<f32> = spec
+        .split_whitespace()
+        .filter_map(|x| x.parse().ok())
+        .collect();
+    let [v, forward, right, yaw, seconds] = n[..] else {
+        println!("H2_DRIVE wants \"vehicle forward right yaw seconds\"");
+        return;
+    };
+    let mut game = new_game(&level.scene, GameType::Slayer, 0);
+    let me = game.add_player();
+    let v = v as usize;
+    let mut cmd = Command::default();
+    for _ in 0..60 {
+        game.step(&level.world, &[cmd]);
+    }
+    let veh = &game.vehicles[v];
+    let def = &game.vehicle_defs[veh.def];
+    let seat = def.driver_seat().unwrap_or(0);
+    let entry = veh.to_world(def, def.seats[seat].entry);
+    game.players[me].body.position = entry - Vec3::Z * 0.3;
+    println!("{} at {:.2}, entry {entry:.2}", def.name, veh.center);
+    if env_set("H2_DRIVE_DEF") {
+        for b in &def.hull {
+            println!("box at {:.2} half {:.2}", b.center, b.half_extents);
+        }
+        for s in &def.spheres {
+            println!("sphere {s:.2?}");
+        }
+        for w in &def.wheels {
+            println!("wheel {:.2} r {}", w.position, w.radius);
+        }
+        for (k, s) in def.seats.iter().enumerate() {
+            println!(
+                "seat {k} {:?} at {:.2} entry {:.2} (world {:.2}) r {:.2} eye {:.2} pivot {:.2?} pitch {:.2?}",
+                s.role,
+                s.position,
+                s.entry,
+                veh.to_world(def, s.entry),
+                s.entry_radius,
+                s.eye,
+                s.pivot,
+                s.pitch_range
+            );
+        }
+        println!("center {:.2} radius {:.2}", def.center, def.radius);
+    }
+    cmd.action = true;
+    for _ in 0..90 {
+        game.step(&level.world, &[cmd]);
+    }
+    println!("riding {:?}", game.riding(me));
+    cmd.action = false;
+    let look = game.vehicles[v].yaw() + yaw.to_radians();
+    for tick in 0..(seconds / TICK) as usize {
+        cmd.movement = glam::vec2(right, forward);
+        cmd.yaw = look;
+        game.step(&level.world, &[cmd]);
+        if tick % 15 == 0 {
+            let veh = &game.vehicles[v];
+            println!(
+                "{:5.2}s at {:.2} speed {:.2} yaw {:.0} up {:.2} steer {:.2} squash {:.2?} asleep {} {:?}",
+                tick as f32 * TICK,
+                veh.center,
+                veh.speed(),
+                veh.yaw().to_degrees(),
+                veh.up().z,
+                veh.steer,
+                veh.compression,
+                veh.asleep,
+                veh.impact
+            );
+        }
+    }
 }
 
 /// Bots only, no window: play `seconds` of a game and print the kills, flag
@@ -637,7 +748,7 @@ impl App {
                 ticked = true;
             }
             for l in &mut self.locals {
-                let eye = self.game.players[l.player].eye();
+                let eye = local::view_point(&self.game, l.player);
                 l.eyes = (l.eyes.1, eye);
             }
             self.frame_events.extend_from_slice(&self.game.events);
@@ -740,7 +851,7 @@ impl App {
                     }
                 }
                 Event::Spawned { player, yaw } => {
-                    let eye = self.game.players[player].eye();
+                    let eye = local::view_point(&self.game, player);
                     if let Some(l) = self.local_of(player) {
                         l.eyes = (eye, eye);
                         l.camera.yaw = yaw;
@@ -762,6 +873,31 @@ impl App {
                     if let Some(l) = self.local_of(player) {
                         l.message(format!("PICKED UP {what}"));
                     }
+                }
+                Event::Entered {
+                    player, vehicle, ..
+                } => {
+                    // The view swings round behind the vehicle (or the
+                    // rider's own eyes), facing the way it does.
+                    let eye = local::view_point(&self.game, player);
+                    let yaw = self.game.vehicles[vehicle].yaw();
+                    if let Some(l) = self.local_of(player) {
+                        l.eyes = (eye, eye);
+                        l.camera.yaw = yaw;
+                        l.camera.pitch = -0.15;
+                    }
+                }
+                Event::Exited { player, .. } => {
+                    let eye = local::view_point(&self.game, player);
+                    if let Some(l) = self.local_of(player) {
+                        l.eyes = (eye, eye);
+                        l.camera.pitch = 0.0;
+                        l.view.switched = true;
+                    }
+                }
+                Event::VehicleDestroyed { position, .. } => {
+                    self.effects.explosion(position, false);
+                    self.effects.explosion(position + Vec3::Z * 0.4, false);
                 }
                 Event::Flag { .. }
                 | Event::Hill { .. }
@@ -800,13 +936,43 @@ impl App {
             }
             let (s, c) = p.yaw.sin_cos();
             let v = p.body.velocity.truncate();
-            let input = BodyInput {
+            let mut input = BodyInput {
                 velocity: glam::vec2(v.x * c + v.y * s, v.y * c - v.x * s),
                 grounded: p.body.grounded,
                 crouching: p.body.crouch > 0.5,
                 alive: p.alive,
                 style,
+                seat: None,
             };
+            let mut object = Mat4::from_translation(p.body.position) * Mat4::from_rotation_z(p.yaw);
+            // Riding: sitting in the seat, turning with the vehicle (and
+            // its turret).
+            if let Some((veh, s, seat)) = local::seat_of(&self.game, i) {
+                let vehicle = &self.game.vehicles[veh];
+                let stance = self
+                    .scene
+                    .vehicles
+                    .kinds
+                    .get(vehicle.def)
+                    .and_then(|k| k.seat_stances.get(s).copied());
+                input = BodyInput {
+                    velocity: glam::Vec2::ZERO,
+                    grounded: true,
+                    crouching: false,
+                    seat: stance,
+                    style: match seat.role {
+                        SeatRole::Driver => ("unarmed", ""),
+                        SeatRole::Gunner => ("fixed", ""),
+                        SeatRole::Passenger => style,
+                    },
+                    ..input
+                };
+                let mut turn = vehicle.rotation;
+                if seat.pivot.is_some() {
+                    turn *= vehicle.turret_turn();
+                }
+                object = Mat4::from_rotation_translation(turn, p.body.position);
+            }
             for &(_, what) in actions.iter().filter(|a| a.0 == i) {
                 self.bodies[i].act(rig, &input, what);
             }
@@ -814,7 +980,7 @@ impl App {
             let world = rig.world(&pose);
             self.body_poses[i] = Some(BodyPose {
                 vertices: rig.skin.pose(&rig.skin_matrices(&world)),
-                object: Mat4::from_translation(p.body.position) * Mat4::from_rotation_z(p.yaw),
+                object,
                 weapons: [false, true].map(|left| rig.weapon_frame(&world, left)),
             });
         }
@@ -896,12 +1062,15 @@ impl App {
             light,
             colors: Some(player_colors(&self.game, player)),
         }];
+        // Drivers and gunners hold the controls, not their guns.
+        let hands_free = local::seat_of(&self.game, player)
+            .is_none_or(|(_, _, seat)| seat.role == SeatRole::Passenger);
         for (held, hand) in [
             (p.held(), pose.weapons[0]),
             (p.left.as_ref(), pose.weapons[1]),
         ] {
             if let Some(mesh) = held
-                .filter(|_| p.alive)
+                .filter(|_| p.alive && hands_free)
                 .and_then(|h| self.scene.weapons.get(h.weapon))
                 .and_then(|w| w.world_mesh)
             {
@@ -939,9 +1108,10 @@ impl App {
         } else {
             vec![[0, 0, w as u32, h as u32]]
         };
-        let shared = self.world_draws();
-        // Posed bodies go up once, with the first view.
-        let mut body_meshes = Vec::new();
+        let mut shared = self.world_draws();
+        // Posed bodies and vehicles go up once, with the first view.
+        let (vehicle_draws, mut body_meshes) = vehicles::draws(&self.scene, &self.game);
+        shared.extend(vehicle_draws);
         if let Some(body) = &self.scene.body {
             for (i, pose) in self.body_poses.iter().enumerate() {
                 if let Some(pose) = pose {
@@ -981,7 +1151,7 @@ impl App {
                 draws: local::ViewDraws {
                     view_models: Vec::new(),
                     view_sprites: Vec::new(),
-                    posed: Vec::new(),
+                    posed: std::mem::take(&mut body_meshes),
                 },
                 hud: Vec::new(),
                 view_model_proj: Mat4::IDENTITY,
@@ -1356,6 +1526,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     // H2_SIM=<seconds> plays bots against each other without a window and
     // prints what happens (for testing).
+    if let Some(spec) = env("H2_DRIVE") {
+        drive_test(&level, &spec);
+        return Ok(());
+    }
     if let Some(seconds) = env("H2_SIM").and_then(|v| v.parse().ok()) {
         simulate(&level, &settings, seconds);
         return Ok(());

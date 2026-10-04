@@ -42,6 +42,7 @@ fn main() -> ExitCode {
         Some("obj") if args.len() >= 3 => obj(&args[1], &args[2]),
         Some("render") if args.len() >= 3 => render_png(&args[1], &args[2]),
         Some("weapon") if args.len() >= 3 => weapon(&args[1], &args[2]),
+        Some("vehicle") if args.len() >= 3 => vehicle(&args[1], &args[2]),
         Some("hud") if args.len() >= 3 => hud(&args[1], &args[2], args.get(3).map(String::as_str)),
         Some("jmad") if args.len() >= 3 => jmad(&args[1], &args[2]),
         Some("jmadscan") if args.len() >= 2 => jmadscan(&args[1]),
@@ -288,6 +289,52 @@ fn hud(path: &str, name: &str, dump: Option<&str>) -> Res {
                 }
                 Err(e) => println!("{}: {e}", w.name),
             }
+        }
+    }
+    Ok(())
+}
+
+fn vehicle(path: &str, name: &str) -> Res {
+    use blam_cache::{vehicle, MapSet};
+    let mut set = MapSet::open(path)?;
+    let vehi = GroupTag::parse("vehi").unwrap();
+    let mut tags: Vec<_> = Vec::new();
+    for m in [Some(&set.map), set.shared.as_ref()].into_iter().flatten() {
+        for t in &m.tags {
+            if t.group == vehi
+                && (t.name == name || t.name.ends_with(name))
+                && !tags.contains(&t.datum)
+            {
+                tags.push(t.datum);
+            }
+        }
+    }
+    let name_of = |set: &MapSet, d: blam_cache::DatumIndex| {
+        set.locate(d)
+            .map_or("?".to_string(), |(_, t)| format!("{} {}", t.group, t.name))
+    };
+    for datum in tags {
+        println!("== {}", name_of(&set, datum));
+        let v = vehicle::read_vehicle(&mut set, datum)?;
+        println!("{v:#?}");
+        for w in &v.weapons {
+            println!("weapon: {}", name_of(&set, *w));
+        }
+        for (a, marker) in &v.attachments {
+            println!("attachment: {} at {marker:?}", name_of(&set, *a));
+        }
+        let m = vehicle::read_model(&mut set, v.model)?;
+        println!("{m:#?}");
+        for var in &m.variants {
+            for o in &var.objects {
+                println!("variant {} attaches {}", var.name, name_of(&set, o.object));
+            }
+        }
+        if m.physics_model != blam_cache::DatumIndex::NONE {
+            println!(
+                "{:#?}",
+                vehicle::read_physics_model(&mut set, m.physics_model)?
+            );
         }
     }
     Ok(())

@@ -265,9 +265,33 @@ impl Audio {
 
     /// Start a clip with left/right gains; returns its voice id.
     pub fn play(&mut self, clip: &Arc<Clip>, gain: [f32; 2], pitch: f32, looping: bool) -> u64 {
+        if gain[0].max(gain[1]) < 0.002 {
+            self.next_id += 1;
+            return self.next_id - 1;
+        }
+        self.start(clip, gain, pitch, looping)
+    }
+
+    /// Loop a clip, however quiet for now (see `adjust`).
+    pub fn play_loop(&mut self, clip: &Arc<Clip>, gain: [f32; 2], pitch: f32) -> u64 {
+        self.start(clip, gain, pitch, true)
+    }
+
+    /// Change a playing voice's gains and pitch.
+    pub fn adjust(&mut self, id: u64, gain: [f32; 2], pitch: f32) {
+        if let Ok(mut m) = self.mixer.lock() {
+            let rate = m.rate.max(1) as f64;
+            if let Some(v) = m.voices.iter_mut().find(|v| v.id == id) {
+                v.gain = gain;
+                v.step = v.clip.rate as f64 / rate * pitch as f64;
+            }
+        }
+    }
+
+    fn start(&mut self, clip: &Arc<Clip>, gain: [f32; 2], pitch: f32, looping: bool) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        if matches!(self.output, Output::None) || gain[0].max(gain[1]) < 0.002 {
+        if matches!(self.output, Output::None) {
             return id;
         }
         let Ok(mut m) = self.mixer.lock() else {

@@ -24,6 +24,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+mod vehicles;
+pub use vehicles::Vehicles;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -513,6 +516,8 @@ pub struct Scene {
     /// Pits and drops that kill.
     pub kill_volumes: Vec<scenario::KillVolume>,
     pub falling: Option<FallingDamage>,
+    /// The map's vehicles, and their guns (in `weapons`).
+    pub vehicles: Vehicles,
 }
 
 /// Capture the Flag's flag: carried in hand like a weapon, with a cloth
@@ -1293,6 +1298,7 @@ impl Scene {
                 light,
             });
         }
+        let vehicles = loader.vehicles(&mut weapons, &mut meshes);
         let grenades = ["frag_grenade", "plasma_grenade"].map(|g| {
             let name = format!("objects\\weapons\\grenade\\{g}\\{g}");
             GrenadeAssets {
@@ -1466,6 +1472,7 @@ impl Scene {
             bomb_icon,
             kill_volumes,
             falling,
+            vehicles,
         })
     }
 

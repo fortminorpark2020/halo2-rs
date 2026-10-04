@@ -109,7 +109,9 @@ impl Client {
                     self.snapshots += 1;
                     let n = r.u16()?;
                     for _ in 0..n {
-                        events.push(Event::read(&mut r, game.players.len(), game.weapons.len())?);
+                        let (p, w, v) =
+                            (game.players.len(), game.weapons.len(), game.vehicles.len());
+                        events.push(Event::read(&mut r, p, w, v)?);
                     }
                     Ok(())
                 })(),

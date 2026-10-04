@@ -6,6 +6,7 @@ pub mod game;
 pub mod nav;
 pub mod player;
 pub mod testing;
+pub mod vehicle;
 pub mod weapon;
 
 pub use bot::Bot;
@@ -13,4 +14,5 @@ pub use collision::{KillZone, World};
 pub use game::{Command, Flag, FlagEvent, Game, GameType, ItemKind, ItemSpawn, Rules};
 pub use nav::NavGraph;
 pub use player::{Input, Player};
+pub use vehicle::{Vehicle, VehicleDef};
 pub use weapon::{Shot, WeaponDef, WeaponInput, WeaponState};

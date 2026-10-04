@@ -103,13 +103,18 @@ impl BodyRig {
 
     /// The most specific animation for `what` in a stance holding a weapon.
     pub fn find(&self, stance: &str, (class, code): (&str, &str), what: &str) -> Option<usize> {
-        let mut candidates = Vec::with_capacity(6);
+        let mut candidates = Vec::with_capacity(8);
         for s in [stance, "combat"] {
             if !code.is_empty() {
                 candidates.push(format!("{s}:{class}:{code}:{what}"));
             }
             candidates.push(format!("{s}:{class}:{what}"));
             candidates.push(format!("{s}:rifle:{what}"));
+            // Seats have some animations whatever the rider holds
+            // ("ghost_d:grip").
+            if s != "combat" && s != "crouch" {
+                candidates.push(format!("{s}:{what}"));
+            }
         }
         candidates
             .iter()
@@ -196,6 +201,8 @@ pub struct BodyInput {
     pub alive: bool,
     /// The weapon's animation class and code.
     pub style: (&'static str, &'static str),
+    /// Riding: the seat's animations ("warthog_d").
+    pub seat: Option<&'static str>,
 }
 
 /// One Spartan's animation state.
@@ -298,7 +305,9 @@ impl BodyAnimator {
 }
 
 fn stance(input: &BodyInput) -> &'static str {
-    if input.crouching {
+    if let Some(seat) = input.seat {
+        seat
+    } else if input.crouching {
         "crouch"
     } else {
         "combat"
@@ -383,6 +392,7 @@ mod tests {
             crouching: false,
             alive: true,
             style: ("rifle", "br"),
+            seat: None,
         };
         let pose = a.update(&r, &input, 0.016);
         assert!((pose[0].translation.z - 0.4).abs() < 1e-5);
