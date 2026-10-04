@@ -6,6 +6,9 @@
 //!
 //! PCs stay together between games: they wait in the host's lobby, and
 //! when the host starts a game they load its map and join it.
+//!
+//! Online games are the same, over connections the online service hands
+//! the host and the joining PC (`Host::add_connection`, `Client::over`).
 
 mod client;
 mod conn;
@@ -14,8 +17,9 @@ mod host;
 mod lobby;
 
 pub use client::{Client, ClientEvent};
+pub use conn::Connection;
 pub use discovery::{local_ip, Browser, LanGame};
-pub use host::{Host, HostEvent};
+pub use host::{Host, HostEvent, Verified};
 pub use lobby::{Lobby, LobbyPlayer};
 
 /// Bumped whenever the messages change; PCs on different versions can't play.

@@ -8,7 +8,8 @@ use crate::discovery::Beacon;
 use crate::{kind, Lobby, ANY_TEAM, MAGIC, PROTOCOL};
 use h2sim::game::{guest_name, Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
-use std::net::{SocketAddr, TcpListener};
+use socket2::{Domain, Protocol, Socket, Type};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
 /// Joining PCs must say hello this soon.
@@ -37,10 +38,27 @@ pub enum HostEvent {
     },
 }
 
+/// Who a PC joining through `Host::add_connection` is, as the online
+/// service checked it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified {
+    pub account: u64,
+    pub gamertag: String,
+    /// Their level (1-50) in what's being played.
+    pub level: u8,
+    /// The team everyone at that PC plays on (`ANY_TEAM`: the host
+    /// chooses).
+    pub team: u8,
+}
+
 struct Remote {
     conn: Connection,
-    address: SocketAddr,
+    /// Where it joined from, for the log.
+    address: String,
     computer: String,
+    /// Who it is, if the online service says so: then that's who plays
+    /// there, whatever its hello says.
+    verified: Option<Verified>,
     /// The gamertag of the person at that PC, how they look, and the team
     /// each player there would like.
     name: String,
@@ -57,11 +75,36 @@ struct Remote {
     players: Vec<(usize, Command, Command)>,
 }
 
+impl Remote {
+    fn new(
+        conn: Connection,
+        address: String,
+        computer: String,
+        verified: Option<Verified>,
+    ) -> Remote {
+        Remote {
+            conn,
+            address,
+            computer,
+            verified,
+            name: String::new(),
+            look: Look::default(),
+            teams: Vec::new(),
+            since: Instant::now(),
+            welcomed: false,
+            in_game: false,
+            fresh: false,
+            players: Vec::new(),
+        }
+    }
+}
+
 pub struct Host {
-    listener: TcpListener,
+    /// Where PCs join, unless they all come through `add_connection`.
+    listener: Option<TcpListener>,
     port: u16,
     remotes: Vec<Remote>,
-    beacon: Beacon,
+    beacon: Option<Beacon>,
     map: String,
     computer: String,
     /// The lobby, while there's no game on.
@@ -127,34 +170,93 @@ fn read_hello(r: &mut Reader) -> Result<Hello, String> {
     })
 }
 
+/// Listen at `address`. An IPv6 one takes IPv4 connections too where the
+/// system allows it, and IPv6's any-address is IPv4's on systems without
+/// IPv6.
+fn listen(address: SocketAddr) -> std::io::Result<TcpListener> {
+    let listener = match address {
+        SocketAddr::V4(_) => TcpListener::bind(address)?,
+        SocketAddr::V6(v6) => match listen_v6(address) {
+            Err(_) if v6.ip().is_unspecified() => {
+                TcpListener::bind((Ipv4Addr::UNSPECIFIED, address.port()))?
+            }
+            other => other?,
+        },
+    };
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
+fn listen_v6(address: SocketAddr) -> std::io::Result<TcpListener> {
+    let s = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    let _ = s.set_only_v6(false);
+    // As the standard library does for its own listeners.
+    #[cfg(unix)]
+    s.set_reuse_address(true)?;
+    s.bind(&address.into())?;
+    s.listen(128)?;
+    Ok(s.into())
+}
+
 impl Host {
     /// Listen for joining PCs on the first free port from `GAME_PORT`, and
     /// announce the game (on `map`) to the network.
     pub fn new(map: &str, session: u64) -> std::io::Result<Host> {
         let mut last = None;
         for port in crate::GAME_PORT..crate::GAME_PORT + 8 {
-            match TcpListener::bind(("0.0.0.0", port)) {
-                Ok(listener) => {
-                    listener.set_nonblocking(true)?;
-                    let computer = crate::computer_name();
-                    return Ok(Host {
-                        listener,
-                        port,
-                        remotes: Vec::new(),
-                        beacon: Beacon::new(session, port),
-                        map: map.to_string(),
-                        computer,
-                        lobby: None,
-                    });
-                }
+            let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+            match Host::bind(map, session, address, true) {
+                Ok(host) => return Ok(host),
                 Err(e) => last = Some(e),
             }
         }
         Err(last.unwrap_or_else(|| std::io::Error::other("no free port")))
     }
 
+    /// Listen for joining PCs at `address` (port 0: any free port), and
+    /// announce the game to the network if `beacon`.
+    pub fn bind(
+        map: &str,
+        session: u64,
+        address: SocketAddr,
+        beacon: bool,
+    ) -> std::io::Result<Host> {
+        let listener = listen(address)?;
+        let port = listener.local_addr()?.port();
+        let mut host = Host::online(map);
+        host.listener = Some(listener);
+        host.port = port;
+        host.beacon = beacon.then(|| Beacon::new(session, port));
+        Ok(host)
+    }
+
+    /// Host a game online: no listening and no announcing, PCs join only
+    /// through `add_connection`.
+    pub fn online(map: &str) -> Host {
+        Host {
+            listener: None,
+            port: 0,
+            remotes: Vec::new(),
+            beacon: None,
+            map: map.to_string(),
+            computer: crate::computer_name(),
+            lobby: None,
+        }
+    }
+
+    /// The port PCs join at (0 if they come through `add_connection`).
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Take a PC joining over `conn` (through the online service, say).
+    /// It says hello as any other, but plays as who `verified` says: their
+    /// gamertag, and everyone there on their team.
+    pub fn add_connection(&mut self, conn: Connection, verified: Verified) {
+        let address = format!("account {}", verified.account);
+        let computer = verified.gamertag.clone();
+        self.remotes
+            .push(Remote::new(conn, address, computer, Some(verified)));
     }
 
     /// How many PCs have joined.
@@ -227,21 +329,13 @@ impl Host {
     /// to `game` here, up to `max_players` in all.
     pub fn poll(&mut self, game: &mut Game, max_players: usize) -> Vec<HostEvent> {
         let mut events = Vec::new();
-        while let Ok((stream, address)) = self.listener.accept() {
-            match Connection::new(stream) {
-                Ok(conn) => self.remotes.push(Remote {
-                    conn,
-                    address,
-                    computer: address.ip().to_string(),
-                    name: String::new(),
-                    look: Look::default(),
-                    teams: Vec::new(),
-                    since: Instant::now(),
-                    welcomed: false,
-                    in_game: false,
-                    fresh: false,
-                    players: Vec::new(),
-                }),
+        while let Some((stream, address)) = self.listener.as_ref().and_then(|l| l.accept().ok()) {
+            match Connection::tcp(stream) {
+                Ok(conn) => {
+                    let computer = address.ip().to_string();
+                    let remote = Remote::new(conn, address.to_string(), computer, None);
+                    self.remotes.push(remote);
+                }
                 Err(e) => println!("lan: couldn't accept {address}: {e}"),
             }
         }
@@ -266,8 +360,9 @@ impl Host {
             Some(l) => l.players.len(),
             None => game.players.len(),
         };
-        self.beacon
-            .announce(&self.map, &self.computer, players.min(255) as u8);
+        if let Some(beacon) = &mut self.beacon {
+            beacon.announce(&self.map, &self.computer, players.min(255) as u8);
+        }
         events
     }
 
@@ -315,6 +410,10 @@ impl Host {
                         teams,
                         ..
                     } = hello;
+                    let (name, teams) = match &r.verified {
+                        Some(v) => (v.gamertag.clone(), vec![v.team; teams.len()]),
+                        None => (name, teams),
+                    };
                     let arriving = !r.welcomed;
                     r.computer = computer.clone();
                     r.name = name.clone();

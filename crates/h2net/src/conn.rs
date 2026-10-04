@@ -1,37 +1,96 @@
-//! Length-prefixed messages over a non-blocking TCP connection.
+//! Messages between two PCs, each a kind and a body: length-prefixed over
+//! a non-blocking TCP connection, or handed straight across between the two
+//! ends of a pair in this process (for tests).
 
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 
 /// Larger messages mean a broken or hostile peer.
 const MAX_MESSAGE: usize = 1 << 20;
 /// A peer that falls this far behind is dropped.
 const MAX_BACKLOG: usize = 8 << 20;
+/// Messages on their way between the two ends of a pair, as a socket's
+/// buffer would hold them; more wait at the sending end.
+const PAIR_BUFFER: usize = 64;
 
+type Message = (u8, Vec<u8>);
+
+/// A connection to another PC.
 pub struct Connection {
-    stream: TcpStream,
-    inbox: Vec<u8>,
-    outbox: Vec<u8>,
+    link: Link,
     closed: Option<String>,
 }
 
+enum Link {
+    Tcp {
+        stream: TcpStream,
+        inbox: Vec<u8>,
+        outbox: Vec<u8>,
+    },
+    Memory {
+        tx: SyncSender<Message>,
+        rx: Receiver<Message>,
+        /// Messages the other end has no room for yet, and their size.
+        outbox: VecDeque<Message>,
+        queued: usize,
+    },
+}
+
 impl Connection {
-    pub fn new(stream: TcpStream) -> io::Result<Connection> {
+    pub fn tcp(stream: TcpStream) -> io::Result<Connection> {
         stream.set_nonblocking(true)?;
         stream.set_nodelay(true)?;
-        Ok(Connection {
+        Ok(Connection::over(Link::Tcp {
             stream,
             inbox: Vec::new(),
             outbox: Vec::new(),
-            closed: None,
-        })
+        }))
+    }
+
+    /// Two ends connected to each other in this process: a host and a PC
+    /// joining it, say, in a test.
+    pub fn pair() -> (Connection, Connection) {
+        let (a, b) = (
+            mpsc::sync_channel(PAIR_BUFFER),
+            mpsc::sync_channel(PAIR_BUFFER),
+        );
+        let end = |tx, rx| {
+            Connection::over(Link::Memory {
+                tx,
+                rx,
+                outbox: VecDeque::new(),
+                queued: 0,
+            })
+        };
+        (end(a.0, b.1), end(b.0, a.1))
+    }
+
+    fn over(link: Link) -> Connection {
+        Connection { link, closed: None }
     }
 
     pub fn send(&mut self, kind: u8, body: &[u8]) {
-        self.outbox
-            .extend_from_slice(&(body.len() as u32 + 1).to_le_bytes());
-        self.outbox.push(kind);
-        self.outbox.extend_from_slice(body);
+        match &mut self.link {
+            Link::Tcp { outbox, .. } => {
+                outbox.extend_from_slice(&(body.len() as u32 + 1).to_le_bytes());
+                outbox.push(kind);
+                outbox.extend_from_slice(body);
+            }
+            Link::Memory { outbox, queued, .. } => {
+                *queued += body.len() + 1;
+                outbox.push_back((kind, body.to_vec()));
+            }
+        }
+    }
+
+    /// Bytes sent that the network (or the other end) hasn't taken yet.
+    fn backlog(&self) -> usize {
+        match &self.link {
+            Link::Tcp { outbox, .. } => outbox.len(),
+            Link::Memory { queued, .. } => *queued,
+        }
     }
 
     /// Write out as much as the network takes now. Err once the connection
@@ -40,18 +99,16 @@ impl Connection {
         if let Some(why) = &self.closed {
             return Err(why.clone());
         }
-        while !self.outbox.is_empty() {
-            match self.stream.write(&self.outbox) {
-                Ok(0) => return self.close("connection closed"),
-                Ok(n) => {
-                    self.outbox.drain(..n);
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return self.close(&e.to_string()),
-            }
+        let gone = match &mut self.link {
+            Link::Tcp { stream, outbox, .. } => write_out(stream, outbox),
+            Link::Memory {
+                tx, outbox, queued, ..
+            } => hand_over(tx, outbox, queued),
+        };
+        if let Some(why) = gone {
+            return self.close(&why);
         }
-        if self.outbox.len() > MAX_BACKLOG {
+        if self.backlog() > MAX_BACKLOG {
             return self.close("connection too slow");
         }
         Ok(())
@@ -65,40 +122,27 @@ impl Connection {
     /// Complete messages received so far, as (kind, body). Messages that
     /// arrived before the connection closed are still returned; the error
     /// comes with the next call.
-    pub fn receive(&mut self) -> Result<Vec<(u8, Vec<u8>)>, String> {
+    pub fn receive(&mut self) -> Result<Vec<Message>, String> {
         if let Some(why) = &self.closed {
             return Err(why.clone());
         }
-        let mut buf = [0u8; 64 * 1024];
-        let mut ended = None;
-        loop {
-            match self.stream.read(&mut buf) {
-                Ok(0) => {
-                    ended = Some("connection closed".to_string());
-                    break;
-                }
-                Ok(n) => self.inbox.extend_from_slice(&buf[..n]),
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => {
-                    ended = Some(e.to_string());
-                    break;
-                }
-            }
-        }
         let mut out = Vec::new();
-        while self.inbox.len() >= 4 {
-            let len = u32::from_le_bytes(self.inbox[..4].try_into().unwrap()) as usize;
-            if len == 0 || len > MAX_MESSAGE {
-                return self.close("bad message");
+        let ended = match &mut self.link {
+            Link::Tcp { stream, inbox, .. } => {
+                let ended = read_in(stream, inbox);
+                if !split(inbox, &mut out) {
+                    return self.close("bad message");
+                }
+                ended
             }
-            if self.inbox.len() < 4 + len {
-                break;
-            }
-            let kind = self.inbox[4];
-            out.push((kind, self.inbox[5..4 + len].to_vec()));
-            self.inbox.drain(..4 + len);
-        }
+            Link::Memory { rx, .. } => loop {
+                match rx.try_recv() {
+                    Ok(m) => out.push(m),
+                    Err(TryRecvError::Empty) => break None,
+                    Err(TryRecvError::Disconnected) => break Some("connection closed".into()),
+                }
+            },
+        };
         if let Some(why) = ended {
             self.closed = Some(why.clone());
             if out.is_empty() {
@@ -107,4 +151,74 @@ impl Connection {
         }
         Ok(out)
     }
+}
+
+/// Write as much of `outbox` as the network takes now. Why the connection
+/// is gone, if it is.
+fn write_out(stream: &mut TcpStream, outbox: &mut Vec<u8>) -> Option<String> {
+    while !outbox.is_empty() {
+        match stream.write(outbox) {
+            Ok(0) => return Some("connection closed".into()),
+            Ok(n) => {
+                outbox.drain(..n);
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Some(e.to_string()),
+        }
+    }
+    None
+}
+
+/// Read what has arrived into `inbox`. Why the connection is gone, if it
+/// is.
+fn read_in(stream: &mut TcpStream, inbox: &mut Vec<u8>) -> Option<String> {
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => return Some("connection closed".into()),
+            Ok(n) => inbox.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return None,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Some(e.to_string()),
+        }
+    }
+}
+
+/// Take the complete messages off the front of `inbox`. False if it holds
+/// something that isn't a message.
+fn split(inbox: &mut Vec<u8>, out: &mut Vec<Message>) -> bool {
+    while inbox.len() >= 4 {
+        let len = u32::from_le_bytes(inbox[..4].try_into().unwrap()) as usize;
+        if len == 0 || len > MAX_MESSAGE {
+            return false;
+        }
+        if inbox.len() < 4 + len {
+            break;
+        }
+        out.push((inbox[4], inbox[5..4 + len].to_vec()));
+        inbox.drain(..4 + len);
+    }
+    true
+}
+
+/// Pass the other end of a pair what it has room for. Why the connection
+/// is gone, if it is.
+fn hand_over(
+    tx: &SyncSender<Message>,
+    outbox: &mut VecDeque<Message>,
+    queued: &mut usize,
+) -> Option<String> {
+    while let Some(m) = outbox.pop_front() {
+        let size = m.1.len() + 1;
+        match tx.try_send(m) {
+            Ok(()) => *queued -= size,
+            Err(TrySendError::Full(m)) => {
+                outbox.push_front(m);
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => return Some("connection closed".into()),
+        }
+    }
+    None
 }

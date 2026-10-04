@@ -33,7 +33,6 @@ pub enum ClientEvent {
 
 pub struct Client {
     conn: Connection,
-    pub address: SocketAddr,
     /// Our players in the host's game, once welcomed.
     pub players: Vec<usize>,
     /// Game states received so far.
@@ -77,18 +76,31 @@ impl Client {
         me: (&str, Look),
     ) -> std::io::Result<Client> {
         let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)?;
-        let mut conn = Connection::new(stream)?;
+        let mut client = Client::over(Connection::tcp(stream)?, game, map, teams, me);
+        client.conn.flush().map_err(std::io::Error::other)?;
+        Ok(client)
+    }
+
+    /// Join a host over `conn` (through the online service, say), as
+    /// `connect` does.
+    pub fn over(
+        mut conn: Connection,
+        game: &Game,
+        map: &str,
+        teams: &[u8],
+        me: (&str, Look),
+    ) -> Client {
         conn.send(kind::HELLO, &hello(game, map, teams, me).0);
-        conn.flush().map_err(std::io::Error::other)?;
-        Ok(Client {
+        // Errors surface as Lost on the first poll.
+        let _ = conn.flush();
+        Client {
             conn,
-            address,
             players: Vec::new(),
             snapshots: 0,
             in_game: false,
             me: (me.0.to_string(), me.1),
             gone: false,
-        })
+        }
     }
 
     /// Join the game the host started (`ClientEvent::Start`), once `game`
