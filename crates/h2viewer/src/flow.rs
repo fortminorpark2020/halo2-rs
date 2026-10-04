@@ -372,7 +372,8 @@ impl App {
     pub(crate) fn place_squads(&mut self, squads: &[usize]) {
         let difficulty = self.menu.difficulty as u8;
         for &s in squads {
-            let placed = campaign::place_squad(&mut self.game, &self.scene, s, difficulty, 0, None);
+            let placed =
+                campaign::place_squad(&mut self.game, &self.scene, s, difficulty, 0, None, None);
             self.bots
                 .retain(|(i, _)| !placed.iter().any(|(j, _)| j == i));
             self.bots

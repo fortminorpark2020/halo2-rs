@@ -39,6 +39,19 @@ const WORST_AIM: f32 = 0.12;
 /// Seconds of shooting at someone before an actor's aim is at its best.
 const ZERO_IN: f32 = 4.0;
 
+/// What a command script has an actor do, in place of what it would.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Scripted {
+    /// Where it's going (`cs_go_to`): it doesn't stop to fight.
+    pub go_to: Option<Vec3>,
+    /// What it faces, and shoots at (`cs_face`, `cs_shoot_point`).
+    pub face: Option<Vec3>,
+    pub shoot: Option<Vec3>,
+    pub crouch: bool,
+    /// Moves about as it would otherwise (`cs_enable_moving`).
+    pub moving: bool,
+}
+
 /// What a campaign actor knows and is told.
 #[derive(Debug, Clone)]
 pub struct ActorMind {
@@ -58,6 +71,8 @@ pub struct ActorMind {
     pub area: Vec<Vec3>,
     /// Goes along with players it meets (unless its orders keep it put).
     pub follows: bool,
+    /// What a command script has it do.
+    pub scripted: Option<Scripted>,
     /// The firing position it's fighting from, how long it's been there
     /// or getting there, and how long it stays.
     fight_at: Option<Vec3>,
@@ -78,6 +93,7 @@ impl ActorMind {
             alert: None,
             area: Vec::new(),
             follows: true,
+            scripted: None,
             fight_at: None,
             held: 0.0,
             stay: 0.0,
@@ -265,6 +281,14 @@ impl Bot {
         let feet = game.players[me].body.position;
         let eye = game.players[me].eye();
         let a = self.actor.as_mut()?;
+        if let Some(s) = a.scripted {
+            if let Some(at) = s.go_to {
+                return ((at - feet).truncate().length() > AT_POST).then_some(at);
+            }
+            if !s.moving {
+                return None;
+            }
+        }
         if let Some((at, age)) = &mut a.alert {
             *age += dt;
             // Held to an area, it looks from the part of it nearest.
@@ -308,8 +332,22 @@ impl Bot {
     }
 
     /// The way an idle actor faces.
-    pub(super) fn actor_facing(&self) -> Option<f32> {
-        self.actor.as_ref().map(|a| a.facing)
+    pub(super) fn actor_facing(&self, feet: Vec3) -> Option<f32> {
+        let a = self.actor.as_ref()?;
+        let toward = a.scripted.and_then(|s| s.shoot.or(s.face));
+        Some(toward.map_or(a.facing, |p| {
+            let to = p - feet;
+            to.y.atan2(to.x)
+        }))
+    }
+
+    /// A command script has the actor going somewhere.
+    pub(super) fn scripted_going(&self) -> bool {
+        self.scripted().is_some_and(|s| s.go_to.is_some())
+    }
+
+    pub(super) fn scripted(&self) -> Option<Scripted> {
+        self.actor.as_ref().and_then(|a| a.scripted)
     }
 }
 
@@ -408,6 +446,7 @@ mod tests {
             .map(|&post| {
                 let i = g
                     .spawn_actor(ActorSpawn {
+                        location: 0,
                         character: 0,
                         squad: 0,
                         position: post,
@@ -488,6 +527,28 @@ mod tests {
         assert!(fired);
         let at = g.players[bots[0].0].body.position;
         assert!(at.distance(area[0]) < 1.0, "at {at}");
+    }
+
+    #[test]
+    fn actors_a_script_sends_somewhere_go_without_stopping_to_fight() {
+        let (mut g, mut bots) = mission(&[Vec3::new(10.0, 0.0, 0.0)]);
+        g.players[0].body.position = Vec3::new(16.0, 0.0, 0.0);
+        g.players[0].health = 1e9;
+        let to = Vec3::new(10.0, -8.0, 0.0);
+        bots[0].1.actor.as_mut().unwrap().scripted = Some(Scripted {
+            go_to: Some(to),
+            ..Scripted::default()
+        });
+        let fired = run(&mut g, &mut bots, 6.0);
+        assert!(!fired);
+        let at = g.players[bots[0].0].body.position;
+        assert!(at.distance(to) < 1.0, "at {at}");
+        // Held still by its script, it fights from where it stands.
+        bots[0].1.actor.as_mut().unwrap().scripted = Some(Scripted::default());
+        g.players[0].body.position = Vec3::new(16.0, -8.0, 0.0);
+        assert!(run(&mut g, &mut bots, 3.0));
+        let still = g.players[bots[0].0].body.position;
+        assert!(still.distance(at) < 0.3, "moved to {still}");
     }
 
     #[test]

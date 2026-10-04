@@ -14,7 +14,7 @@ use glam::{Vec2, Vec3};
 mod actor;
 mod arms;
 mod ride;
-pub use actor::{alert_actors, ActorMind};
+pub use actor::{alert_actors, ActorMind, Scripted};
 use ride::Riding;
 
 /// How far a bot sees.
@@ -473,8 +473,11 @@ impl Bot {
         } else {
             self.find_target(game, world, me)
         };
-        let target =
-            found.filter(|&t| !carrying || game.players[t].body.position.distance(feet) < 2.5);
+        // An actor a script sends somewhere goes without stopping.
+        let going = self.scripted_going();
+        let target = found.filter(|&t| {
+            !going && (!carrying || game.players[t].body.position.distance(feet) < 2.5)
+        });
         if target != self.target {
             // An actor that loses sight of someone goes to look for them.
             let lost = self
@@ -571,8 +574,12 @@ impl Bot {
                 0.0
             };
             cmd.movement = Vec2::new(self.strafe, fwd);
-            // An actor with an area fights from its firing positions.
-            if !charging {
+            // An actor with an area fights from its firing positions; one a
+            // script holds still stays put.
+            let held = self.scripted().is_some_and(|s| !s.moving);
+            if held {
+                cmd.movement = Vec2::ZERO;
+            } else if !charging {
                 if let Some(at) = self.actor_position(game, world, me, t, dt) {
                     let to = (at - feet).truncate();
                     cmd.movement = if to.length() < ARRIVED {
@@ -654,9 +661,18 @@ impl Bot {
             }
             // Reload while nothing is around.
             cmd.reload = self.held_partly_empty(game, me);
-            // An actor with nowhere to go stands facing its way.
-            if let (None, Some(facing)) = (walk_to, self.actor_facing()) {
-                self.turn_to(facing, 0.0, dt);
+            // An actor with nowhere to go stands facing its way, or
+            // shoots where a script says.
+            if let (None, Some(facing)) = (walk_to, self.actor_facing(feet)) {
+                match self.scripted().and_then(|s| s.shoot) {
+                    Some(at) => {
+                        let to = at - eye;
+                        let pitch = (to.z / to.length().max(1e-4)).asin();
+                        self.turn_to(facing, pitch, dt);
+                        cmd.fire = self.pulse;
+                    }
+                    None => self.turn_to(facing, 0.0, dt),
+                }
             }
         }
         if let Some(goal) = walk_to {
@@ -683,7 +699,10 @@ impl Bot {
             let drift = game.players[me].body.velocity.truncate();
             cmd.movement = self.keep_off_ledges(world, feet, drift, cmd.movement);
         }
-        self.idle = target.is_none() && cmd.movement == Vec2::ZERO;
+        // Standing still on purpose isn't being stuck (actors hold their
+        // ground while they fight).
+        self.idle = cmd.movement == Vec2::ZERO && (target.is_none() || self.actor.is_some());
+        cmd.crouch |= self.scripted().is_some_and(|s| s.crouch);
         cmd.yaw = self.yaw;
         cmd.pitch = self.pitch;
         cmd

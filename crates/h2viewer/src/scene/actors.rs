@@ -42,6 +42,8 @@ pub struct CampaignAi {
     pub zones: Vec<orders::Zone>,
     pub orders: Vec<orders::Order>,
     pub triggers: Vec<orders::AiTrigger>,
+    /// Points scripts send actors to.
+    pub point_sets: Vec<orders::PointSet>,
     pub scripts: Scripts,
     /// Trigger volumes, by index.
     pub volumes: Vec<KillZone>,
@@ -219,6 +221,10 @@ impl Loader {
         });
         out.triggers = orders::ai_triggers(set).unwrap_or_else(|e| {
             println!("warning: AI triggers: {e}");
+            Vec::new()
+        });
+        out.point_sets = orders::point_sets(set).unwrap_or_else(|e| {
+            println!("warning: point sets: {e}");
             Vec::new()
         });
         out.volumes = scenario::trigger_volumes(set)

@@ -542,8 +542,10 @@ pub struct Vitality {
 pub struct Actor {
     /// Index into the game's characters.
     pub character: usize,
-    /// The scenario squad it was placed with.
+    /// The scenario squad it was placed with, and at which of its
+    /// starting locations.
     pub squad: u16,
+    pub location: u16,
     /// Can be hurt but not killed (a script says so).
     pub immortal: bool,
     /// Taken out of the level by a script (not dead: there's no body).

@@ -125,6 +125,21 @@ pub trait Host {
 
     /// A script's `print` (debug text the designers left in).
     fn print(&mut self, _text: &str) {}
+
+    /// The actor the thread about to run commands (a command script's),
+    /// for `ai_current_actor` and the `cs_` functions.
+    fn set_actor(&mut self, _actor: Option<u32>) {}
+
+    /// An engine global's value (`ai_current_actor`...), by name.
+    fn engine_global(&mut self, _name: &str) -> Option<Value> {
+        None
+    }
+
+    /// Whether the call just made is still being carried out (an actor
+    /// on its way somewhere): the script waits a tick and calls again.
+    fn waiting(&mut self) -> bool {
+        false
+    }
 }
 
 /// The forms evaluated here rather than by the host.
@@ -240,6 +255,8 @@ struct Thread {
     /// The tick it runs again at.
     wake_at: u32,
     done: bool,
+    /// The actor a command script commands.
+    actor: Option<u32>,
 }
 
 /// What a frame's step leads to.
@@ -257,6 +274,8 @@ pub struct Vm {
     /// Each script's thread, if it has one.
     thread_of: Vec<Option<usize>>,
     globals: Vec<Value>,
+    /// Command scripts waiting for their actor's current one to end.
+    queued: Vec<(u32, u16)>,
     /// Each node's form (calls only), and its arguments.
     forms: Vec<Option<Form>>,
     args: Vec<Vec<u16>>,
@@ -315,6 +334,7 @@ impl Vm {
                 stack: vec![Frame::new(root)],
                 wake_at,
                 done: false,
+                actor: None,
             });
         }
         let mut vm = Vm {
@@ -325,6 +345,7 @@ impl Vm {
                 .iter()
                 .map(|g| default_value(g.value_type))
                 .collect(),
+            queued: Vec::new(),
             forms,
             args,
             now: 0,
@@ -379,9 +400,64 @@ impl Vm {
             if th.done || th.wake_at > self.now {
                 continue;
             }
+            host.set_actor(th.actor);
             self.run(scripts, t, host);
         }
+        host.set_actor(None);
         self.now += 1;
+    }
+
+    /// Run a command script for an actor from the next tick, in place of
+    /// the one it's running (or, `queue`d, once that one ends).
+    pub fn command(&mut self, scripts: &Scripts, script: usize, actor: u32, queue: bool) {
+        if queue && self.commanding(actor) {
+            self.queued.push((actor, script as u16));
+            return;
+        }
+        if !queue {
+            self.stop_command(actor);
+        }
+        self.start_command(scripts, script, actor);
+    }
+
+    fn start_command(&mut self, scripts: &Scripts, script: usize, actor: u32) {
+        let Some(root) = scripts.scripts.get(script).and_then(|s| s.root) else {
+            return;
+        };
+        let thread = Thread {
+            script: script as u16,
+            kind: ScriptKind::CommandScript,
+            stack: vec![Frame::new(root)],
+            wake_at: self.now,
+            done: false,
+            actor: Some(actor),
+        };
+        // A finished command script's place, if there is one.
+        match (0..self.threads.len()).find(|&t| {
+            let th = &self.threads[t];
+            th.done && th.actor.is_some()
+        }) {
+            Some(t) => self.threads[t] = thread,
+            None => self.threads.push(thread),
+        }
+    }
+
+    /// Stop an actor's command scripts (and those queued).
+    pub fn stop_command(&mut self, actor: u32) {
+        for th in &mut self.threads {
+            if th.actor == Some(actor) && !th.done {
+                th.done = true;
+                th.stack.clear();
+            }
+        }
+        self.queued.retain(|q| q.0 != actor);
+    }
+
+    /// Whether an actor is running a command script.
+    pub fn commanding(&self, actor: u32) -> bool {
+        self.threads
+            .iter()
+            .any(|th| th.actor == Some(actor) && !th.done)
     }
 
     /// Run a static script at once for its value (orders' triggers ask
@@ -396,7 +472,7 @@ impl Vm {
     /// Evaluate an expression to its value at once (globals' starting
     /// values); one that sleeps gives its type's default.
     fn evaluate(&mut self, scripts: &Scripts, node: u16, host: &mut dyn Host) -> Value {
-        if let Some(v) = leaf(&self.globals, scripts, node) {
+        if let Some(v) = self.leaf(scripts, node, host) {
             return v;
         }
         let t = self.threads.len();
@@ -406,12 +482,25 @@ impl Vm {
             stack: vec![Frame::new(node)],
             wake_at: self.now,
             done: false,
+            actor: None,
         });
         let v = self.run(scripts, t, host);
         self.threads.pop();
         v.unwrap_or_else(|| {
             default_value(scripts.expression(node).map_or(vt::VOID, |e| e.value_type))
         })
+    }
+
+    /// A value that needs no evaluating; engine globals come from the
+    /// host.
+    fn leaf(&self, scripts: &Scripts, node: u16, host: &mut dyn Host) -> Option<Value> {
+        let e = scripts.expression(node)?;
+        if e.kind == NodeKind::Global && e.value & 0xFFFF & ENGINE_GLOBAL != 0 {
+            if let Some(v) = host.engine_global(scripts.text(e.text)) {
+                return Some(v);
+            }
+        }
+        leaf(&self.globals, scripts, node)
     }
 
     fn random(&mut self) -> u32 {
@@ -434,10 +523,11 @@ impl Vm {
                         ret = Some(Value::Void);
                         continue;
                     };
-                    if let Some(v) = leaf(&self.globals, scripts, node) {
+                    if let Some(v) = self.leaf(scripts, node, host) {
                         ret = Some(v);
                         continue;
                     }
+                    let th = &mut self.threads[t];
                     match e.kind {
                         NodeKind::Value | NodeKind::Global => {}
                         NodeKind::Call | NodeKind::ScriptCall => {
@@ -486,6 +576,11 @@ impl Vm {
             }
         }
         th.done = true;
+        let actor = th.actor;
+        if let Some(k) = actor.and_then(|a| self.queued.iter().position(|q| q.0 == a)) {
+            let (a, script) = self.queued.remove(k);
+            self.start_command(scripts, script as usize, a);
+        }
         Some(ret.unwrap_or_default())
     }
 
@@ -724,7 +819,7 @@ impl Vm {
                         Form::Builtin(b) => self.builtin(b, &f.values, returns),
                         _ => {
                             let name = scripts.function_name(f.node);
-                            match host.call(name, &f.values, returns) {
+                            let v = match host.call(name, &f.values, returns) {
                                 Some(v) => v,
                                 None => {
                                     if self.log {
@@ -732,7 +827,12 @@ impl Vm {
                                     }
                                     default_value(returns)
                                 }
+                            };
+                            // Not done yet: ask again next tick.
+                            if host.waiting() {
+                                return (Step::Sleep(1), f);
                             }
+                            v
                         }
                     };
                     Step::Return(v)
@@ -968,6 +1068,88 @@ mod tests {
             self.calls.push((function.to_string(), args.to_vec()));
             (function == "probe").then_some(Value::Real(self.answer))
         }
+    }
+
+    /// `walk` takes three calls to finish; `arrived` notes who arrived.
+    #[derive(Default)]
+    struct Walker {
+        actor: Option<u32>,
+        walks: u32,
+        waiting: bool,
+        arrived: Vec<(Option<u32>, f32)>,
+    }
+
+    impl Host for Walker {
+        fn call(&mut self, function: &str, args: &[Value], _: u16) -> Option<Value> {
+            match function {
+                "walk" => {
+                    self.walks += 1;
+                    self.waiting = !self.walks.is_multiple_of(3);
+                }
+                "arrived" => self.arrived.push((self.actor, args[0].num())),
+                _ => return None,
+            }
+            Some(Value::Void)
+        }
+
+        fn set_actor(&mut self, actor: Option<u32>) {
+            self.actor = actor;
+        }
+
+        fn engine_global(&mut self, name: &str) -> Option<Value> {
+            (name == "ai_current_actor").then(|| Value::Real(self.actor.map_or(-1.0, |a| a as f32)))
+        }
+
+        fn waiting(&mut self) -> bool {
+            std::mem::take(&mut self.waiting)
+        }
+    }
+
+    #[test]
+    fn command_scripts_run_for_their_actor_and_wait_on_its_calls() {
+        let mut b = Builder::default();
+        // (begin (walk) (arrived ai_current_actor))
+        let walk = b.call("walk", &[]);
+        let text = b.text("ai_current_actor");
+        let me = b.node(Expression {
+            opcode: 0,
+            value_type: vt::REAL,
+            kind: NodeKind::Global,
+            next: None,
+            text,
+            value: ENGINE_GLOBAL,
+        });
+        let arrived = b.call("arrived", &[me]);
+        let body = b.call("begin", &[walk, arrived]);
+        b.script("cs_walk", ScriptKind::CommandScript, body);
+        let s = b.s;
+        let mut host = Walker::default();
+        let mut vm = Vm::new(&s, &mut host);
+        vm.tick(&s, &mut host);
+        assert_eq!(host.walks, 0, "command scripts wait to be run");
+        vm.command(&s, 0, 7, false);
+        assert!(vm.commanding(7));
+        for _ in 0..5 {
+            vm.tick(&s, &mut host);
+        }
+        assert_eq!(host.walks, 3, "walking took three ticks");
+        assert_eq!(host.arrived, vec![(Some(7), 7.0)]);
+        assert!(!vm.commanding(7));
+        // A queued script runs once the one before it ends.
+        vm.command(&s, 0, 3, false);
+        vm.command(&s, 0, 3, true);
+        for _ in 0..10 {
+            vm.tick(&s, &mut host);
+        }
+        assert_eq!(host.arrived.len(), 3);
+        // Stopped, it doesn't finish.
+        vm.command(&s, 0, 4, false);
+        vm.tick(&s, &mut host);
+        vm.stop_command(4);
+        for _ in 0..5 {
+            vm.tick(&s, &mut host);
+        }
+        assert_eq!(host.arrived.len(), 3);
     }
 
     #[test]

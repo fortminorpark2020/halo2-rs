@@ -103,6 +103,8 @@ impl Default for Mind {
 pub struct ActorSpawn {
     pub character: usize,
     pub squad: u16,
+    /// Which of the squad's starting locations.
+    pub location: u16,
     pub position: Vec3,
     pub yaw: f32,
     /// Weapon indices, or the character's own.
@@ -139,6 +141,7 @@ impl Game {
         s.actor = Some(Actor {
             character: spawn.character,
             squad: spawn.squad,
+            location: spawn.location,
             immortal: false,
             gone: false,
         });
@@ -311,6 +314,7 @@ mod tests {
 
     fn spawn(g: &mut Game, at: Vec3) -> usize {
         g.spawn_actor(ActorSpawn {
+            location: 0,
             character: 0,
             squad: 0,
             position: at,

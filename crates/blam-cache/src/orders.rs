@@ -20,6 +20,55 @@ const TRIGGER_REF_SIZE: usize = 0x8;
 const SCNR_AI_TRIGGERS: usize = 0x248;
 const AI_TRIGGER_SIZE: usize = 0x30;
 const CONDITION_SIZE: usize = 0x38;
+const SCNR_SCRIPTING_DATA: usize = 0x1D8;
+const SCRIPTING_DATA_SIZE: usize = 0x80;
+const POINT_SET_SIZE: usize = 0x30;
+const POINT_SIZE: usize = 0x3C;
+
+/// A named point scripts send actors to (`cs_go_to`) or look at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Point {
+    pub name: String,
+    pub position: [f32; 3],
+    /// Relative to a moving object, not the level.
+    pub moving: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PointSet {
+    pub name: String,
+    pub points: Vec<Point>,
+}
+
+/// The scenario's point sets (scripts name a point by set and index).
+pub fn point_sets(set: &mut MapSet) -> Result<Vec<PointSet>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let scripting = map.read_block(meta, &data, SCNR_SCRIPTING_DATA, SCRIPTING_DATA_SIZE)?;
+    let Some(scripting) = scripting.get(..SCRIPTING_DATA_SIZE) else {
+        return Ok(Vec::new());
+    };
+    let sets = map.read_block(meta, scripting, 0, POINT_SET_SIZE)?;
+    let mut out = Vec::new();
+    for s in sets.as_chunks::<POINT_SET_SIZE>().0 {
+        let points = map.read_block(meta, s, 0x20, POINT_SIZE)?;
+        out.push(PointSet {
+            name: ascii(&s[..0x20]),
+            points: points
+                .as_chunks::<POINT_SIZE>()
+                .0
+                .iter()
+                .map(|p| Point {
+                    name: ascii(&p[..0x20]),
+                    position: [f32_at(p, 0x20), f32_at(p, 0x24), f32_at(p, 0x28)],
+                    moving: i16_at(p, 0x2C) >= 0,
+                })
+                .collect(),
+        });
+    }
+    Ok(out)
+}
 
 /// A place an actor stands to fight from.
 #[derive(Debug, Clone, PartialEq)]

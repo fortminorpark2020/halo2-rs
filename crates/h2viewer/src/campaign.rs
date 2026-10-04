@@ -13,6 +13,7 @@ use h2sim::script::{Host, Obj, Value, Vm};
 use h2sim::{Bot, Game, World};
 use std::collections::{HashMap, HashSet};
 
+mod commands;
 mod orders;
 
 /// Seconds a machine takes to open when its tag doesn't say.
@@ -45,8 +46,9 @@ fn squad_team(team: AiTeam) -> Option<u8> {
 }
 
 /// Place a squad's actors at its starting locations (as many as the
-/// difficulty calls for); returns them and their bots (none for a
-/// braindead squad). Allies are those on `players_team`.
+/// difficulty calls for, or just the one at location `only`); returns
+/// them and their bots (none for a braindead squad). Allies are those on
+/// `players_team`.
 pub fn place_squad(
     game: &mut Game,
     scene: &Scene,
@@ -54,6 +56,7 @@ pub fn place_squad(
     difficulty: u8,
     players_team: u8,
     limit: Option<usize>,
+    only: Option<usize>,
 ) -> Vec<(usize, Option<Bot>)> {
     let ai = &scene.ai;
     let Some(s) = ai.squads.get(squad) else {
@@ -72,9 +75,14 @@ pub fn place_squad(
     let always = s.locations.iter().filter(|l| l.always).count();
     let mut order: Vec<usize> = (0..n).filter(|&k| s.locations[k].always).collect();
     order.extend((0..n).filter(|&k| !s.locations[k].always));
+    if let Some(k) = only {
+        order = vec![k].into_iter().filter(|&k| k < n).collect();
+    }
     let weapon = |i: Option<u16>| i.and_then(|i| ai.weapons.get(i as usize).copied().flatten());
     let mut out = Vec::new();
-    let count = if limit.is_some() {
+    let count = if only.is_some() {
+        1
+    } else if limit.is_some() {
         count
     } else {
         count.max(always)
@@ -92,6 +100,7 @@ pub fn place_squad(
         let spawn = ActorSpawn {
             character,
             squad: squad as u16,
+            location: k as u16,
             position: l.position.into(),
             yaw: l.facing,
             weapon: weapon(l.weapon.or(s.weapon)),
@@ -277,6 +286,8 @@ struct State {
     placed: HashMap<usize, u32>,
     /// Each squad's orders.
     orders: orders::Orders,
+    /// Actors under command scripts.
+    commands: commands::Commands,
     difficulty: u8,
     won: bool,
     /// Say what the scripts do (H2_SCRIPT_LOG).
@@ -377,7 +388,7 @@ impl Mission {
         };
         for s in 0..scene.ai.squads.len() {
             if scene.ai.squads[s].initially_placed {
-                ctx.place(s, None);
+                ctx.place(s, None, None);
             }
         }
         // H2_LIFTS="k=position,..." sends lifts somewhere (for testing).
@@ -468,6 +479,7 @@ impl Mission {
         ctx.move_doors(world, dt);
         self.vm.tick(&scene.ai.scripts, &mut ctx);
         ctx.follow_orders(&mut self.vm, dt);
+        ctx.run_commands(&mut self.vm, dt);
     }
 
     /// Whether one of the scene's objects is in the level as it is now
@@ -658,8 +670,16 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     /// Place a squad's actors (at most `limit`), with bots to run them.
-    fn place(&mut self, squad: usize, limit: Option<usize>) {
-        let placed = place_squad(self.game, self.scene, squad, self.st.difficulty, 0, limit);
+    fn place(&mut self, squad: usize, limit: Option<usize>, only: Option<usize>) {
+        let placed = place_squad(
+            self.game,
+            self.scene,
+            squad,
+            self.st.difficulty,
+            0,
+            limit,
+            only,
+        );
         if self.st.log {
             let name = &self.scene.ai.squads[squad].name;
             println!("script: placed {name} ({})", placed.len());
@@ -677,6 +697,18 @@ impl Ctx<'_> {
         let Some(h) = ai.handle() else {
             return Vec::new();
         };
+        if let Some(actors) = self.ai_actors(h) {
+            let mut squads: Vec<usize> = actors
+                .iter()
+                .filter_map(|&i| Some(self.game.players[i].actor?.squad as usize))
+                .collect();
+            let squad = ((h >> 16) & 0x3FFF) as usize;
+            if h & (3 << 30) == commands::AI_LOCATION && squad < self.scene.ai.squads.len() {
+                squads.push(squad);
+            }
+            squads.dedup();
+            return squads;
+        }
         let squads = &self.scene.ai.squads;
         let n = (h & 0xFFFF) as usize;
         match h >> 30 {
@@ -690,6 +722,9 @@ impl Ctx<'_> {
 
     /// The living actors of an `ai` value.
     fn actors(&self, ai: &Value) -> Vec<usize> {
+        if let Some(actors) = ai.handle().and_then(|h| self.ai_actors(h)) {
+            return actors;
+        }
         let squads = self.squads(ai);
         (0..self.game.players.len())
             .filter(|&i| {
@@ -1017,7 +1052,22 @@ impl Ctx<'_> {
 }
 
 impl Host for Ctx<'_> {
+    fn set_actor(&mut self, actor: Option<u32>) {
+        self.st.commands.current = actor.map(|a| a as usize);
+    }
+
+    fn engine_global(&mut self, name: &str) -> Option<Value> {
+        self.current_ai(name)
+    }
+
+    fn waiting(&mut self) -> bool {
+        std::mem::take(&mut self.st.commands.waiting)
+    }
+
     fn call(&mut self, function: &str, args: &[Value], _returns: u16) -> Option<Value> {
+        if let Some(v) = self.command_call(function, args) {
+            return Some(v);
+        }
         let arg = |k: usize| args.get(k).cloned().unwrap_or_default();
         let num = |k: usize| args.get(k).map_or(0.0, Value::num);
         let objects = |k: usize| args.get(k).map_or(&[][..], Value::objects);
@@ -1126,8 +1176,20 @@ impl Host for Ctx<'_> {
             // Squads.
             "ai_place" => {
                 let limit = (args.len() > 1).then(|| num(1).max(0.0) as usize);
-                for s in self.squads(&arg(0)) {
-                    self.place(s, limit);
+                // One starting location, or whole squads.
+                match arg(0)
+                    .handle()
+                    .filter(|h| h & (3 << 30) == commands::AI_LOCATION)
+                {
+                    Some(h) => {
+                        let squad = ((h >> 16) & 0x3FFF) as usize;
+                        self.place(squad, None, Some((h & 0xFFFF) as usize));
+                    }
+                    None => {
+                        for s in self.squads(&arg(0)) {
+                            self.place(s, limit, None);
+                        }
+                    }
                 }
                 Value::Void
             }

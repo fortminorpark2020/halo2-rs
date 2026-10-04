@@ -526,7 +526,7 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         campaign.then(|| campaign::Mission::new(&level.scene, &mut game, &mut bots, 1));
     if let (true, Ok(names)) = (campaign, std::env::var("H2_SQUADS")) {
         for s in campaign::squads_named(&level.scene, &names) {
-            let placed = campaign::place_squad(&mut game, &level.scene, s, 1, 0, None);
+            let placed = campaign::place_squad(&mut game, &level.scene, s, 1, 0, None, None);
             let name = &level.scene.ai.squads[s].name;
             println!("placed {name}: {} actors", placed.len());
             bots.extend(placed.into_iter().filter_map(|(i, b)| Some((i, b?))));
@@ -544,6 +544,24 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
     if let Some(at) = still {
         game.players[0].body.position = at;
     }
+    // H2_SIM_PATH="seconds=x y z;...": and moves on to each place then.
+    let mut path: Vec<(f32, Vec3)> = std::env::var("H2_SIM_PATH")
+        .unwrap_or_default()
+        .split(';')
+        .filter_map(|step| {
+            let (t, at) = step.split_once('=')?;
+            let n: Vec<f32> = at
+                .split_whitespace()
+                .filter_map(|x| x.parse().ok())
+                .collect();
+            Some((
+                t.trim().parse().ok()?,
+                Vec3::new(*n.first()?, *n.get(1)?, *n.get(2)?),
+            ))
+        })
+        .collect();
+    path.reverse();
+    let still = still.or(path.last().map(|_| Vec3::ZERO));
     let mut won = false;
     let mut kills_with = std::collections::HashMap::<String, u32>::new();
     for tick in 0..(seconds / TICK) as usize {
@@ -557,6 +575,12 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         game.step(&level.world, &commands);
         h2sim::bot::alert_actors(&mut bots, &game, &game.events);
         let t = tick as f32 * TICK;
+        if let Some(&(_, at)) = path.last().filter(|(when, _)| t >= *when) {
+            path.pop();
+            game.players[0].body.position = at;
+            game.players[0].body.velocity = Vec3::ZERO;
+            println!("{t:6.1} player moves to {at}");
+        }
         if let Some(m) = &mut mission {
             let (bsp, placed) = (m.bsp(), game.players.len());
             m.step(&level.scene, &level.world, &mut game, &mut bots);
