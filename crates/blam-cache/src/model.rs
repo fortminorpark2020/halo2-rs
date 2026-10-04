@@ -34,6 +34,9 @@ const VARIANT_REGIONS: usize = 0x14;
 const VARIANT_REGION_SIZE: usize = 0x14;
 const VARIANT_PERMUTATIONS: usize = 0x8;
 const VARIANT_PERMUTATION_SIZE: usize = 0x20;
+const OBJECT_CHANGE_COLORS: usize = 0xAC;
+const CHANGE_COLOR_SIZE: usize = 0x10;
+const INITIAL_PERMUTATION_SIZE: usize = 0x20;
 
 /// The permutation a model variant shows in each region it names: `None`
 /// hides the region. Regions it doesn't name show their first permutation.
@@ -133,6 +136,36 @@ fn object_model_ref(set: &mut MapSet, object: DatumIndex, field: usize) -> Resul
 /// "default" variant (or first), if the model has variants.
 pub fn object_variant(set: &mut MapSet, object: DatumIndex) -> Result<Option<Variant>> {
     named_variant(set, object, "default")
+}
+
+/// The colours an object of model variant `variant` starts out in, one
+/// per change colour (primary, secondary...): the middle of the range of
+/// the variant's own initial permutation, else of one any variant may use,
+/// else white (unchanged).
+pub fn object_change_colors(
+    set: &mut MapSet,
+    object: DatumIndex,
+    variant: &str,
+) -> Result<Vec<[f32; 3]>> {
+    let (src, _, obj) = set.tag_data(object)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let colors = file.read_block(region, &obj, OBJECT_CHANGE_COLORS, CHANGE_COLOR_SIZE)?;
+    let mut out = Vec::new();
+    for c in colors.as_chunks::<CHANGE_COLOR_SIZE>().0 {
+        let perms = file.read_block(region, c, 0, INITIAL_PERMUTATION_SIZE)?;
+        let perms = perms.as_chunks::<INITIAL_PERMUTATION_SIZE>().0;
+        let called = |n: &str| perms.iter().find(|p| sid_name(file, &p[0x1C..]) == n);
+        let rgb = |p: &[u8], o: usize| [0, 4, 8].map(|k| f32_at(p, o + k));
+        out.push(match called(variant).or_else(|| called("")) {
+            Some(p) => {
+                let (lo, hi) = (rgb(p, 4), rgb(p, 0x10));
+                [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0)
+            }
+            None => [1.0; 3],
+        });
+    }
+    Ok(out)
 }
 
 /// An object's model variant called `name` (a vehicle collection's gauss

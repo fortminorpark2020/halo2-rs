@@ -556,6 +556,7 @@ impl Mission {
                 k <= heard || !matches!(s, MissionSound::Line { .. })
             });
             self.state.sounds.push(MissionSound::Hush);
+            self.state.cutscene.hush();
         }
     }
 

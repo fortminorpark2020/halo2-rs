@@ -1172,6 +1172,10 @@ impl App {
             self.game.step(&self.world, &commands);
             h2sim::bot::alert_actors(&mut self.bots, &self.game, &self.game.events);
             if let Some(m) = &mut self.mission {
+                // H2_SKIP=1 skips every cutscene (for testing).
+                if env_set("H2_SKIP") {
+                    m.skip_cutscene();
+                }
                 m.step(&self.scene, &self.world, &mut self.game, &mut self.bots);
                 for (player, yaw) in m.take_turns() {
                     for l in self.locals.iter_mut().filter(|l| l.player == player) {

@@ -187,6 +187,8 @@ pub struct Character {
     /// The designators of the voices it speaks mission dialogue in
     /// ("jon", "nrl"...).
     pub voices: Vec<String>,
+    /// The model variants it comes in ("minor_scl"...), for its colours.
+    pub model_variants: Vec<String>,
 }
 
 /// The character's type, from its general properties.
@@ -616,6 +618,14 @@ pub fn read_character(set: &mut MapSet, tag: DatumIndex) -> Result<Character> {
             .iter()
             .filter_map(|v| set.map.string_id(u32_at(v, 8)))
             .filter(|d| !d.is_empty())
+            .map(str::to_string)
+            .collect(),
+        model_variants: own
+            .variants
+            .as_chunks::<VARIANT_SIZE>()
+            .0
+            .iter()
+            .filter_map(|v| set.map.string_id(u32_at(v, 0)))
             .map(str::to_string)
             .collect(),
     })

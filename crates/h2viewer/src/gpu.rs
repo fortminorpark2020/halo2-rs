@@ -270,7 +270,7 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     let baked = textureSample(lightmap, lsamp, i.lmuv).rgb;
     let e = textureSample(emblems, esamp, mix(u.emblem.xy, u.emblem.zw, clamp(i.uv, vec2<f32>(0.0), vec2<f32>(1.0))));
     var alpha = c.a;
-    if (m.mode.y > 1.5 && m.mode.y < 3.5) {
+    if (m.mode.y > 1.5 && m.mode.y < 2.5) {
         alpha = min(a.r, a.a);
     }
     alpha *= m.tint.a;

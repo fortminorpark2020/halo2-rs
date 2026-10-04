@@ -51,6 +51,11 @@ impl Cutscene {
         self.skippable
     }
 
+    /// Take down the subtitle (the lines a skipped cutscene ran past).
+    pub(super) fn hush(&mut self) {
+        self.subtitle = None;
+    }
+
     /// A skipped cutscene is still running on.
     pub(super) fn fast_forward(&self) -> bool {
         self.skippable && self.skipping

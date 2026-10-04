@@ -142,9 +142,27 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
             info.blend = Blend::Alpha;
             info.opacity = 0.0;
         }
-        _ if t.starts_with("opaque\\") && t.ends_with("change_color") => {
-            info.diffuse = own(2).or(info.diffuse);
-            info.change_color = own(4);
+        // Where the colour and change-colour maps sit depends on the
+        // template: after an active-camo bump map in the armour ones.
+        _ if t.starts_with("opaque\\") && t.contains("change_color") => {
+            let (base, change) = if t == "opaque\\tex_bump_one_change_color" {
+                (1, 2)
+            } else if t.starts_with("opaque\\tex_bump_env")
+                && !["combined", "indexed", "multiply_map"]
+                    .iter()
+                    .any(|k| t.contains(k))
+            {
+                (2, 4)
+            } else {
+                (1, 3)
+            };
+            info.diffuse = own(base).or(info.diffuse);
+            info.change_color = own(change);
+        }
+        "transparent\\lit\\transparent_lit_alpha_blend_two_change_color" => {
+            info.diffuse = own(0);
+            info.change_color = own(1);
+            info.blend = Blend::Alpha;
         }
         "transparent\\one_alpha_env"
         | "transparent\\one_alpha_env_illum"

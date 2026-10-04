@@ -560,6 +560,9 @@ fn model(path: &str, name: &str, png: Option<&str>) -> Res {
         .flatten();
     if let Some(v) = &variant {
         println!("variant {}: {:?}", v.name, v.regions);
+        if let Ok(c) = model::object_change_colors(&mut set, tag.datum, &v.name) {
+            println!("change colors {c:.3?}");
+        }
     }
     let m = model::read_render_model_variant(&mut set, mode, variant.as_ref())?;
     println!(
@@ -748,8 +751,12 @@ fn objects(path: &str) -> Res {
                 .and_then(|n| names.get(n as usize))
                 .map_or("", |n| n.name.as_str());
             let auto = if p.automatic { "" } else { " (by script)" };
+            let variant = match p.variant.as_str() {
+                "" => String::new(),
+                v => format!(" variant {v}"),
+            };
             println!(
-                "{kind:?} {k} {:<70} {called} at {:7.2?} rot {:5.2?} scale {}{auto}",
+                "{kind:?} {k} {:<70} {called} at {:7.2?} rot {:5.2?} scale {}{variant}{auto}",
                 name(&set, p.object),
                 p.position,
                 p.rotation,

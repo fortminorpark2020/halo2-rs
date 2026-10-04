@@ -101,7 +101,7 @@ pub struct Cinema {
     /// The named bipeds and vehicles cutscenes animate, by object name.
     pub bodies: HashMap<u16, CinemaBody>,
     /// Their tags, while loading.
-    cast: Vec<(u16, DatumIndex)>,
+    cast: Vec<(u16, DatumIndex, String)>,
     /// Each named object's placement.
     pub placed: Vec<Option<Mat4>>,
     /// Subtitle text by string id.
@@ -179,20 +179,6 @@ fn rank_colors(name: &str, kind: CharacterKind) -> [[f32; 3]; 2] {
         _ => [0.5, 0.5, 0.5],
     };
     [c, c.map(|v| v * 0.6)]
-}
-
-/// Colours for a cutscene's cast whose models take them from the game.
-fn cast_colors(tag: &str) -> Option<[[f32; 3]; 2]> {
-    let c = if tag.contains("brute") {
-        [0.42, 0.3, 0.2]
-    } else if tag.contains("grunt") {
-        [0.9, 0.5, 0.15]
-    } else if tag.contains("jackal") {
-        [0.25, 0.35, 0.75]
-    } else {
-        return None;
-    };
-    Some([c, c.map(|v| v * 0.6)])
 }
 
 fn vitality(body: f32, shield: f32, recharge: f32) -> Vitality {
@@ -418,7 +404,8 @@ impl Loader {
                     .filter(|&k| k == PlacedKind::Biped || k == PlacedKind::Vehicle)?;
                 let (_, list) = placed.iter().find(|(k, _)| *k == kind)?;
                 let p = list.get(n.index? as usize)?;
-                (kind == PlacedKind::Biped || !p.automatic).then_some((k as u16, p.object))
+                (kind == PlacedKind::Biped || !p.automatic)
+                    .then(|| (k as u16, p.object, p.variant.clone()))
             })
             .collect();
         out.machines = names
@@ -485,20 +472,39 @@ impl Loader {
                 Err(e) => println!("warning: cutscene animations {tag:08x}: {e}"),
             }
         }
-        for (name, object) in std::mem::take(&mut out.cinema.cast) {
+        for (name, object, variant) in std::mem::take(&mut out.cinema.cast) {
             let tag_name = self
                 .set
                 .locate(object)
                 .map(|(_, t)| t.name)
                 .unwrap_or_default();
             let chief = tag_name.ends_with("masterchief");
-            let colors = cast_colors(&tag_name);
-            let m = match model::read_object_render_model(&mut self.set, object) {
+            let read = |set: &mut blam_cache::mapset::MapSet| {
+                let v = model::named_variant(set, object, &variant)?;
+                // Colours go by the name the scenario gives, even when the
+                // model has no variant called that.
+                let called = match variant.as_str() {
+                    "" => v.as_ref().map_or("", |v| v.name.as_str()),
+                    name => name,
+                };
+                let colors = model::object_change_colors(set, object, called)?;
+                let mode = model::object_render_model(set, object)?;
+                Ok::<_, blam_cache::Error>((
+                    model::read_render_model_variant(set, mode, v.as_ref())?,
+                    colors,
+                ))
+            };
+            let (m, colors) = match read(&mut self.set) {
                 Ok(m) => m,
                 Err(e) => {
                     println!("warning: cutscene object {:08x}: {e}", object.0);
                     continue;
                 }
+            };
+            let colors = match colors.as_slice() {
+                [] => None,
+                [p] => Some([*p, [1.0; 3]]),
+                [p, s, ..] => Some([*p, *s]),
             };
             let mesh = self.model_mesh(&m);
             let skin = SkinnedMesh::new(&mesh);
@@ -629,7 +635,17 @@ impl Loader {
                 })
                 .and_then(|w| self.weapon_by_tag(w, weapons, arms, meshes));
             let (def, legendary) = character_def(&c, biped, weapon);
-            out.colors.push(rank_colors(&c.name, c.kind));
+            // Its biped's colours for its variant, else its rank's.
+            let colors = c.unit.and_then(|u| {
+                let variant = c.model_variants.first().map_or("", String::as_str);
+                match model::object_change_colors(&mut self.set, u, variant).ok()?[..] {
+                    [p] => Some([p, [1.0; 3]]),
+                    [p, s, ..] => Some([p, s]),
+                    _ => None,
+                }
+            });
+            out.colors
+                .push(colors.unwrap_or_else(|| rank_colors(&c.name, c.kind)));
             out.legendary_accuracy.push(legendary);
             out.characters.push(def);
             out.voices.push(c.voices.clone());
