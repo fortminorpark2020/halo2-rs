@@ -64,6 +64,47 @@ pub fn world_matrices(parents: &[i16], local: &[NodePose]) -> Vec<Mat4> {
     world
 }
 
+/// World matrices of a model's nodes posed by an animation from any graph
+/// that names the same nodes (a cutscene's), at `frame`; nodes it leaves
+/// alone keep their default pose.
+pub fn pose_by_name(
+    skeleton: &Skeleton,
+    parents: &[i16],
+    graph: &AnimationGraph,
+    anim: &Animation,
+    frame: f32,
+) -> Vec<Mat4> {
+    let local: Vec<NodePose> = skeleton
+        .names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let d = skeleton.default[i];
+            let Some(g) = graph.node(name) else {
+                return d;
+            };
+            NodePose {
+                rotation: anim
+                    .rotations
+                    .get(g)
+                    .and_then(Option::as_ref)
+                    .map_or(d.rotation, |t| tag_quat(t.sample(frame))),
+                translation: anim
+                    .translations
+                    .get(g)
+                    .and_then(Option::as_ref)
+                    .map_or(d.translation, |t| Vec3::from(t.sample(frame))),
+                scale: anim
+                    .scales
+                    .get(g)
+                    .and_then(Option::as_ref)
+                    .map_or(d.scale, |t| t.sample(frame)),
+            }
+        })
+        .collect();
+    world_matrices(parents, &local)
+}
+
 /// A render model's node hierarchy in its default (bind) pose.
 #[derive(Clone, Debug, Default)]
 pub struct Skeleton {

@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 mod cinematic;
 mod commands;
+mod cutscene;
 mod dialogue;
 mod orders;
 mod vehicles;
@@ -211,6 +212,8 @@ pub enum MissionSound {
         gain: f32,
     },
     StopLine(usize),
+    /// Stop every line (a cutscene skipped).
+    Hush,
     /// Music or another looping sound, by tag (`CampaignAi::loops`).
     StartLoop(u32),
     StopLoop(u32),
@@ -274,7 +277,12 @@ pub struct ScreenView {
     pub letterbox: f32,
     pub hud: f32,
     pub title: Option<(String, [f32; 4], f32)>,
+    /// A cutscene's subtitle.
+    pub subtitle: Option<String>,
 }
+
+/// Most script ticks a skipped cutscene runs on in one game tick.
+const SKIP_TICKS: usize = 30 * 600;
 
 /// Seconds the letterbox bars take to come in or go.
 const LETTERBOX_TIME: f32 = 0.5;
@@ -334,6 +342,8 @@ struct State {
     turns: Vec<(usize, f32)>,
     /// Objects the scripts hid.
     hidden: HashSet<Obj>,
+    /// The cutscene playing.
+    cutscene: cutscene::Cutscene,
     difficulty: u8,
     won: bool,
     /// Say what the scripts do (H2_SCRIPT_LOG).
@@ -527,6 +537,42 @@ impl Mission {
         if self.ticks % 2 == 1 {
             return;
         }
+        self.run_scripts(scene, world, game, bots);
+        // Skipping a cutscene: its scripts run on to its end at once,
+        // without its lines.
+        if self.state.cutscene.fast_forward() {
+            let heard = self.state.sounds.len();
+            for _ in 0..SKIP_TICKS {
+                if !self.state.cutscene.fast_forward() {
+                    break;
+                }
+                self.ticks += 2;
+                self.state.time = self.ticks as f32 * h2sim::game::TICK;
+                self.run_scripts(scene, world, game, bots);
+            }
+            let mut k = 0;
+            self.state.sounds.retain(|s| {
+                k += 1;
+                k <= heard || !matches!(s, MissionSound::Line { .. })
+            });
+            self.state.sounds.push(MissionSound::Hush);
+        }
+    }
+
+    /// One tick of the scripts and what they drive.
+    fn run_scripts(
+        &mut self,
+        scene: &Scene,
+        world: &World,
+        game: &mut Game,
+        bots: &mut Vec<(usize, Bot)>,
+    ) {
+        let mut ctx = Ctx {
+            st: &mut self.state,
+            scene,
+            game,
+            bots,
+        };
         let dt = 1.0 / h2sim::script::TICKS_PER_SECOND as f32;
         ctx.follow_bsp();
         ctx.move_devices(dt);
@@ -536,6 +582,12 @@ impl Mission {
         ctx.run_commands(&mut self.vm, dt);
         ctx.run_scenes(dt);
         ctx.run_vehicles(world, dt);
+    }
+
+    /// Skip the cutscene playing, if the player may; returns whether it
+    /// will be.
+    pub fn skip_cutscene(&mut self) -> bool {
+        self.state.cutscene.skip()
     }
 
     /// Whether one of the scene's objects is in the level as it is now
@@ -606,6 +658,7 @@ impl Mission {
             letterbox: s.letterbox.at(now),
             hud: if won { 1.0 } else { s.hud.at(now) },
             title,
+            subtitle: self.subtitle(scene),
         }
     }
 
@@ -1180,6 +1233,9 @@ impl Host for Ctx<'_> {
         if let Some(v) = self.cinematic_call(function, args) {
             return Some(v);
         }
+        if let Some(v) = self.cutscene_call(function, args) {
+            return Some(v);
+        }
         if let Some(v) = self.command_call(function, args) {
             return Some(v);
         }
@@ -1276,9 +1332,9 @@ impl Host for Ctx<'_> {
             "game_difficulty_get" | "game_difficulty_get_real" => {
                 Value::Handle(0xFFFF_0000 | self.st.difficulty as u32)
             }
-            // Cutscenes aren't played yet: the scripts skip them as if
-            // the player had.
-            "game_reverted" => Value::Bool(true),
+            // Whether the player skipped the cutscene (a real revert to
+            // the save before it isn't needed: skipping fast-forwards it).
+            "game_reverted" => Value::Bool(self.st.cutscene.skipped()),
             "game_is_cooperative" => Value::Bool(self.humans().len() > 1),
             "game_won" => {
                 self.st.won = true;

@@ -19,6 +19,8 @@ const CUTSCENE_TITLE_SIZE: usize = 0x24;
 /// The string lists of the chapter titles and of the objectives.
 const SCNR_CHAPTER_TITLE_TEXT: usize = 0x200;
 const SCNR_OBJECTIVES: usize = 0x3B8;
+/// The string list of cutscene subtitles.
+const SCNR_SUBTITLES: usize = 0x358;
 /// The mission dialogue (`mdlg`) tags: the lines scripts make actors say.
 const SCNR_MISSION_DIALOGUE: usize = 0x3B0;
 const MISSION_DIALOGUE_SIZE: usize = 0x8;
@@ -636,6 +638,15 @@ pub fn mission_dialogue(set: &mut MapSet) -> Result<Vec<DialogueLine>> {
                 .collect(),
         })
         .collect())
+}
+
+/// The scenario's cutscene subtitle strings (`unic`).
+pub fn subtitles(set: &mut MapSet) -> Result<DatumIndex> {
+    let data = scenario_data(set)?;
+    if data.len() < SCNR_SUBTITLES + 8 {
+        return Err(Error::Corrupt("scenario tag too small".into()));
+    }
+    Ok(DatumIndex(u32_at(&data, SCNR_SUBTITLES + 4)))
 }
 
 /// What kind of switch a control is.

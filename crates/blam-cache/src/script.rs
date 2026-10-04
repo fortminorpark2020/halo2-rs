@@ -37,6 +37,7 @@ pub mod value_type {
     pub const STRUCTURE_BSP: u16 = 0x1A;
     pub const SOUND: u16 = 0x20;
     pub const LOOPING_SOUND: u16 = 0x23;
+    pub const ANIMATION_GRAPH: u16 = 0x24;
     pub const GAME_DIFFICULTY: u16 = 0x2C;
     pub const TEAM: u16 = 0x2D;
     pub const OBJECT: u16 = 0x32;

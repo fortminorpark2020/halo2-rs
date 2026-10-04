@@ -308,6 +308,13 @@ fn load_level(path: &Path) -> Result<Level, String> {
             scene.lifts.len(),
             scene.switches.len()
         );
+        let cinema = &scene.ai.cinema;
+        println!(
+            "cutscenes: {} animation graphs, {} cast, {} subtitles",
+            cinema.graphs.len(),
+            cinema.bodies.len(),
+            cinema.subtitles.len()
+        );
     }
     // H2_LIST_WEAPONS=1: each weapon's crosshair range and HUD pieces.
     if std::env::var_os("H2_LIST_WEAPONS").is_some() {
@@ -566,6 +573,10 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         .collect();
     path.reverse();
     let still = still.or(path.last().map(|_| Vec3::ZERO));
+    // H2_SIM_SKIP=<seconds>: skip cutscenes from then on.
+    let skip_at: Option<f32> = std::env::var("H2_SIM_SKIP")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let mut won = false;
     let mut kills_with = std::collections::HashMap::<String, u32>::new();
     for tick in 0..(seconds / TICK) as usize {
@@ -586,6 +597,9 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             println!("{t:6.1} player moves to {at}");
         }
         if let Some(m) = &mut mission {
+            if skip_at.is_some_and(|at| t >= at) && m.skip_cutscene() {
+                println!("{t:6.1} cutscene skipped");
+            }
             let (bsp, placed) = (m.bsp(), game.players.len());
             m.step(&level.scene, &level.world, &mut game, &mut bots);
             if m.bsp() != bsp {
@@ -730,10 +744,35 @@ fn mission_screen(
             [1.0, 1.0, 1.0, *shown],
         );
     }
+    if let Some(text) = &view.subtitle {
+        // In the bottom bar, a line at a time.
+        let size = 9.0 * s;
+        let lines = wrap(text, 72);
+        let bottom = h * (1.0 - LETTERBOX * 0.5) + size * (lines.len() as f32 * 0.6 - 1.1);
+        for (k, line) in lines.iter().rev().enumerate() {
+            let y = bottom - k as f32 * size * 1.2;
+            hb.text(font, [w * 0.5, y], size, line, [1.0, 1.0, 1.0, 1.0]);
+        }
+    }
     if view.fade[3] > 0.0 {
         fill(&mut hb, [0.0, 0.0, w, h], view.fade);
     }
     hud.extend(hb.finish());
+}
+
+/// Text broken into lines of at most `width` characters, at spaces.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if line.len() + 1 + word.len() <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
 }
 
 /// A map loading in the background, behind the loading screen.
@@ -967,6 +1006,11 @@ impl App {
         }
         if self.in_menu() {
             self.menu_pad(id, press);
+            return;
+        }
+        // A, Start or the trigger skip a cutscene.
+        let skip = matches!(press, PadPress::Claim | PadPress::Join | PadPress::Fire);
+        if skip && self.mission.as_mut().is_some_and(|m| m.skip_cutscene()) {
             return;
         }
         let owner = self.locals.iter().position(|l| l.pad == Some(id));
@@ -1618,9 +1662,15 @@ impl App {
                 .mission
                 .as_ref()
                 .map_or(Mat4::IDENTITY, |m| m.carried(scene, k));
+            // Scenery a cutscene flies about (In Amber Clad).
+            let animated = self
+                .mission
+                .as_ref()
+                .zip(o.name)
+                .and_then(|(m, n)| m.cutscene_object(scene, n));
             world.push(DrawCall {
                 mesh: o.mesh,
-                model: carried * o.transform,
+                model: animated.unwrap_or(carried * o.transform),
                 light: o.light,
                 colors: None,
                 emblem: None,
@@ -1792,6 +1842,27 @@ impl App {
         for pose in self.body_poses.iter().flatten() {
             body_meshes.push((pose.mesh, pose.vertices.clone()));
         }
+        // A cutscene's cast, and its camera while it has the view.
+        let mut cutscene_camera = None;
+        if let Some(m) = &self.mission {
+            let player = self.locals.first().map_or(0, |l| l.player);
+            for (mesh, vertices, model, body) in m.cutscene_bodies(&self.scene) {
+                body_meshes.push((mesh, vertices));
+                let colors = match body.chief {
+                    true => Some(player_colors(&self.game, player)),
+                    false => body.colors,
+                };
+                shared.push(DrawCall {
+                    mesh,
+                    model,
+                    light: None,
+                    colors,
+                    emblem: None,
+                    fx: Fx::default(),
+                });
+            }
+            cutscene_camera = m.cutscene_camera(&self.scene);
+        }
         let ctf = self.game.rules.game_type == GameType::Ctf;
         if let (Some(flag), true) = (&self.scene.flag, ctf && self.game.has_flags()) {
             let cloth = objective::cloth_vertices(flag, self.game.time as f32);
@@ -1841,20 +1912,41 @@ impl App {
             };
             let aspect = viewport[2] as f32 / viewport[3].max(1) as f32;
             let mut world = shared.clone();
-            let own = l.first_person(&self.game).then_some(l.player);
+            let own = l
+                .first_person(&self.game)
+                .then_some(l.player)
+                .filter(|_| cutscene_camera.is_none());
             for i in 0..self.body_poses.len() {
                 if Some(i) != own {
                     world.extend(self.body_draws(i));
                 }
             }
-            let (_, r, u) = l.camera.basis();
-            let mut draws = l.view_draws(&self.scene, &self.game);
+            // A cutscene sees through its own camera, with no HUD or
+            // weapon in view.
+            let camera = match cutscene_camera {
+                Some((at, forward, _)) => FlyCamera::looking_at(at, at + forward),
+                None => FlyCamera {
+                    position: l.camera.position,
+                    yaw: l.camera.yaw,
+                    pitch: l.camera.pitch,
+                },
+            };
+            let (_, r, u) = camera.basis();
+            let mut draws = if cutscene_camera.is_some() {
+                local::ViewDraws {
+                    view_models: Vec::new(),
+                    view_sprites: Vec::new(),
+                    posed: Vec::new(),
+                }
+            } else {
+                l.view_draws(&self.scene, &self.game)
+            };
             if k == 0 {
                 draws.posed.splice(0..0, std::mem::take(&mut body_meshes));
             }
             let (vw, vh) = (viewport[2] as f32, viewport[3] as f32);
             // The menu replaces the HUD while it's up.
-            let mut hud = if self.menu_open {
+            let mut hud = if self.menu_open || cutscene_camera.is_some() {
                 Vec::new()
             } else {
                 l.build_hud(&self.scene, &self.game, vw, vh)
@@ -1891,15 +1983,18 @@ impl App {
                 menu::draw_scoreboard(&mut hb, font, white, vw, vh, &scores);
                 hud.extend(hb.finish());
             }
+            let magnification = match cutscene_camera {
+                Some((_, _, fov)) => {
+                    let half_x = (camera::half_height(aspect) * aspect).atan();
+                    half_x.tan() / (fov.to_radians() * 0.5).tan().max(1e-3)
+                }
+                None => l.magnification(&self.scene, &self.game),
+            };
             views.push(View {
                 viewport,
                 aspect,
-                magnification: l.magnification(&self.scene, &self.game),
-                camera: FlyCamera {
-                    position: l.camera.position,
-                    yaw: l.camera.yaw,
-                    pitch: l.camera.pitch,
-                },
+                magnification,
+                camera,
                 world,
                 sprites: {
                     let mut sprites = self.effects.sprites(r, u);
@@ -2147,6 +2242,14 @@ impl App {
         }
         if code == KeyCode::Escape {
             self.open_menu(Screen::Pause);
+            return;
+        }
+        // Space, Enter or E skip a cutscene.
+        let skip = matches!(
+            code,
+            KeyCode::Space | KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyE
+        );
+        if skip && self.mission.as_mut().is_some_and(|m| m.skip_cutscene()) {
             return;
         }
         if code == KeyCode::KeyB {

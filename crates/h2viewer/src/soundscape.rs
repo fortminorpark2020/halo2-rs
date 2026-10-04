@@ -197,6 +197,11 @@ impl Soundscape {
                 }
                 self.lines.retain(|(s, _)| *s != sound);
             }
+            MissionSound::Hush => {
+                for (_, voice) in self.lines.drain(..) {
+                    self.audio.stop(voice);
+                }
+            }
             MissionSound::StartLoop(tag) => {
                 if self.loops.iter().any(|(t, _)| *t == tag) {
                     return;

@@ -4,13 +4,16 @@
 //! the trigger volumes and named objects they work with.
 
 use super::{Arms2, Body, Loader, MeshData, WeaponAssets};
+use crate::rig::{Skeleton, SkinnedMesh};
+use crate::scene::placement_matrix;
 use blam_cache::ai::{self, Character, CharacterKind, Squad};
+use blam_cache::animation::{self, AnimationGraph};
 use blam_cache::orders;
 use blam_cache::physics::{self, BipedPhysics};
 use blam_cache::scenario::{self, PlacedKind};
 use blam_cache::script::{self, Scripts};
-use blam_cache::{text, vehicle, DatumIndex};
-use glam::Vec3;
+use blam_cache::{model, text, vehicle, DatumIndex};
+use glam::{Mat4, Vec3};
 use h2sim::game::{CharacterDef, GrenadeKind, Mind, Side, Vitality};
 use h2sim::KillZone;
 use std::collections::HashMap;
@@ -84,6 +87,39 @@ pub struct CampaignAi {
     /// The AI triggers scripts test by name, by the value scripts name
     /// each with.
     pub trigger_names: HashMap<u32, u16>,
+    /// What the cutscenes play.
+    pub cinema: Cinema,
+}
+
+/// What the mission's cutscenes play: the animation graphs scripts name,
+/// the named bipeds they animate, where named objects are placed (the
+/// anchors cutscenes play relative to) and the subtitles.
+#[derive(Default)]
+pub struct Cinema {
+    /// By tag (the value scripts name each with).
+    pub graphs: HashMap<u32, AnimationGraph>,
+    /// The named bipeds and vehicles cutscenes animate, by object name.
+    pub bodies: HashMap<u16, CinemaBody>,
+    /// Their tags, while loading.
+    cast: Vec<(u16, DatumIndex)>,
+    /// Each named object's placement.
+    pub placed: Vec<Option<Mat4>>,
+    /// Subtitle text by string id.
+    pub subtitles: HashMap<u32, String>,
+}
+
+/// A biped or vehicle a cutscene animates (Master Chief, Johnson, a
+/// Pelican...): its own copy of its model's mesh, posed on the CPU.
+pub struct CinemaBody {
+    pub mesh: usize,
+    /// It's Master Chief: he wears the player's colours.
+    pub chief: bool,
+    /// The colours its armour or skin takes, where the model leaves them
+    /// to the game (Brutes' fur).
+    pub colors: Option<[[f32; 3]; 2]>,
+    pub skeleton: Skeleton,
+    pub parents: Vec<i16>,
+    pub skin: SkinnedMesh,
 }
 
 /// A title scripts put on screen: its text, where (top, left, bottom,
@@ -143,6 +179,20 @@ fn rank_colors(name: &str, kind: CharacterKind) -> [[f32; 3]; 2] {
         _ => [0.5, 0.5, 0.5],
     };
     [c, c.map(|v| v * 0.6)]
+}
+
+/// Colours for a cutscene's cast whose models take them from the game.
+fn cast_colors(tag: &str) -> Option<[[f32; 3]; 2]> {
+    let c = if tag.contains("brute") {
+        [0.42, 0.3, 0.2]
+    } else if tag.contains("grunt") {
+        [0.9, 0.5, 0.15]
+    } else if tag.contains("jackal") {
+        [0.25, 0.35, 0.75]
+    } else {
+        return None;
+    };
+    Some([c, c.map(|v| v * 0.6)])
 }
 
 fn vitality(body: f32, shield: f32, recharge: f32) -> Vitality {
@@ -326,6 +376,12 @@ impl Loader {
             .into_iter()
             .map(|(_, s)| s)
             .collect();
+        if let Ok(subtitles) = scenario::subtitles(set) {
+            out.cinema.subtitles = text::unicode_strings(set, &table, subtitles)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+        }
         let placed: Vec<(PlacedKind, Vec<scenario::Placement>)> = PlacedKind::ALL
             .iter()
             .map(|&k| (k, scenario::placements(set, k).unwrap_or_default()))
@@ -341,6 +397,28 @@ impl Loader {
                 let (_, list) = placed.iter().find(|(k, _)| Some(*k) == n.kind)?;
                 let p = list.get(n.index? as usize)?;
                 Some(Vec3::from(p.position))
+            })
+            .collect();
+        out.cinema.placed = names
+            .iter()
+            .map(|n| {
+                let (_, list) = placed.iter().find(|(k, _)| Some(*k) == n.kind)?;
+                let p = list.get(n.index? as usize)?;
+                Some(placement_matrix(p.position, p.rotation, p.scale))
+            })
+            .collect();
+        // Named bipeds, and vehicles only scripts create (the game has
+        // the rest): the cast cutscenes animate.
+        out.cinema.cast = names
+            .iter()
+            .enumerate()
+            .filter_map(|(k, n)| {
+                let kind = n
+                    .kind
+                    .filter(|&k| k == PlacedKind::Biped || k == PlacedKind::Vehicle)?;
+                let (_, list) = placed.iter().find(|(k, _)| *k == kind)?;
+                let p = list.get(n.index? as usize)?;
+                (kind == PlacedKind::Biped || !p.automatic).then_some((k as u16, p.object))
             })
             .collect();
         out.machines = names
@@ -378,6 +456,64 @@ impl Loader {
                 .filter_map(|v| Some((v.designation.clone(), self.sound(v.sound)?)))
                 .collect();
             out.lines.insert(id, voices);
+        }
+    }
+
+    /// The cutscenes' animation graphs and the bipeds they animate.
+    fn cinema(&mut self, out: &mut CampaignAi, meshes: &mut Vec<MeshData>) {
+        let mut tags: Vec<u32> = out
+            .scripts
+            .expressions
+            .iter()
+            .filter(|e| {
+                e.kind == script::NodeKind::Value
+                    && e.value_type == script::value_type::ANIMATION_GRAPH
+            })
+            .map(|e| e.value)
+            .collect();
+        tags.sort_unstable();
+        tags.dedup();
+        for tag in tags {
+            let datum = DatumIndex(tag);
+            if datum == DatumIndex::NONE {
+                continue;
+            }
+            match animation::read_animation_graph(&mut self.set, datum) {
+                Ok(g) => {
+                    out.cinema.graphs.insert(tag, g);
+                }
+                Err(e) => println!("warning: cutscene animations {tag:08x}: {e}"),
+            }
+        }
+        for (name, object) in std::mem::take(&mut out.cinema.cast) {
+            let tag_name = self
+                .set
+                .locate(object)
+                .map(|(_, t)| t.name)
+                .unwrap_or_default();
+            let chief = tag_name.ends_with("masterchief");
+            let colors = cast_colors(&tag_name);
+            let m = match model::read_object_render_model(&mut self.set, object) {
+                Ok(m) => m,
+                Err(e) => {
+                    println!("warning: cutscene object {:08x}: {e}", object.0);
+                    continue;
+                }
+            };
+            let mesh = self.model_mesh(&m);
+            let skin = SkinnedMesh::new(&mesh);
+            meshes.push(mesh);
+            out.cinema.bodies.insert(
+                name,
+                CinemaBody {
+                    mesh: meshes.len() - 1,
+                    chief,
+                    colors,
+                    skeleton: Skeleton::new(&m.nodes),
+                    parents: m.nodes.iter().map(|n| n.parent).collect(),
+                    skin,
+                },
+            );
         }
     }
 
@@ -463,6 +599,7 @@ impl Loader {
             ..CampaignAi::default()
         };
         self.mission_scripts(&mut out);
+        self.cinema(&mut out, meshes);
         let palette = ai::weapon_palette(&mut self.set).unwrap_or_default();
         out.weapons = palette
             .iter()

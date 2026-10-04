@@ -806,6 +806,16 @@ fn scripts(path: &str) -> Res {
         let body = sc.root.map(|i| s.source(i, 64)).unwrap_or_default();
         println!("(script {:?} {} {body})", sc.kind, sc.name);
     }
+    // H2_TYPES=1: each literal's value type, once per text.
+    if std::env::var("H2_TYPES").is_ok() {
+        let mut seen = std::collections::HashSet::new();
+        for e in &s.expressions {
+            let text = s.text(e.text);
+            if e.kind == script::NodeKind::Value && seen.insert((e.value_type, text)) {
+                println!("type {:#04x} {text} {:#x}", e.value_type, e.value);
+            }
+        }
+    }
     Ok(())
 }
 
