@@ -5,7 +5,7 @@ use super::{Loader, MeshData, Vertex, WeaponAssets};
 use crate::rig::{tag_quat, world_matrices, NodePose, Skeleton, SkinnedMesh};
 use blam_cache::model::{self, RenderModel};
 use blam_cache::vehicle::{self, seat_flags, FrictionPoint, VehicleTag, VehicleType};
-use blam_cache::{scenario, weapon, DatumIndex, GroupTag};
+use blam_cache::{ai, scenario, weapon, DatumIndex, GroupTag};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use h2sim::game::VehicleSpawn;
 use h2sim::vehicle::{
@@ -203,11 +203,10 @@ fn turret_gun(m: &RenderModel, bind: &[Mat4], part: &VehiclePart, attach: Mat4) 
     }
 }
 
-/// The seats a player can sit in (not the boarding positions).
+/// The seats people sit in (not the boarding positions), some of them
+/// only actors.
 fn player_seats(tag: &VehicleTag) -> impl Iterator<Item = &vehicle::Seat> {
-    tag.seats
-        .iter()
-        .filter(|s| !s.has(seat_flags::BOARDING) && !s.has(seat_flags::INVALID_FOR_PLAYER))
+    tag.seats.iter().filter(|s| !s.has(seat_flags::BOARDING))
 }
 
 impl Loader {
@@ -492,9 +491,12 @@ impl Loader {
         let mut seats = Vec::new();
         let mut stances = Vec::new();
         for s in player_seats(&tag) {
-            let Some(position) = at(&s.marker) else {
-                continue;
-            };
+            let ai_only = s.has(seat_flags::INVALID_FOR_PLAYER);
+            // A seat with no marker of its own (a dropship's): by where
+            // it's got into, else in the middle.
+            let position = at(&s.marker)
+                .or_else(|| at(&s.entry_marker))
+                .unwrap_or(Vec3::Z);
             let role = if s.has(seat_flags::DRIVER) {
                 SeatRole::Driver
             } else if s.has(seat_flags::GUNNER) {
@@ -524,6 +526,7 @@ impl Loader {
                 turret: aims,
                 pitch_range: s.pitch_range,
                 animation: s.animation.clone(),
+                ai_only,
                 camera: self.camera_track(s.camera_track),
             });
             stances.push(leak(&s.animation));
@@ -552,6 +555,7 @@ impl Loader {
                     turret: Some(aim),
                     pitch_range: s.pitch_range,
                     animation: s.animation.clone(),
+                    ai_only: s.has(seat_flags::INVALID_FOR_PLAYER),
                     camera: self.camera_track(s.camera_track),
                 });
                 stances.push(leak(&s.animation));
@@ -641,7 +645,15 @@ impl Loader {
         let mut out = Vehicles::default();
         let mut kinds: HashMap<(DatumIndex, String), Option<usize>> = HashMap::new();
         let mut templates: Vec<(MeshData, Option<MeshData>)> = Vec::new();
-        for (vehi, variant, position, yaw, respawn) in self.vehicle_spawns(campaign) {
+        let mut spawns: Vec<_> = self
+            .vehicle_spawns(campaign)
+            .into_iter()
+            .map(|s| (s, None))
+            .collect();
+        if campaign {
+            spawns.extend(self.squad_vehicle_spawns());
+        }
+        for ((vehi, variant, position, yaw, respawn), owner) in spawns {
             let key = (vehi, variant.clone());
             let kind = match kinds.get(&key) {
                 Some(&k) => k,
@@ -673,8 +685,45 @@ impl Loader {
                 yaw,
                 respawn,
             });
+            if let Some(owner) = owner {
+                out.squad_vehicles.insert(owner, out.spawns.len() - 1);
+            }
         }
         out
+    }
+
+    /// The vehicles squads start in, one for each starting location
+    /// with one (left out of the level until the squad is placed), with
+    /// whose each is: (squad, location).
+    #[allow(clippy::type_complexity)]
+    fn squad_vehicle_spawns(
+        &mut self,
+    ) -> Vec<((DatumIndex, String, [f32; 3], f32, f32), Option<(u16, u16)>)> {
+        let palette = ai::vehicle_palette(&mut self.set).unwrap_or_default();
+        let squads = ai::squads(&mut self.set).unwrap_or_default();
+        let mut spawns = Vec::new();
+        for (q, squad) in squads.iter().enumerate() {
+            for (k, l) in squad.locations.iter().enumerate() {
+                if l.seat == ai::SeatType::NoVehicle {
+                    continue;
+                }
+                let Some(&vehi) = l
+                    .vehicle
+                    .or(squad.vehicle)
+                    .and_then(|v| palette.get(v as usize))
+                else {
+                    continue;
+                };
+                let variant = if l.vehicle_variant.is_empty() {
+                    squad.vehicle_variant.clone()
+                } else {
+                    l.vehicle_variant.clone()
+                };
+                let owner = Some((q as u16, k as u16));
+                spawns.push(((vehi, variant, l.position, l.facing, 1e9), owner));
+            }
+        }
+        spawns
     }
 
     /// Where vehicles appear: (vehicle, variant, position, yaw, seconds
@@ -728,4 +777,7 @@ pub struct Vehicles {
     pub spawns: Vec<VehicleSpawn>,
     /// Per spawn: the meshes posed for that vehicle (and its turret).
     pub meshes: Vec<(usize, Option<usize>)>,
+    /// The spawn of each squad starting location's vehicle, by squad and
+    /// location.
+    pub squad_vehicles: HashMap<(u16, u16), usize>,
 }

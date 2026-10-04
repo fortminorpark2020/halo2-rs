@@ -76,8 +76,11 @@ pub struct SeatDef {
     pub turret: Option<TurretGun>,
     /// How far the turret may aim down and up (radians).
     pub pitch_range: [f32; 2],
-    /// The rider's animations ("warthog_d"...).
+    /// The rider's animations ("warthog_d"...), which is also the name
+    /// scripts know the seat by.
     pub animation: String,
+    /// Only actors sit here (a dropship's troop seats, its cargo).
+    pub ai_only: bool,
     /// Where a third person camera sits for each look pitch, from looking
     /// down to looking up: (pitch, offset from the eye with x along the
     /// look and z up). Empty if the seat has no camera track.
@@ -202,6 +205,8 @@ pub struct VehicleDef {
     pub center: Vec3,
     /// Principal moments of inertia.
     pub inertia: Vec3,
+    /// The box holding the whole hull, in the vehicle's space.
+    pub bounds: [Vec3; 2],
     /// Radius around `center` that holds the whole hull.
     pub radius: f32,
     /// The driver's trigger sounds a horn.
@@ -231,6 +236,7 @@ impl VehicleDef {
             (lo, hi) = (Vec3::new(-0.3, -0.3, 0.0), Vec3::new(0.3, 0.3, 0.5));
             spheres.push((Vec3::new(0.0, 0.0, 0.25), 0.25));
         }
+        self.bounds = [lo, hi];
         let size = hi - lo;
         let m = self.mass.max(1.0);
         // Weight sits low, in the chassis and engine.
@@ -336,6 +342,21 @@ pub struct Controls {
     pub driven: bool,
 }
 
+/// A course a script sets a flying vehicle on (a dropship coming in):
+/// straight to a point at up to a speed, turning to face a heading, over
+/// whatever is in the way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flight {
+    /// Where its origin goes.
+    pub to: Vec3,
+    /// Metres per second, at most.
+    pub speed: f32,
+    /// The yaw to turn to (else the way it's going).
+    pub face: Option<f32>,
+    /// Slows to a stop there (else flies on through it).
+    pub stop: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Vehicle {
     pub def: usize,
@@ -374,6 +395,10 @@ pub struct Vehicle {
     pub last_driver: Option<usize>,
     /// A stunt under way (Banshee).
     pub trick: Option<Trick>,
+    /// Flown along a script's course.
+    pub flight: Option<Flight>,
+    /// Carried in another vehicle's seat (a Ghost in a Phantom's hold).
+    pub carrier: Option<(usize, usize)>,
     still: f32,
     contacts: Vec<Contact>,
 }
@@ -405,6 +430,8 @@ impl Vehicle {
             overturned: 0.0,
             last_driver: None,
             trick: None,
+            flight: None,
+            carrier: None,
             still: 0.0,
             contacts: Vec::new(),
         }
@@ -523,6 +550,9 @@ impl Vehicle {
         if def.drive == Drive::Fixed {
             return;
         }
+        if let Some(course) = self.flight {
+            return self.fly_course(def, course, dt);
+        }
         if self.asleep && !self.controls.driven {
             return;
         }
@@ -549,6 +579,41 @@ impl Vehicle {
             self.velocity = Vec3::ZERO;
             self.spin = Vec3::ZERO;
         }
+    }
+
+    /// Fly along a script's course: speed up toward the point, slow down
+    /// coming in, turn level toward the heading.
+    fn fly_course(&mut self, def: &VehicleDef, course: Flight, dt: f32) {
+        const ACCELERATION: f32 = 4.0;
+        const TURN: f32 = 0.8;
+        self.asleep = false;
+        self.spin = Vec3::ZERO;
+        let to = course.to - self.origin(def);
+        let dist = to.length();
+        // Slow enough to stop at the point.
+        let speed = if course.stop {
+            course.speed.min((2.0 * ACCELERATION * dist).sqrt())
+        } else {
+            course.speed
+        };
+        let want = to.normalize_or_zero() * speed;
+        let change = want - self.velocity;
+        self.velocity += change.clamp_length_max(ACCELERATION * dt);
+        self.center += self.velocity * dt;
+        let (yaw, ..) = self.rotation.to_euler(glam::EulerRot::ZYX);
+        let going = self.velocity.truncate();
+        let heading = course
+            .face
+            .or_else(|| (going.length() > 1.0).then(|| going.y.atan2(going.x)));
+        let turned = heading.map_or(yaw, |h| {
+            let off = (h - yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            yaw + off.clamp(-TURN * dt, TURN * dt)
+        });
+        // Turn about the origin, where the course is set.
+        let origin = self.origin(def);
+        self.rotation = Quat::from_rotation_z(turned);
+        self.center = origin + self.rotation * def.center;
     }
 
     fn substep(&mut self, def: &VehicleDef, world: &World, dt: f32) {
@@ -981,6 +1046,7 @@ pub(crate) mod tests {
                 turret: None,
                 pitch_range: [-0.8, 0.8],
                 animation: "warthog_d".into(),
+                ai_only: false,
             }],
             max_forward_speed: 7.65,
             max_reverse_speed: 3.0,

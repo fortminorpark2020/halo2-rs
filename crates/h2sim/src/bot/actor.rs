@@ -129,7 +129,8 @@ impl Bot {
             let to = chest - eye;
             let d = to.length();
             let sight = (a.mind.sight * q.visibility()).max(super::CAMO_NOTICE);
-            let ahead = forward.angle_to(to.truncate()).abs() <= a.mind.fov;
+            // In a vehicle it looks all around.
+            let ahead = forward.angle_to(to.truncate()).abs() <= a.mind.fov || p.seat.is_some();
             let seen = d < sight && (alert || ahead || d < a.mind.peripheral);
             (seen && world.raycast(eye, to / d.max(1e-4), d).is_none()).then_some(d)
         };
@@ -549,6 +550,32 @@ mod tests {
         assert!(run(&mut g, &mut bots, 3.0));
         let still = g.players[bots[0].0].body.position;
         assert!(still.distance(at) < 0.3, "moved to {still}");
+    }
+
+    #[test]
+    fn actors_drive_where_a_script_sends_them_and_stay_in_their_seats() {
+        let (mut g, mut bots) = mission(&[Vec3::new(-10.0, 0.0, 0.0)]);
+        g.set_vehicles(
+            vec![crate::vehicle::tests::jeep()],
+            vec![crate::game::VehicleSpawn {
+                def: 0,
+                position: Vec3::new(-10.0, 3.0, 0.05),
+                yaw: 0.0,
+                respawn: 1e9,
+            }],
+        );
+        let i = bots[0].0;
+        g.enter_vehicle(i, 0, 0);
+        g.players[0].body.position = Vec3::new(-60.0, 0.0, 0.0);
+        let to = Vec3::new(15.0, 3.0, 0.0);
+        bots[0].1.actor.as_mut().unwrap().scripted = Some(Scripted {
+            go_to: Some(to),
+            ..Scripted::default()
+        });
+        run(&mut g, &mut bots, 15.0);
+        assert_eq!(g.riding(i), Some((0, 0)), "still driving");
+        let at = g.vehicles[0].center;
+        assert!((at - to).truncate().length() < 2.0, "at {at}");
     }
 
     #[test]

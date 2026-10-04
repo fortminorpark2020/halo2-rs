@@ -3,7 +3,7 @@
 //! and following the player from one part of the level to the next.
 
 use crate::scene::Scene;
-use blam_cache::ai::AiTeam;
+use blam_cache::ai::{AiTeam, SeatType};
 use blam_cache::scenario::ControlKind;
 use blam_cache::script::value_type;
 use glam::{Mat4, Vec3};
@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 mod commands;
 mod orders;
+mod vehicles;
 
 /// Seconds a machine takes to open when its tag doesn't say.
 const MACHINE_TIME: f32 = 1.5;
@@ -80,6 +81,9 @@ pub fn place_squad(
     }
     let weapon = |i: Option<u16>| i.and_then(|i| ai.weapons.get(i as usize).copied().flatten());
     let mut out = Vec::new();
+    // The vehicles placed for the squad, for others to join as gunners
+    // or passengers.
+    let mut vehicles: Vec<usize> = Vec::new();
     let count = if only.is_some() {
         1
     } else if limit.is_some() {
@@ -89,6 +93,32 @@ pub fn place_squad(
     };
     for &k in order.iter().take(count) {
         let l = &s.locations[k];
+        // Its vehicle: one the squad has placed, with a seat to take; else
+        // its own (left empty, with no actor at all, for "no driver").
+        let joins = matches!(l.seat, SeatType::Gunner | SeatType::Passenger)
+            .then(|| {
+                vehicles
+                    .iter()
+                    .find_map(|&v| Some((v, vehicles::starting_seat(game, v, l.seat)?)))
+            })
+            .flatten();
+        let own = match joins {
+            Some(_) => None,
+            None => scene
+                .vehicles
+                .squad_vehicles
+                .get(&(squad as u16, k as u16))
+                .copied(),
+        };
+        if let Some(v) = own {
+            game.place_vehicle(v, Vec3::from(l.position) + Vec3::Z * 0.05, l.facing);
+            vehicles.push(v);
+        }
+        if l.seat == SeatType::NoDriver {
+            continue;
+        }
+        let seat = joins
+            .or_else(|| own.and_then(|v| Some((v, vehicles::starting_seat(game, v, l.seat)?))));
         let Some(character) = l
             .character
             .or(s.character)
@@ -111,6 +141,9 @@ pub fn place_squad(
         let Some(i) = game.spawn_actor(spawn) else {
             continue;
         };
+        if let Some((v, seat)) = seat {
+            game.enter_vehicle(i, v, seat);
+        }
         if s.braindead {
             out.push((i, None));
             continue;
@@ -288,6 +321,8 @@ struct State {
     orders: orders::Orders,
     /// Actors under command scripts.
     commands: commands::Commands,
+    /// Actors getting in and out of vehicles.
+    rides: vehicles::Rides,
     difficulty: u8,
     won: bool,
     /// Say what the scripts do (H2_SCRIPT_LOG).
@@ -440,6 +475,14 @@ impl Mission {
         }
         let mut vm = Vm::new(&scene.ai.scripts, &mut ctx);
         vm.log = log;
+        // H2_WAKE="<script>,...": wake those scripts at the start (for
+        // testing one part of a mission).
+        for name in std::env::var("H2_WAKE").unwrap_or_default().split(',') {
+            let scripts = &scene.ai.scripts.scripts;
+            if let Some(k) = scripts.iter().position(|s| s.name == name.trim()) {
+                vm.wake(k);
+            }
+        }
         Mission {
             vm,
             state,
@@ -480,6 +523,7 @@ impl Mission {
         self.vm.tick(&scene.ai.scripts, &mut ctx);
         ctx.follow_orders(&mut self.vm, dt);
         ctx.run_commands(&mut self.vm, dt);
+        ctx.run_vehicles(world, dt);
     }
 
     /// Whether one of the scene's objects is in the level as it is now
@@ -669,8 +713,9 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    /// Place a squad's actors (at most `limit`), with bots to run them.
-    fn place(&mut self, squad: usize, limit: Option<usize>, only: Option<usize>) {
+    /// Place a squad's actors (at most `limit`), with bots to run them;
+    /// returns them.
+    fn place(&mut self, squad: usize, limit: Option<usize>, only: Option<usize>) -> Vec<usize> {
         let placed = place_squad(
             self.game,
             self.scene,
@@ -687,9 +732,22 @@ impl Ctx<'_> {
         *self.st.placed.entry(squad).or_insert(0) += placed.len() as u32;
         self.bots
             .retain(|(i, _)| !placed.iter().any(|(j, _)| j == i));
+        let actors: Vec<usize> = placed.iter().map(|(i, _)| *i).collect();
         self.bots
             .extend(placed.into_iter().filter_map(|(i, b)| Some((i, b?))));
         self.start_orders(squad);
+        // Each runs its starting location's command script.
+        let s = &self.scene.ai.squads[squad];
+        for &i in &actors {
+            let script = self.game.players[i]
+                .actor
+                .and_then(|a| s.locations.get(a.location as usize)?.placement_script)
+                .or(s.placement_script);
+            if let Some(script) = script {
+                self.st.commands.starts.push((i, script as usize, false));
+            }
+        }
+        actors
     }
 
     /// The squads an `ai` value means: a squad, or every squad in a group.
@@ -747,7 +805,7 @@ impl Ctx<'_> {
     fn unit(&self, o: Obj) -> Option<usize> {
         match o {
             Obj::Unit(i) => Some(i).filter(|&i| i < self.game.players.len()),
-            Obj::Name(_) => None,
+            Obj::Name(_) | Obj::Vehicle(_) => None,
         }
     }
 
@@ -760,6 +818,12 @@ impl Ctx<'_> {
                 .get(i)
                 .filter(|p| p.alive)
                 .map(|p| p.body.position),
+            Obj::Vehicle(v) => self
+                .game
+                .vehicles
+                .get(v)
+                .filter(|veh| !veh.destroyed)
+                .map(|veh| veh.origin(&self.game.vehicle_defs[veh.def])),
             Obj::Name(n) => {
                 if self.st.created.get(&n) == Some(&false) {
                     return None;
@@ -987,7 +1051,7 @@ impl Ctx<'_> {
     fn device(&mut self, v: Option<&Value>) -> Option<&mut Device> {
         let name = match v?.objects().first()? {
             Obj::Name(n) => *n,
-            Obj::Unit(_) => return None,
+            Obj::Unit(_) | Obj::Vehicle(_) => return None,
         };
         if let Some(&k) = self.st.door_named.get(&name) {
             return self.st.doors.get_mut(k);
@@ -1053,7 +1117,8 @@ impl Ctx<'_> {
                     self.st.created.insert(n, created);
                 }
                 Obj::Unit(i) if !created => self.game.erase_actor(i),
-                Obj::Unit(_) => {}
+                Obj::Vehicle(v) if !created => self.remove_vehicle(v),
+                Obj::Unit(_) | Obj::Vehicle(_) => {}
             }
         }
     }
@@ -1074,6 +1139,9 @@ impl Host for Ctx<'_> {
 
     fn call(&mut self, function: &str, args: &[Value], _returns: u16) -> Option<Value> {
         if let Some(v) = self.command_call(function, args) {
+            return Some(v);
+        }
+        if let Some(v) = self.vehicle_call(function, args) {
             return Some(v);
         }
         let arg = |k: usize| args.get(k).cloned().unwrap_or_default();
@@ -1119,7 +1187,7 @@ impl Host for Ctx<'_> {
                         Obj::Unit(i) => self.game.players.get(i).is_some_and(|p| {
                             p.alive && p.aim().dot((t - p.eye()).normalize_or_zero()) >= cone
                         }),
-                        Obj::Name(_) => false,
+                        Obj::Name(_) | Obj::Vehicle(_) => false,
                     })
                 }))
             }
@@ -1133,6 +1201,14 @@ impl Host for Ctx<'_> {
                             p.health / p.full.health.max(1e-3)
                         } else {
                             0.0
+                        }
+                    }),
+                    Some(&Obj::Vehicle(v)) => self.game.vehicles.get(v).map_or(-1.0, |veh| {
+                        let full = self.game.vehicle_defs[veh.def].health.max(1e-3);
+                        if shield || veh.destroyed {
+                            0.0
+                        } else {
+                            veh.health / full
                         }
                     }),
                     Some(&Obj::Name(_)) => 1.0,
@@ -1243,7 +1319,7 @@ impl Host for Ctx<'_> {
                     self.actors(&arg(0))
                 };
                 for i in actors {
-                    self.game.erase_actor(i);
+                    self.erase(i);
                 }
                 Value::Void
             }

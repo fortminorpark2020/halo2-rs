@@ -252,6 +252,10 @@ fn campaign_game(scene: &Scene) -> Game {
     game.rules.starting_plasmas = start.plasmas;
     game.rules.friendly_fire = true;
     game.characters = scene.ai.characters.clone();
+    // Squads' vehicles wait until their squads are placed.
+    for &v in scene.vehicles.squad_vehicles.values() {
+        game.remove_vehicle(v);
+    }
     game
 }
 

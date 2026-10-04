@@ -27,6 +27,8 @@ pub mod value_type {
     pub const LONG: u16 = 0x08;
     pub const STRING: u16 = 0x09;
     pub const SCRIPT: u16 = 0x0A;
+    pub const STRING_ID: u16 = 0x0B;
+    pub const UNIT_SEAT_MAPPING: u16 = 0x0C;
     pub const TRIGGER_VOLUME: u16 = 0x0D;
     pub const CUTSCENE_FLAG: u16 = 0x0E;
     pub const DEVICE_GROUP: u16 = 0x12;

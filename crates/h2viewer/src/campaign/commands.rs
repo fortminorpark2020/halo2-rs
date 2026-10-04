@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 /// Seconds an actor has to get where a command sends it, and to get any
 /// closer, before the script stops waiting.
-const GIVE_UP: f32 = 60.0;
+pub(super) const GIVE_UP: f32 = 60.0;
 const STALLED: f32 = 4.0;
 /// Close enough to a point to be there.
 const THERE: f32 = 1.0;
@@ -45,7 +45,7 @@ pub(super) struct Commands {
     pub current: Option<usize>,
     /// Command scripts to start (actor, script, queued) and actors whose
     /// scripts to stop, once this tick's scripts have run.
-    starts: Vec<(usize, usize, bool)>,
+    pub starts: Vec<(usize, usize, bool)>,
     stops: Vec<usize>,
     /// What each commanded actor is doing.
     actors: HashMap<usize, Command>,
@@ -53,18 +53,56 @@ pub(super) struct Commands {
     pub waiting: bool,
 }
 
-#[derive(Debug, Clone, Default)]
-struct Command {
+#[derive(Debug, Clone)]
+pub(super) struct Command {
     scripted: Scripted,
+    /// Where it's flying the vehicle it drives, and whether to stop there;
+    /// and the share of the vehicle's top speed it goes at.
+    pub fly: Option<(Vec3, bool)>,
+    speed: f32,
     /// Seconds since it was sent where it's going, the closest it's got,
     /// and seconds since it last got closer.
-    going: f32,
+    pub going: f32,
     closest: f32,
     stalled: f32,
     /// Its script stops once its combat status gets this high, or once
     /// it's hurt (below this health and shield).
     abort_status: Option<i16>,
     abort_hurt: Option<f32>,
+}
+
+impl Default for Command {
+    fn default() -> Command {
+        Command {
+            scripted: Scripted::default(),
+            fly: None,
+            speed: 1.0,
+            going: 0.0,
+            closest: 0.0,
+            stalled: 0.0,
+            abort_status: None,
+            abort_hurt: None,
+        }
+    }
+}
+
+/// How a pilot is flying: where to, how fast, facing what.
+pub(super) struct Flying {
+    pub fly: Option<(Vec3, bool)>,
+    pub speed: f32,
+    pub face: Option<Vec3>,
+}
+
+impl Commands {
+    /// What a command script has a pilot do.
+    pub(super) fn flying(&self, actor: usize) -> Flying {
+        let c = self.actors.get(&actor);
+        Flying {
+            fly: c.and_then(|c| c.fly),
+            speed: c.map_or(1.0, |c| c.speed),
+            face: c.and_then(|c| c.scripted.face),
+        }
+    }
 }
 
 /// How roused an actor is.
@@ -96,7 +134,7 @@ impl Ctx<'_> {
             .filter(|&i| self.game.players.get(i).is_some_and(|p| p.alive))
     }
 
-    fn command_mut(&mut self, actor: usize) -> &mut Command {
+    pub(super) fn command_mut(&mut self, actor: usize) -> &mut Command {
         self.st.commands.actors.entry(actor).or_default()
     }
 
@@ -275,6 +313,25 @@ impl Ctx<'_> {
                 let p = &self.game.players[actor];
                 let left = p.health + p.shield;
                 self.command_mut(actor).abort_hurt = on(0).then_some(left);
+                Value::Void
+            }
+            "cs_fly_to" | "cs_fly_by" | "cs_fly_to_and_face" => {
+                let stop = function != "cs_fly_by";
+                let (near, face) = match function {
+                    "cs_fly_to_and_face" => (args.get(2), self.point(&arg(1))),
+                    _ => (args.get(1), None),
+                };
+                if face.is_some() {
+                    self.command_mut(actor).scripted.face = face;
+                }
+                let near = near.map(Value::num);
+                match self.point(&arg(0)) {
+                    Some(to) => self.fly(actor, to, near, stop),
+                    None => Value::Void,
+                }
+            }
+            "cs_vehicle_speed" => {
+                self.command_mut(actor).speed = arg(0).num().clamp(0.05, 1.0);
                 Value::Void
             }
             "cs_teleport" => {

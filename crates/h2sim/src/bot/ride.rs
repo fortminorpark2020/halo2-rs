@@ -1,6 +1,9 @@
 //! Bots and vehicles: getting into one nearby, driving it where the bot is
 //! going (at enemies, given the chance), manning its gun, and getting out
 //! when it's stuck, when there's nothing to shoot, or near the objective.
+//! Campaign actors stay in the seats their mission puts them in: drivers
+//! go where they're sent (circling enemies they see), gunners shoot and
+//! passengers fire their own guns.
 
 use super::{wrap, Bot, FIRE_CONE, REACTION};
 use crate::collision::World;
@@ -30,6 +33,15 @@ const OBJECTIVE_ON_FOOT: f32 = 4.0;
 const RAM_RANGE: f32 = 15.0;
 /// Fliers keep this high over where they're heading.
 const FLY_HEIGHT: f32 = 1.5;
+/// An actor driving stops this close to where it's going, and circles
+/// enemies this close (this far off them).
+const ACTOR_ARRIVED: f32 = 3.0;
+const CIRCLE: (f32, f32) = (18.0, 10.0);
+/// An actor driving slows down this far from where it's going.
+const BRAKING: f32 = 12.0;
+/// An actor driving heads straight for where it's going once it's this
+/// close and in sight.
+const DIRECT: f32 = 25.0;
 
 /// A bot's dealings with vehicles.
 #[derive(Default)]
@@ -109,7 +121,7 @@ impl Bot {
             }
             let driven = def.driver_seat().is_some_and(|d| veh.riders[d].is_some());
             for (s, seat) in def.seats.iter().enumerate() {
-                if veh.riders[s].is_some() {
+                if veh.riders[s].is_some() || seat.ai_only {
                     continue;
                 }
                 let wanted = match seat.role {
@@ -180,14 +192,23 @@ impl Bot {
             cmd.pitch = self.pitch;
             return cmd;
         }
-        let target = self.find_target(game, world, me);
+        let target = match self.actor {
+            Some(_) => self.actor_target(game, world, me),
+            None => self.find_target(game, world, me),
+        };
         if target != self.target {
             self.target = target;
             self.seen_for = 0.0;
             self.aim_error = Vec2::new(self.random() - 0.5, self.random() - 0.5) * 0.2;
         }
         self.pulse = !self.pulse;
-        let gun = seat.weapon.and_then(|w| game.weapons.get(w));
+        // An actor riding along fires its own gun (from a seat out in the
+        // open).
+        let own = (self.actor.is_some() && seat.role == SeatRole::Passenger && seat.exposed)
+            .then(|| game.players[me].held())
+            .flatten()
+            .and_then(|h| game.weapons.get(h.weapon));
+        let gun = seat.weapon.and_then(|w| game.weapons.get(w)).or(own);
         // Aim from where the crosshair's line starts.
         let eye = game.view_point(me);
 
@@ -263,7 +284,9 @@ impl Bot {
                 } else {
                     r.driverless + dt
                 };
-                if r.idle > BORED || r.driverless > NO_DRIVER || seat.role == SeatRole::Passenger {
+                let done =
+                    r.idle > BORED || r.driverless > NO_DRIVER || seat.role == SeatRole::Passenger;
+                if done && self.actor.is_none() {
                     r.leaving = true;
                 }
                 if !aiming {
@@ -321,10 +344,13 @@ impl Bot {
             r.stalls += 1;
             r.backing = BACK_UP;
             self.route.clear();
-            if r.stalls >= GIVE_UP_STALLS {
+            if r.stalls >= GIVE_UP_STALLS && self.actor.is_none() {
                 r.leaving = true;
             }
             return;
+        }
+        if self.actor.is_some() {
+            return self.drive_actor(game, world, nav, me, v, target, aiming, cmd);
         }
 
         // Where to: at an enemy nearby (to run them over), else along the
@@ -385,6 +411,100 @@ impl Bot {
                 0.0
             };
             self.turn_to(to.y.atan2(to.x), pitch, dt);
+        }
+    }
+
+    /// An actor driving: where its mission sends it, else around an enemy
+    /// in sight (ramming them in a Warthog), else back to its post.
+    #[allow(clippy::too_many_arguments)]
+    fn drive_actor(
+        &mut self,
+        game: &Game,
+        world: &World,
+        nav: &NavGraph,
+        me: usize,
+        v: usize,
+        target: Option<usize>,
+        aiming: bool,
+        cmd: &mut Command,
+    ) {
+        let dt = TICK;
+        let veh = &game.vehicles[v];
+        let def = &game.vehicle_defs[veh.def];
+        let at = veh.center;
+        let scripted = self.scripted_going();
+        let goal = self.actor_goal(game, world, me, dt);
+        let fight = target
+            .filter(|_| !scripted)
+            .map(|t| game.players[t].body.position);
+        let heading = match fight {
+            Some(enemy) => {
+                let to = enemy - at;
+                let d = to.truncate().length();
+                // Far off, or close enough to run over in a Warthog: at
+                // them.
+                if d > CIRCLE.0 || (def.drive == Drive::Wheels && d < RAM_RANGE) {
+                    enemy
+                } else {
+                    // Around them, keeping its guns on them.
+                    let side = to.truncate().perp().normalize_or_zero() * CIRCLE.1;
+                    enemy + side.extend(0.0) - to.normalize_or_zero() * CIRCLE.1 * 0.5
+                }
+            }
+            None => match goal {
+                Some(g) if (g - at).truncate().length() > ACTOR_ARRIVED => {
+                    let target_changed = self.heading_for.is_none_or(|h| h.distance(g) > 1.0);
+                    if target_changed {
+                        self.heading_for = Some(g);
+                        self.route.clear();
+                    }
+                    // In sight and near: straight there.
+                    let lift = Vec3::Z * 0.5;
+                    let near =
+                        (g - at).length() < DIRECT && Bot::visible(world, at + lift, g + lift);
+                    if near {
+                        self.route.clear();
+                        g
+                    } else {
+                        match self.next_stop(world, nav, at, Some(g)) {
+                            Some(p) => p,
+                            None => return,
+                        }
+                    }
+                }
+                _ => {
+                    self.heading_for = None;
+                    self.riding.stalled = 0.0;
+                    return;
+                }
+            },
+        };
+        let to = heading - at;
+        // Easing off coming up to where it's going, to stop there rather
+        // than circle it.
+        let left = goal.map_or(f32::MAX, |g| (g - at).truncate().length()) - ACTOR_ARRIVED;
+        let ahead = veh.forward().truncate().normalize_or_zero();
+        let facing = ahead.dot(to.truncate().normalize_or_zero());
+        let throttle = if fight.is_some() {
+            1.0
+        } else {
+            (left / BRAKING).clamp(0.25, 1.0) * facing.max(0.4)
+        };
+        cmd.movement = Vec2::new(0.0, throttle);
+        if !aiming {
+            let pitch = if def.drive == Drive::Fly {
+                let up = heading.z + FLY_HEIGHT - at.z;
+                (up / to.truncate().length().max(1.0))
+                    .atan()
+                    .clamp(-0.6, 0.6)
+            } else {
+                0.0
+            };
+            self.turn_to(to.y.atan2(to.x), pitch, dt);
+        } else {
+            // Aiming elsewhere: steer by strafing toward the heading.
+            let local = super::local(self.yaw, to.truncate().normalize_or_zero());
+            cmd.movement = local;
         }
     }
 

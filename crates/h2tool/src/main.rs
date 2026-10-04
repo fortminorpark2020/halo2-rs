@@ -938,9 +938,15 @@ fn squads(path: &str) -> Res {
     for (i, &w) in weapons.iter().enumerate() {
         println!("weapon {i} {}", name(&set, w));
     }
+    for (i, &v) in ai::vehicle_palette(&mut set)?.iter().enumerate() {
+        println!("vehicle {i} {}", name(&set, v));
+    }
+    for (i, (unit, seats)) in ai::unit_seat_mappings(&mut set)?.iter().enumerate() {
+        println!("seat mapping {i} {} {seats:#x}", name(&set, *unit));
+    }
     for (i, s) in ai::squads(&mut set)?.iter().enumerate() {
         println!(
-            "squad {i} {:?} {:?} placed {} counts {:?} char {:?} weap {:?}/{:?} veh {:?}{}{}{}",
+            "squad {i} {:?} {:?} placed {} counts {:?} char {:?} weap {:?}/{:?} veh {:?} {:?}{}{}{}",
             s.name,
             s.team,
             s.initially_placed,
@@ -949,19 +955,23 @@ fn squads(path: &str) -> Res {
             s.weapon,
             s.secondary,
             s.vehicle,
+            s.vehicle_variant,
             if s.blind { " blind" } else { "" },
             if s.deaf { " deaf" } else { "" },
             if s.braindead { " braindead" } else { "" },
         );
         for l in &s.locations {
             println!(
-                "    {:<12} at {:7.2?} facing {:5.2} char {:?} weap {:?} veh {:?}{}{}{}",
+                "    {:<12} at {:7.2?} facing {:5.2} char {:?} weap {:?} veh {:?} {:?} {:?} script {:?}{}{}{}",
                 l.name,
                 l.position,
                 l.facing,
                 l.character,
                 l.weapon,
                 l.vehicle,
+                l.vehicle_variant,
+                l.seat,
+                l.placement_script,
                 if l.asleep { " asleep" } else { "" },
                 if l.always { " always" } else { "" },
                 if l.hidden { " hidden" } else { "" },

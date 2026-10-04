@@ -28,6 +28,8 @@ const ENGINE_GLOBAL: u32 = 0x8000;
 pub enum Obj {
     Name(u16),
     Unit(usize),
+    /// A vehicle in play (an index into the game's vehicles).
+    Vehicle(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

@@ -166,6 +166,9 @@ impl Game {
                 continue;
             }
             for (s, seat) in def.seats.iter().enumerate() {
+                if seat.ai_only {
+                    continue;
+                }
                 // An enemy driving or on the gun can be boarded.
                 let hijack = match veh.riders[s] {
                     None => false,
@@ -262,6 +265,72 @@ impl Game {
         });
     }
 
+    /// Put player (or actor) `i` straight into seat `s` of vehicle `v`
+    /// (out of any seat they're in), if it's free.
+    pub fn enter_vehicle(&mut self, i: usize, v: usize, s: usize) {
+        let free = self
+            .vehicles
+            .get(v)
+            .is_some_and(|veh| !veh.destroyed && veh.riders.get(s) == Some(&None));
+        if !free || !self.players.get(i).is_some_and(|p| p.alive) {
+            return;
+        }
+        self.leave_seat(i);
+        self.enter(i, v, s);
+    }
+
+    /// Get out of a vehicle in the air (dropped from a dropship), landing
+    /// unhurt.
+    pub fn unload(&mut self, world: &World, i: usize) {
+        if self.players.get(i).is_some_and(|p| p.seat.is_some()) {
+            self.exit(world, i);
+            self.players[i].soft_landing = true;
+        }
+    }
+
+    /// Put vehicle `v` in the level at `position` facing `yaw`, new and
+    /// empty (a script placing it).
+    pub fn place_vehicle(&mut self, v: usize, position: Vec3, yaw: f32) {
+        let Some(s) = self.vehicle_spawns.get_mut(v) else {
+            return;
+        };
+        s.position = position;
+        s.yaw = yaw;
+        self.respawn_vehicle(v);
+    }
+
+    /// Take vehicle `v` out of the level until it's placed again; its
+    /// riders stay where they are, and what it carries drops.
+    pub fn remove_vehicle(&mut self, v: usize) {
+        let Some(veh) = self.vehicles.get(v) else {
+            return;
+        };
+        let riders: Vec<usize> = veh.riders.iter().flatten().copied().collect();
+        for r in riders {
+            self.leave_seat(r);
+        }
+        for o in &mut self.vehicles {
+            if o.carrier.is_some_and(|(c, _)| c == v) {
+                o.carrier = None;
+                o.asleep = false;
+            }
+        }
+        let veh = &mut self.vehicles[v];
+        veh.destroyed = true;
+        veh.respawn_in = f32::MAX;
+        veh.flight = None;
+        veh.carrier = None;
+    }
+
+    /// Load vehicle `cargo` into seat `s` of vehicle `v` (a Ghost into a
+    /// Phantom's hold), or drop it (`None`).
+    pub fn carry_vehicle(&mut self, cargo: usize, into: Option<(usize, usize)>) {
+        if let Some(veh) = self.vehicles.get_mut(cargo) {
+            veh.carrier = into;
+            veh.asleep = false;
+        }
+    }
+
     fn enter(&mut self, i: usize, v: usize, s: usize) {
         self.seat_rider(i, v, s);
         self.events.push(Event::Entered {
@@ -313,10 +382,20 @@ impl Game {
         // Out the side the seat is on, else the other side, behind, on top.
         let side = if seat.position.y >= 0.0 { 1.0 } else { -1.0 };
         let half = def.radius.min(1.2);
+        // A big vehicle (a dropship): clear of its hull, beside the seat,
+        // behind, in front or below.
+        let [lo, hi] = def.bounds;
+        let beside = |s: f32| if s > 0.0 { hi.y + 0.4 } else { lo.y - 0.4 };
+        let floor = lo.z + 0.1;
         let places = [
             Vec3::new(seat.position.x, side * (half + 0.3), 0.1),
             Vec3::new(seat.position.x, -side * (half + 0.3), 0.1),
             Vec3::new(-(half + 0.4), 0.0, 0.1),
+            Vec3::new(seat.position.x, beside(side), floor),
+            Vec3::new(seat.position.x, beside(-side), floor),
+            Vec3::new(lo.x - 0.5, seat.position.y, floor),
+            Vec3::new(hi.x + 0.5, seat.position.y, floor),
+            Vec3::new(seat.position.x, seat.position.y, lo.z - 1.9),
             Vec3::new(seat.position.x, seat.position.y, def.radius + 0.2),
         ];
         let p = &self.players[i];
@@ -647,11 +726,36 @@ impl Game {
                 }
                 continue;
             }
+            // Carried: held in the carrier's seat.
+            if let Some((c, s)) = self.vehicles[v].carrier {
+                let held = self
+                    .vehicles
+                    .get(c)
+                    .filter(|o| !o.destroyed && c != v)
+                    .map(|o| {
+                        let d = &self.vehicle_defs[o.def];
+                        (o.seat_position(d, s), o.rotation, o.velocity)
+                    });
+                let veh = &mut self.vehicles[v];
+                match held {
+                    Some((at, rotation, velocity)) => {
+                        let def = &self.vehicle_defs[veh.def];
+                        veh.rotation = rotation;
+                        veh.center = at + rotation * def.center;
+                        veh.velocity = velocity;
+                        veh.spin = Vec3::ZERO;
+                        veh.asleep = false;
+                        continue;
+                    }
+                    None => veh.carrier = None,
+                }
+            }
             let veh = &mut self.vehicles[v];
             let def = &self.vehicle_defs[veh.def];
             if let Some(d) = def.driver_seat() {
                 if veh.riders[d].is_none() {
                     veh.controls.driven = false;
+                    veh.flight = None;
                 }
             }
             veh.step(def, world, dt);
@@ -750,7 +854,9 @@ impl Game {
         for a in 0..n {
             for b in a + 1..n {
                 let (va, vb) = (&self.vehicles[a], &self.vehicles[b]);
-                if va.destroyed || vb.destroyed {
+                // A vehicle in another's hold stays put in it.
+                let carried = va.carrier.is_some() || vb.carrier.is_some();
+                if va.destroyed || vb.destroyed || carried {
                     continue;
                 }
                 let (da, db) = (&self.vehicle_defs[va.def], &self.vehicle_defs[vb.def]);
@@ -950,6 +1056,7 @@ mod tests {
     use crate::game::tests::game;
     use crate::testing::floor;
     use crate::vehicle::tests::jeep;
+    use crate::vehicle::{Flight, SeatDef};
 
     fn with_jeep() -> Game {
         let mut g = game();
@@ -1267,5 +1374,91 @@ mod tests {
             "{}",
             g.vehicles[0].yaw()
         );
+    }
+
+    /// A jeep that flies, with a hold and a troop seat: a dropship.
+    fn dropship() -> VehicleDef {
+        let mut def = jeep();
+        def.drive = Drive::Fly;
+        let driver = def.seats[0].clone();
+        let seat = |role, animation: &str, y: f32| SeatDef {
+            role,
+            position: Vec3::new(-0.5, y, 0.39),
+            animation: animation.into(),
+            ai_only: true,
+            ..driver.clone()
+        };
+        def.seats.push(seat(SeatRole::Passenger, "dropship_p", 0.3));
+        def.seats
+            .push(seat(SeatRole::Passenger, "dropship_sc", -0.3));
+        def
+    }
+
+    #[test]
+    fn a_dropship_flies_its_course_and_drops_its_cargo_and_troops_unhurt() {
+        let mut g = game();
+        g.set_vehicles(
+            vec![dropship(), jeep()],
+            [
+                (0, Vec3::new(0.0, 0.0, 10.0)),
+                (1, Vec3::new(20.0, 0.0, 0.05)),
+            ]
+            .map(|(def, position)| VehicleSpawn {
+                def,
+                position,
+                yaw: 0.0,
+                respawn: 1e9,
+            })
+            .to_vec(),
+        );
+        // Not in the level until placed.
+        g.remove_vehicle(1);
+        assert!(g.vehicles[1].destroyed);
+        g.place_vehicle(1, Vec3::new(0.0, 0.0, 12.0), 0.0);
+        assert!(!g.vehicles[1].destroyed);
+        let pilot = g.add_player();
+        let rider = g.add_player();
+        g.enter_vehicle(pilot, 0, 0);
+        g.enter_vehicle(rider, 0, 1);
+        g.carry_vehicle(1, Some((0, 2)));
+        assert_eq!(g.riding(rider), Some((0, 1)));
+        // The players' seats hold only actors.
+        g.players[0].body.position = g.vehicles[0].to_world(&g.vehicle_defs[0], Vec3::ZERO);
+        assert!(g.vehicle_action(0).is_none_or(
+            |a| !matches!(a, VehicleAction::Enter { seat, .. } | VehicleAction::Hijack { seat, .. } if seat > 0)
+        ));
+
+        let to = Vec3::new(15.0, 5.0, 8.0);
+        g.vehicles[0].flight = Some(Flight {
+            to,
+            speed: 6.0,
+            face: Some(1.0),
+            stop: true,
+        });
+        hold(&mut g, Command::default(), 600);
+        let def = &g.vehicle_defs[0];
+        let ship = &g.vehicles[0];
+        assert!(ship.origin(def).distance(to) < 0.3, "{}", ship.origin(def));
+        assert!(
+            (ship.yaw() - 1.0).abs() < 0.05,
+            "turned to face {}",
+            ship.yaw()
+        );
+        // The cargo came along in the hold.
+        let hold_at = ship.seat_position(def, 2);
+        let cargo = &g.vehicles[1];
+        assert!(cargo.origin(&g.vehicle_defs[1]).distance(hold_at) < 0.05);
+
+        // Dropped: the jeep falls to the ground and the trooper lands
+        // unhurt from 8 metres.
+        g.carry_vehicle(1, None);
+        let world = floor();
+        g.unload(&world, rider);
+        assert!(g.riding(rider).is_none());
+        hold(&mut g, Command::default(), 300);
+        assert!(g.vehicles[1].center.z < 1.0, "{}", g.vehicles[1].center);
+        let r = &g.players[rider];
+        assert!(r.alive && r.health >= r.full.health, "{}", r.health);
+        assert!(r.body.position.z < 0.5);
     }
 }

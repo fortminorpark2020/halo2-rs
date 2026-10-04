@@ -9,7 +9,7 @@ use blam_cache::orders;
 use blam_cache::physics::{self, BipedPhysics};
 use blam_cache::scenario::{self, PlacedKind};
 use blam_cache::script::{self, Scripts};
-use blam_cache::{text, DatumIndex};
+use blam_cache::{text, vehicle, DatumIndex};
 use glam::Vec3;
 use h2sim::game::{CharacterDef, GrenadeKind, Mind, Side, Vitality};
 use h2sim::KillZone;
@@ -44,6 +44,11 @@ pub struct CampaignAi {
     pub triggers: Vec<orders::AiTrigger>,
     /// Points scripts send actors to.
     pub point_sets: Vec<orders::PointSet>,
+    /// The seats scripts name ("warthog_d"): per entry, the names of the
+    /// seats it picks out.
+    pub seat_mappings: Vec<Vec<String>>,
+    /// The names behind the string ids scripts use.
+    pub string_ids: HashMap<u32, String>,
     pub scripts: Scripts,
     /// Trigger volumes, by index.
     pub volumes: Vec<KillZone>,
@@ -227,6 +232,26 @@ impl Loader {
             println!("warning: point sets: {e}");
             Vec::new()
         });
+        for (unit, seats) in ai::unit_seat_mappings(set).unwrap_or_default() {
+            let names = vehicle::read_vehicle(set, unit)
+                .map(|v| {
+                    (0..v.seats.len().min(32))
+                        .filter(|k| seats & (1 << k) != 0)
+                        .map(|k| v.seats[k].animation.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.seat_mappings.push(names);
+        }
+        out.string_ids = out
+            .scripts
+            .expressions
+            .iter()
+            .filter(|e| {
+                e.kind == script::NodeKind::Value && e.value_type == script::value_type::STRING_ID
+            })
+            .map(|e| (e.value, out.scripts.text(e.text).to_string()))
+            .collect();
         out.volumes = scenario::trigger_volumes(set)
             .unwrap_or_default()
             .iter()

@@ -617,6 +617,8 @@ pub struct Spartan {
     /// Seconds the action key has been held by a vehicle (negative once
     /// acted on).
     board_held: f32,
+    /// Dropped from a dropship: the next landing doesn't hurt.
+    soft_landing: bool,
     last: Command,
 }
 
@@ -1099,6 +1101,7 @@ impl Game {
             switch_held: f32::MIN,
             seat: None,
             board_held: 0.0,
+            soft_landing: false,
             last: Command::default(),
         }
     }
@@ -1226,7 +1229,10 @@ impl Game {
             self.kill(i, None, false);
             return;
         }
-        let fell = std::mem::take(&mut self.players[i].body.fell);
+        let mut fell = std::mem::take(&mut self.players[i].body.fell);
+        if fell > 0.0 && std::mem::take(&mut self.players[i].soft_landing) {
+            fell = 0.0;
+        }
         let hurt = self.rules.falling.damage_for(fell);
         if hurt > 0.0 {
             self.damage(i, None, hurt, false);

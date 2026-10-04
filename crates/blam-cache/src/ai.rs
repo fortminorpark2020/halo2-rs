@@ -6,7 +6,10 @@
 use crate::mapset::MapSet;
 use crate::{f32_at, i16_at, u32_at, DatumIndex, Error, Result};
 
+const SCNR_VEHICLE_PALETTE: usize = 0x78;
 const SCNR_WEAPON_PALETTE: usize = 0x98;
+const SCNR_UNIT_SEATS: usize = 0x228;
+const UNIT_SEATS_SIZE: usize = 0x8;
 const SCNR_SQUAD_GROUPS: usize = 0x158;
 const SCNR_SQUADS: usize = 0x160;
 const SQUAD_GROUP_SIZE: usize = 0x24;
@@ -97,9 +100,14 @@ pub struct Squad {
     pub weapon: Option<u16>,
     pub secondary: Option<u16>,
     pub vehicle: Option<u16>,
+    /// The variant of its vehicles ("" for the default).
+    pub vehicle_variant: String,
     /// The zone and the order (`orders::orders`) it starts with.
     pub zone: Option<u16>,
     pub order: Option<u16>,
+    /// The command script its actors run once placed (unless their
+    /// starting location has its own), by index.
+    pub placement_script: Option<u16>,
     pub locations: Vec<StartingLocation>,
 }
 
@@ -119,6 +127,43 @@ pub struct StartingLocation {
     pub weapon: Option<u16>,
     pub secondary: Option<u16>,
     pub vehicle: Option<u16>,
+    pub vehicle_variant: String,
+    /// Which seat of the vehicle the actor starts in.
+    pub seat: SeatType,
+    /// The command script the actor runs once placed, by index.
+    pub placement_script: Option<u16>,
+}
+
+/// Where a squad's actor sits in the vehicle it starts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SeatType {
+    /// Driving (the default).
+    #[default]
+    Default,
+    Passenger,
+    Gunner,
+    Driver,
+    SmallCargo,
+    LargeCargo,
+    /// In the vehicle, but not driving it.
+    NoDriver,
+    /// Not in it: the vehicle is placed empty.
+    NoVehicle,
+}
+
+impl SeatType {
+    fn from_number(n: u16) -> SeatType {
+        match n {
+            1 => SeatType::Passenger,
+            2 => SeatType::Gunner,
+            3 => SeatType::Driver,
+            4 => SeatType::SmallCargo,
+            5 => SeatType::LargeCargo,
+            6 => SeatType::NoDriver,
+            7 => SeatType::NoVehicle,
+            _ => SeatType::Default,
+        }
+    }
 }
 
 /// A kind of actor: Grunt, Jackal, Elite, Marine...
@@ -303,6 +348,12 @@ pub fn squads(set: &mut MapSet) -> Result<Vec<Squad>> {
                     weapon: index(l, 0x22),
                     secondary: index(l, 0x24),
                     vehicle: index(l, 0x28),
+                    vehicle_variant: map
+                        .string_id(u32_at(l, 0x34))
+                        .unwrap_or_default()
+                        .to_string(),
+                    seat: SeatType::from_number(i16_at(l, 0x2A) as u16),
+                    placement_script: index(l, 0x60),
                 }
             })
             .collect();
@@ -317,11 +368,16 @@ pub fn squads(set: &mut MapSet) -> Result<Vec<Squad>> {
             braindead: flags & SQUAD_BRAINDEAD != 0,
             counts: (index(e, 0x2C).unwrap_or(0), index(e, 0x2E).unwrap_or(0)),
             vehicle: index(e, 0x34),
+            vehicle_variant: map
+                .string_id(u32_at(e, 0x44))
+                .unwrap_or_default()
+                .to_string(),
             character: index(e, 0x36),
             weapon: index(e, 0x3C),
             secondary: index(e, 0x3E),
             zone: index(e, 0x38),
             order: index(e, 0x42),
+            placement_script: index(e, 0x70),
             locations,
         });
     }
@@ -380,6 +436,37 @@ pub fn weapon_palette(set: &mut MapSet) -> Result<Vec<DatumIndex>> {
         .0
         .iter()
         .map(|p| DatumIndex(u32_at(p, 4)))
+        .collect())
+}
+
+/// The vehicles squads' vehicle indices pick from (the scenario's
+/// vehicle palette).
+pub fn vehicle_palette(set: &mut MapSet) -> Result<Vec<DatumIndex>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let palette = map.read_block(meta, &data, SCNR_VEHICLE_PALETTE, PALETTE_SIZE)?;
+    Ok(palette
+        .as_chunks::<PALETTE_SIZE>()
+        .0
+        .iter()
+        .map(|p| DatumIndex(u32_at(p, 4)))
+        .collect())
+}
+
+/// The seats scripts name ("warthog_d", "pelican_g"...): per entry, a
+/// unit (`vehi`) and which of its seats, as bits over its seat block.
+/// A script's seat value is `count << 16 | first entry`.
+pub fn unit_seat_mappings(set: &mut MapSet) -> Result<Vec<(DatumIndex, u32)>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let block = map.read_block(meta, &data, SCNR_UNIT_SEATS, UNIT_SEATS_SIZE)?;
+    Ok(block
+        .as_chunks::<UNIT_SEATS_SIZE>()
+        .0
+        .iter()
+        .map(|e| (DatumIndex(u32_at(e, 0)), u32_at(e, 4)))
         .collect())
 }
 
