@@ -201,13 +201,34 @@ pub fn load(path: &Path) -> Result<Vec<Account>, String> {
 /// Write `text` to `path` whole: to a temporary file first, then renamed
 /// over the old one.
 pub fn replace(path: &Path, text: &str) -> std::io::Result<()> {
+    write_whole(path, text, false)
+}
+
+/// `replace`, and for a `secret` only its owner can read the file.
+fn write_whole(path: &Path, text: &str, secret: bool) -> std::io::Result<()> {
     let mut temp = path.as_os_str().to_owned();
     temp.push(".tmp");
     let mut file = std::fs::File::create(&temp)?;
+    if secret {
+        owner_only(&file)?;
+    }
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
     drop(file);
     std::fs::rename(&temp, path)
+}
+
+/// Let only `file`'s owner read it. (Elsewhere than Unix, the folders
+/// keys are kept in are the user's own.)
+#[cfg(unix)]
+fn owner_only(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn owner_only(_: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// A signing key kept at `path` as its seed (64 hex digits), made at
@@ -224,7 +245,7 @@ pub fn signing_key(path: &Path) -> std::io::Result<SigningKey> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let mut seed = [0; 32];
             getrandom::fill(&mut seed).map_err(|e| std::io::Error::other(e.to_string()))?;
-            replace(path, &format!("{}\n", hex(&seed)))?;
+            write_whole(path, &format!("{}\n", hex(&seed)), true)?;
             Ok(SigningKey::from_bytes(&seed))
         }
         Err(e) => Err(e),
@@ -411,6 +432,13 @@ mod tests {
         let again = signing_key(&path).unwrap();
         assert_eq!(made.to_bytes(), again.to_bytes());
         assert_eq!(std::fs::read_to_string(&path).unwrap().trim().len(), 64);
+        // It's secret: only its owner can read it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         // Another file is another key.
         let other = signing_key(&dir.join("other.key")).unwrap();
         assert_ne!(made.to_bytes(), other.to_bytes());
