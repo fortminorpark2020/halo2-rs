@@ -389,6 +389,68 @@ fn players_rename_themselves() {
 }
 
 #[test]
+fn gamertags_never_start_with_a_space() {
+    let mut w = World::new("spaces");
+    // What can't be shown goes, and then the spaces around what's left,
+    // signing in or renaming (here by hand, as a modified game might).
+    let mut conn = sign_in_by_hand(&mut w, 1, "\u{3a9} Chief");
+    let id = store::account_id(key(1).verifying_key().as_bytes());
+    assert_eq!(w.server.account(id).unwrap().gamertag, "CHIEF");
+    let profile = ToServer::Profile {
+        gamertag: "\u{e9} Bob".into(),
+        look: Look::default(),
+    };
+    profile.send(&mut conn);
+    conn.flush().unwrap();
+    w.step();
+    let welcome = heard(&mut conn).into_iter().find_map(|m| match m {
+        ToPc::Welcome(welcome) => Some(welcome),
+        _ => None,
+    });
+    let welcome = welcome.unwrap();
+    assert_eq!(welcome.gamertag, "BOB");
+    // It's the same gamertag as "Bob".
+    let other = w.connect(2, "Bob");
+    w.until(|w| w.refused(other).is_some());
+    assert_eq!(w.refused(other), Some(live::GAMERTAG_TAKEN));
+    // The card holds it, and the server starts again with it.
+    let key = card::server_key(&w.data.0, None).unwrap();
+    let carded = card::verify(&welcome.card, &key.verifying_key()).unwrap();
+    assert_eq!(carded.gamertag, "BOB");
+    w.restart();
+    assert_eq!(w.server.account(id).unwrap().gamertag, "BOB");
+}
+
+#[test]
+fn profiles_change_at_most_once_a_second() {
+    let mut w = World::new("profile-spam");
+    let a = w.sign_in(1, "Alpha");
+    let id = w.id(a);
+    let seq = w.server.account(id).unwrap().seq;
+    // A thousand changes in a second.
+    for step in 0..20 {
+        for n in 0..50 {
+            let look = Look::default_for(step * 50 + n);
+            w.send(
+                a,
+                ToServer::Profile {
+                    gamertag: "Alpha".into(),
+                    look,
+                },
+            );
+        }
+        w.step();
+    }
+    assert!(w.server.account(id).unwrap().seq <= seq + 2);
+    // The last one is taken, a second on.
+    w.run(1.0);
+    let account = w.server.account(id).unwrap();
+    assert_eq!(account.look, Look::default_for(999));
+    assert!(account.seq <= seq + 3);
+    assert_eq!(w.welcome(a).gamertag, "ALPHA");
+}
+
+#[test]
 fn accounts_are_kept_across_a_restart() {
     let mut w = World::new("restart");
     let a = w.sign_in(1, "Jorge");
@@ -854,9 +916,7 @@ fn everyone_online_is_listed_at_most_once_a_second() {
     heard(&mut watcher);
     let mut sent = Vec::new();
     for i in 0..100 {
-        let gamertag = format!("Alpha {}", i % 2);
-        let look = Look::default();
-        w.send(a, ToServer::Profile { gamertag, look });
+        w.send(a, ToServer::Guests(i % 2));
         w.step();
         for message in heard(&mut watcher) {
             if let ToPc::Online(list) = message {
@@ -869,7 +929,8 @@ fn everyone_online_is_listed_at_most_once_a_second() {
     // The latest says who's there now.
     let (_, latest) = sent.last().unwrap();
     assert_eq!(latest.len(), 3);
-    assert!(latest.iter().any(|p| p.gamertag.starts_with("ALPHA ")));
+    let alpha = latest.iter().find(|p| p.gamertag == "ALPHA").unwrap();
+    assert!((2..=3).contains(&alpha.size));
     // Players signing out drop off it.
     drop(watcher);
     w.until(|w| w.pcs[b].view.online.len() == 2);

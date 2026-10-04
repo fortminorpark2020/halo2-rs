@@ -44,6 +44,9 @@ const LINGER: f64 = 2.0;
 const ROUND_TRIPS: usize = 9;
 /// Pings that can be on their way back at once.
 const PINGS: usize = 16;
+/// A PC's gamertag and look change at most this often (seconds), since
+/// each change rewrites accounts.txt.
+const PROFILE_EVERY: f64 = 1.0;
 
 /// Where a connection came in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +74,10 @@ struct Pc {
     maps: Vec<(String, u64)>,
     /// Splitscreen guests playing on it.
     guests: u8,
+    /// The gamertag and look it last asked for, not yet taken on, and when
+    /// it last changed them.
+    profile: Option<(String, Look)>,
+    profiled: f64,
     /// The next ping's number and when the last went; pings on their way
     /// back (number, when sent); and the latest round trips (milliseconds).
     ping: u32,
@@ -93,6 +100,8 @@ impl Pc {
             party: 0,
             maps: Vec::new(),
             guests: 0,
+            profile: None,
+            profiled: f64::NEG_INFINITY,
             ping: 0,
             pinged: now,
             pings: VecDeque::new(),
@@ -272,6 +281,7 @@ impl Server {
         for k in 0..self.pcs.len() {
             self.read_pc(k, now);
         }
+        self.change_profiles(now);
         self.read_legs(now);
         self.relay(now);
         self.keep_up(now);
@@ -395,9 +405,7 @@ impl Server {
                     self.refuse(k, live::BAD_SIGNATURE);
                 }
             }
-            (Some(me), ToServer::Profile { gamertag, look }) => {
-                self.profile(me, &gamertag, look);
-            }
+            (Some(_), ToServer::Profile { gamertag, look }) => pc.profile = Some((gamertag, look)),
             (Some(me), ToServer::Invite(who)) => self.invite(me, who),
             (Some(me), ToServer::Accept(id) | ToServer::JoinParty(id)) => self.join_party(me, id),
             (Some(me), ToServer::Decline(id)) => self.decline(me, id),
@@ -464,6 +472,21 @@ impl Server {
         let playlists = ToPc::Playlists(self.playlists_for(id, &self.playlist_counts()));
         self.tell(id, &playlists);
         self.new_party(id);
+    }
+
+    /// Take on the gamertags and looks PCs asked for, each PC's at most
+    /// once a second.
+    fn change_profiles(&mut self, now: f64) {
+        for k in 0..self.pcs.len() {
+            let pc = &mut self.pcs[k];
+            if now - pc.profiled < PROFILE_EVERY {
+                continue;
+            }
+            if let (Some(me), Some((gamertag, look))) = (pc.account, pc.profile.take()) {
+                pc.profiled = now;
+                self.profile(me, &gamertag, look);
+            }
+        }
     }
 
     /// A player asks for a new gamertag or look.

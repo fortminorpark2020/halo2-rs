@@ -275,9 +275,13 @@ impl LiveClient {
     }
 
     /// Ask the server for something.
-    pub fn send(&mut self, message: ToServer) {
-        if let ToServer::Accept(p) | ToServer::Decline(p) | ToServer::JoinParty(p) = message {
-            self.view.invites.retain(|&(party, _)| party != p);
+    pub fn send(&mut self, mut message: ToServer) {
+        match &mut message {
+            ToServer::Accept(p) | ToServer::Decline(p) | ToServer::JoinParty(p) => {
+                self.view.invites.retain(|&(party, _)| party != *p);
+            }
+            ToServer::Profile { gamertag, .. } => *gamertag = clean_name(gamertag),
+            _ => {}
         }
         message.send(&mut self.conn);
         // Errors surface as Lost on the next poll.

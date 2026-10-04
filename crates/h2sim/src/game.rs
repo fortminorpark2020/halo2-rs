@@ -61,12 +61,13 @@ pub const DEFAULT_COLORS: [[u8; 2]; 12] = [
 ];
 
 /// A name as gamertags are shown here: capitals and printable characters,
-/// at most `MAX_NAME` of them.
+/// at most `MAX_NAME` of them, with no spaces at either end. Cleaning a
+/// clean name changes nothing.
 pub fn clean_name(name: &str) -> String {
     let name: String = name
-        .trim()
         .chars()
         .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .skip_while(|&c| c == ' ')
         .take(MAX_NAME)
         .collect();
     name.trim_end().to_ascii_uppercase()
@@ -2375,6 +2376,20 @@ pub(crate) mod tests {
     fn names_are_gamertags_and_last_through_respawns() {
         assert_eq!(clean_name("  John Morrow\t"), "JOHN MORROW");
         assert_eq!(clean_name("averyveryverylongname"), "AVERYVERYVERYLO");
+        // Spaces left at the start once what can't be shown is gone go too.
+        assert_eq!(clean_name("\u{e9} Bob"), "BOB");
+        assert_eq!(
+            clean_name("\u{3a9}  Master  Chief \u{3a9}"),
+            "MASTER  CHIEF"
+        );
+        for name in [
+            "\u{e9} Bob",
+            " a\u{e9}\u{e9} b ",
+            "\u{e9}             x  y z",
+        ] {
+            let clean = clean_name(name);
+            assert_eq!(clean_name(&clean), clean, "{name:?}");
+        }
         assert_eq!(guest_name("john", 0), "JOHN");
         assert_eq!(guest_name("john", 2), "JOHN(2)");
         assert_eq!(guest_name("averyveryverylongname", 1), "AVERYVERYVER(1)");
