@@ -586,6 +586,10 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         .collect();
     path.reverse();
     let still = still.or(path.last().map(|_| Vec3::ZERO));
+    // H2_SIM_FREE=<seconds>: the player's bot plays on its own from then.
+    let free_at: Option<f32> = std::env::var("H2_SIM_FREE")
+        .ok()
+        .and_then(|v| v.parse().ok());
     // H2_SIM_SKIP=<seconds>: skip cutscenes from then on.
     let skip_at: Option<f32> = std::env::var("H2_SIM_SKIP")
         .ok()
@@ -594,8 +598,9 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
     let mut kills_with = std::collections::HashMap::<String, u32>::new();
     for tick in 0..(seconds / TICK) as usize {
         let mut commands = vec![Command::default(); game.players.len()];
+        let free = free_at.is_some_and(|at| tick as f32 * TICK >= at);
         for (i, bot) in &mut bots {
-            if *i == 0 && still.is_some() {
+            if *i == 0 && still.is_some() && !free {
                 continue;
             }
             commands[*i] = bot.think(&game, &level.world, &level.nav, *i);
