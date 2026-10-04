@@ -95,12 +95,19 @@ and both ammo counters show. No grenades while dual wielding. In testing,
 pressing the number of the one-handed gun in hand gives a second one, and
 `H2_WEAPON=<n> H2_DUAL=1` starts with two.
 
-Vehicles: each map's own Warthogs (chaingun and gauss), Ghosts, Banshees and
-turrets, where the map places them (Zanzibar and Ascension have them). Walk up
+Vehicles: each map's own Warthogs (chaingun and gauss), Ghosts, Banshees,
+Scorpions, Wraiths and turrets, where the map places them (Zanzibar,
+Ascension, Coagulation, Containment and Waterworks have them). Walk up
 to one and hold E (X on a controller) to drive it, man its gun or ride along,
 and hold it again to get out; an overturned vehicle can be flipped back over
-the same way. The view follows the vehicle and it steers toward where you look;
-W/S (the left stick) drive, and G (the left trigger) boosts a Ghost or Banshee.
+the same way. The view follows the vehicle from where Halo 2's own camera
+tracks put it (higher and closer as you look down) and it steers toward where
+you look; W/S (the left stick) drive, and G (the left trigger) boosts a Ghost
+or Banshee. Scorpions and Wraiths drive like tanks, turning on the spot toward
+the view while you drive, with the turret aimed at the crosshair: left mouse
+fires the Scorpion's cannon or lobs the Wraith's mortar, and G (the left
+trigger) fires the Scorpion's machine gun. F (B on a controller) drops the
+Banshee's fuel rod bomb. Every vehicle gun fires at what the crosshair is on.
 Their speeds, seats, guns, hover pads, wheels and hulls come from the vehicle,
 model and physics tags; wheels turn and ride their suspension, turrets aim,
 and riders sit in Master Chief's seat animations. Vehicles run over and kill

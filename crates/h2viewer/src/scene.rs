@@ -231,8 +231,9 @@ pub struct HudWidget {
 
 /// Everything needed to hold and fire one weapon.
 pub struct WeaponAssets {
-    /// The `weap` tag.
+    /// The `weap` tag, and which of its triggers this is.
     pub tag: DatumIndex,
+    pub trigger: usize,
     pub def: WeaponDef,
     /// Third person model (lying on the map), in `Scene::meshes`.
     pub world_mesh: Option<usize>,
@@ -909,7 +910,7 @@ impl Loader {
 
     /// A weapon as fired by its trigger `trigger` (vehicle guns have a
     /// second: the Scorpion's machine gun, the Banshee's bomb).
-    fn weapon_trigger(
+    pub(super) fn weapon_trigger(
         &mut self,
         name: &str,
         trigger: usize,
@@ -1046,6 +1047,7 @@ impl Loader {
         };
         Some(WeaponAssets {
             tag: datum,
+            trigger,
             world_mesh,
             round,
             def,

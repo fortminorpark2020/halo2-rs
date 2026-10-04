@@ -13,6 +13,7 @@ const ATTACHMENT_SIZE: usize = 0x18;
 const UNIT_WEAPONS: usize = 0x1C0;
 const UNIT_SEATS: usize = 0x1C8;
 const SEAT_SIZE: usize = 0xB0;
+const SEAT_CAMERA_TRACKS: usize = 0x74;
 const VEHI_TYPE: usize = 0x1F0;
 const VEHI_ANTI_GRAVITY: usize = 0x2E8;
 const ANTI_GRAVITY_SIZE: usize = 0x4C;
@@ -28,6 +29,9 @@ const VARIANT_OBJECTS: usize = 0x1C;
 const VARIANT_OBJECT_SIZE: usize = 0x10;
 const HLMT_DAMAGE_INFO: usize = 0x60;
 const DAMAGE_INFO_SIZE: usize = 0xF8;
+
+const TRAK_POINTS: usize = 0x4;
+const TRAK_POINT_SIZE: usize = 0x1C;
 
 const PHMO_MASS: usize = 0x4;
 const PHMO_BOXES: usize = 0x60;
@@ -70,6 +74,8 @@ pub struct Seat {
     pub marker: String,
     pub entry_marker: String,
     pub camera_marker: String,
+    /// The camera track (`trak`) the rider's view follows, if any.
+    pub camera_track: DatumIndex,
     /// Radians either way the rider may look, around and up/down.
     pub yaw_range: [f32; 2],
     pub pitch_range: [f32; 2],
@@ -252,6 +258,39 @@ pub fn object_attachments(
 }
 
 /// Read a vehicle tag.
+/// A point on a camera track (`trak`): where the camera sits, from the
+/// camera marker (x along the look, z up), while it looks along
+/// `orientation`. A track's points run from looking straight down to
+/// straight up.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CameraPoint {
+    pub position: [f32; 3],
+    /// i, j, k, w.
+    pub orientation: [f32; 4],
+}
+
+pub fn read_camera_track(set: &mut MapSet, trak: DatumIndex) -> Result<Vec<CameraPoint>> {
+    let (src, tag, data) = set.tag_data(trak)?;
+    if tag.group.to_string() != "trak" {
+        return Err(Error::Corrupt(format!(
+            "{} is not a camera track",
+            tag.name
+        )));
+    }
+    let file = set.get(src);
+    let region = file.meta_region();
+    Ok(file
+        .read_block(region, &data, TRAK_POINTS, TRAK_POINT_SIZE)?
+        .as_chunks::<TRAK_POINT_SIZE>()
+        .0
+        .iter()
+        .map(|p| CameraPoint {
+            position: [f32_at(p, 0), f32_at(p, 4), f32_at(p, 8)],
+            orientation: [f32_at(p, 12), f32_at(p, 16), f32_at(p, 20), f32_at(p, 24)],
+        })
+        .collect())
+}
+
 pub fn read_vehicle(set: &mut MapSet, vehi: DatumIndex) -> Result<VehicleTag> {
     let (src, tag, data) = set.tag_data(vehi)?;
     if tag.group.to_string() != "vehi" {
@@ -270,23 +309,28 @@ pub fn read_vehicle(set: &mut MapSet, vehi: DatumIndex) -> Result<VehicleTag> {
         .map(|w| datum(w, 0))
         .filter(|d| *d != DatumIndex::NONE)
         .collect();
-    let seats = file
-        .read_block(region, &data, UNIT_SEATS, SEAT_SIZE)?
-        .as_chunks::<SEAT_SIZE>()
-        .0
-        .iter()
-        .map(|s| Seat {
+    let seat_data = file.read_block(region, &data, UNIT_SEATS, SEAT_SIZE)?;
+    let mut seats = Vec::new();
+    for s in seat_data.as_chunks::<SEAT_SIZE>().0 {
+        let camera_track = file
+            .read_block(region, s, SEAT_CAMERA_TRACKS, 8)?
+            .as_chunks::<8>()
+            .0
+            .first()
+            .map_or(DatumIndex::NONE, |t| datum(t, 0));
+        seats.push(Seat {
             flags: u32_at(s, 0),
             animation: sid(file, s, 0x4),
             marker: sid(file, s, 0x8),
             entry_marker: sid(file, s, 0xC),
             camera_marker: sid(file, s, 0x60),
+            camera_track,
             pitch_range: [f32_at(s, 0x6C), f32_at(s, 0x70)],
             yaw_range: [f32_at(s, 0x88), f32_at(s, 0x8C)],
             built_in_gunner: datum(s, 0x90),
             entry_radius: f32_at(s, 0x98),
-        })
-        .collect();
+        });
+    }
     let anti_gravity = file
         .read_block(region, &data, VEHI_ANTI_GRAVITY, ANTI_GRAVITY_SIZE)?
         .as_chunks::<ANTI_GRAVITY_SIZE>()

@@ -7,7 +7,7 @@ use crate::collision::World;
 use crate::game::{Command, Game, VehicleAction, TICK};
 use crate::nav::NavGraph;
 use crate::vehicle::{Drive, SeatRole};
-use blam_cache::weapon::TriggerBehavior;
+use blam_cache::weapon::{TriggerBehavior, TriggerInput};
 use glam::{Vec2, Vec3};
 
 /// How far a bot goes out of its way for a vehicle.
@@ -175,7 +175,8 @@ impl Bot {
         }
         self.pulse = !self.pulse;
         let gun = seat.weapon.and_then(|w| game.weapons.get(w));
-        let eye = veh.seat_eye(def, s);
+        // Aim from where the crosshair's line starts.
+        let eye = game.view_point(me);
 
         // Aim at whoever is in sight, if this seat has a gun.
         let mut aiming = false;
@@ -183,16 +184,42 @@ impl Bot {
             self.seen_for += dt;
             self.aim_error *= 1.0 - (2.5 * dt).min(1.0);
             let q = &game.players[t];
+            // A gun that lobs its shots (the Wraith's) aims above the target
+            // by its barrel's tilt.
+            let lob = seat.turret.map_or(0.0, |g| g.elevation);
             let to = Bot::aim_point(Some(gun), eye, q) - eye;
+            let dist = to.length();
             let yaw = to.y.atan2(to.x) + self.aim_error.x;
-            let pitch = (to.z / to.length().max(1e-4)).asin() + self.aim_error.y;
+            let pitch = (to.z / dist.max(1e-4)).asin() + self.aim_error.y - lob;
             self.turn_to(yaw, pitch, dt);
             let off = wrap(yaw - self.yaw).abs() + (pitch - self.pitch).abs();
-            if self.seen_for > REACTION && off < FIRE_CONE * 2.0 {
-                cmd.fire = match gun.behavior {
-                    TriggerBehavior::Spew => true,
-                    _ => self.pulse,
+            let ready = self.seen_for > REACTION && off < FIRE_CONE * 2.0;
+            let pull = |d: &crate::weapon::WeaponDef, pulse: bool| match d.behavior {
+                TriggerBehavior::Spew => true,
+                _ => pulse,
+            };
+            // Not into a blast of its own.
+            let clear = |d: &crate::weapon::WeaponDef| {
+                d.flight
+                    .and_then(|f| f.blast)
+                    .is_none_or(|b| dist > b.radius.1 + 1.0)
+            };
+            if ready && clear(gun) {
+                cmd.fire = pull(gun, self.pulse);
+            }
+            // The second trigger: the Scorpion's machine gun up close, the
+            // Banshee's bomb from further off.
+            if let Some(alt) = seat.alt_weapon.and_then(|w| game.weapons.get(w)) {
+                let wanted = match alt.flight.and_then(|f| f.blast) {
+                    Some(_) => clear(alt),
+                    None => dist < 15.0,
                 };
+                if ready && wanted {
+                    match alt.input {
+                        TriggerInput::Melee => cmd.melee = self.pulse,
+                        _ => cmd.throw_grenade = pull(alt, self.pulse),
+                    }
+                }
             }
             aiming = true;
         }
@@ -297,6 +324,17 @@ impl Bot {
         };
         let to = heading - at;
         cmd.movement = Vec2::new(0.0, 1.0);
+        // Shelling someone: keep out of the blast.
+        let shelling = target
+            .zip(def.seats.iter().find_map(|s| s.weapon))
+            .and_then(|(t, w)| Some((t, game.weapons.get(w)?.flight?.blast?)))
+            .map(|(t, b)| (game.players[t].body.position.distance(at), b));
+        if let (true, Some((d, b))) = (aiming, shelling) {
+            if d < (b.radius.1 * 4.0).max(10.0) {
+                cmd.movement.y = if d < b.radius.1 * 2.0 { -1.0 } else { 0.0 };
+                self.riding.stalled = 0.0;
+            }
+        }
         // Teammates on foot ahead: brake rather than run them over.
         let fwd = veh.forward();
         let reach = 2.0 + speed * 0.6;

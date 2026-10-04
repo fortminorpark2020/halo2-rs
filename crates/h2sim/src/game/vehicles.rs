@@ -5,6 +5,7 @@ use super::{Command, Event, Game, SWAP_HOLD};
 use crate::collision::World;
 use crate::vehicle::{Controls, Drive, SeatRole, Vehicle, VehicleDef};
 use crate::weapon::{WeaponDef, WeaponInput, WeaponState};
+use blam_cache::weapon::TriggerInput;
 use glam::{Vec2, Vec3};
 
 /// Moving into someone faster than this (world units per second) kills them.
@@ -19,6 +20,8 @@ const FLIP_REACH: f32 = 1.6;
 /// Damage the blast of a destroyed vehicle does nearby, and how far.
 const WRECK_DAMAGE: f32 = 100.0;
 const WRECK_RADIUS: f32 = 2.5;
+/// How far the crosshair reaches when it points at nothing.
+const CROSSHAIR_RANGE: f32 = 200.0;
 
 /// A place a vehicle appears on the map.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,15 +57,70 @@ impl Game {
 
     fn arm_vehicle(&mut self, v: usize) {
         let def = &self.vehicle_defs[self.vehicles[v].def];
-        self.vehicles[v].weapons = def
-            .seats
-            .iter()
-            .map(|s| {
-                s.weapon
-                    .and_then(|w| self.weapons.get(w))
-                    .map(WeaponState::new)
-            })
-            .collect();
+        let arm = |w: Option<usize>| w.and_then(|w| self.weapons.get(w)).map(WeaponState::new);
+        self.vehicles[v].weapons = def.seats.iter().map(|s| arm(s.weapon)).collect();
+        self.vehicles[v].alt_weapons = def.seats.iter().map(|s| arm(s.alt_weapon)).collect();
+    }
+
+    /// Where player `i` sees from: their eyes, a seat's, or (in a seat with
+    /// a camera following the vehicle) the point on the camera's line of
+    /// sight nearest the seat's eye.
+    pub fn view_point(&self, i: usize) -> Vec3 {
+        self.view(i).0
+    }
+
+    /// How far behind the view point the camera follows player `i`'s
+    /// vehicle, if it does.
+    pub fn chase_distance(&self, i: usize) -> Option<f32> {
+        self.view(i).1
+    }
+
+    fn view(&self, i: usize) -> (Vec3, Option<f32>) {
+        let p = &self.players[i];
+        let Some((v, s)) = self.riding(i) else {
+            return (p.eye(), None);
+        };
+        let veh = &self.vehicles[v];
+        let def = &self.vehicle_defs[veh.def];
+        let seat = &def.seats[s];
+        let eye = veh.seat_eye(def, s);
+        if !seat.third_person {
+            return (eye, None);
+        }
+        // The seat's camera track places the camera off the eye by how far
+        // up or down they look (higher and closer looking down).
+        if let Some(offset) = seat.camera_offset(p.yaw, p.pitch) {
+            let look = p.aim();
+            let camera = eye + offset;
+            let back = (eye - camera).dot(look).max(0.0);
+            return (camera + look * back, Some(back));
+        }
+        match seat.pivot {
+            // A turret's gunner: over the gun, to see past them.
+            Some(_) => (eye + Vec3::Z * 0.45, Some(0.8 + def.radius * 0.6)),
+            None => (
+                veh.center + Vec3::Z * (def.radius * 0.3 + 0.35),
+                Some(1.2 + def.radius * 1.4),
+            ),
+        }
+    }
+
+    /// The point player `i`'s crosshair rests on, looking along `look`
+    /// (unit length): the first wall, player or vehicle on the line through
+    /// their view point. Seat guns fire at it, so their shots meet where
+    /// the crosshair is wherever the gun sits.
+    pub fn crosshair(&self, world: &World, i: usize, look: Vec3) -> Vec3 {
+        let from = self.view_point(i);
+        let mut t = world
+            .raycast(from, look, CROSSHAIR_RANGE)
+            .unwrap_or(CROSSHAIR_RANGE);
+        if let Some((_, d, _)) = self.trace_players(i, from, look) {
+            t = t.min(d);
+        }
+        if let Some((_, d)) = self.trace_vehicles(i, from, look) {
+            t = t.min(d);
+        }
+        from + look * t
     }
 
     /// The vehicle player `i` rides and their seat.
@@ -264,7 +322,30 @@ impl Game {
         let def = &self.vehicle_defs[self.vehicles[v].def];
         let seat = def.seats[s].clone();
         let drive = def.drive;
+        let (cp, sp) = (cmd.pitch.cos(), cmd.pitch.sin());
+        let look = Vec3::new(cmd.yaw.cos() * cp, cmd.yaw.sin() * cp, sp);
+        let armed = seat.weapon.is_some() || seat.alt_weapon.is_some();
+        let target = if armed {
+            self.crosshair(world, i, look)
+        } else {
+            Vec3::ZERO
+        };
         let veh = &mut self.vehicles[v];
+        // Aim the turret at what its gunner (or the tank's driver) looks at.
+        if let Some(gun) = seat.turret {
+            let pivot = veh.to_world(def, gun.pivot);
+            let want = (target - pivot).normalize_or(look);
+            let local = veh.rotation.inverse() * want;
+            let [lo, hi] = seat.pitch_range;
+            veh.aim = Vec2::new(
+                local.y.atan2(local.x),
+                local
+                    .z
+                    .clamp(-1.0, 1.0)
+                    .asin()
+                    .clamp(lo.min(hi), hi.max(lo)),
+            );
+        }
         match seat.role {
             SeatRole::Driver => {
                 veh.controls = Controls {
@@ -277,38 +358,36 @@ impl Game {
                 veh.last_driver = Some(i);
                 veh.asleep = false;
             }
-            SeatRole::Gunner => {
-                // Aim the turret where the gunner looks.
-                let (cp, sp) = (cmd.pitch.cos(), cmd.pitch.sin());
-                let look = Vec3::new(cmd.yaw.cos() * cp, cmd.yaw.sin() * cp, sp);
-                let local = veh.rotation.inverse() * look;
-                let [lo, hi] = seat.pitch_range;
-                veh.aim = Vec2::new(
-                    local.y.atan2(local.x),
-                    local
-                        .z
-                        .clamp(-1.0, 1.0)
-                        .asin()
-                        .clamp(lo.min(hi), hi.max(lo)),
-                );
-            }
+            SeatRole::Gunner => {}
             SeatRole::Passenger => return true,
         }
+        let boosting = self.vehicles[v].controls.boost;
         if let Some(w) = seat.weapon {
-            self.fire_seat(world, i, v, s, w, cmd, dt);
+            let pulled = cmd.fire && !boosting;
+            self.fire_seat(world, i, (v, s), (w, false), target, pulled, dt);
+        }
+        if let Some(w) = seat.alt_weapon {
+            // The second trigger: the left trigger, or melee.
+            let pulled = match self.weapons.get(w).map(|d| d.input) {
+                Some(TriggerInput::Melee) => cmd.melee,
+                _ => cmd.throw_grenade && !boosting,
+            };
+            self.fire_seat(world, i, (v, s), (w, true), target, pulled, dt);
         }
         false
     }
 
+    /// Fire seat `s` of vehicle `v`'s gun `w` (its second trigger's, if
+    /// `alt`) at `target` while `pulled`.
     #[allow(clippy::too_many_arguments)]
     fn fire_seat(
         &mut self,
         world: &World,
         i: usize,
-        v: usize,
-        s: usize,
-        w: usize,
-        cmd: Command,
+        (v, s): (usize, usize),
+        (w, alt): (usize, bool),
+        target: Vec3,
+        pulled: bool,
         dt: f32,
     ) {
         let Some(def) = self.weapons.get(w).cloned() else {
@@ -316,25 +395,28 @@ impl Game {
         };
         let veh = &self.vehicles[v];
         let vdef = &self.vehicle_defs[veh.def];
+        // Rounds that fly leave a turret's muzzle the way it points; bullets
+        // (and built-in guns' rounds) go from the rider's eye straight to
+        // what the crosshair is on.
         let eye = veh.seat_eye(vdef, s);
-        // A turret fires where it points; built-in guns where the driver looks.
-        let dir = if vdef.seats[s].pivot.is_some() {
-            let (yaw, pitch) = (veh.aim.x, veh.aim.y);
-            veh.rotation
-                * Vec3::new(
-                    yaw.cos() * pitch.cos(),
-                    yaw.sin() * pitch.cos(),
-                    pitch.sin(),
-                )
-        } else {
-            self.players[i].aim()
+        let at_target = (target - eye).normalize_or(self.players[i].aim());
+        let (dir, origin) = match veh.turret_muzzle(vdef, s) {
+            Some((dir, muzzle)) if def.flight.is_some() => (dir, muzzle),
+            _ => (at_target, eye),
         };
         let right = dir.cross(Vec3::Z).normalize_or(Vec3::X);
         let up = right.cross(dir);
-        let boosting = veh.controls.boost;
-        let state = self.vehicles[v].weapons[s].get_or_insert_with(|| WeaponState::new(&def));
+        let states = if alt {
+            &mut self.vehicles[v].alt_weapons
+        } else {
+            &mut self.vehicles[v].weapons
+        };
+        let Some(state) = states.get_mut(s) else {
+            return;
+        };
+        let state = state.get_or_insert_with(|| WeaponState::new(&def));
         let input = WeaponInput {
-            fire: cmd.fire && !boosting,
+            fire: pulled,
             reload: false,
             zoom: false,
         };
@@ -347,7 +429,7 @@ impl Game {
             self.fire(
                 world,
                 i,
-                eye,
+                origin,
                 shot.direction(dir, right, up),
                 &def,
                 w,
@@ -970,5 +1052,95 @@ mod tests {
         // It comes back after its respawn time.
         hold(&mut g, Command::default(), 31 * 60);
         assert!(!g.vehicles[0].destroyed);
+    }
+
+    /// The jeep as a tank whose driver works a turret: a cannon on the
+    /// trigger and a machine gun on the left trigger.
+    fn with_tank() -> Game {
+        let mut g = game();
+        let mg = WeaponDef {
+            name: "machine_gun".into(),
+            input: TriggerInput::Left,
+            ..g.weapons[0].clone()
+        };
+        g.weapons.push(mg);
+        let mut tank = jeep();
+        tank.drive = Drive::Tank;
+        tank.seats[0].weapon = Some(0);
+        tank.seats[0].alt_weapon = Some(g.weapons.len() - 1);
+        tank.seats[0].turret = Some(crate::vehicle::TurretGun {
+            pivot: Vec3::new(0.0, 0.0, 0.6),
+            muzzle: Vec3::new(1.0, 0.0, 0.0),
+            elevation: 0.0,
+        });
+        g.set_vehicles(
+            vec![tank],
+            vec![VehicleSpawn {
+                def: 0,
+                position: Vec3::new(3.0, 3.0, 0.05),
+                yaw: 0.0,
+                respawn: 30.0,
+            }],
+        );
+        g.add_player();
+        g
+    }
+
+    #[test]
+    fn a_tank_driver_aims_the_turret_and_fires_both_guns() {
+        let mut g = with_tank();
+        hold(&mut g, Command::default(), 120);
+        walk_to_driver_door(&mut g);
+        let act = Command {
+            action: true,
+            ..Command::default()
+        };
+        hold(&mut g, act, 30);
+        assert_eq!(g.riding(0), Some((0, 0)));
+        hold(&mut g, Command::default(), 30);
+        // Look left: the turret turns, the hull stays put.
+        let look = Command {
+            yaw: 1.0,
+            ..Command::default()
+        };
+        hold(&mut g, look, 30);
+        assert!(
+            (g.vehicles[0].aim.x - 1.0).abs() < 0.05,
+            "{:?}",
+            g.vehicles[0].aim
+        );
+        assert!(g.vehicles[0].yaw().abs() < 0.05, "hull turned");
+        let fired = |g: &Game, w: usize| {
+            g.events
+                .iter()
+                .any(|e| matches!(e, Event::Shot { weapon, .. } if *weapon == w))
+        };
+        hold(&mut g, Command { fire: true, ..look }, 1);
+        assert!(fired(&g, 0), "the cannon fires on the trigger");
+        let mg = g.weapons.len() - 1;
+        hold(&mut g, look, 30);
+        hold(
+            &mut g,
+            Command {
+                throw_grenade: true,
+                ..look
+            },
+            1,
+        );
+        assert!(fired(&g, mg), "the machine gun fires on the left trigger");
+        // Driving off, the hull swings round to where the driver looks.
+        hold(
+            &mut g,
+            Command {
+                movement: Vec2::new(0.0, 1.0),
+                ..look
+            },
+            120,
+        );
+        assert!(
+            (g.vehicles[0].yaw() - 1.0).abs() < 0.2,
+            "{}",
+            g.vehicles[0].yaw()
+        );
     }
 }

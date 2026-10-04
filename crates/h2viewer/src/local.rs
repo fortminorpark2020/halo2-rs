@@ -287,31 +287,15 @@ pub fn seat_of(game: &Game, i: usize) -> Option<(usize, usize, &SeatDef)> {
     Some((v, s, game.vehicle_defs.get(veh.def)?.seats.get(s)?))
 }
 
-/// Where player `i` sees from: their eyes, a seat's, or (in a seat with a
-/// camera following the vehicle) the point the camera circles.
+/// Where player `i` sees from (see `Game::view_point`).
 pub fn view_point(game: &Game, i: usize) -> Vec3 {
-    let Some((v, s, seat)) = seat_of(game, i) else {
-        return game.players[i].eye();
-    };
-    let veh = &game.vehicles[v];
-    let def = &game.vehicle_defs[veh.def];
-    match (seat.third_person, seat.pivot) {
-        (false, _) => veh.seat_eye(def, s),
-        // A turret's gunner: over the gun, to see past them.
-        (true, Some(_)) => veh.seat_eye(def, s) + Vec3::Z * 0.45,
-        (true, None) => veh.center + Vec3::Z * (def.radius * 0.3 + 0.35),
-    }
+    game.view_point(i)
 }
 
 /// How far behind the view point the camera follows player `i`'s vehicle,
 /// if it does.
 fn chase_distance(game: &Game, i: usize) -> Option<f32> {
-    let (v, _, seat) = seat_of(game, i).filter(|s| s.2.third_person)?;
-    let radius = game.vehicle_defs[game.vehicles[v].def].radius;
-    Some(match seat.pivot {
-        Some(_) => 0.8 + radius * 0.6,
-        None => 1.2 + radius * 1.4,
-    })
+    game.chase_distance(i)
 }
 
 pub struct LocalPlayer {

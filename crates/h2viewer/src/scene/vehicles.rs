@@ -5,11 +5,12 @@ use super::{Loader, MeshData, Vertex, WeaponAssets};
 use crate::rig::{tag_quat, world_matrices, NodePose, Skeleton, SkinnedMesh};
 use blam_cache::model::{self, RenderModel};
 use blam_cache::vehicle::{self, seat_flags, FrictionPoint, VehicleTag, VehicleType};
-use blam_cache::{scenario, DatumIndex, GroupTag};
+use blam_cache::{scenario, weapon, DatumIndex, GroupTag};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use h2sim::game::VehicleSpawn;
 use h2sim::vehicle::{
-    Drive, HoverPad, HullBox, SeatDef, SeatRole, Vehicle, VehicleDef, Wheel, SUSPENSION_TRAVEL,
+    Drive, HoverPad, HullBox, SeatDef, SeatRole, TurretGun, Vehicle, VehicleDef, Wheel,
+    SUSPENSION_TRAVEL,
 };
 use std::collections::HashMap;
 
@@ -34,8 +35,10 @@ impl VehiclePart {
             skeleton: Skeleton::new(&m.nodes),
             parents: m.nodes.iter().map(|n| n.parent).collect(),
             skin: SkinnedMesh::new(mesh),
-            yaw_node: node(&["gun_mount_base", "arm"]),
-            pitch_node: node(&["gun"]),
+            // Warthog turrets, stationary turrets, the Scorpion's and the
+            // Wraith's.
+            yaw_node: node(&["gun_mount_base", "arm", "turret_rotator", "root"]),
+            pitch_node: node(&["turret", "gun_arm", "gun"]),
         }
     }
 
@@ -168,6 +171,34 @@ fn display_name(tag: &str) -> String {
     }
 }
 
+/// The gun a turret model aims (`attach` places the model in the
+/// vehicle's): where it turns, its muzzle, and how high it points at rest.
+fn turret_gun(m: &RenderModel, bind: &[Mat4], part: &VehiclePart, attach: Mat4) -> TurretGun {
+    let pivot = part
+        .yaw_node
+        .and_then(|n| bind.get(n))
+        .map(|b| attach.transform_point3(b.w_axis.truncate()))
+        .unwrap_or(attach.w_axis.truncate());
+    match marker(m, bind, "primary_trigger").map(|t| attach * t) {
+        Some(t) => {
+            let dir = t.x_axis.truncate().normalize_or(Vec3::X);
+            let elevation = dir.z.clamp(-1.0, 1.0).asin();
+            // The muzzle with the gun level and facing ahead.
+            let level = Quat::from_rotation_z(-dir.y.atan2(dir.x)) * (t.w_axis.truncate() - pivot);
+            TurretGun {
+                pivot,
+                muzzle: Quat::from_rotation_y(elevation) * level,
+                elevation,
+            }
+        }
+        None => TurretGun {
+            pivot,
+            muzzle: Vec3::ZERO,
+            elevation: 0.0,
+        },
+    }
+}
+
 /// The seats a player can sit in (not the boarding positions).
 fn player_seats(tag: &VehicleTag) -> impl Iterator<Item = &vehicle::Seat> {
     tag.seats
@@ -234,24 +265,60 @@ impl Loader {
         })
     }
 
-    /// A vehicle weapon, loaded into `weapons` once.
+    /// A vehicle weapon and its second trigger (the Scorpion's machine
+    /// gun, the Banshee's bomb), each loaded into `weapons` once.
+    /// A seat's camera track: (look pitch, camera offset) from looking
+    /// down to looking up.
+    fn camera_track(&mut self, trak: DatumIndex) -> Vec<(f32, Vec3)> {
+        if trak == DatumIndex::NONE {
+            return Vec::new();
+        }
+        let Ok(points) = vehicle::read_camera_track(&mut self.set, trak) else {
+            return Vec::new();
+        };
+        let mut track: Vec<(f32, Vec3)> = points
+            .iter()
+            .filter(|p| p.orientation != [0.0; 4])
+            .map(|p| {
+                let [i, j, k, w] = p.orientation;
+                let look = Quat::from_xyzw(i, j, k, w).normalize() * Vec3::X;
+                (look.z.clamp(-1.0, 1.0).asin(), Vec3::from(p.position))
+            })
+            .collect();
+        track.sort_by(|a, b| a.0.total_cmp(&b.0));
+        track
+    }
+
     fn vehicle_weapon(
         &mut self,
         weap: DatumIndex,
         weapons: &mut Vec<WeaponAssets>,
         meshes: &mut Vec<MeshData>,
-    ) -> Option<usize> {
-        if let Some(i) = weapons.iter().position(|w| w.tag == weap) {
-            return Some(i);
-        }
-        let name = self.set.locate(weap)?.1.name;
+    ) -> (Option<usize>, Option<usize>) {
+        let Some(name) = self.set.locate(weap).map(|t| t.1.name) else {
+            return (None, None);
+        };
         // The Warthog's "gun" is its horn.
         if name.ends_with("horn") {
-            return None;
+            return (None, None);
         }
-        let w = self.weapon(&name, None, meshes)?;
-        weapons.push(w);
-        Some(weapons.len() - 1)
+        let triggers = weapon::read_weapon(&mut self.set, weap)
+            .map(|w| w.triggers.len())
+            .unwrap_or(1);
+        let mut load = |trigger: usize| {
+            if let Some(i) = weapons
+                .iter()
+                .position(|w| w.tag == weap && w.trigger == trigger)
+            {
+                return Some(i);
+            }
+            let w = self.weapon_trigger(&name, trigger, None, meshes)?;
+            weapons.push(w);
+            Some(weapons.len() - 1)
+        };
+        let primary = load(0);
+        let alt = (triggers > 1).then(|| load(1)).flatten();
+        (primary, alt)
     }
 
     /// A kind of vehicle in a model variant: how it drives and how to draw it.
@@ -300,6 +367,7 @@ impl Loader {
             })
             .collect();
         let drive = match tag.kind {
+            VehicleType::HumanTank => Drive::Tank,
             VehicleType::AlienScout => Drive::Hover,
             VehicleType::AlienFighter | VehicleType::HumanPlane => Drive::Fly,
             VehicleType::Turret => Drive::Fixed,
@@ -330,17 +398,40 @@ impl Loader {
             })
             .collect();
 
+        // The turret its variant mounts, if any.
+        let body_mesh = self.model_mesh(&render);
+        let mut body = VehiclePart::new(&render, &body_mesh);
+        let mounted = model
+            .variant(variant)
+            .and_then(|v| v.objects.iter().find(|o| !o.parent_marker.is_empty()))
+            .cloned();
+        let mut turret = None;
+        let loaded = mounted.and_then(|mount| {
+            let attach = marker(&render, &bind, &mount.parent_marker).unwrap_or(Mat4::IDENTITY);
+            let t = vehicle::read_vehicle(&mut self.set, mount.object).ok()?;
+            let m = vehicle::read_model(&mut self.set, t.model).ok()?;
+            let r = model::read_render_model(&mut self.set, m.render_model).ok()?;
+            Some((t, r, attach))
+        });
+        if let Some((ttag, tm, attach)) = loaded {
+            let tbind = bind_pose(&tm);
+            let gun = ttag
+                .weapons
+                .first()
+                .map_or((None, None), |&w| self.vehicle_weapon(w, weapons, meshes));
+            let mesh = self.model_mesh(&tm);
+            let part = VehiclePart::new(&tm, &mesh);
+            let aim = turret_gun(&tm, &tbind, &part, attach);
+            turret = Some((ttag, tm, tbind, attach, gun, aim, part, mesh));
+        }
+
         // Seats: the vehicle's own, then its turret's.
         let built_in = tag
             .weapons
             .first()
-            .and_then(|&w| self.vehicle_weapon(w, weapons, meshes));
-        let body_mesh = self.model_mesh(&render);
-        let mut body = VehiclePart::new(&render, &body_mesh);
-        let pivot = body
-            .yaw_node
-            .and_then(|n| bind.get(n))
-            .map(|m| m.w_axis.truncate());
+            .map_or((None, None), |&w| self.vehicle_weapon(w, weapons, meshes));
+        let fixed_gun =
+            (drive == Drive::Fixed).then(|| turret_gun(&render, &bind, &body, Mat4::IDENTITY));
         if drive != Drive::Fixed {
             body.yaw_node = None;
             body.pitch_node = None;
@@ -358,6 +449,14 @@ impl Loader {
             } else {
                 SeatRole::Passenger
             };
+            // A gunner seat with no gun of its own works the turret's (the
+            // Scorpion's and the Wraith's driver).
+            let (gun, aims) = match (s.has(seat_flags::GUNNER), built_in, &turret) {
+                (false, ..) => ((None, None), None),
+                (true, (Some(w), alt), _) => ((Some(w), alt), fixed_gun),
+                (true, _, Some(t)) => (t.4, Some(t.5)),
+                (true, ..) => ((None, None), None),
+            };
             seats.push(SeatDef {
                 role,
                 position,
@@ -366,69 +465,52 @@ impl Loader {
                 eye: at(&s.camera_marker).unwrap_or(position + Vec3::Z * 0.55),
                 exposed: !s.has(seat_flags::INVISIBLE),
                 third_person: s.has(seat_flags::THIRD_PERSON_CAMERA),
-                weapon: s.has(seat_flags::GUNNER).then_some(built_in).flatten(),
-                pivot: (drive == Drive::Fixed).then_some(pivot).flatten(),
+                weapon: gun.0,
+                alt_weapon: gun.1,
+                pivot: fixed_gun.map(|g| g.pivot),
+                turret: aims,
                 pitch_range: s.pitch_range,
                 animation: s.animation.clone(),
+                camera: self.camera_track(s.camera_track),
             });
             stances.push(leak(&s.animation));
         }
-        let mut turret = None;
         let mut turret_mesh = None;
-        let mounted = model
-            .variant(variant)
-            .and_then(|v| v.objects.iter().find(|o| !o.parent_marker.is_empty()))
-            .cloned();
-        if let Some(mount) = mounted {
-            let attach = marker(&render, &bind, &mount.parent_marker).unwrap_or(Mat4::IDENTITY);
-            let loaded = vehicle::read_vehicle(&mut self.set, mount.object).and_then(|t| {
-                let m = vehicle::read_model(&mut self.set, t.model)?;
-                let r = model::read_render_model(&mut self.set, m.render_model)?;
-                Ok((t, r))
-            });
-            if let Ok((ttag, tm)) = loaded {
-                let tbind = bind_pose(&tm);
-                let gun = ttag
-                    .weapons
-                    .first()
-                    .and_then(|&w| self.vehicle_weapon(w, weapons, meshes));
-                let mesh = self.model_mesh(&tm);
-                let part = VehiclePart::new(&tm, &mesh);
-                let pivot = part
-                    .yaw_node
-                    .and_then(|n| tbind.get(n))
-                    .map(|m| attach.transform_point3(m.w_axis.truncate()))
-                    .unwrap_or(attach.w_axis.truncate());
-                for s in player_seats(&ttag) {
-                    let Some(m) = marker(&tm, &tbind, &s.marker) else {
-                        continue;
-                    };
-                    let position = attach.transform_point3(m.w_axis.truncate());
-                    let place = |n: &str| {
-                        marker(&tm, &tbind, n).map(|m| attach.transform_point3(m.w_axis.truncate()))
-                    };
-                    seats.push(SeatDef {
-                        role: SeatRole::Gunner,
-                        position,
-                        entry: place(&s.entry_marker).unwrap_or(position),
-                        entry_radius: s.entry_radius.max(1.0),
-                        eye: place(&s.camera_marker).unwrap_or(position + Vec3::Z * 0.55),
-                        exposed: !s.has(seat_flags::INVISIBLE),
-                        third_person: s.has(seat_flags::THIRD_PERSON_CAMERA),
-                        weapon: gun,
-                        pivot: Some(pivot),
-                        pitch_range: s.pitch_range,
-                        animation: s.animation.clone(),
-                    });
-                    stances.push(leak(&s.animation));
-                }
-                turret = Some((part, attach));
-                turret_mesh = Some(mesh);
+        let turret = turret.map(|(ttag, tm, tbind, attach, gun, aim, part, mesh)| {
+            for s in player_seats(&ttag) {
+                let Some(m) = marker(&tm, &tbind, &s.marker) else {
+                    continue;
+                };
+                let position = attach.transform_point3(m.w_axis.truncate());
+                let place = |n: &str| {
+                    marker(&tm, &tbind, n).map(|m| attach.transform_point3(m.w_axis.truncate()))
+                };
+                seats.push(SeatDef {
+                    role: SeatRole::Gunner,
+                    position,
+                    entry: place(&s.entry_marker).unwrap_or(position),
+                    entry_radius: s.entry_radius.max(1.0),
+                    eye: place(&s.camera_marker).unwrap_or(position + Vec3::Z * 0.55),
+                    exposed: !s.has(seat_flags::INVISIBLE),
+                    third_person: s.has(seat_flags::THIRD_PERSON_CAMERA),
+                    weapon: gun.0,
+                    alt_weapon: gun.1,
+                    pivot: Some(aim.pivot),
+                    turret: Some(aim),
+                    pitch_range: s.pitch_range,
+                    animation: s.animation.clone(),
+                    camera: self.camera_track(s.camera_track),
+                });
+                stances.push(leak(&s.animation));
             }
-        }
+            turret_mesh = Some(mesh);
+            (part, attach)
+        });
 
         let max_turn = match drive {
             Drive::Wheels => tag.max_left_turn.abs().to_radians().clamp(0.2, 1.0),
+            // Radians per second the hull turns.
+            Drive::Tank => tag.turn_rate.clamp(0.5, 2.0),
             _ => (tag.max_left_turn.abs().to_radians() * 2.5).max(2.0),
         };
         let def = VehicleDef {

@@ -32,6 +32,9 @@ pub enum Drive {
     /// Sprung wheels: the Warthog.
     #[default]
     Wheels,
+    /// Treads: the Scorpion. Turns on the spot toward where the driver
+    /// looks, as it drives.
+    Tank,
     /// Hover pads: the Ghost.
     Hover,
     /// Flies: the Banshee.
@@ -62,14 +65,61 @@ pub struct SeatDef {
     pub exposed: bool,
     /// The rider's view is a camera following the vehicle.
     pub third_person: bool,
-    /// The weapon fired from this seat (index into the game's weapons).
+    /// The weapon fired from this seat (index into the game's weapons), and
+    /// its second trigger (the Scorpion's machine gun, the Banshee's bomb).
     pub weapon: Option<usize>,
+    pub alt_weapon: Option<usize>,
     /// On a turret: the seat turns with the turret's aim around this point.
     pub pivot: Option<Vec3>,
+    /// The turret gun this seat aims (a gunner's, or the Scorpion and Wraith
+    /// driver's).
+    pub turret: Option<TurretGun>,
     /// How far the turret may aim down and up (radians).
     pub pitch_range: [f32; 2],
     /// The rider's animations ("warthog_d"...).
     pub animation: String,
+    /// Where a third person camera sits for each look pitch, from looking
+    /// down to looking up: (pitch, offset from the eye with x along the
+    /// look and z up). Empty if the seat has no camera track.
+    pub camera: Vec<(f32, Vec3)>,
+}
+
+impl SeatDef {
+    /// The camera's offset from the eye while looking along `yaw` and
+    /// `pitch`, if the seat has a camera track: smoothly between its points.
+    pub fn camera_offset(&self, yaw: f32, pitch: f32) -> Option<Vec3> {
+        let track = &self.camera;
+        let last = track.len().checked_sub(1)?;
+        let k = track
+            .iter()
+            .position(|p| p.0 > pitch)
+            .unwrap_or(last + 1)
+            .clamp(1, last.max(1))
+            - 1;
+        let at = |j: usize| track[j.min(last)].1;
+        let (p0, p1) = (track[k].0, track[(k + 1).min(last)].0);
+        let t = ((pitch - p0) / (p1 - p0).max(1e-4)).clamp(0.0, 1.0);
+        // Catmull-Rom through the points either side.
+        let (a, b, c, d) = (at(k.saturating_sub(1)), at(k), at(k + 1), at(k + 2));
+        let local = 0.5
+            * (2.0 * b
+                + (c - a) * t
+                + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t
+                + (3.0 * b - a - 3.0 * c + d) * t * t * t);
+        Some(Quat::from_rotation_z(yaw) * local)
+    }
+}
+
+/// A gun on a turret.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TurretGun {
+    /// Where it turns, in the vehicle's space.
+    pub pivot: Vec3,
+    /// The muzzle, from the pivot, with the gun pointing straight ahead.
+    pub muzzle: Vec3,
+    /// How far above the aim the barrel points (radians): the Wraith's
+    /// mortar lobs its shots.
+    pub elevation: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -254,8 +304,9 @@ pub struct Vehicle {
     pub health: f32,
     /// Who sits in each seat.
     pub riders: Vec<Option<usize>>,
-    /// Each seat's weapon.
+    /// Each seat's weapon, and its second trigger's.
     pub weapons: Vec<Option<WeaponState>>,
+    pub alt_weapons: Vec<Option<WeaponState>>,
     /// The turret's aim, relative to the vehicle: yaw and pitch.
     pub aim: Vec2,
     /// How far the front wheels are turned (radians, left positive).
@@ -294,6 +345,7 @@ impl Vehicle {
             health: def.health,
             riders: vec![None; def.seats.len()],
             weapons: def.seats.iter().map(|_| None).collect(),
+            alt_weapons: def.seats.iter().map(|_| None).collect(),
             aim: Vec2::ZERO,
             steer: 0.0,
             roll: 0.0,
@@ -374,6 +426,20 @@ impl Vehicle {
         }
     }
 
+    /// Which way a seat's turret gun points, and its muzzle, in the world.
+    pub fn turret_muzzle(&self, def: &VehicleDef, seat: usize) -> Option<(Vec3, Vec3)> {
+        let gun = def.seats.get(seat)?.turret?;
+        let (yaw, pitch) = (self.aim.x, self.aim.y + gun.elevation);
+        let dir = self.rotation
+            * Vec3::new(
+                yaw.cos() * pitch.cos(),
+                yaw.sin() * pitch.cos(),
+                pitch.sin(),
+            );
+        let turn = Quat::from_rotation_z(self.aim.x) * Quat::from_rotation_y(-self.aim.y);
+        Some((dir, self.to_world(def, gun.pivot + turn * gun.muzzle)))
+    }
+
     /// Velocity of the body at a world point.
     pub fn point_velocity(&self, p: Vec3) -> Vec3 {
         self.velocity + self.spin.cross(p - self.center)
@@ -437,7 +503,9 @@ impl Vehicle {
         let mut force = Vec3::new(0.0, 0.0, -gravity * m);
         let mut torque = Vec3::ZERO;
         match def.drive {
-            Drive::Wheels => self.wheel_forces(def, world, dt, &mut force, &mut torque),
+            Drive::Wheels | Drive::Tank => {
+                self.wheel_forces(def, world, dt, &mut force, &mut torque)
+            }
             Drive::Hover => self.hover_forces(def, world, dt, &mut force, &mut torque),
             Drive::Fly => self.flight_forces(def, world, dt, &mut force, &mut torque),
             Drive::Fixed => return,
@@ -497,10 +565,24 @@ impl Vehicle {
         let fwd = self.forward();
 
         // Steer toward where the driver looks (backing up, the other way).
+        // Tanks turn the whole hull instead, as they drive.
         let c = self.controls;
         let speed = self.velocity.dot(fwd);
+        let tank = def.drive == Drive::Tank;
         let mut target = 0.0;
-        if c.driven {
+        let mut accel = self.drive_acceleration(def, speed, dt);
+        if tank {
+            if c.driven && c.throttle.y.abs() > 0.05 {
+                self.turn_toward(def, c.yaw, None, torque);
+                // Swing round before setting off.
+                let err = wrap_angle(c.yaw - self.yaw()).abs();
+                accel *= (1.0 - err / 1.2).max(0.0);
+            } else {
+                // Treads hold it still.
+                let local = self.rotation.inverse() * (Vec3::Z * -self.spin.z * 8.0);
+                *torque += self.rotation * (local * def.inertia);
+            }
+        } else if c.driven {
             let err = wrap_angle(c.yaw - self.yaw());
             let reversing = c.throttle.y < -0.05 || (c.throttle.y.abs() < 0.05 && speed < -0.5);
             target = if reversing { -err } else { err } * 1.5;
@@ -508,7 +590,6 @@ impl Vehicle {
         }
         let turn_rate = 6.0;
         self.steer += (target - self.steer).clamp(-turn_rate * dt, turn_rate * dt);
-        let accel = self.drive_acceleration(def, speed, dt);
         let powered = def.wheels.iter().filter(|w| w.powered).count().max(1) as f32;
 
         let mut rolling = 0.0;
@@ -536,7 +617,12 @@ impl Vehicle {
             };
             let along = (heading - normal * heading.dot(normal)).normalize_or(fwd);
             let side = normal.cross(along);
-            let slip = v.dot(side);
+            // Treads skid round as the hull turns; they only stop it sliding.
+            let slip = if tank {
+                self.velocity.dot(side)
+            } else {
+                v.dot(side)
+            };
             let grip = TIRE_GRIP * load;
             f += side * (-slip * share / dt * 0.5).clamp(-grip, grip);
             if w.powered {
@@ -791,7 +877,10 @@ pub(crate) mod tests {
                 exposed: true,
                 third_person: true,
                 weapon: None,
+                alt_weapon: None,
+                camera: Vec::new(),
                 pivot: None,
+                turret: None,
                 pitch_range: [-0.8, 0.8],
                 animation: "warthog_d".into(),
             }],
@@ -846,6 +935,28 @@ pub(crate) mod tests {
         for _ in 0..(seconds * 60.0) as usize {
             v.step(def, &world, 1.0 / 60.0);
         }
+    }
+
+    #[test]
+    fn the_camera_rises_as_you_look_down() {
+        let mut seat = jeep().seats[0].clone();
+        assert_eq!(seat.camera_offset(0.0, 0.0), None);
+        let deg = f32::to_radians;
+        seat.camera = vec![
+            (deg(-90.0), Vec3::new(1.0, 0.0, 3.0)),
+            (deg(0.0), Vec3::new(-4.0, 0.0, 1.0)),
+            (deg(90.0), Vec3::new(-1.0, 0.0, 0.0)),
+        ];
+        let level = seat.camera_offset(0.0, 0.0).unwrap();
+        assert!(level.distance(Vec3::new(-4.0, 0.0, 1.0)) < 1e-4);
+        // Past the ends it stays at the end points.
+        let down = seat.camera_offset(0.0, deg(-120.0)).unwrap();
+        assert!(down.distance(Vec3::new(1.0, 0.0, 3.0)) < 1e-4);
+        let between = seat.camera_offset(0.0, deg(-45.0)).unwrap();
+        assert!(between.z > 1.0 && between.z < 3.0, "{between}");
+        // It turns with the look.
+        let side = seat.camera_offset(deg(90.0), 0.0).unwrap();
+        assert!(side.distance(Vec3::new(0.0, -4.0, 1.0)) < 1e-4, "{side}");
     }
 
     #[test]

@@ -335,7 +335,7 @@ fn drive_test(level: &Level, spec: &str) {
         }
         for (k, s) in def.seats.iter().enumerate() {
             println!(
-                "seat {k} {:?} at {:.2} entry {:.2} (world {:.2}) r {:.2} eye {:.2} pivot {:.2?} pitch {:.2?}",
+                "seat {k} {:?} at {:.2} entry {:.2} (world {:.2}) r {:.2} eye {:.2} pivot {:.2?} pitch {:.2?} turret {:.2?} guns {:?}",
                 s.role,
                 s.position,
                 s.entry,
@@ -343,7 +343,9 @@ fn drive_test(level: &Level, spec: &str) {
                 s.entry_radius,
                 s.eye,
                 s.pivot,
-                s.pitch_range
+                s.pitch_range,
+                s.turret,
+                [s.weapon, s.alt_weapon].map(|w| w.and_then(|w| game.weapons.get(w)).map(|d| &d.name)),
             );
         }
         println!("center {:.2} radius {:.2}", def.center, def.radius);
@@ -355,10 +357,23 @@ fn drive_test(level: &Level, spec: &str) {
     println!("riding {:?}", game.riding(me));
     cmd.action = false;
     let look = game.vehicles[v].yaw() + yaw.to_radians();
+    // H2_DRIVE_FIRE=1 (2 for the second trigger): pull the trigger now and
+    // then, and say where the shots land.
+    let firing = std::env::var("H2_DRIVE_FIRE").unwrap_or_default();
     for tick in 0..(seconds / TICK) as usize {
         cmd.movement = glam::vec2(right, forward);
         cmd.yaw = look;
+        let pull = tick % 60 < 2;
+        cmd.fire = firing == "1" && pull;
+        cmd.melee = firing == "2" && pull;
+        cmd.throw_grenade = firing == "2" && pull;
+        game.events.clear();
         game.step(&level.world, &[cmd]);
+        for e in &game.events {
+            if matches!(e, Event::Shot { .. } | Event::Impact { .. }) {
+                println!("{:5.2}s {e:?}", tick as f32 * TICK);
+            }
+        }
         if tick % 15 == 0 {
             let veh = &game.vehicles[v];
             println!(
