@@ -1335,6 +1335,11 @@ fn dialing_a_bad_address_fails() {
             "ws://no-such-host.invalid/live",
             "couldn't find no-such-host.invalid",
         ),
+        // Not port 80, for want of a port that's one.
+        (
+            "ws://127.0.0.1:65616/live",
+            "not a server address: ws://127.0.0.1:65616/live",
+        ),
     ] {
         let Err(why) = dial(url, Duration::from_secs(5)).recv().unwrap() else {
             panic!("{url} connected");
@@ -1355,6 +1360,71 @@ fn dialing_a_server_that_never_answers_gives_up_in_time() {
     assert_eq!(why, "127.0.0.1 took too long to answer");
     let took = start.elapsed();
     assert!(took >= SHORT && took < SHORT * 3, "{took:?}");
+}
+
+#[test]
+fn dialing_a_server_that_answers_ever_so_slowly_gives_up_in_time() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/live", listener.local_addr().unwrap());
+    let start = Instant::now();
+    let dialing = dial(&url, SHORT);
+    let (mut stream, _) = listener.accept().unwrap();
+    std::thread::spawn(move || {
+        Read::read(&mut stream, &mut [0; 4096]).unwrap();
+        // A byte at a time, each soon after the last.
+        for b in b"HTTP/1.1 101 Switching Protocols\r\n" {
+            if stream.write_all(&[*b]).is_err() {
+                break;
+            }
+            std::thread::sleep(SHORT / 6);
+        }
+    });
+    let Err(why) = dialing.recv().unwrap() else {
+        panic!("connected");
+    };
+    assert_eq!(why, "127.0.0.1 took too long to answer");
+    let took = start.elapsed();
+    assert!(took < SHORT * 2, "{took:?}");
+}
+
+#[test]
+fn dialing_leaves_time_for_a_names_other_addresses() {
+    use socket2::{Domain, Socket, Type};
+    // One that leads nowhere: a listener with no room for more connections
+    // drops what asks for one.
+    let nowhere = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+    nowhere
+        .bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())
+        .unwrap();
+    nowhere.listen(0).unwrap();
+    let nowhere = nowhere.local_addr().unwrap().as_socket().unwrap();
+    let _filling = std::net::TcpStream::connect(nowhere).unwrap();
+    // Then one that works.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addresses = [nowhere, listener.local_addr().unwrap()];
+    let start = Instant::now();
+    let reached = ws::reach("game.example", &addresses, start + SHORT);
+    assert!(reached.is_ok(), "{:?}", reached.err());
+    assert!(start.elapsed() < SHORT, "{:?}", start.elapsed());
+}
+
+#[test]
+fn dialing_takes_schemes_in_any_case() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    for url in [
+        format!("WS://{address}/live"),
+        format!("Ws://{address}/live"),
+    ] {
+        let dialing = dial(&url, Duration::from_secs(5));
+        let (stream, _) = listener.accept().unwrap();
+        assert!(
+            matches!(accept(stream), Ok(Request::WebSocket(..))),
+            "{url}"
+        );
+        assert!(dialing.recv().unwrap().is_ok(), "{url}");
+    }
 }
 
 #[test]
@@ -1433,6 +1503,93 @@ fn servers_answer_web_requests_and_take_websockets() {
 }
 
 #[test]
+fn servers_see_just_the_path() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    // Without the query...
+    let dialing = dial(&format!("ws://{address}/live?v=1"), Duration::from_secs(5));
+    let (stream, _) = listener.accept().unwrap();
+    let Ok(Request::WebSocket(_, path)) = accept(stream) else {
+        panic!("no WebSocket");
+    };
+    assert_eq!(path, "/live");
+    assert!(dialing.recv().unwrap().is_ok());
+    // ...or the scheme and host, as a proxy may send them.
+    let mut s = std::net::TcpStream::connect(address).unwrap();
+    s.write_all(b"GET http://localhost/health?all HTTP/1.1\r\n\r\n")
+        .unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    let Ok(Request::Http(_, path)) = accept(stream) else {
+        panic!("no web request");
+    };
+    assert_eq!(path, "/health");
+}
+
+#[test]
+fn servers_give_up_on_requests_that_never_end_in_time() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut s = std::net::TcpStream::connect(address).unwrap();
+        // A byte at a time, each soon after the last.
+        for b in b"GET /live HTTP/1.1\r\nHost: localhost\r\n" {
+            if s.write_all(&[*b]).is_err() {
+                break;
+            }
+            std::thread::sleep(SHORT / 6);
+        }
+    });
+    let (stream, _) = listener.accept().unwrap();
+    let start = Instant::now();
+    let why = ws::accept_within(stream, SHORT).err();
+    assert_eq!(why.as_deref(), Some("never said what it wants"));
+    let took = start.elapsed();
+    assert!(took < SHORT * 2, "{took:?}");
+}
+
+#[test]
+fn servers_wait_for_the_request_on_connections_that_never_wait() {
+    use std::io::Write;
+    // As on Windows, where what a listener that never waits takes doesn't
+    // either.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let browser = std::thread::spawn(move || {
+        let mut s = std::net::TcpStream::connect(address).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        s.write_all(b"GET /health HTTP/1.1\r\n\r\n").unwrap();
+    });
+    let (stream, _) = listener.accept().unwrap();
+    stream.set_nonblocking(true).unwrap();
+    let Ok(Request::Http(_, path)) = accept(stream) else {
+        panic!("no web request");
+    };
+    assert_eq!(path, "/health");
+    browser.join().unwrap();
+}
+
+#[test]
+fn a_websocket_asked_for_wrongly_is_answered() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut s = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    s.write_all(b"GET /live HTTP/1.1\r\nUpgrade: websocket\r\nConnection: keep-alive\r\n\r\n")
+        .unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    let why = accept(stream).err();
+    let expected = "WebSocket protocol error: No \"Connection: upgrade\" header";
+    assert_eq!(why.as_deref(), Some(expected));
+    let mut answer = String::new();
+    s.read_to_string(&mut answer).unwrap();
+    assert!(
+        answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+        "{answer}"
+    );
+}
+
+#[test]
 fn the_largest_messages_arrive_over_tcp() {
     the_largest_messages_arrive(tcp_pair());
 }
@@ -1475,12 +1632,86 @@ fn a_websocket_that_takes_nothing_is_too_slow() {
     assert!(sent > conn::MAX_BACKLOG, "{sent} bytes sent");
 }
 
+#[test]
+fn a_websocket_that_pings_and_takes_nothing_is_too_slow() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    // Something that asks for an answer over and over, and never reads one.
+    let pinging = std::thread::spawn(move || {
+        let tcp = std::net::TcpStream::connect(address).unwrap();
+        let (mut ws, _) = tungstenite::client(format!("ws://{address}/live"), tcp).unwrap();
+        for _ in 0..500_000 {
+            let ping = tungstenite::Message::Ping(vec![0; 125].into());
+            if ws.write(ping).is_err() {
+                break;
+            }
+        }
+    });
+    let (stream, _) = listener.accept().unwrap();
+    let Ok(Request::WebSocket(mut taken, _)) = accept(stream) else {
+        panic!("no WebSocket");
+    };
+    // The answers wait to go out, as more of what it's behind by.
+    let why = loop {
+        if let Err(why) = taken.receive().and_then(|_| taken.flush()) {
+            break why;
+        }
+    };
+    assert_eq!(why, "connection too slow");
+    drop(taken);
+    pinging.join().unwrap();
+}
+
+/// Why `conn` ends, once it does.
+fn end_of(conn: &mut Connection) -> String {
+    let start = Instant::now();
+    loop {
+        if let Err(why) = conn.receive() {
+            return why;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "still there");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn a_websocket_reset_is_just_closed() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/live", listener.local_addr().unwrap());
+    let dialing = dial(&url, Duration::from_secs(5));
+    let (stream, _) = listener.accept().unwrap();
+    tungstenite::accept(&stream).unwrap();
+    let mut dialed = dialing.recv().unwrap().unwrap();
+    let linger = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
+    linger.unwrap();
+    drop(stream);
+    assert_eq!(end_of(&mut dialed), "connection closed");
+}
+
 // Secure WebSockets, to a server behind TLS as online servers are (with a
 // certificate of the test's own).
+
+type SecureWebSocket =
+    tungstenite::WebSocket<rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>>;
 
 /// A secure server on loopback, as `name`, that sends back every message
 /// it gets: where it is, and the certificate to trust to reach it.
 fn secure_echo(name: &str) -> (SocketAddr, rustls::RootCertStore) {
+    secure_server(name, |ws| {
+        while let Ok(m) = ws.read() {
+            if m.is_binary() && ws.send(m).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// A secure server on loopback, as `name`, that has `serve` take each
+/// WebSocket: where it is, and the certificate to trust to reach it.
+fn secure_server(
+    name: &str,
+    serve: fn(&mut SecureWebSocket),
+) -> (SocketAddr, rustls::RootCertStore) {
     use std::sync::Arc;
     let certified = rcgen::generate_simple_self_signed([name.to_string()]).unwrap();
     let cert = certified.cert.der().clone();
@@ -1498,13 +1729,8 @@ fn secure_echo(name: &str) -> (SocketAddr, rustls::RootCertStore) {
     std::thread::spawn(move || {
         for tcp in listener.incoming().flatten() {
             let tls = rustls::ServerConnection::new(config.clone()).unwrap();
-            let Ok(mut ws) = tungstenite::accept(rustls::StreamOwned::new(tls, tcp)) else {
-                continue;
-            };
-            while let Ok(m) = ws.read() {
-                if m.is_binary() && ws.send(m).is_err() {
-                    break;
-                }
+            if let Ok(mut ws) = tungstenite::accept(rustls::StreamOwned::new(tls, tcp)) {
+                serve(&mut ws);
             }
         }
     });
@@ -1557,4 +1783,17 @@ fn an_untrusted_secure_server_is_refused() {
         why.starts_with("couldn't connect to localhost: invalid peer certificate"),
         "{why}"
     );
+}
+
+#[test]
+fn a_secure_server_gone_without_a_word_is_just_gone() {
+    // Without TLS's goodbye, as when a server online crashes, or what it
+    // runs behind restarts.
+    let (address, roots) = secure_server("localhost", |ws| {
+        let _ = ws.send(tungstenite::Message::Binary(vec![7].into()));
+    });
+    let url = format!("wss://localhost:{}/live", address.port());
+    let dialing = ws::dial_trusting(&url, Duration::from_secs(5), roots);
+    let mut dialed = dialing.recv().unwrap().unwrap();
+    assert_eq!(end_of(&mut dialed), "connection closed");
 }

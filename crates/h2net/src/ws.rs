@@ -3,11 +3,11 @@
 //! takes WebSockets and plain web requests (a browser's, a health check's)
 //! on the same port.
 
-use crate::conn::{Connection, MAX_MESSAGE};
+use crate::conn::{Connection, MAX_BACKLOG, MAX_MESSAGE};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,7 +21,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longer requests (than any game's or browser's) are hostile.
 const MAX_REQUEST: usize = 16 << 10;
 
-/// What a connection to a server asked for.
+/// What a connection to a server asked for, and at what path (only the
+/// path: without any query).
 pub enum Request {
     /// A WebSocket, at this path (`/live`, say).
     WebSocket(Connection, String),
@@ -32,15 +33,55 @@ pub enum Request {
 
 /// What a WebSocket runs over: TCP, or TLS over TCP (to a server online).
 pub(crate) enum Stream {
-    Plain(TcpStream),
-    Tls(Box<ClientConnection>, TcpStream),
+    Plain(Tcp),
+    Tls(Box<ClientConnection>, Tcp),
 }
 
 impl Stream {
-    pub(crate) fn tcp(&self) -> &TcpStream {
-        match self {
-            Stream::Plain(tcp) | Stream::Tls(_, tcp) => tcp,
+    /// Never wait from now on (the handshake done), and so never give up.
+    pub(crate) fn set_nonblocking(&mut self) -> io::Result<()> {
+        let (Stream::Plain(tcp) | Stream::Tls(_, tcp)) = self;
+        tcp.deadline = None;
+        tcp.stream.set_nonblocking(true)?;
+        tcp.stream.set_nodelay(true)
+    }
+}
+
+/// A TCP connection, and while it's in a handshake, when to give up on it:
+/// however little comes at a time, it all has to come by then.
+pub(crate) struct Tcp {
+    stream: TcpStream,
+    deadline: Option<Instant>,
+}
+
+impl Tcp {
+    /// The stream, to wait on for no longer than the time left.
+    fn in_time(&self) -> io::Result<&TcpStream> {
+        if let Some(deadline) = self.deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(ErrorKind::TimedOut.into());
+            }
+            self.stream.set_read_timeout(Some(left))?;
+            self.stream.set_write_timeout(Some(left))?;
         }
+        Ok(&self.stream)
+    }
+}
+
+impl Read for Tcp {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.in_time()?.read(buf)
+    }
+}
+
+impl Write for Tcp {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.in_time()?.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
     }
 }
 
@@ -93,18 +134,20 @@ impl Write for Stream {
 }
 
 /// Write out what `tls` has encrypted, or has to say.
-fn send_tls(tls: &mut ClientConnection, tcp: &mut TcpStream) -> io::Result<()> {
+fn send_tls(tls: &mut ClientConnection, tcp: &mut Tcp) -> io::Result<()> {
     while tls.wants_write() {
         tls.write_tls(tcp)?;
     }
     Ok(())
 }
 
-/// Messages no larger than over TCP.
+/// Messages no larger than over TCP, and no more waiting to go out than a
+/// connection may be behind by (with room for the messages' headers).
 fn config() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE))
         .max_frame_size(Some(MAX_MESSAGE))
+        .max_write_buffer_size(MAX_BACKLOG + MAX_MESSAGE)
 }
 
 /// Connect to the server at `url`: ws://host:port/path, or wss://host/path
@@ -136,23 +179,34 @@ pub(crate) fn dial_trusting(
 
 fn connect(url: &str, deadline: Instant, roots: RootCertStore) -> Result<Connection, String> {
     let bad = || format!("not a server address: {url}");
-    let uri: Uri = url.parse().map_err(|_| bad())?;
-    let secure = match uri.scheme_str().map(str::to_ascii_lowercase).as_deref() {
+    // Schemes are any case, but tungstenite only takes them in lowercase.
+    let lowercase = match url.split_once("://") {
+        Some((scheme, rest)) => format!("{}://{rest}", scheme.to_ascii_lowercase()),
+        None => url.to_string(),
+    };
+    let uri: Uri = lowercase.parse().map_err(|_| bad())?;
+    let secure = match uri.scheme_str() {
         Some("ws") => false,
         Some("wss") => true,
         _ => return Err(bad()),
     };
+    let authority = uri.authority().ok_or_else(bad)?;
+    let default_port = if secure { 443 } else { 80 };
+    let port = match authority.port_u16() {
+        Some(port) => port,
+        // No port at all (rather than one that isn't one).
+        None if authority.as_str().ends_with(authority.host()) => default_port,
+        None => return Err(bad()),
+    };
     // IPv6 addresses come in brackets in URLs.
-    let host = uri
-        .host()
-        .ok_or_else(bad)?
-        .trim_matches(['[', ']'])
-        .to_string();
-    let port = uri.port_u16().unwrap_or(if secure { 443 } else { 80 });
-    let tcp = reach(&host, port, deadline)?;
+    let host = authority.host().trim_matches(['[', ']']).to_string();
+    let addresses = (host.as_str(), port).to_socket_addrs();
+    let addresses: Vec<_> = addresses.map_err(|_| not_found(&host))?.collect();
     // The handshake has the time that's left.
-    let left = deadline.saturating_duration_since(Instant::now());
-    set_timeouts(&tcp, left.max(Duration::from_millis(1)))?;
+    let tcp = Tcp {
+        stream: reach(&host, &addresses, deadline)?,
+        deadline: Some(deadline),
+    };
     let stream = if secure {
         let name = ServerName::try_from(host.clone()).map_err(|_| bad())?;
         let tls = ClientConnection::new(tls_config(roots)?, name).map_err(|e| e.to_string())?;
@@ -180,17 +234,22 @@ fn tls_config(roots: RootCertStore) -> Result<Arc<ClientConfig>, String> {
     Ok(Arc::new(config))
 }
 
-/// A TCP connection to `host`, trying each of its addresses in turn.
-fn reach(host: &str, port: u16, deadline: Instant) -> Result<TcpStream, String> {
-    let not_found = || format!("couldn't find {host}");
-    let addresses = (host, port).to_socket_addrs().map_err(|_| not_found())?;
-    let mut why = not_found();
-    for address in addresses {
+/// A TCP connection to `host`, trying each of its `addresses` in turn.
+/// Each has its share of the time, so one that leads nowhere (as an IPv6
+/// address can, on a network without IPv6) leaves the rest time to answer.
+pub(crate) fn reach(
+    host: &str,
+    addresses: &[SocketAddr],
+    deadline: Instant,
+) -> Result<TcpStream, String> {
+    let mut why = not_found(host);
+    for (i, address) in addresses.iter().enumerate() {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Err(too_long(host));
         }
-        match TcpStream::connect_timeout(&address, left) {
+        let share = left / (addresses.len() - i) as u32;
+        match TcpStream::connect_timeout(address, share) {
             Ok(stream) => return Ok(stream),
             Err(e) if e.kind() == ErrorKind::TimedOut => why = too_long(host),
             Err(e) => why = format!("couldn't connect to {host}: {e}"),
@@ -199,12 +258,16 @@ fn reach(host: &str, port: u16, deadline: Instant) -> Result<TcpStream, String> 
     Err(why)
 }
 
-/// Give up reading or writing `stream` after `after` (during a handshake).
+/// Give up reading or writing `stream` after `after`.
 fn set_timeouts(stream: &TcpStream, after: Duration) -> Result<(), String> {
     let set = stream
         .set_read_timeout(Some(after))
         .and_then(|()| stream.set_write_timeout(Some(after)));
     set.map_err(|e| e.to_string())
+}
+
+fn not_found(host: &str) -> String {
+    format!("couldn't find {host}")
 }
 
 fn too_long(host: &str) -> String {
@@ -230,13 +293,23 @@ fn failed(host: &str, e: tungstenite::Error) -> String {
 /// for. This waits for the request (a few seconds at most), so servers
 /// take each connection on a thread of its own. Servers never do TLS:
 /// online, whatever they run behind does it for them.
-pub fn accept(mut stream: TcpStream) -> Result<Request, String> {
+pub fn accept(stream: TcpStream) -> Result<Request, String> {
+    accept_within(stream, REQUEST_TIMEOUT)
+}
+
+/// `accept`, giving the request `timeout` to arrive (a test's own, say).
+pub(crate) fn accept_within(stream: TcpStream, timeout: Duration) -> Result<Request, String> {
     use ErrorKind::{Interrupted, TimedOut, WouldBlock};
-    set_timeouts(&stream, REQUEST_TIMEOUT)?;
+    // What a listener that never waits takes may not either (on Windows).
+    stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+    let mut tcp = Tcp {
+        stream,
+        deadline: Some(Instant::now() + timeout),
+    };
     let mut request = Vec::new();
     let size = loop {
         let mut buf = [0; 4096];
-        match stream.read(&mut buf) {
+        match tcp.read(&mut buf) {
             Ok(0) => return Err("connection closed".into()),
             Ok(n) => request.extend_from_slice(&buf[..n]),
             Err(e) if e.kind() == Interrupted => continue,
@@ -255,33 +328,51 @@ pub fn accept(mut stream: TcpStream) -> Result<Request, String> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut parsed = httparse::Request::new(&mut headers);
     parsed.parse(&request).map_err(|e| e.to_string())?;
-    let path = parsed.path.unwrap_or("/").to_string();
+    let target = parsed.path.unwrap_or("/");
+    // Just the path: not the query, nor the scheme and host a proxy may
+    // put first.
+    let path = match target.parse::<Uri>() {
+        Ok(uri) => uri.path().to_string(),
+        Err(e) => return refuse(tcp.stream, e.to_string()),
+    };
     let upgrade = parsed.headers.iter().any(|h| {
         h.name.eq_ignore_ascii_case("upgrade") && h.value.eq_ignore_ascii_case(b"websocket")
     });
     if !upgrade {
-        return Ok(Request::Http(stream, path));
+        // The caller answers it, and has as long again to.
+        set_timeouts(&tcp.stream, timeout)?;
+        return Ok(Request::Http(tcp.stream, path));
     }
     // Answer it as tungstenite's own `accept` would, the request read.
     let mut answer = tungstenite::http::Request::builder()
         .method(parsed.method.unwrap_or("GET"))
-        .uri(&path);
+        .uri(target);
     for h in parsed.headers.iter() {
         answer = answer.header(h.name, h.value);
     }
     let response = answer
         .body(())
         .map_err(|e| e.to_string())
-        .and_then(|r| create_response(&r).map_err(|e| e.to_string()))?;
+        .and_then(|r| create_response(&r).map_err(|e| e.to_string()));
+    let response = match response {
+        Ok(response) => response,
+        Err(why) => return refuse(tcp.stream, why),
+    };
     let mut head = Vec::new();
     write_response(&mut head, &response).map_err(|e| e.to_string())?;
-    stream.write_all(&head).map_err(|e| e.to_string())?;
+    tcp.write_all(&head).map_err(|e| e.to_string())?;
     // Anything after the request is the WebSocket's.
     let rest = request[size..].to_vec();
-    let stream = Stream::Plain(stream);
+    let stream = Stream::Plain(tcp);
     let socket = WebSocket::from_partially_read(stream, rest, Role::Server, Some(config()));
     let conn = Connection::ws(socket).map_err(|e| e.to_string())?;
     Ok(Request::WebSocket(conn, path))
+}
+
+/// Answer a web request that can't be taken, and say why it wasn't.
+fn refuse(stream: TcpStream, why: String) -> Result<Request, String> {
+    let _ = reply(stream, "400 Bad Request", &why);
+    Err(why)
 }
 
 /// Answer a web request (`Request::Http`) with `status` ("200 OK", say)

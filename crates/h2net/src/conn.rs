@@ -51,7 +51,8 @@ enum Link {
         /// never more than it was last given.
         outbox: VecDeque<Vec<u8>>,
         queued: usize,
-        /// The size of what it was last given, while some may be left.
+        /// The size of what it was last given while some may be left, and
+        /// of its answers to pings since it last wrote out all it had.
         handed: usize,
     },
 }
@@ -86,9 +87,8 @@ impl Connection {
     }
 
     /// A WebSocket, its handshake done (see `dial` and `accept`).
-    pub(crate) fn ws(socket: WebSocket<Stream>) -> io::Result<Connection> {
-        socket.get_ref().tcp().set_nonblocking(true)?;
-        socket.get_ref().tcp().set_nodelay(true)?;
+    pub(crate) fn ws(mut socket: WebSocket<Stream>) -> io::Result<Connection> {
+        socket.get_mut().set_nonblocking()?;
         Ok(Connection::over(Link::Ws {
             socket: Box::new(socket),
             outbox: VecDeque::new(),
@@ -205,7 +205,7 @@ impl Connection {
                     Err(TryRecvError::Disconnected) => break Some("connection closed".into()),
                 }
             },
-            Link::Ws { socket, .. } => read_ws(socket, &mut out),
+            Link::Ws { socket, handed, .. } => read_ws(socket, handed, &mut out),
         };
         if !out.is_empty() {
             self.heard = Instant::now();
@@ -231,7 +231,7 @@ fn write_out(stream: &mut TcpStream, outbox: &mut Vec<u8>) -> Option<String> {
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Some(e.to_string()),
+            Err(e) => return Some(io_gone(e)),
         }
     }
     None
@@ -247,7 +247,7 @@ fn read_in(stream: &mut TcpStream, inbox: &mut Vec<u8>) -> Option<String> {
             Ok(n) => inbox.extend_from_slice(&buf[..n]),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return None,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Some(e.to_string()),
+            Err(e) => return Some(io_gone(e)),
         }
     }
 }
@@ -320,13 +320,26 @@ fn write_ws(
 
 /// Read the messages that have arrived. Why the connection is gone, if it
 /// is.
-fn read_ws(socket: &mut WebSocket<Stream>, out: &mut Vec<Message>) -> Option<String> {
+fn read_ws(
+    socket: &mut WebSocket<Stream>,
+    handed: &mut usize,
+    out: &mut Vec<Message>,
+) -> Option<String> {
     use tungstenite::Message as Ws;
     loop {
         match socket.read() {
             Ok(Ws::Binary(m)) if !m.is_empty() => out.push((m[0], m[1..].to_vec())),
-            // tungstenite answers pings itself.
-            Ok(Ws::Ping(_) | Ws::Pong(_)) => {}
+            // tungstenite answers pings itself, after what it has to write
+            // out: so something that pings and never reads soon has us too
+            // far behind.
+            Ok(Ws::Ping(m)) => {
+                // The answer, and its header.
+                *handed += m.len() + 2;
+                if *handed > MAX_BACKLOG {
+                    return Some("connection too slow".into());
+                }
+            }
+            Ok(Ws::Pong(_)) => {}
             Ok(Ws::Close(_)) => return Some("connection closed".into()),
             Ok(_) => return Some("bad message".into()),
             Err(e) => return ws_gone(e),
@@ -342,12 +355,28 @@ fn ws_gone(e: tungstenite::Error) -> Option<String> {
     use tungstenite::error::{Error, ProtocolError};
     match e {
         Error::Io(e) if matches!(e.kind(), WouldBlock | Interrupted) => None,
+        Error::Io(e) => Some(io_gone(e)),
         Error::ConnectionClosed
         | Error::AlreadyClosed
         | Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
             Some("connection closed".into())
         }
         Error::Capacity(_) => Some("bad message".into()),
+        // More to write out than it may hold.
+        Error::WriteBufferFull(_) => Some("connection too slow".into()),
         e => Some(e.to_string()),
+    }
+}
+
+/// Why a connection is gone, from what went wrong reading or writing it.
+fn io_gone(e: io::Error) -> String {
+    use io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, UnexpectedEof};
+    match e.kind() {
+        // However the other end went: reset, say, or over TLS without
+        // saying goodbye.
+        UnexpectedEof | ConnectionReset | ConnectionAborted | BrokenPipe => {
+            "connection closed".into()
+        }
+        _ => e.to_string(),
     }
 }
