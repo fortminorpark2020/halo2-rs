@@ -169,7 +169,7 @@ again. Start on a new controller during a game drops them straight in.
 LAN: every lobby and game is open to other PCs on the same network (allow
 h2viewer through Windows Firewall when asked); System Link lists them and joins
 the one you pick. Joined PCs wait in the host's lobby, seeing its choices and
-everyone in it, and follow the host into each game it starts (loading the map
+everyone in it (T or X picks your team there), and follow the host into each game it starts (loading the map
 if needed; the game holds its start for them) and back to the lobby after it.
 The host runs the game and its bots (fewer bots when more people join); if the
 host leaves, the joined PCs go back to System Link.

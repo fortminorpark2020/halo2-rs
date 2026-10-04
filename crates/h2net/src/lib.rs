@@ -19,7 +19,9 @@ pub use host::{Host, HostEvent};
 pub use lobby::{Lobby, LobbyPlayer};
 
 /// Bumped whenever the messages change; PCs on different versions can't play.
-pub const PROTOCOL: u32 = 17;
+pub const PROTOCOL: u32 = 18;
+/// A joining player's team when the host is to choose it.
+pub const ANY_TEAM: u8 = u8::MAX;
 /// The host listens here (or the next free port above it).
 pub const GAME_PORT: u16 = 47040;
 /// Hosts announce their games to this port.

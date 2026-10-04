@@ -30,11 +30,14 @@ fn overview((focus, radius): (glam::Vec3, f32), angle: f32) -> crate::camera::Fl
 }
 
 /// Someone playing at this PC: their controller (none for the keyboard)
-/// and the team they picked in the lobby.
+/// and their team in the lobby.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Seat {
     pub pad: Option<GamepadId>,
     pub team: u8,
+    /// They chose the team (in another PC's lobby; otherwise its host
+    /// chooses).
+    pub picked: bool,
 }
 
 /// A controller press, as the menus see it.
@@ -156,7 +159,7 @@ impl App {
                 } else if self.seats.len() < crate::MAX_LOCAL {
                     self.seats.push(Seat {
                         pad: Some(id),
-                        team: 0,
+                        ..Seat::default()
                     });
                 }
                 self.sound.play_ui(&self.scene, menu::Sound::Forward);
@@ -192,14 +195,31 @@ impl App {
 
     /// Put someone at this PC on the other team, in team games.
     pub(crate) fn change_team(&mut self, seat: usize) {
-        // Joined, the host puts us on teams.
-        if !self.menu.settings.game_type().teams() || self.joined() {
+        let teams = match &self.net {
+            Net::Joined { lobby, .. } => lobby.as_ref().is_some_and(|l| l.teams),
+            _ => self.menu.settings.game_type().teams(),
+        };
+        if !teams {
             return;
         }
+        let joined = self.joined();
         if let Some(s) = self.seats.get_mut(seat) {
-            s.team = (s.team + 1) % TEAMS;
+            // Joined, the first press keeps the seat's team, now chosen.
+            if s.picked || !joined {
+                s.team = (s.team + 1) % TEAMS;
+            }
+            s.picked = true;
             self.sound.play_ui(&self.scene, menu::Sound::Cursor);
         }
+    }
+
+    /// The teams the people here would like, for the host: `ANY_TEAM`
+    /// where they didn't pick one.
+    pub(crate) fn wanted_teams(&self) -> Vec<u8> {
+        self.seats
+            .iter()
+            .map(|s| if s.picked { s.team } else { h2net::ANY_TEAM })
+            .collect()
     }
 
     /// How each person at this PC plays, for the lobby.
@@ -529,6 +549,7 @@ impl App {
             let seat = |l: &LocalPlayer| Seat {
                 pad: l.pad,
                 team: self.game.players.get(l.player).map_or(0, |p| p.team),
+                picked: false,
             };
             let mut seats: Vec<Seat> = Vec::new();
             for l in self.locals.iter().filter(|l| l.keyboard) {
@@ -541,6 +562,9 @@ impl App {
                 seats.push(seat(l));
             }
             if !seats.is_empty() {
+                for (new, old) in seats.iter_mut().zip(&self.seats) {
+                    new.picked = old.picked;
+                }
                 self.seats = seats;
             }
         }

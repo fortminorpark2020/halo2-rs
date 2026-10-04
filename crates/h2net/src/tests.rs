@@ -50,8 +50,14 @@ fn a_joined_pc_plays_in_the_hosts_game() {
             colors: [17, 0, 9],
         },
     };
-    let mut client =
-        Client::connect(address(&host), &cg, "testmap", 1, ("Noble Six", look)).unwrap();
+    let mut client = Client::connect(
+        address(&host),
+        &cg,
+        "testmap",
+        &[ANY_TEAM],
+        ("Noble Six", look),
+    )
+    .unwrap();
 
     let mut mine = None;
     pump(&mut host, &mut hg, &mut client, &mut cg, |he, ce, cg| {
@@ -130,7 +136,7 @@ fn taps_between_ticks_are_not_lost() {
     hg.add_player();
     let mut host = Host::new("testmap", 2).unwrap();
     let mut cg = game();
-    let mut client = Client::connect(address(&host), &cg, "testmap", 1, me()).unwrap();
+    let mut client = Client::connect(address(&host), &cg, "testmap", &[ANY_TEAM], me()).unwrap();
     let mut mine = None;
     pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
         if let Some(ClientEvent::Welcomed { players, .. }) = ce.first() {
@@ -160,7 +166,7 @@ fn a_pc_on_another_map_is_turned_away() {
     hg.add_player();
     let mut host = Host::new("lockout", 3).unwrap();
     let mut cg = game();
-    let mut client = Client::connect(address(&host), &cg, "midship", 1, me()).unwrap();
+    let mut client = Client::connect(address(&host), &cg, "midship", &[ANY_TEAM], me()).unwrap();
     let mut refused = None;
     pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
         if let Some(ClientEvent::Refused(why)) = ce.first() {
@@ -215,7 +221,7 @@ fn joined_pcs_wait_in_the_lobby_between_games() {
     host.set_lobby(lobby.clone());
     // Any map will do for the lobby.
     let mut cg = game();
-    let mut client = Client::connect(address(&host), &cg, "midship", 2, me()).unwrap();
+    let mut client = Client::connect(address(&host), &cg, "midship", &[ANY_TEAM, 1], me()).unwrap();
     let mut arrived = false;
     let mut seen = None;
     pump(&mut host, &mut hg, &mut client, &mut cg, |he, ce, _| {
@@ -231,7 +237,7 @@ fn joined_pcs_wait_in_the_lobby_between_games() {
     assert_eq!(seen.as_ref(), Some(&lobby));
     assert_eq!(
         host.members(),
-        vec![("TESTER".to_string(), Look::default(), 2)]
+        vec![("TESTER".to_string(), Look::default(), vec![ANY_TEAM, 1])]
     );
     assert_eq!(hg.players.len(), 1);
 
@@ -247,7 +253,9 @@ fn joined_pcs_wait_in_the_lobby_between_games() {
     });
     assert_eq!(seen, Some(fewer.clone()));
 
-    // The host starts a game: they load the map and join it.
+    // The host starts a team game: they load the map and join it, on the
+    // teams they picked.
+    hg.rules.game_type = h2sim::GameType::TeamSlayer;
     host.start("lockout");
     let mut started = None;
     pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
@@ -257,7 +265,7 @@ fn joined_pcs_wait_in_the_lobby_between_games() {
         started.is_some()
     });
     assert_eq!(started.as_deref(), Some("lockout"));
-    client.rejoin(&cg, "lockout", 2);
+    client.rejoin(&cg, "lockout", &[1, 1]);
     let mut mine = Vec::new();
     pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, cg| {
         if let Some(ClientEvent::Welcomed { players, .. }) = ce.first() {
@@ -266,6 +274,7 @@ fn joined_pcs_wait_in_the_lobby_between_games() {
         !mine.is_empty() && cg.players.len() == 3
     });
     assert_eq!(mine.len(), 2);
+    assert!(mine.iter().all(|&p| hg.players[p].team == 1));
     assert!(client.in_game);
     assert!(host.is_remote(mine[0]));
 

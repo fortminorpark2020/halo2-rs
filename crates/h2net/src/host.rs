@@ -5,7 +5,7 @@
 
 use crate::conn::Connection;
 use crate::discovery::Beacon;
-use crate::{kind, Lobby, MAGIC, PROTOCOL};
+use crate::{kind, Lobby, ANY_TEAM, MAGIC, PROTOCOL};
 use h2sim::game::{guest_name, Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
 use std::net::{SocketAddr, TcpListener};
@@ -41,11 +41,11 @@ struct Remote {
     conn: Connection,
     address: SocketAddr,
     computer: String,
-    /// The gamertag of the person at that PC, how they look, and how many
-    /// play there.
+    /// The gamertag of the person at that PC, how they look, and the team
+    /// each player there would like.
     name: String,
     look: Look,
-    locals: usize,
+    teams: Vec<u8>,
     since: Instant,
     /// Said hello and was let in (to the lobby or the game).
     welcomed: bool,
@@ -88,7 +88,7 @@ struct Hello {
     computer: String,
     name: String,
     look: Look,
-    locals: usize,
+    teams: Vec<u8>,
 }
 
 impl Hello {
@@ -109,14 +109,21 @@ fn read_hello(r: &mut Reader) -> Result<Hello, String> {
     if r.u32().map_err(bad)? != PROTOCOL {
         return Err("DIFFERENT GAME VERSION, UPDATE BOTH PCS".into());
     }
+    let map = r.str().map_err(bad)?;
+    let weapons = r.u16().map_err(bad)? as usize;
+    let items = r.u16().map_err(bad)? as usize;
+    let locals = (r.u8().map_err(bad)? as usize).clamp(1, 4);
     Ok(Hello {
-        map: r.str().map_err(bad)?,
-        weapons: r.u16().map_err(bad)? as usize,
-        items: r.u16().map_err(bad)? as usize,
-        locals: (r.u8().map_err(bad)? as usize).max(1),
+        map,
+        weapons,
+        items,
         computer: r.str().map_err(bad)?,
         name: r.str().map_err(bad)?,
         look: Look::read(r).map_err(bad)?,
+        teams: (0..locals)
+            .map(|_| r.u8())
+            .collect::<Result<_, _>>()
+            .map_err(bad)?,
     })
 }
 
@@ -155,13 +162,13 @@ impl Host {
         self.remotes.iter().filter(|r| r.welcomed).count()
     }
 
-    /// The PCs that joined: the gamertag there, its look, and how many
-    /// play there.
-    pub fn members(&self) -> Vec<(String, Look, usize)> {
+    /// The PCs that joined: the gamertag there, its look, and the team
+    /// each player there would like (`ANY_TEAM`: any).
+    pub fn members(&self) -> Vec<(String, Look, Vec<u8>)> {
         self.remotes
             .iter()
             .filter(|r| r.welcomed)
-            .map(|r| (r.name.clone(), r.look, r.locals))
+            .map(|r| (r.name.clone(), r.look, r.teams.clone()))
             .collect()
     }
 
@@ -228,7 +235,7 @@ impl Host {
                     computer: address.ip().to_string(),
                     name: String::new(),
                     look: Look::default(),
-                    locals: 1,
+                    teams: Vec::new(),
                     since: Instant::now(),
                     welcomed: false,
                     in_game: false,
@@ -305,14 +312,14 @@ impl Host {
                         computer,
                         name,
                         look,
-                        locals,
+                        teams,
                         ..
                     } = hello;
                     let arriving = !r.welcomed;
                     r.computer = computer.clone();
                     r.name = name.clone();
                     r.look = look;
-                    r.locals = locals;
+                    r.teams = teams.clone();
                     r.welcomed = true;
                     if let Some(lobby) = &self.lobby {
                         // Wait in the lobby for the next game.
@@ -325,14 +332,20 @@ impl Host {
                         }
                         continue;
                     }
-                    if game.players.len() + locals > max_players {
+                    if game.players.len() + teams.len() > max_players {
                         let mut w = Writer::default();
                         w.str("THE GAME IS FULL");
                         r.conn.send(kind::REFUSED, &w.0);
                         let _ = r.conn.flush();
                         return Err("game full".into());
                     }
-                    let players: Vec<usize> = (0..locals).map(|_| game.add_player()).collect();
+                    let players: Vec<usize> = teams
+                        .iter()
+                        .map(|&t| match t {
+                            ANY_TEAM => game.add_player(),
+                            t => game.add_player_on(t),
+                        })
+                        .collect();
                     for (k, &p) in players.iter().enumerate() {
                         game.set_name(p, &guest_name(&name, k));
                         game.set_look(p, look.guest(k));

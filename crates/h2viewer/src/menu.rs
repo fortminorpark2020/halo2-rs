@@ -214,7 +214,7 @@ pub struct SeatInfo {
 }
 
 /// A player in the lobby whose team the game will choose.
-pub const NO_TEAM: u8 = u8::MAX;
+pub const NO_TEAM: u8 = h2net::ANY_TEAM;
 
 /// What the game should do after a menu input.
 #[derive(Clone, Debug, PartialEq)]
@@ -1215,9 +1215,7 @@ impl Menu {
         };
         let lines = ctx.seats.len() + (bots > 0) as usize;
         let invite = ctx.local < crate::MAX_LOCAL;
-        // Joined PCs' teams are the host's to choose.
-        let pick_teams = teams && !ctx.joined;
-        let hints = invite as usize * 2 + pick_teams as usize;
+        let hints = invite as usize * 2 + teams as usize;
         let height = 34.0 + 16.0 * lines as f32 + 6.0 + 11.0 * hints as f32;
         hb.quad(
             white,
@@ -1251,7 +1249,7 @@ impl Menu {
             y += 16.0;
         }
         y += 6.0;
-        if pick_teams {
+        if teams {
             hb.text_left(font, f.at(x, y), 7.0 * s, "T OR X: CHANGE TEAM", DIM);
             y += 11.0;
         }

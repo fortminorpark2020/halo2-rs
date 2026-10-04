@@ -2,7 +2,7 @@
 //! host sends back.
 
 use crate::conn::Connection;
-use crate::{kind, Lobby, MAGIC, PROTOCOL};
+use crate::{kind, Lobby, ANY_TEAM, MAGIC, PROTOCOL};
 use h2sim::game::{Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
 use std::net::{SocketAddr, TcpStream};
@@ -45,34 +45,40 @@ pub struct Client {
     gone: bool,
 }
 
-/// What we say to the host to join its game, or its lobby.
-fn hello(game: &Game, map: &str, locals: usize, (name, look): (&str, Look)) -> Writer {
+/// What we say to the host to join its game, or its lobby: the map we have
+/// loaded, and who plays here (with the team each would like).
+fn hello(game: &Game, map: &str, teams: &[u8], (name, look): (&str, Look)) -> Writer {
+    let locals = teams.len().clamp(1, 4);
     let mut w = Writer::default();
     w.u32(MAGIC);
     w.u32(PROTOCOL);
     w.str(map);
     w.u16(game.weapons.len() as u16);
     w.u16(game.item_spawns.len() as u16);
-    w.u8(locals.clamp(1, 4) as u8);
+    w.u8(locals as u8);
     w.str(&crate::computer_name());
     w.str(name);
     look.write(&mut w);
+    for k in 0..locals {
+        w.u8(teams.get(k).copied().unwrap_or(ANY_TEAM));
+    }
     w
 }
 
 impl Client {
-    /// Connect to a host and ask to play with `locals` players, going by
+    /// Connect to a host and ask to play with a player for each of `teams`
+    /// (`ANY_TEAM` lets the host choose), going by
     /// `name` and `look`. `game` must be the same map the host is on.
     pub fn connect(
         address: SocketAddr,
         game: &Game,
         map: &str,
-        locals: usize,
+        teams: &[u8],
         me: (&str, Look),
     ) -> std::io::Result<Client> {
         let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)?;
         let mut conn = Connection::new(stream)?;
-        conn.send(kind::HELLO, &hello(game, map, locals, me).0);
+        conn.send(kind::HELLO, &hello(game, map, teams, me).0);
         conn.flush().map_err(std::io::Error::other)?;
         Ok(Client {
             conn,
@@ -86,10 +92,10 @@ impl Client {
     }
 
     /// Join the game the host started (`ClientEvent::Start`), once `game`
-    /// is its map.
-    pub fn rejoin(&mut self, game: &Game, map: &str, locals: usize) {
+    /// is its map. In the lobby, tells the host who plays here now.
+    pub fn rejoin(&mut self, game: &Game, map: &str, teams: &[u8]) {
         let me = (self.me.0.as_str(), self.me.1);
-        let w = hello(game, map, locals, me);
+        let w = hello(game, map, teams, me);
         self.conn.send(kind::HELLO, &w.0);
         self.flush();
     }

@@ -5,7 +5,7 @@
 
 use crate::flow::bot_for;
 use crate::local::{Keyboard, LocalPlayer};
-use crate::menu::{self, Screen, SeatInfo, NO_TEAM};
+use crate::menu::{self, Screen, SeatInfo};
 use crate::options::GameOptions;
 use crate::{scene, App, Mode, Then};
 use gilrs::GamepadId;
@@ -32,8 +32,9 @@ pub enum Net {
         waiting_pads: Vec<Option<GamepadId>>,
         /// The host's lobby, while waiting there for its next game.
         lobby: Option<Lobby>,
-        /// How many play here, as last told to the host.
-        locals_sent: usize,
+        /// Who plays here and the teams they'd like, as last told to the
+        /// host.
+        teams_sent: Vec<u8>,
     },
 }
 
@@ -69,19 +70,19 @@ impl App {
             if !self.client_status(status) || self.loading.is_some() {
                 return;
             }
-            // Splitscreen players coming and going here show in the host's
-            // lobby.
-            let here = self.seats.len();
+            // Splitscreen players coming and going here, and their teams,
+            // show in the host's lobby.
+            let wanted = self.wanted_teams();
             if let Net::Joined {
                 client,
                 lobby: Some(_),
-                locals_sent,
+                teams_sent,
                 ..
             } = &mut self.net
             {
-                if *locals_sent != here {
-                    *locals_sent = here;
-                    client.rejoin(&self.game, &self.map_name, here);
+                if *teams_sent != wanted {
+                    client.rejoin(&self.game, &self.map_name, &wanted);
+                    *teams_sent = wanted;
                 }
             }
             return;
@@ -116,13 +117,13 @@ impl App {
             return Vec::new();
         };
         let mut seats = Vec::new();
-        for (name, look, locals) in host.members() {
-            for k in 0..locals {
+        for (name, look, teams) in host.members() {
+            for (k, team) in teams.into_iter().enumerate() {
                 seats.push(SeatInfo {
                     name: guest_name(&name, k),
                     look: look.guest(k),
                     how: "SYSTEM LINK",
-                    team: NO_TEAM,
+                    team,
                 });
             }
         }
@@ -183,7 +184,7 @@ impl App {
     /// Hosting: how many play on PCs that joined the lobby.
     pub(crate) fn lan_players(&self) -> usize {
         match &self.net {
-            Net::Hosting(host) => host.members().iter().map(|m| m.2).sum(),
+            Net::Hosting(host) => host.members().iter().map(|m| m.2.len()).sum(),
             _ => 0,
         }
     }
@@ -389,15 +390,14 @@ impl App {
         }
         // The host's options arrive with its game.
         self.seat_players(0, &GameOptions::default());
-        let here = self.locals.len();
+        let mut wanted = self.wanted_teams();
+        wanted.truncate(self.locals.len());
         if let Net::Joined {
-            client,
-            locals_sent,
-            ..
+            client, teams_sent, ..
         } = &mut self.net
         {
-            client.rejoin(&self.game, &self.map_name, here);
-            *locals_sent = here;
+            client.rejoin(&self.game, &self.map_name, &wanted);
+            *teams_sent = wanted;
         }
     }
 
@@ -480,13 +480,9 @@ impl App {
         // Stop hosting first so no one joins us meanwhile.
         self.net = Net::Offline;
         let me = (self.menu.profile.name.as_str(), self.menu.profile.look);
-        match Client::connect(
-            game.address,
-            &self.game,
-            &self.map_name,
-            self.locals.len(),
-            me,
-        ) {
+        let mut wanted = self.wanted_teams();
+        wanted.truncate(self.locals.len());
+        match Client::connect(game.address, &self.game, &self.map_name, &wanted, me) {
             Ok(client) => {
                 self.announce(&format!("JOINING {}", game.computer.to_uppercase()));
                 self.net = Net::Joined {
@@ -495,7 +491,7 @@ impl App {
                     seated: false,
                     waiting_pads: Vec::new(),
                     lobby: None,
-                    locals_sent: self.locals.len(),
+                    teams_sent: wanted,
                 };
             }
             Err(e) => {
