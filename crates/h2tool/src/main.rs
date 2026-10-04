@@ -38,6 +38,7 @@ fn main() -> ExitCode {
         Some("check") if args.len() >= 2 => check(&args[1]),
         Some("scan") if args.len() >= 2 => scan(&args[1]),
         Some("sim") if args.len() >= 2 => sim(&args[1]),
+        Some("walk") if args.len() >= 8 => walk(&args[1], &args[2..8]),
         Some("level") if args.len() >= 2 => level(&args[1], args.get(2).map(String::as_str)),
         Some("obj") if args.len() >= 3 => obj(&args[1], &args[2]),
         Some("render") if args.len() >= 3 => render_png(&args[1], &args[2]),
@@ -556,9 +557,13 @@ fn model(path: &str, name: &str, png: Option<&str>) -> Res {
     } else {
         model::object_render_model(&mut set, tag.datum)?
     };
-    let variant = (tag.group != GroupTag::parse("mode").unwrap())
-        .then(|| model::object_variant(&mut set, tag.datum).ok().flatten())
-        .flatten();
+    // H2_VARIANT=<name>: that model variant instead of the default.
+    let called = std::env::var("H2_VARIANT").unwrap_or_else(|_| "default".into());
+    let variant = if tag.group == GroupTag::parse("mode").unwrap() {
+        None
+    } else {
+        model::named_variant(&mut set, tag.datum, &called)?
+    };
     if let Some(v) = &variant {
         println!("variant {}: {:?}", v.name, v.regions);
         if let Ok(c) = model::object_change_colors(&mut set, tag.datum, &v.name) {
@@ -690,6 +695,33 @@ fn level(path: &str, dump: Option<&str>) -> Res {
             };
             println!("  {i:2} {name}\n     -> {tex}");
         }
+    }
+    Ok(())
+}
+
+/// What lies between two points: per structure BSP, the first wall a
+/// straight line from one to the other hits (a person's middle height).
+fn walk(path: &str, at: &[String]) -> Res {
+    use glam::Vec3;
+    use h2sim::World;
+    let n: Vec<f32> = at.iter().filter_map(|x| x.parse().ok()).collect();
+    let [ax, ay, az, bx, by, bz] = n[..] else {
+        return Err("six numbers".into());
+    };
+    let (a, b) = (Vec3::new(ax, ay, az), Vec3::new(bx, by, bz));
+    let mut map = CacheFile::open(path)?;
+    for (k, bsp) in map.structure_bsps()?.iter().enumerate() {
+        let mesh = map.bsp_collision_mesh(bsp)?;
+        let world = World::new(&mesh.positions, &mesh.indices);
+        let from = a + Vec3::Z * 0.6;
+        let to = b + Vec3::Z * 0.6;
+        let hit = world.raycast_hit(from, (to - from).normalize(), from.distance(to));
+        let floor = world.raycast(b + Vec3::Z * 1.0, -Vec3::Z, 3.0);
+        println!(
+            "bsp {k}: wall {:?}, floor under the end {floor:?}, walkable {}",
+            hit.map(|(t, _)| from + (to - from).normalize() * t),
+            h2sim::nav::walkable(&world, a, b)
+        );
     }
     Ok(())
 }
@@ -946,8 +978,8 @@ fn squads(path: &str) -> Res {
                     .map(|w| name(&set, w))
                     .unwrap_or_default();
                 println!(
-                    "character {i} {} ({:?}) unit {unit} weapon {weapon} voices {:?}",
-                    ch.name, ch.kind, ch.voices
+                    "character {i} {} ({:?}, {:?}) unit {unit} weapon {weapon} voices {:?}",
+                    ch.name, ch.kind, ch.team, ch.voices
                 );
                 println!("    {:?}", ch.vitality);
                 println!("    {:?}", ch.perception);
@@ -1132,8 +1164,8 @@ fn netgame(path: &str) -> Res {
     for s in set.map.player_spawns()? {
         let [x, y, z] = s.position;
         println!(
-            "spawn team {} game types {:?} at ({x:.2}, {y:.2}, {z:.2})",
-            s.team, s.game_types
+            "spawn team {} game types {:?} player {} at ({x:.2}, {y:.2}, {z:.2})",
+            s.team, s.game_types, s.campaign_player
         );
     }
     Ok(())

@@ -847,6 +847,9 @@ pub struct Game {
     /// Needles stuck in people.
     pub stuck: Vec<StuckRound>,
     pub players: Vec<Spartan>,
+    /// Teams that side with each other though they differ (a mission's
+    /// Sentinels with the heretics...), as pairs.
+    pub allegiances: Vec<(u8, u8)>,
     /// Capture the Flag: each team's flag.
     pub flags: Vec<Flag>,
     /// Where each team brings the enemy flag to score.
@@ -937,6 +940,7 @@ impl Game {
             grenades: Vec::new(),
             projectiles: Vec::new(),
             stuck: Vec::new(),
+            allegiances: Vec::new(),
             players: Vec::new(),
             flags: Vec::new(),
             flag_bases: Vec::new(),
@@ -1025,7 +1029,14 @@ impl Game {
 
     /// Players `a` and `b` are on opposite sides.
     pub fn is_enemy(&self, a: usize, b: usize) -> bool {
-        a != b && (!self.rules.game_type.teams() || self.players[a].team != self.players[b].team)
+        let (ta, tb) = (self.players[a].team, self.players[b].team);
+        a != b
+            && (!self.rules.game_type.teams()
+                || ta != tb
+                    && !self
+                        .allegiances
+                        .iter()
+                        .any(|&p| p == (ta, tb) || p == (tb, ta)))
     }
 
     pub fn team_score(&self, team: u8) -> i32 {
@@ -1225,7 +1236,7 @@ impl Game {
         }
         // Fell out of the level or into a pit; landed hard.
         let feet = self.players[i].body.position;
-        if feet.z < world.min.z - 1.0 || self.kill_zones.iter().any(|z| z.contains(feet)) {
+        if feet.z < world.min.z - 1.0 || self.kill_zones.iter().any(|z| z.kills(feet)) {
             self.kill(i, None, false);
             return;
         }

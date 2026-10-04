@@ -13,6 +13,8 @@ const SCNR_BSP_SWITCHES: usize = 0x130;
 const BSP_SWITCH_SIZE: usize = 0xE;
 const SCNR_DEVICE_GROUPS: usize = 0xA0;
 const SCNR_CUTSCENE_FLAGS: usize = 0x1E0;
+const SCNR_CAMERA_POINTS: usize = 0x1E8;
+const CAMERA_POINT_SIZE: usize = 0x40;
 const CUTSCENE_FLAG_SIZE: usize = 0x38;
 const SCNR_CUTSCENE_TITLES: usize = 0x1F0;
 const CUTSCENE_TITLE_SIZE: usize = 0x24;
@@ -396,6 +398,8 @@ pub fn kill_volumes(set: &mut MapSet) -> Result<Vec<KillVolume>> {
 pub struct TriggerVolume {
     pub name: String,
     pub volume: KillVolume,
+    /// It's one of the scenario's kill volumes.
+    pub kills: bool,
 }
 
 /// Every trigger volume, in block order (scripts know them by index).
@@ -417,6 +421,7 @@ pub fn trigger_volumes(set: &mut MapSet) -> Result<Vec<TriggerVolume>> {
                 position: v3(e, 0x24),
                 extents: v3(e, 0x30),
             },
+            kills: i16_at(e, 0x40) >= 0,
         })
         .collect())
 }
@@ -517,6 +522,33 @@ pub struct CutsceneFlag {
     pub name: String,
     pub position: [f32; 3],
     pub facing: [f32; 2],
+}
+
+/// A place a cutscene's camera can be put: where, and which way it looks
+/// (yaw, pitch, roll, radians).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CameraPoint {
+    pub name: String,
+    pub position: [f32; 3],
+    pub orientation: [f32; 3],
+}
+
+pub fn camera_points(set: &mut MapSet) -> Result<Vec<CameraPoint>> {
+    let data = scenario_data(set)?;
+    let map = &mut set.map;
+    let meta = map.meta_region();
+    let points = map.read_block(meta, &data, SCNR_CAMERA_POINTS, CAMERA_POINT_SIZE)?;
+    let v3 = |e: &[u8], at: usize| [f32_at(e, at), f32_at(e, at + 4), f32_at(e, at + 8)];
+    Ok(points
+        .as_chunks::<CAMERA_POINT_SIZE>()
+        .0
+        .iter()
+        .map(|p| CameraPoint {
+            name: ascii(&p[4..0x24]),
+            position: v3(p, 0x28),
+            orientation: v3(p, 0x34),
+        })
+        .collect())
 }
 
 pub fn cutscene_flags(set: &mut MapSet) -> Result<Vec<CutsceneFlag>> {

@@ -6,7 +6,7 @@
 use super::{Arms2, Body, Loader, MeshData, WeaponAssets};
 use crate::rig::{Skeleton, SkinnedMesh};
 use crate::scene::placement_matrix;
-use blam_cache::ai::{self, Character, CharacterKind, Squad};
+use blam_cache::ai::{self, AiTeam, Character, CharacterKind, Squad};
 use blam_cache::animation::{self, AnimationGraph};
 use blam_cache::orders;
 use blam_cache::physics::{self, BipedPhysics};
@@ -76,6 +76,10 @@ pub struct CampaignAi {
     pub sounds: HashMap<u32, usize>,
     /// The music and loops scripts start, by tag.
     pub loops: HashMap<u32, ScriptLoop>,
+    /// The kill zone (in the game's) each trigger volume is, if it's one.
+    pub kill_zone_of: Vec<Option<usize>>,
+    /// Where cutscene cameras can be put: position and the way they look.
+    pub camera_points: Vec<(Vec3, Vec3)>,
     /// Effects (and damage) scripts set off, by tag.
     pub effects: HashMap<u32, ScriptEffect>,
     /// The mission dialogue lines scripts have actors say, by the string
@@ -223,8 +227,20 @@ pub struct ScriptLoop {
     pub once: bool,
 }
 
+/// Which side a character fights on: its biped's team, else its kind's.
+fn side(team: AiTeam, kind: CharacterKind) -> Side {
+    match team {
+        AiTeam::Player | AiTeam::Human => Side::Human,
+        AiTeam::Covenant | AiTeam::Prophet => Side::Covenant,
+        AiTeam::Flood => Side::Flood,
+        AiTeam::Sentinel => Side::Sentinel,
+        AiTeam::Heretic => Side::Heretic,
+        AiTeam::Default | AiTeam::Other(_) => kind_side(kind),
+    }
+}
+
 /// Which side a kind of character fights on.
-fn side(kind: CharacterKind) -> Side {
+fn kind_side(kind: CharacterKind) -> Side {
     use CharacterKind::*;
     match kind {
         Marine | Player | Crew => Side::Human,
@@ -311,7 +327,7 @@ fn character_def(
     };
     let def = CharacterDef {
         name: c.name.rsplit('\\').next().unwrap_or(&c.name).to_uppercase(),
-        side: side(c.kind),
+        side: side(c.team, c.kind),
         biped,
         vitality: vitality(v.body, v.shield, v.shield_recharge_time),
         legendary: vitality(
@@ -395,8 +411,32 @@ impl Loader {
             .filter(|e| e.kind == script::NodeKind::Value)
             .filter_map(|e| Some((e.value, *triggers.get(out.scripts.text(e.text))?)))
             .collect();
-        out.volumes = scenario::trigger_volumes(set)
+        let volumes = scenario::trigger_volumes(set).unwrap_or_default();
+        // Kill volumes go into the game's kill zones in this order.
+        let mut zones = 0;
+        out.kill_zone_of = volumes
+            .iter()
+            .map(|t| {
+                t.kills.then(|| {
+                    zones += 1;
+                    zones - 1
+                })
+            })
+            .collect();
+        out.camera_points = scenario::camera_points(set)
             .unwrap_or_default()
+            .iter()
+            .map(|c| {
+                let [yaw, pitch, _] = c.orientation;
+                let forward = Vec3::new(
+                    yaw.cos() * pitch.cos(),
+                    yaw.sin() * pitch.cos(),
+                    pitch.sin(),
+                );
+                (Vec3::from(c.position), forward)
+            })
+            .collect();
+        out.volumes = volumes
             .iter()
             .map(|t| {
                 let v = &t.volume;

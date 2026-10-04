@@ -343,14 +343,16 @@ impl App {
     /// the Covenant (not open to the network).
     pub(crate) fn start_campaign(&mut self) {
         self.net = Net::Offline;
+        // The Master Chief in his own olive armour, whatever the profile,
+        // or the Arbiter, on the Covenant's side, in his missions.
+        let arbiter = campaign::arbiter(&self.scene);
         for seat in &mut self.seats {
-            seat.team = 0;
+            seat.team = campaign::players_team(&self.scene);
         }
         self.seat_players(0, &GameOptions::default());
-        // The Master Chief in his own olive armour, whatever the profile.
         for l in &self.locals {
             let mut look = self.game.players[l.player].look;
-            look.elite = false;
+            look.elite = arbiter;
             look.colors = [CHIEF_OLIVE; 2];
             self.game.set_look(l.player, look);
         }
@@ -371,9 +373,13 @@ impl App {
     /// Bring a mission's squads into play.
     pub(crate) fn place_squads(&mut self, squads: &[usize]) {
         let difficulty = self.menu.difficulty as u8;
+        let team = self
+            .locals
+            .first()
+            .map_or(0, |l| self.game.players[l.player].team);
         for &s in squads {
             let placed =
-                campaign::place_squad(&mut self.game, &self.scene, s, difficulty, 0, None, None);
+                campaign::place_squad(&mut self.game, &self.scene, s, difficulty, team, None, None);
             self.bots
                 .retain(|(i, _)| !placed.iter().any(|(j, _)| j == i));
             self.bots
@@ -732,15 +738,25 @@ impl App {
 
     /// Hold up the carnage report a little after someone wins.
     pub(crate) fn check_game_over(&mut self, dt: f32) {
-        // A mission won: say so, then back to the missions.
+        // A mission won: on to the next one, as in the story; after the
+        // last one here, say so and go back to the missions.
         if self.mission.as_ref().is_some_and(|m| m.won()) {
-            if self.game_over.is_none() {
+            let next = self
+                .missions
+                .iter()
+                .position(|m| m.path == self.map_path)
+                .map(|i| i + 1)
+                .filter(|&i| i < self.missions.len());
+            if self.game_over.is_none() && next.is_none() {
                 self.announce("MISSION COMPLETE");
             }
             let t = self.game_over.get_or_insert(0.0);
             *t += dt;
-            if *t >= crate::GAME_OVER_DELAY {
-                self.back_to_lobby();
+            if *t >= crate::GAME_OVER_DELAY && self.loading.is_none() {
+                match next {
+                    Some(i) => self.start_mission(i),
+                    None => self.back_to_lobby(),
+                }
             }
             return;
         }

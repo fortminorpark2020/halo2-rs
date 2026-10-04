@@ -433,7 +433,7 @@ impl Game {
             }
             flag.reset_in -= dt;
             let lost = flag.position.z < world.min.z - 1.0
-                || self.kill_zones.iter().any(|z| z.contains(flag.position));
+                || self.kill_zones.iter().any(|z| z.kills(flag.position));
             if flag.reset_in <= 0.0 || lost {
                 self.return_flag(f, None);
             }

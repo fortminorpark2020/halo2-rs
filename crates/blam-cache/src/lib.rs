@@ -235,6 +235,9 @@ pub struct PlayerSpawn {
     pub bsp: u16,
     /// Game types the spawn is for (0 none, 1 CTF, 2 Slayer ... 12 all).
     pub game_types: [u16; 4],
+    /// Who a campaign player starts as: 0 the Master Chief, 1 the Arbiter
+    /// (2 and 3 the multiplayer Spartan and Elite).
+    pub campaign_player: u16,
 }
 
 pub struct CacheFile<R> {
@@ -505,6 +508,7 @@ impl<R: Read + Seek> CacheFile<R> {
                 team: i16_at(e, 0x10) as u16,
                 bsp: i16_at(e, 0x12) as u16,
                 game_types: [0x14, 0x16, 0x18, 0x1A].map(|o| i16_at(e, o) as u16),
+                campaign_player: i16_at(e, 0x2C) as u16,
             })
             .collect())
     }

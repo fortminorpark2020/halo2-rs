@@ -704,8 +704,10 @@ impl Vm {
                         self.set_wake(other, at);
                         Step::Return(Value::Void)
                     } else {
+                        // A sleep worked out short of nothing (a line minus
+                        // a lead-in) doesn't sleep.
                         f.pc += 1;
-                        Step::Sleep(if ticks < 0.0 { NEVER } else { ticks as u32 })
+                        Step::Sleep(ticks.max(0.0) as u32)
                     }
                 } else {
                     Step::Return(Value::Void)

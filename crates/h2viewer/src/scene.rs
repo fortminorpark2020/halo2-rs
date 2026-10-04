@@ -535,6 +535,15 @@ pub struct Door {
     pub powered: bool,
     /// Seconds to open or shut.
     pub time: f32,
+    /// How near someone has to be for it to open by itself (0: the
+    /// usual reach).
+    pub reach: f32,
+    /// The way it faces; a one-sided door opens only for those behind it
+    /// (an airlock's outer door lets you in, then shuts behind you).
+    pub forward: Vec3,
+    /// One-sided from the start: for everyone, or just for players.
+    pub one_sided: bool,
+    pub one_sided_for_players: bool,
     /// Its shape in the world, to block the way while shut.
     pub triangles: Vec<[Vec3; 3]>,
 }
@@ -575,6 +584,9 @@ const SPARTAN: &str = "objects\\characters\\masterchief\\masterchief_mp";
 const ELITE: &str = "objects\\characters\\elite\\elite_mp";
 const SPARTAN_ARMS: &str = "objects\\characters\\masterchief\\fp\\fp";
 const ELITE_ARMS: &str = "objects\\characters\\elite\\fp_arms\\fp_arms";
+/// The Arbiter, in the missions he plays.
+const DERVISH: &str = "objects\\characters\\dervish\\dervish";
+const DERVISH_ARMS: &str = "objects\\characters\\dervish\\fp\\fp";
 
 /// The Spartan's and the Elite's first person arms skeletons.
 type Arms2<'a> = [Option<&'a Skeleton>; 2];
@@ -620,6 +632,8 @@ pub struct Scene {
     pub spawns: Vec<PlayerSpawn>,
     /// Collision geometry, used for walking, shooting and framing.
     pub collision: Mesh,
+    /// The structure BSP each of the collision mesh's triangles is in.
+    pub collision_bsp: Vec<u16>,
     /// The level's own map of where the AI can walk (campaign levels).
     pub nav_mesh: NavMesh,
     pub movement: PlayerMovement,
@@ -1498,6 +1512,10 @@ impl Loader {
             } else {
                 1.0
             },
+            reach: machine.activation_radius.max(0.0),
+            forward: transform.x_axis.truncate().normalize_or_zero(),
+            one_sided: p.machine_flags & (1 << 1) != 0,
+            one_sided_for_players: p.machine_flags & (1 << 4) != 0,
             triangles,
         })
     }
@@ -1660,9 +1678,11 @@ impl Scene {
         }
         let bsps = set.map.structure_bsps()?;
         let mut collision = Mesh::default();
+        let mut collision_bsp = Vec::new();
         let mut nav_mesh = NavMesh::default();
         for (b, bsp) in bsps.iter().enumerate() {
             collision.append(&set.map.bsp_collision_mesh(bsp)?);
+            collision_bsp.resize(collision.indices.len() / 3, b as u16);
             if let Ok(p) = set.map.bsp_pathfinding(bsp) {
                 nav_mesh.add(b as u16, &p);
             }
@@ -1727,12 +1747,22 @@ impl Scene {
         let mut meshes = vec![level];
         let sky = loader.sky(&mut meshes);
         let arms = loader.arms(SPARTAN_ARMS, &mut meshes);
-        let elite_arms = loader.arms(ELITE_ARMS, &mut meshes);
+        let elite_arms = loader
+            .arms(ELITE_ARMS, &mut meshes)
+            .or_else(|| loader.arms(DERVISH_ARMS, &mut meshes));
         let campaign = loader.set.map.header.map_type == blam_cache::MapType::Campaign;
         let body = loader
             .body(SPARTAN, ["right_hand", "left_hand"], &mut meshes)
             .or_else(|| loader.body(CAMPAIGN_SPARTAN, ["right_hand", "left_hand"], &mut meshes));
-        let elite = loader.body(ELITE, ["right_hand_elite", "left_hand_elite"], &mut meshes);
+        let elite = loader
+            .body(ELITE, ["right_hand_elite", "left_hand_elite"], &mut meshes)
+            .or_else(|| {
+                loader.body(
+                    DERVISH,
+                    ["right_hand_elite", "left_hand_elite"],
+                    &mut meshes,
+                )
+            });
         let skeletons = [&arms, &elite_arms].map(|a| a.as_ref().map(|a| &a.skeleton));
         let weapons = WEAPONS
             .iter()
@@ -2060,6 +2090,7 @@ impl Scene {
             hud_textures: loader.hud_textures,
             spawns,
             collision,
+            collision_bsp,
             nav_mesh,
             movement,
             biped,

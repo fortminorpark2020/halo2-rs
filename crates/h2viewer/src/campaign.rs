@@ -8,7 +8,7 @@ use blam_cache::scenario::ControlKind;
 use blam_cache::script::value_type;
 use glam::{Mat4, Vec3};
 use h2sim::bot::ActorMind;
-use h2sim::game::ActorSpawn;
+use h2sim::game::{ActorSpawn, Side};
 use h2sim::script::{Host, Obj, Value, Vm};
 use h2sim::{Bot, Game, World};
 use std::collections::{HashMap, HashSet};
@@ -34,13 +34,19 @@ const CARRY_REACH: f32 = 0.15;
 const SWITCH_REACH: f32 = 1.2;
 /// A player's middle, above their feet.
 const MIDDLE: f32 = 0.4;
+/// How far under the players the floor of a structure BSP they move
+/// into may be (they may be in a vehicle), and under actors it keeps.
+const HUMAN_FLOOR: f32 = 6.0;
+const ACTOR_FLOOR: f32 = 4.0;
 /// A switch with no device group calls the nearest lift this close.
 const CALL_REACH: f32 = 10.0;
 
-/// The team of a squad that says which side it's on.
-fn squad_team(team: AiTeam) -> Option<u8> {
+/// The team of a squad that says which side it's on ("player" being the
+/// players' own).
+fn squad_team(team: AiTeam, players_team: u8) -> Option<u8> {
     match team {
-        AiTeam::Player | AiTeam::Human => Some(0),
+        AiTeam::Player => Some(players_team),
+        AiTeam::Human => Some(0),
         AiTeam::Covenant | AiTeam::Prophet => Some(1),
         AiTeam::Flood => Some(2),
         AiTeam::Sentinel => Some(3),
@@ -139,7 +145,7 @@ pub fn place_squad(
             weapon: weapon(l.weapon.or(s.weapon)),
             secondary: weapon(l.secondary.or(s.secondary)),
             difficulty,
-            team: squad_team(s.team),
+            team: squad_team(s.team, players_team),
         };
         let Some(i) = game.spawn_actor(spawn) else {
             continue;
@@ -167,6 +173,21 @@ pub fn place_squad(
     out
 }
 
+/// Whether the mission's players are the Arbiter (on the Covenant's side)
+/// rather than the Master Chief.
+pub fn arbiter(scene: &Scene) -> bool {
+    scene.elite.is_some() && scene.spawns.first().is_some_and(|s| s.campaign_player == 1)
+}
+
+/// The team a mission's players are on.
+pub fn players_team(scene: &Scene) -> u8 {
+    match arbiter(scene) {
+        true => Side::Covenant,
+        false => Side::Human,
+    }
+    .team()
+}
+
 /// The squads whose names start with any of `names` (comma separated;
 /// "all" for every squad).
 pub fn squads_named(scene: &Scene, names: &str) -> Vec<usize> {
@@ -188,6 +209,8 @@ struct Device {
     power: f32,
     /// Opens by itself for someone near.
     automatic: bool,
+    /// Opens by itself only for those behind it.
+    one_sided: bool,
 }
 
 impl Default for Device {
@@ -197,6 +220,7 @@ impl Default for Device {
             target: 0.0,
             power: 1.0,
             automatic: false,
+            one_sided: false,
         }
     }
 }
@@ -296,6 +320,9 @@ const LETTERBOX_TIME: f32 = 0.5;
 struct State {
     /// Seconds since the mission started.
     time: f32,
+    /// The players' side: the humans', or the Covenant's in the Arbiter's
+    /// missions.
+    players_team: u8,
     screen: Screen,
     /// Gravity as a share of normal.
     gravity: f32,
@@ -307,6 +334,9 @@ struct State {
     effects: Vec<(EffectLook, Vec3)>,
     /// The structure BSP the players are in.
     bsp: u16,
+    /// The BSP from before a cutscene, to go back to if the players are
+    /// still there rather than in the one it ended in.
+    bsp_after_cutscene: Option<u16>,
     devices: HashMap<u16, Device>,
     /// The level's doors (`Scene::doors`), and which name each has.
     doors: Vec<Device>,
@@ -381,6 +411,11 @@ impl Mission {
             },
             gravity: 1.0,
             bsp: start_bsp(scene, game),
+            players_team: game
+                .players
+                .iter()
+                .find(|p| p.actor.is_none())
+                .map_or(0, |p| p.team),
             difficulty,
             log,
             doors: scene
@@ -393,6 +428,7 @@ impl Mission {
                         target: at,
                         power: if d.powered { 1.0 } else { 0.0 },
                         automatic: d.automatic,
+                        one_sided: d.one_sided,
                     }
                 })
                 .collect(),
@@ -411,7 +447,7 @@ impl Mission {
                         position: at,
                         target: at,
                         power: if l.powered { 1.0 } else { 0.0 },
-                        automatic: false,
+                        ..Device::default()
                     }
                 })
                 .collect(),
@@ -540,6 +576,7 @@ impl Mission {
         };
         ctx.move_lifts(world, h2sim::game::TICK);
         ctx.use_switches();
+        ctx.follow_collision(world);
         if self.ticks % 2 == 1 {
             return;
         }
@@ -835,7 +872,7 @@ impl Ctx<'_> {
             self.scene,
             squad,
             self.st.difficulty,
-            0,
+            self.st.players_team,
             limit,
             only,
         );
@@ -982,6 +1019,70 @@ impl Ctx<'_> {
                 self.st.bsp = to;
                 return;
             }
+        }
+    }
+
+    /// Only the structure BSP the mission is in blocks, once the players
+    /// stand in it; till then (in a cutscene's own BSP, say) all of the
+    /// level does. Actors it leaves with nothing to stand on are gone from
+    /// the level, as in the original.
+    fn follow_collision(&mut self, world: &World) {
+        let stands = |bsp: u16, p: &h2sim::game::Spartan, reach: f32| {
+            let feet = p.body.position + Vec3::Z * 0.5;
+            world.floor_in_group(bsp, feet, reach) || world.mover_under(feet, reach).is_some()
+        };
+        let humans: Vec<usize> = self
+            .humans()
+            .into_iter()
+            .filter(|&i| self.game.players[i].alive)
+            .collect();
+        let all_stand = |bsp: u16| {
+            !humans.is_empty()
+                && humans
+                    .iter()
+                    .all(|&i| stands(bsp, &self.game.players[i], HUMAN_FLOOR))
+        };
+        if let Some(before) = self.st.bsp_after_cutscene.take() {
+            if !all_stand(self.st.bsp) && all_stand(before) {
+                self.st.bsp = before;
+                if self.st.log {
+                    println!("back in bsp {before} after the cutscene");
+                }
+            }
+        }
+        let bsp = self.st.bsp;
+        if world.group() == Some(bsp) {
+            return;
+        }
+        if !all_stand(bsp) {
+            // Until they do, all of the level is there.
+            if world.group().is_some() {
+                world.set_group(None);
+                if self.st.log {
+                    println!("collision of every bsp");
+                }
+            }
+            return;
+        }
+        world.set_group(Some(bsp));
+        if self.st.log {
+            println!("collision of bsp {bsp}");
+        }
+        let left: Vec<usize> = (0..self.game.players.len())
+            .filter(|&i| {
+                let p = &self.game.players[i];
+                p.actor.is_some_and(|a| !a.gone)
+                    && p.alive
+                    && p.seat.is_none()
+                    && !stands(bsp, p, ACTOR_FLOOR)
+            })
+            .collect();
+        for i in left {
+            if self.st.log {
+                let at = self.game.players[i].body.position;
+                println!("actor {i} at {at:.1} left behind in another bsp");
+            }
+            self.erase(i);
         }
     }
 
@@ -1134,9 +1235,18 @@ impl Ctx<'_> {
         let scene = self.scene;
         for (k, door) in scene.doors.iter().enumerate() {
             let middle = door.position + Vec3::Z * DOOR_MIDDLE;
+            let reach = if door.reach > 0.0 {
+                door.reach
+            } else {
+                DOOR_REACH
+            };
+            let one_sided = self.st.doors[k].one_sided;
             let near = || {
                 self.game.players.iter().any(|p| {
-                    p.alive && (p.body.position + Vec3::Z * 0.5).distance(middle) < DOOR_REACH
+                    let at = p.body.position + Vec3::Z * 0.5;
+                    let behind = (at - door.position).dot(door.forward) < 0.0;
+                    let sided = one_sided || door.one_sided_for_players && p.actor.is_none();
+                    p.alive && at.distance(middle) < reach && (behind || !sided)
                 })
             };
             let exists = self.st.exists(door.name, door.placed);
@@ -1156,7 +1266,7 @@ impl Ctx<'_> {
             let shut = d.position < 0.5;
             if self.st.log && shut != was_shut {
                 let what = if shut { "shuts" } else { "opens" };
-                println!("door {k} at {:.1} {what}", door.position);
+                println!("door {k} at {:.1} {what} (reach {reach})", door.position);
             }
             world.set_door(k, exists && shut);
         }
@@ -1292,6 +1402,57 @@ impl Host for Ctx<'_> {
                 let v = arg(0);
                 let list = objects(1);
                 Value::Bool(!list.is_empty() && list.iter().all(|&o| self.in_volume(&v, o)))
+            }
+            "objects_distance_to_flag" => {
+                let to = arg(1)
+                    .index()
+                    .and_then(|k| self.scene.ai.flags.get(k as usize))
+                    .map(|f| f.0);
+                let d = to.and_then(|to| {
+                    objects(0)
+                        .iter()
+                        .filter_map(|&o| self.position(o))
+                        .map(|p| p.distance(to))
+                        .min_by(f32::total_cmp)
+                });
+                Value::Real(d.unwrap_or(-1.0))
+            }
+            // Who and what is inside a volume: units (type bit 0) and
+            // vehicles (bit 1).
+            "volume_return_objects" | "volume_return_objects_by_type" => {
+                let mask = if args.len() > 1 {
+                    num(1) as u32
+                } else {
+                    u32::MAX
+                };
+                let v = arg(0);
+                let mut found = Vec::new();
+                if mask & 1 != 0 {
+                    for i in 0..self.game.players.len() {
+                        if self.game.players[i].alive && self.in_volume(&v, Obj::Unit(i)) {
+                            found.push(Obj::Unit(i));
+                        }
+                    }
+                }
+                if mask & 2 != 0 {
+                    for k in 0..self.game.vehicles.len() {
+                        if self.in_volume(&v, Obj::Vehicle(k)) {
+                            found.push(Obj::Vehicle(k));
+                        }
+                    }
+                }
+                Value::Objects(found)
+            }
+            "kill_volume_enable" | "kill_volume_disable" => {
+                let on = function.ends_with("enable");
+                let zone = arg(0)
+                    .index()
+                    .and_then(|k| self.scene.ai.kill_zone_of.get(k as usize).copied())
+                    .flatten();
+                if let Some(z) = zone.and_then(|z| self.game.kill_zones.get_mut(z)) {
+                    z.on = on;
+                }
+                Value::Void
             }
             "objects_distance_to_object" => {
                 let to = objects(1).first().and_then(|&o| self.position(o));
@@ -1498,9 +1659,21 @@ impl Host for Ctx<'_> {
                 Value::Bool(has)
             }
             // Bookkeeping the game here doesn't need.
+            // Two teams side with each other from now on.
+            "ai_allegiance" => {
+                let team = |v: Value| {
+                    let Value::Handle(h) = v else { return None };
+                    squad_team(AiTeam::from_number(h as u16), self.st.players_team)
+                };
+                if let (Some(a), Some(b)) = (team(arg(0)), team(arg(1))) {
+                    if a != b && !self.game.allegiances.contains(&(a, b)) {
+                        self.game.allegiances.push((a, b));
+                    }
+                }
+                Value::Void
+            }
             "ai_renew"
             | "ai_disposable"
-            | "ai_allegiance"
             | "ai_dialogue_enable"
             | "data_mine_set_mission_segment"
             | "cache_block_for_one_frame"
@@ -1551,7 +1724,7 @@ impl Host for Ctx<'_> {
                 Value::Void
             }
             // Objects.
-            "object_create" | "object_create_anew" => {
+            "object_create" | "object_create_anew" | "object_create_clone" => {
                 self.set_created(&arg(0), true);
                 Value::Void
             }
@@ -1561,6 +1734,7 @@ impl Host for Ctx<'_> {
             }
             "object_create_containing"
             | "object_create_anew_containing"
+            | "object_create_clone_containing"
             | "object_destroy_containing" => {
                 let made = !function.starts_with("object_destroy");
                 for n in self.names_containing(&arg(0)) {
@@ -1619,7 +1793,7 @@ impl Host for Ctx<'_> {
                 Value::Void
             }
             // Doors, lifts and the like.
-            "device_set_position" | "device_set_position_immediate" => {
+            "device_set_position" | "device_set_position_immediate" | "device_animate_position" => {
                 let to = num(1).clamp(0.0, 1.0);
                 let now = function.ends_with("immediate");
                 if let Some(d) = self.device(args.first()) {
@@ -1644,6 +1818,13 @@ impl Host for Ctx<'_> {
                 let on = arg(1).truthy();
                 if let Some(d) = self.device(args.first()) {
                     d.automatic = on;
+                }
+                Value::Void
+            }
+            "device_one_sided_set" => {
+                let on = arg(1).truthy();
+                if let Some(d) = self.device(args.first()) {
+                    d.one_sided = on;
                 }
                 Value::Void
             }

@@ -26,6 +26,7 @@ const CHAR_UNIT: usize = 0xC;
 /// mission dialogue is recorded under.
 const CHAR_VARIANTS: usize = 0x2C;
 const CHAR_GENERAL: usize = 0x34;
+const UNIT_DEFAULT_TEAM: usize = 0xC0;
 const CHAR_VITALITY: usize = 0x3C;
 const CHAR_PERCEPTION: usize = 0x4C;
 const CHAR_CHARGE: usize = 0x7C;
@@ -52,9 +53,10 @@ const LOCATION_ALWAYS_PLACE: u32 = 1 << 3;
 const LOCATION_HIDDEN: u32 = 1 << 4;
 
 /// Which side a squad fights on (the scenario's team numbers).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AiTeam {
     /// The character's own.
+    #[default]
     Default,
     Player,
     Human,
@@ -67,7 +69,7 @@ pub enum AiTeam {
 }
 
 impl AiTeam {
-    fn from_number(n: u16) -> AiTeam {
+    pub fn from_number(n: u16) -> AiTeam {
         match n {
             0 => AiTeam::Default,
             1 => AiTeam::Player,
@@ -189,6 +191,8 @@ pub struct Character {
     pub voices: Vec<String>,
     /// The model variants it comes in ("minor_scl"...), for its colours.
     pub model_variants: Vec<String>,
+    /// The side its biped is on (heretics against the Covenant...).
+    pub team: AiTeam,
 }
 
 /// The character's type, from its general properties.
@@ -601,9 +605,18 @@ pub fn read_character(set: &mut MapSet, tag: DatumIndex) -> Result<Character> {
         delay: f32_at(&g, 0x28),
         count: (index(&g, 0x34).unwrap_or(0), index(&g, 0x36).unwrap_or(0)),
     });
+    // The unit's default team, just after its object part.
+    let team = own
+        .unit
+        .and_then(|u| set.tag_data(u).ok())
+        .filter(|(_, _, d)| d.len() >= UNIT_DEFAULT_TEAM + 2)
+        .map_or(AiTeam::Default, |(_, _, d)| {
+            AiTeam::from_number(i16_at(&d, UNIT_DEFAULT_TEAM) as u16)
+        });
     Ok(Character {
         name,
         unit: own.unit,
+        team,
         kind,
         vitality,
         perception,

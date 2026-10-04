@@ -22,6 +22,8 @@ pub enum Side {
     Covenant,
     Flood,
     Sentinel,
+    /// The Elites and Grunts who turned against the Prophets.
+    Heretic,
 }
 
 impl Side {
@@ -32,6 +34,7 @@ impl Side {
             Side::Covenant => 1,
             Side::Flood => 2,
             Side::Sentinel => 3,
+            Side::Heretic => 4,
         }
     }
 }

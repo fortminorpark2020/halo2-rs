@@ -26,6 +26,10 @@ pub(super) struct Cutscene {
     /// The scripts have the camera.
     camera_on: bool,
     shot: Option<Playing>,
+    /// The camera put at a camera point, or moving to one: from where
+    /// and which way it looked, to the point, starting when and taking
+    /// how long.
+    point: Option<CameraMove>,
     /// Horizontal field of view the scripts set, degrees.
     fov: Option<f32>,
     /// Named objects' animations.
@@ -42,6 +46,32 @@ pub(super) struct Cutscene {
     /// In a cutscene the player can skip, and skipping it.
     skippable: bool,
     skipping: bool,
+    /// The structure BSP before the skippable cutscene (skipping one
+    /// goes back to the game saved before it).
+    bsp_before: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CameraMove {
+    from: (Vec3, Vec3),
+    to: (Vec3, Vec3),
+    start: f32,
+    length: f32,
+}
+
+impl CameraMove {
+    fn at(&self, now: f32) -> (Vec3, Vec3) {
+        let t = if self.length > 0.0 {
+            ((now - self.start) / self.length).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let t = t * t * (3.0 - 2.0 * t);
+        (
+            self.from.0.lerp(self.to.0, t),
+            self.from.1.lerp(self.to.1, t).normalize_or(self.to.1),
+        )
+    }
 }
 
 impl Cutscene {
@@ -117,7 +147,31 @@ impl Playing {
     }
 }
 
+/// Where the scripts' camera is at `now`, which way it looks and its
+/// field of view, while they have it.
+fn camera_at(c: &Cutscene, scene: &Scene, now: f32) -> Option<(Vec3, Vec3, f32)> {
+    if !c.camera_on {
+        return None;
+    }
+    let fov = c.fov.filter(|f| *f > 1.0).unwrap_or(70.0);
+    if let Some(shot) = c.shot {
+        let at = shot.root(scene, now)?;
+        return Some((
+            at.transform_point3(Vec3::ZERO),
+            at.transform_vector3(Vec3::X).normalize_or(Vec3::X),
+            fov,
+        ));
+    }
+    let (at, forward) = c.point?.at(now);
+    Some((at, forward, fov))
+}
+
 impl Ctx<'_> {
+    /// Where the scripts' camera is now.
+    fn camera_now(&self) -> Option<(Vec3, Vec3, f32)> {
+        camera_at(&self.st.cutscene, self.scene, self.st.time)
+    }
+
     /// An animation a script names: graph tag and the animation's index.
     fn animation(&self, graph: &Value, name: &Value) -> Option<(u32, usize)> {
         let tag = graph.handle()?;
@@ -236,7 +290,26 @@ impl Ctx<'_> {
                 self.st.cutscene.camera_on = arg(0).truthy();
                 if !self.st.cutscene.camera_on {
                     self.st.cutscene.shot = None;
+                    self.st.cutscene.point = None;
                     self.st.cutscene.fov = None;
+                }
+                Value::Void
+            }
+            // Put the camera at a camera point, or move it there over a
+            // number of ticks.
+            "camera_set" => {
+                let to = arg(0)
+                    .index()
+                    .and_then(|k| self.scene.ai.camera_points.get(k as usize).copied());
+                if let Some(to) = to {
+                    let from = self.camera_now().map_or(to, |c| (c.0, c.1));
+                    self.st.cutscene.point = Some(CameraMove {
+                        from,
+                        to,
+                        start: now,
+                        length: arg(1).num() / TICKS_PER_SECOND as f32,
+                    });
+                    self.st.cutscene.shot = None;
                 }
                 Value::Void
             }
@@ -263,15 +336,21 @@ impl Ctx<'_> {
                         anchor,
                         looping: false,
                     });
+                    self.st.cutscene.point = None;
                 }
                 Value::Void
             }
-            "camera_time" => ticks(
-                self.st
-                    .cutscene
-                    .shot
-                    .map_or(0.0, |s| s.left(self.scene, now)),
-            ),
+            // Ticks left of the camera's animation, or its move to a
+            // camera point.
+            "camera_time" => {
+                let c = &self.st.cutscene;
+                let left = match (c.shot, c.point) {
+                    (Some(s), _) => s.left(self.scene, now),
+                    (None, Some(p)) => (p.start + p.length - now).max(0.0),
+                    (None, None) => 0.0,
+                };
+                ticks(left)
+            }
             "camera_set_field_of_view" => {
                 self.st.cutscene.fov = Some(arg(0).num());
                 Value::Void
@@ -326,10 +405,21 @@ impl Ctx<'_> {
             "cinematic_skip_start_internal" => {
                 self.st.cutscene.skippable = true;
                 self.st.cutscene.skipping = false;
+                self.st.cutscene.bsp_before = Some(self.st.bsp);
                 Value::Void
             }
+            // Skipped, the game went back to before it, in that BSP; played
+            // through, back to it too if that's where the players still are
+            // (Cairo's ceremony ends in a BSP the mission doesn't go on in).
             "cinematic_skip_stop_internal" => {
                 self.st.cutscene.skippable = false;
+                if let Some(bsp) = self.st.cutscene.bsp_before.take() {
+                    if self.st.cutscene.skipping {
+                        self.st.bsp = bsp;
+                    } else if bsp != self.st.bsp {
+                        self.st.bsp_after_cutscene = Some(bsp);
+                    }
+                }
                 Value::Void
             }
             "effect_new" | "damage_new" => {
@@ -369,17 +459,7 @@ impl Mission {
     /// Where the cutscene camera is, which way it looks and its horizontal
     /// field of view (degrees), while the scripts have it.
     pub fn cutscene_camera(&self, scene: &Scene) -> Option<(Vec3, Vec3, f32)> {
-        let c = &self.state.cutscene;
-        if !c.camera_on {
-            return None;
-        }
-        let at = c.shot?.root(scene, self.state.time)?;
-        let fov = c.fov.filter(|f| *f > 1.0).unwrap_or(70.0);
-        Some((
-            at.transform_point3(Vec3::ZERO),
-            at.transform_vector3(Vec3::X).normalize_or(Vec3::X),
-            fov,
-        ))
+        camera_at(&self.state.cutscene, scene, self.state.time)
     }
 
     /// The cutscene's cast as posed now: mesh, posed vertices, where they

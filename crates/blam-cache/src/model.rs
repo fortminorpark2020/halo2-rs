@@ -182,7 +182,10 @@ pub fn named_variant(set: &mut MapSet, object: DatumIndex, name: &str) -> Result
     let variants = file.read_block(region, &model, HLMT_VARIANTS, VARIANT_SIZE)?;
     let variants = variants.as_chunks::<VARIANT_SIZE>().0;
     let called = |n: &str| variants.iter().find(|v| sid_name(file, &v[..]) == n);
+    // (No name means the default: an empty one would match a variant
+    // whose name doesn't resolve.)
     let Some(v) = called(name)
+        .filter(|_| !name.is_empty())
         .or_else(|| called("default"))
         .or(variants.first())
     else {

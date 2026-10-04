@@ -358,7 +358,11 @@ fn load_level(path: &Path) -> Result<Level, String> {
             );
         }
     }
-    let mut world = World::new(&scene.collision.positions, &scene.collision.indices);
+    let mut world = World::new_grouped(
+        &scene.collision.positions,
+        &scene.collision.indices,
+        &scene.collision_bsp,
+    );
     let mut spots: Vec<Vec3> = level_spawns(&scene).iter().map(|s| s.0).collect();
     spots.extend(scene.items.iter().map(|i| i.position));
     spots.extend(objective::objective_points(&scene));
@@ -528,7 +532,12 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         .map(|_| {
             let i = game.add_player();
             game.set_name(i, bot_name(i));
-            game.set_look(i, bot_look(i));
+            let mut look = bot_look(i);
+            if campaign {
+                look.elite = campaign::arbiter(&level.scene);
+                game.players[i].team = campaign::players_team(&level.scene);
+            }
+            game.set_look(i, look);
             (i, Bot::new(i as u32 * 7919 + 13 + seed * 104_729))
         })
         .collect();
@@ -539,7 +548,8 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
         campaign.then(|| campaign::Mission::new(&level.scene, &mut game, &mut bots, 1));
     if let (true, Ok(names)) = (campaign, std::env::var("H2_SQUADS")) {
         for s in campaign::squads_named(&level.scene, &names) {
-            let placed = campaign::place_squad(&mut game, &level.scene, s, 1, 0, None, None);
+            let team = campaign::players_team(&level.scene);
+            let placed = campaign::place_squad(&mut game, &level.scene, s, 1, team, None, None);
             let name = &level.scene.ai.squads[s].name;
             println!("placed {name}: {} actors", placed.len());
             bots.extend(placed.into_iter().filter_map(|(i, b)| Some((i, b?))));
@@ -2353,6 +2363,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Unknown: the mission works it out.
             bsp: u16::MAX,
             game_types: [12, 0, 0, 0],
+            campaign_player: 0,
         })
     });
     let mut maps = path.parent().map(menu::find_maps).unwrap_or_default();

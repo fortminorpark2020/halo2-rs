@@ -4,7 +4,7 @@
 
 use glam::Vec3;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 const CELL: f32 = 1.0;
 /// Triangles spanning more grid cells than this (a map's floors and walls
@@ -37,6 +37,8 @@ pub struct KillZone {
     corner: Vec3,
     axes: [Vec3; 3],
     extents: Vec3,
+    /// Killing (a mission's scripts turn some off for a while).
+    pub on: bool,
 }
 
 impl KillZone {
@@ -49,7 +51,13 @@ impl KillZone {
             corner,
             axes: [forward, up.cross(forward), up],
             extents,
+            on: true,
         }
+    }
+
+    /// Whether it kills something at `p`: it's on and `p` is inside.
+    pub fn kills(&self, p: Vec3) -> bool {
+        self.on && self.contains(p)
     }
 
     pub fn contains(&self, p: Vec3) -> bool {
@@ -70,6 +78,13 @@ pub struct World {
     pub max: Vec3,
     /// Each triangle's door (`LEVEL` for the level's own).
     owner: Vec<u16>,
+    /// Each triangle's part of the level (its structure BSP; `ANY` for
+    /// one that's always there).
+    group: Vec<u16>,
+    /// The part of the level that's there just now (`ANY`: all of it).
+    /// A campaign level's structure BSPs overlap where one leads into the
+    /// next, each walled off where it ends; only one is there at a time.
+    active: AtomicU16,
     /// Each door: shut (it blocks) or open.
     shut: Vec<AtomicBool>,
     movers: Vec<Mover>,
@@ -137,6 +152,9 @@ impl Mover {
 
 /// The owner of the level's own triangles.
 const LEVEL: u16 = u16::MAX;
+/// The group of triangles that are always there, and the active group
+/// when every part of the level is.
+const ANY: u16 = u16::MAX;
 
 /// Triangles by the cubes of space their bounds overlap.
 struct Grid {
@@ -249,12 +267,20 @@ impl Grid {
 
 impl World {
     pub fn new(positions: &[[f32; 3]], indices: &[u32]) -> World {
+        World::new_grouped(positions, indices, &[])
+    }
+
+    /// A world whose triangles (by index triple) are in `groups` (the
+    /// structure BSP each came from); only the active group blocks, once
+    /// one is set. Triangles past the end of `groups` are always there.
+    pub fn new_grouped(positions: &[[f32; 3]], indices: &[u32], groups: &[u16]) -> World {
         let mut triangles = Vec::with_capacity(indices.len() / 3);
+        let mut group = Vec::with_capacity(indices.len() / 3);
         let mut grid = Grid::new(CELL);
         let mut coarse = Grid::new(COARSE_CELL);
         let mut large = Vec::new();
         let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for t in indices.as_chunks::<3>().0 {
+        for (k, t) in indices.as_chunks::<3>().0.iter().enumerate() {
             let [a, b, c] = t.map(|i| Vec3::from(positions[i as usize]));
             let n = (b - a).cross(c - a);
             if n.length_squared() < 1e-12 {
@@ -267,6 +293,7 @@ impl World {
                 c,
                 normal: n.normalize(),
             });
+            group.push(groups.get(k).copied().unwrap_or(ANY));
             let lo = a.min(b).min(c);
             let hi = a.max(b).max(c);
             min = min.min(lo);
@@ -281,6 +308,8 @@ impl World {
         }
         World {
             owner: vec![LEVEL; triangles.len()],
+            group,
+            active: AtomicU16::new(ANY),
             triangles,
             grid,
             coarse,
@@ -372,6 +401,7 @@ impl World {
                 normal: n.normalize(),
             });
             self.owner.push(door as u16);
+            self.group.push(ANY);
             let lo = a.min(b).min(c);
             let hi = a.max(b).max(c);
             if self.grid.count(lo, hi) <= LARGE {
@@ -392,12 +422,51 @@ impl World {
         }
     }
 
-    /// Whether a triangle blocks: the level's do, a door's while shut.
+    /// Whether a triangle blocks: the level's do (those of the part
+    /// that's there), a door's while shut.
     fn solid(&self, id: u32) -> bool {
         match self.owner[id as usize] {
-            LEVEL => true,
+            LEVEL => {
+                let active = self.active.load(Ordering::Relaxed);
+                let group = self.group[id as usize];
+                active == ANY || group == ANY || group == active
+            }
             d => self.shut[d as usize].load(Ordering::Relaxed),
         }
+    }
+
+    /// Make only one part of the level (a structure BSP) block, or (None)
+    /// all of it.
+    pub fn set_group(&self, group: Option<u16>) {
+        self.active.store(group.unwrap_or(ANY), Ordering::Relaxed);
+    }
+
+    /// The part of the level that blocks, if just one does.
+    pub fn group(&self) -> Option<u16> {
+        Some(self.active.load(Ordering::Relaxed)).filter(|&g| g != ANY)
+    }
+
+    /// Whether part `group` of the level has a floor under `p`, within
+    /// `reach`.
+    pub fn floor_in_group(&self, group: u16, p: Vec3, reach: f32) -> bool {
+        let mut best: Hit = None;
+        let test = |id: u32, best: &mut Hit| {
+            let i = id as usize;
+            if self.owner[i] != LEVEL || self.group[i] != group {
+                return;
+            }
+            if let Some(d) = ray_triangle(p, Vec3::NEG_Z, &self.triangles[i]) {
+                if d <= reach && best.is_none_or(|b| d < b.0) {
+                    *best = Some((d, Vec3::Z));
+                }
+            }
+        };
+        for &id in &self.large {
+            test(id, &mut best);
+        }
+        self.coarse.walk(p, Vec3::NEG_Z, reach, &mut best, test);
+        self.grid.walk(p, Vec3::NEG_Z, reach, &mut best, test);
+        best.is_some()
     }
 
     pub fn floors(&self, min_up: f32) -> impl Iterator<Item = [Vec3; 3]> + '_ {
@@ -770,6 +839,24 @@ mod tests {
         assert_eq!(ray(&w), None);
         assert!(!touching(&w));
         assert_eq!(floors, w.floors(0.7).count(), "doors aren't floors");
+    }
+
+    #[test]
+    fn only_the_active_part_of_the_level_blocks() {
+        // Two parts overlapping where one leads into the other, each
+        // walled off where it ends: part 0 at x = 3, part 1 at x = 1.
+        let wall = |x: f32| [[x, -1.0, 0.0], [x, 1.0, 0.0], [x, 1.0, 2.0], [x, -1.0, 2.0]];
+        let positions: Vec<[f32; 3]> = [wall(3.0), wall(1.0)].concat();
+        let indices = [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+        let w = World::new_grouped(&positions, &indices, &[0, 0, 1, 1]);
+        let ray = |w: &World| w.raycast(Vec3::new(0.0, 0.0, 1.0), Vec3::X, 5.0);
+        assert_eq!(ray(&w), Some(1.0), "all of it until a part is chosen");
+        w.set_group(Some(0));
+        assert_eq!(ray(&w), Some(3.0));
+        assert_eq!(w.group(), Some(0));
+        w.set_group(Some(1));
+        assert_eq!(ray(&w), Some(1.0));
+        assert!(!w.floor_in_group(0, Vec3::new(2.0, 0.0, 1.0), 3.0));
     }
 
     #[test]

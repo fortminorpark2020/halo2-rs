@@ -780,7 +780,7 @@ impl Game {
                 || self
                     .kill_zones
                     .iter()
-                    .any(|z| z.contains(self.vehicles[v].center))
+                    .any(|z| z.kills(self.vehicles[v].center))
             {
                 let blame = self.vehicles[v].last_driver;
                 let riders: Vec<usize> =

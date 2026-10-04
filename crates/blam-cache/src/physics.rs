@@ -146,15 +146,19 @@ pub fn falling_damage(set: &mut MapSet) -> Result<Option<FallingDamage>> {
 
 /// Physics of the multiplayer Spartan (falls back to the campaign Master Chief).
 pub fn player_biped(set: &mut MapSet) -> Result<BipedPhysics> {
-    let found = biped_physics(set, "objects\\characters\\masterchief\\masterchief_mp")?.or(
-        biped_physics(set, "objects\\characters\\masterchief\\masterchief")?,
-    );
+    let found = biped_physics(set, "objects\\characters\\masterchief\\masterchief_mp")?
+        .or(biped_physics(
+            set,
+            "objects\\characters\\masterchief\\masterchief",
+        )?)
+        .or(biped_physics(set, "objects\\characters\\dervish\\dervish")?);
     Ok(found.unwrap_or_default())
 }
 
-/// Physics of the multiplayer Elite, if the maps have it.
+/// Physics of the multiplayer Elite, or the Arbiter in his missions.
 pub fn elite_biped(set: &mut MapSet) -> Result<Option<BipedPhysics>> {
-    biped_physics(set, "objects\\characters\\elite\\elite_mp")
+    Ok(biped_physics(set, "objects\\characters\\elite\\elite_mp")?
+        .or(biped_physics(set, "objects\\characters\\dervish\\dervish")?))
 }
 
 /// Physics of a biped tag, by name.

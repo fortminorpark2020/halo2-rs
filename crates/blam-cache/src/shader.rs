@@ -181,6 +181,14 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
             info.tint = slot_color(0);
             info.blend = Blend::Additive;
         }
+        // The energy sword's blade: noise in the blade's colour, where its
+        // mask (map 3) says.
+        "transparent\\plasma_mask_offset" => {
+            info.diffuse = own(0).or(first_own);
+            info.mask = own(3);
+            info.tint = slot_color(2);
+            info.blend = Blend::Additive;
+        }
         // Map 0 masks what maps 1 (and 2) add.
         _ if t.starts_with("transparent\\one_add") || t.starts_with("transparent\\sky_one_add") => {
             info.diffuse = own(1).or(first_own);
