@@ -516,6 +516,8 @@ pub struct Command {
     pub switch_grenade: bool,
     /// The flashlight button: the Arbiter's active camouflage.
     pub vision: bool,
+    /// Flying: up (1) or down (-1).
+    pub rise: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -1195,7 +1197,7 @@ impl Game {
         self.step_flags(world, dt);
         self.step_hills(dt);
         self.step_territories(dt);
-        self.step_checkpoint(dt);
+        self.step_checkpoint(world, dt);
     }
 
     fn step_player(&mut self, world: &World, i: usize, cmd: Command, dt: f32) {
@@ -1224,6 +1226,7 @@ impl Game {
                         yaw: cmd.yaw,
                         jump: cmd.jump,
                         crouch: cmd.crouch,
+                        lift: cmd.rise,
                     },
                     dt,
                 );

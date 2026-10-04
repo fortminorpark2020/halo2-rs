@@ -279,12 +279,23 @@ impl Bot {
         me: usize,
         dt: f32,
     ) -> Option<Vec3> {
-        let feet = game.players[me].body.position;
+        let body = &game.players[me].body;
+        let feet = body.position;
         let eye = game.players[me].eye();
+        // How far from a place: for a flier, up or down counts too.
+        let middle = feet + Vec3::Z * body.origin_height();
+        let flies = body.biped.flying;
+        let away = |at: Vec3| {
+            if flies {
+                at.distance(middle)
+            } else {
+                (at - feet).truncate().length()
+            }
+        };
         let a = self.actor.as_mut()?;
         if let Some(s) = a.scripted {
             if let Some(at) = s.go_to {
-                return ((at - feet).truncate().length() > AT_POST).then_some(at);
+                return (away(at) > AT_POST).then_some(at);
             }
             if !s.moving {
                 return None;
@@ -329,7 +340,7 @@ impl Bot {
             a.facing = q.yaw;
             return None;
         }
-        ((a.post - feet).truncate().length() > AT_POST).then_some(a.post)
+        (away(a.post) > AT_POST).then_some(a.post)
     }
 
     /// The way an idle actor faces.

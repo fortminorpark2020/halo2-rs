@@ -568,20 +568,22 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
     if let Some(at) = still {
         game.players[0].body.position = at;
     }
-    // H2_SIM_PATH="seconds=x y z;...": and moves on to each place then.
-    let mut path: Vec<(f32, Vec3)> = std::env::var("H2_SIM_PATH")
+    // H2_SIM_PATH="seconds=x y z;...": and moves on to each place then
+    // ("seconds=use" presses the action button there instead).
+    let mut path: Vec<(f32, Option<Vec3>)> = std::env::var("H2_SIM_PATH")
         .unwrap_or_default()
         .split(';')
         .filter_map(|step| {
             let (t, at) = step.split_once('=')?;
+            let t = t.trim().parse().ok()?;
+            if at.trim() == "use" {
+                return Some((t, None));
+            }
             let n: Vec<f32> = at
                 .split_whitespace()
                 .filter_map(|x| x.parse().ok())
                 .collect();
-            Some((
-                t.trim().parse().ok()?,
-                Vec3::new(*n.first()?, *n.get(1)?, *n.get(2)?),
-            ))
+            Some((t, Some(Vec3::new(*n.first()?, *n.get(1)?, *n.get(2)?))))
         })
         .collect();
     path.reverse();
@@ -605,14 +607,24 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             }
             commands[*i] = bot.think(&game, &level.world, &level.nav, *i);
         }
+        let t = tick as f32 * TICK;
+        let step = path.last().filter(|(when, _)| t >= *when).map(|s| s.1);
+        if step == Some(None) {
+            commands[0].action = true;
+        }
         game.step(&level.world, &commands);
         h2sim::bot::alert_actors(&mut bots, &game, &game.events);
-        let t = tick as f32 * TICK;
-        if let Some(&(_, at)) = path.last().filter(|(when, _)| t >= *when) {
+        match step {
+            Some(Some(at)) => {
+                game.players[0].body.position = at;
+                game.players[0].body.velocity = Vec3::ZERO;
+                println!("{t:6.1} player moves to {at}");
+            }
+            Some(None) => println!("{t:6.1} player presses action"),
+            None => {}
+        }
+        if step.is_some() {
             path.pop();
-            game.players[0].body.position = at;
-            game.players[0].body.velocity = Vec3::ZERO;
-            println!("{t:6.1} player moves to {at}");
         }
         if let Some(m) = &mut mission {
             if skip_at.is_some_and(|at| t >= at) && m.skip_cutscene() {
@@ -695,7 +707,8 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
             let at: Vec<String> = game
                 .players
                 .iter()
-                .map(|p| {
+                .enumerate()
+                .map(|(i, p)| {
                     let guns: Vec<&str> = p
                         .weapons
                         .iter()
@@ -704,12 +717,33 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
                         .map(|d| d.name.as_str())
                         .collect();
                     let dead = if p.alive { "" } else { "x" };
-                    format!("{:.0?}{dead} {}", p.body.position, guns.join("/"))
+                    let name = game.name(i);
+                    format!(
+                        "\n  {i} {name} {:.0?}{dead} {}",
+                        p.body.position,
+                        guns.join("/")
+                    )
                 })
                 .collect();
-            println!("{t:6.1} at {}", at.join(" "));
+            println!("{t:6.1} at{}", at.join(""));
             for (i, bot) in &bots {
                 println!("   {i}: {}", bot.describe());
+            }
+            // H2_SIM_SIGHT=1: and what blocks each one's view of each enemy.
+            if std::env::var_os("H2_SIM_SIGHT").is_some() {
+                for (i, a) in game.players.iter().enumerate().filter(|(_, p)| p.alive) {
+                    for (j, b) in game.players.iter().enumerate().filter(|(_, p)| p.alive) {
+                        if !game.is_enemy(i, j) {
+                            continue;
+                        }
+                        let (from, to) = (a.eye(), b.eye() - Vec3::Z * 0.1);
+                        let d = to - from;
+                        let hit = level
+                            .world
+                            .raycast_what(from, d.normalize_or_zero(), d.length());
+                        println!("   sight {i}->{j} {:.1} m hit {hit}", d.length());
+                    }
+                }
             }
         }
     }
@@ -1529,7 +1563,9 @@ impl App {
                 seat: None,
                 pitch: p.pitch,
             };
-            let mut object = Mat4::from_translation(p.body.position) * Mat4::from_rotation_z(p.yaw);
+            // (A Sentinel's model is centred on its middle.)
+            let origin = p.body.position + Vec3::Z * p.body.origin_height();
+            let mut object = Mat4::from_translation(origin) * Mat4::from_rotation_z(p.yaw);
             // Riding: sitting in the seat, turning with the vehicle (and
             // its turret).
             if let Some((veh, s, seat)) = local::seat_of(&self.game, i) {

@@ -19,6 +19,8 @@ use ride::Riding;
 
 /// How far a bot sees.
 const SIGHT: f32 = 35.0;
+/// A flier slows down within this distance of where it's going.
+const FLY_EASE: f32 = 1.5;
 /// Camouflaged enemies are noticed within this distance.
 const CAMO_NOTICE: f32 = 3.0;
 /// Seconds between seeing someone and shooting at them.
@@ -500,6 +502,9 @@ impl Bot {
         self.pulse = !self.pulse;
 
         let mut walk_to: Option<Vec3> = None;
+        // Where a flier goes, up or down too.
+        let mut fly_to: Option<Vec3> = None;
+        let flies = p.body.biped.flying;
         let mut boarding = false;
         // Route links were checked for drops when the graph was made.
         let mut on_route = false;
@@ -587,6 +592,7 @@ impl Bot {
                     } else {
                         local(self.yaw, to.normalize())
                     };
+                    fly_to = Some(at);
                 }
             }
             if self.held_empty(game, me) {
@@ -621,7 +627,12 @@ impl Bot {
                     .map(|at| (at, false))
                     .or_else(|| Bot::objective(game, me))
             };
-            if let Some(o) = objective {
+            if let (Some(o), true) = (objective, flies) {
+                // Fliers go straight there.
+                self.route.clear();
+                walk_to = Some(o.0);
+                fly_to = Some(o.0);
+            } else if let Some(o) = objective {
                 walk_to = self.walk_to_objective(nav, world, feet, o);
                 if weapon.is_some() && self.no_way {
                     self.shun_weapon(o.0);
@@ -681,8 +692,10 @@ impl Bot {
             // Walk toward the goal whichever way the bot faces.
             cmd.movement = local(self.yaw, to.normalize_or_zero());
         }
-        // An enemy's vehicle in reach: board it.
-        boarding |= matches!(game.vehicle_action(me), Some(VehicleAction::Hijack { .. }));
+        // An enemy's vehicle in reach: board it (players' bots only; the
+        // level's actors stay out of the dropships they meet).
+        boarding |= self.actor.is_none()
+            && matches!(game.vehicle_action(me), Some(VehicleAction::Hijack { .. }));
         // Take a flag (or the ball, or the team's bomb) on reaching it,
         // fighting or not, and defuse enemy bombs.
         let team = p.team;
@@ -695,7 +708,9 @@ impl Bot {
         if target.is_none() && !boarding && self.actor.is_none() {
             self.pick_up(game, me, &mut cmd);
         }
-        if !on_route {
+        if flies {
+            self.steer_flight(game, me, fly_to.or(walk_to), &mut cmd);
+        } else if !on_route {
             let drift = game.players[me].body.velocity.truncate();
             cmd.movement = self.keep_off_ledges(world, feet, drift, cmd.movement);
         }
@@ -706,6 +721,22 @@ impl Bot {
         cmd.yaw = self.yaw;
         cmd.pitch = self.pitch;
         cmd
+    }
+
+    /// A flier eases toward where it's going, up or down to it too, and
+    /// holds its height with nowhere to go.
+    fn steer_flight(&self, game: &Game, me: usize, goal: Option<Vec3>, cmd: &mut Command) {
+        let body = &game.players[me].body;
+        let middle = body.position + Vec3::Z * body.origin_height();
+        let Some(goal) = goal else {
+            cmd.rise = (-body.velocity.z).clamp(-1.0, 1.0);
+            return;
+        };
+        let to = goal - middle;
+        let flat = to.truncate().length();
+        // Slow down coming in, so as not to overshoot.
+        cmd.movement = cmd.movement.clamp_length_max((flat / FLY_EASE).min(1.0));
+        cmd.rise = (to.z / FLY_EASE).clamp(-1.0, 1.0);
     }
 
     /// Give up on a route point the bot isn't getting any closer to, and

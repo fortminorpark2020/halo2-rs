@@ -72,6 +72,7 @@ pub fn game() -> Game {
         height_crouching: 0.5,
         radius: 0.175,
         max_slope: 0.87,
+        ..BipedPhysics::default()
     };
     Game::new(
         rules,

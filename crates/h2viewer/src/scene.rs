@@ -535,6 +535,8 @@ pub struct Door {
     pub powered: bool,
     /// Seconds to open or shut.
     pub time: f32,
+    /// Seconds it stays open once no one's near.
+    pub stays_open: f32,
     /// How near someone has to be for it to open by itself (0: the
     /// usual reach).
     pub reach: f32,
@@ -1512,6 +1514,7 @@ impl Loader {
             } else {
                 1.0
             },
+            stays_open: machine.door_open_time.max(0.0),
             reach: machine.activation_radius.max(0.0),
             forward: transform.x_axis.truncate().normalize_or_zero(),
             one_sided: p.machine_flags & (1 << 1) != 0,

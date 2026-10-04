@@ -211,6 +211,8 @@ struct Device {
     automatic: bool,
     /// Opens by itself only for those behind it.
     one_sided: bool,
+    /// Seconds an open door waits before it shuts again.
+    wait: f32,
 }
 
 impl Default for Device {
@@ -221,6 +223,7 @@ impl Default for Device {
             power: 1.0,
             automatic: false,
             one_sided: false,
+            wait: 0.0,
         }
     }
 }
@@ -431,6 +434,7 @@ impl Mission {
                         power: if d.powered { 1.0 } else { 0.0 },
                         automatic: d.automatic,
                         one_sided: d.one_sided,
+                        ..Device::default()
                     }
                 })
                 .collect(),
@@ -1261,8 +1265,12 @@ impl Ctx<'_> {
             if d.automatic && d.power > 0.0 && exists {
                 if near() {
                     d.target = 1.0;
+                    d.wait = door.stays_open;
                 } else if door.closes {
-                    d.target = 0.0;
+                    d.wait -= dt;
+                    if d.wait <= 0.0 {
+                        d.target = 0.0;
+                    }
                 }
             }
             let was_shut = d.position < 0.5;

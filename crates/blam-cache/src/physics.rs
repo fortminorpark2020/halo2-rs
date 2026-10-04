@@ -31,6 +31,16 @@ pub struct BipedPhysics {
     pub radius: f32,
     /// Radians; steeper surfaces are walls, not floors.
     pub max_slope: f32,
+    /// Flies (Sentinels, Drones): no gravity, and it goes up and down.
+    pub flying: bool,
+    /// Its origin is its middle, not its feet (Sentinels).
+    pub centered: bool,
+    /// Flying: top speed forward, and sideways or up and down, and how
+    /// fast it gets up to speed and slows.
+    pub fly_speed: f32,
+    pub fly_sidestep: f32,
+    pub fly_acceleration: f32,
+    pub fly_deceleration: f32,
 }
 
 impl Default for PlayerMovement {
@@ -63,6 +73,12 @@ impl Default for BipedPhysics {
             height_crouching: 0.5,
             radius: 0.175,
             max_slope: 0.872_664_6,
+            flying: false,
+            centered: false,
+            fly_speed: 0.0,
+            fly_sidestep: 0.0,
+            fly_acceleration: 0.0,
+            fly_deceleration: 0.0,
         }
     }
 }
@@ -190,5 +206,11 @@ pub fn biped_physics_of(set: &mut MapSet, datum: DatumIndex) -> Result<Option<Bi
         height_crouching: f32_at(&d, 0x26C),
         radius: f32_at(&d, 0x270),
         max_slope: f32_at(&d, 0x29C),
+        flying: u32_at(&d, 0x264) & (1 << 4) != 0,
+        centered: u32_at(&d, 0x264) & 1 != 0,
+        fly_speed: f32_at(&d, 0x2DC),
+        fly_sidestep: f32_at(&d, 0x2E0),
+        fly_acceleration: f32_at(&d, 0x2E4),
+        fly_deceleration: f32_at(&d, 0x2E8),
     }))
 }

@@ -196,6 +196,8 @@ impl Command {
             throw_grenade: f(8),
             switch_grenade: f(9),
             vision: f(10),
+            // Only actors fly, and they aren't sent.
+            rise: 0.0,
         })
     }
 

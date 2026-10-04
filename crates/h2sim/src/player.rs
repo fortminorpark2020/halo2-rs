@@ -22,6 +22,8 @@ pub struct Input {
     pub yaw: f32,
     pub jump: bool,
     pub crouch: bool,
+    /// Flying: up (1) or down (-1).
+    pub lift: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -71,7 +73,17 @@ impl Player {
         let b = &self.biped;
         let h = b.standing_camera_height
             + (b.crouching_camera_height - b.standing_camera_height) * self.crouch;
-        self.position + Vec3::Z * h
+        self.position + Vec3::Z * (h + self.origin_height())
+    }
+
+    /// How far above the feet the body's origin is (its middle, for one
+    /// centred there like a Sentinel).
+    pub fn origin_height(&self) -> f32 {
+        if self.biped.centered {
+            self.height() * 0.5
+        } else {
+            0.0
+        }
     }
 
     fn capsule(&self, pos: Vec3) -> (Vec3, Vec3) {
@@ -91,6 +103,9 @@ impl Player {
     }
 
     fn step(&mut self, world: &World, input: Input, dt: f32) {
+        if self.biped.flying {
+            return self.fly(world, input, dt);
+        }
         let m = self.movement;
         // Crouch eases over ~0.1 s.
         let target = if input.crouch { 1.0 } else { 0.0 };
@@ -166,6 +181,26 @@ impl Player {
                 (self.position, self.velocity) = saved;
             }
         }
+    }
+
+    /// A flier speeds up toward the way it's steered, up or down too, and
+    /// slows when let go; nothing pulls it down.
+    fn fly(&mut self, world: &World, input: Input, dt: f32) {
+        let b = self.biped;
+        let fwd = Vec2::new(input.yaw.cos(), input.yaw.sin());
+        let right = Vec2::new(fwd.y, -fwd.x);
+        let mv = input.movement.clamp_length_max(1.0);
+        let desired = (fwd * mv.y * b.fly_speed + right * mv.x * b.fly_sidestep)
+            .extend(input.lift.clamp(-1.0, 1.0) * b.fly_sidestep);
+        let rate = if desired.length() > self.velocity.length() {
+            b.fly_acceleration
+        } else {
+            b.fly_deceleration
+        };
+        self.velocity += (desired - self.velocity).clamp_length_max(rate.max(0.5) * dt);
+        self.position += self.velocity * dt;
+        self.resolve(world);
+        self.grounded = false;
     }
 
     /// Push the capsule out of the world; returns whether it stands on walkable ground.
@@ -290,6 +325,50 @@ mod tests {
             p.update(&w, input, 1.0 / 60.0);
         }
         assert!((p.velocity.y - 2.25).abs() < 0.01, "vy = {}", p.velocity.y);
+    }
+
+    #[test]
+    fn a_flier_hovers_and_climbs_without_falling() {
+        let w = room();
+        let biped = BipedPhysics {
+            flying: true,
+            centered: true,
+            standing_camera_height: 0.0,
+            crouching_camera_height: 0.0,
+            height_standing: 0.7,
+            height_crouching: 0.7,
+            radius: 0.35,
+            fly_speed: 2.25,
+            fly_sidestep: 2.0,
+            fly_acceleration: 2.0,
+            fly_deceleration: 3.0,
+            ..BipedPhysics::default()
+        };
+        let mut p = Player::new(Vec3::new(0.0, 0.0, 1.0), PlayerMovement::default(), biped);
+        for _ in 0..60 {
+            p.update(&w, Input::default(), 1.0 / 60.0);
+        }
+        assert!(
+            (p.position.z - 1.0).abs() < 0.01,
+            "hovers, z = {}",
+            p.position.z
+        );
+        let up = Input {
+            lift: 1.0,
+            ..Default::default()
+        };
+        for _ in 0..60 {
+            p.update(&w, up, 1.0 / 60.0);
+        }
+        assert!(
+            p.position.z > 1.5 && p.velocity.z > 1.5,
+            "climbs, z = {}",
+            p.position.z
+        );
+        assert!(
+            (p.eye().z - p.position.z - 0.35).abs() < 1e-4,
+            "sees from its middle"
+        );
     }
 
     #[test]

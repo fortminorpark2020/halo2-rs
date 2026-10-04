@@ -157,8 +157,10 @@ impl Ctx<'_> {
 
     /// Send the commanded actor somewhere and wait till it's there
     /// (within `near`), or till it gives up.
-    fn go(&mut self, actor: usize, to: Vec3, near: f32) -> Value {
-        let feet = self.game.players[actor].body.position;
+    pub(super) fn go(&mut self, actor: usize, to: Vec3, near: f32) -> Value {
+        let body = &self.game.players[actor].body;
+        let (feet, flies) = (body.position, body.biped.flying);
+        let middle = feet + Vec3::Z * body.origin_height();
         let c = self.command_mut(actor);
         if c.scripted.go_to.is_none_or(|g| g.distance(to) > 0.5) {
             c.scripted.go_to = Some(to);
@@ -166,8 +168,11 @@ impl Ctx<'_> {
             c.closest = f32::INFINITY;
             c.stalled = 0.0;
         }
-        let there =
-            (to - feet).truncate().length() < near.max(THERE) && (to.z - feet.z).abs() < 2.0;
+        let there = if flies {
+            to.distance(middle) < near.max(THERE)
+        } else {
+            (to - feet).truncate().length() < near.max(THERE) && (to.z - feet.z).abs() < 2.0
+        };
         if there || c.going > GIVE_UP || c.stalled > STALLED {
             c.scripted.go_to = None;
             if self.st.log {

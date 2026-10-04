@@ -3,6 +3,7 @@
 //! dies comes back.
 
 use super::{Actor, Game, GameType, GrenadeKind, HeldWeapon, Look, Vitality};
+use crate::collision::World;
 use crate::weapon::WeaponState;
 use blam_cache::physics::BipedPhysics;
 use glam::Vec3;
@@ -236,9 +237,10 @@ impl Game {
         CORPSE_TIME
     }
 
-    /// Note where the players are safe (alive, on the ground, no enemy
-    /// actor close by), to bring them back there when they die.
-    pub(super) fn step_checkpoint(&mut self, dt: f32) {
+    /// Note where the players are safe (alive, on the ground, not on a
+    /// lift that may leave, no enemy actor close by), to bring them back
+    /// there when they die.
+    pub(super) fn step_checkpoint(&mut self, world: &World, dt: f32) {
         if self.rules.game_type != GameType::Campaign {
             return;
         }
@@ -254,6 +256,7 @@ impl Game {
             p.alive
                 && p.body.grounded
                 && p.seat.is_none()
+                && world.mover_under(p.body.position, 0.3).is_none()
                 && !self.players.iter().enumerate().any(|(j, q)| {
                     q.alive
                         && q.actor.is_some()

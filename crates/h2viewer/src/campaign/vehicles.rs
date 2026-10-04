@@ -177,6 +177,11 @@ impl Ctx<'_> {
     /// there, or on by it) and wait till it's there.
     pub(super) fn fly(&mut self, actor: usize, to: Vec3, near: Option<f32>, stop: bool) -> Value {
         let Some(v) = self.driving(actor) else {
+            // A Sentinel flies itself.
+            if self.game.players[actor].body.biped.flying {
+                let near = near.unwrap_or(if stop { FLOWN_TO } else { FLOWN_BY });
+                return self.go(actor, to, near);
+            }
             return Value::Void;
         };
         let veh = &self.game.vehicles[v];

@@ -555,6 +555,25 @@ impl World {
         best
     }
 
+    /// What a ray hits first: "level" or a mover's number (debugging).
+    pub fn raycast_what(&self, origin: Vec3, dir: Vec3, max: f32) -> String {
+        let mut what = format!(
+            "level {:?}",
+            self.raycast_level(origin, dir, max).map(|h| h.0)
+        );
+        for (k, m) in self.movers.iter().enumerate() {
+            let present = m.present.load(Ordering::Relaxed);
+            if let Some(hit) = m.raycast(origin - m.offset(), dir, max) {
+                what += &format!(
+                    " mover {k} {:.2} present {present} offset {:?}",
+                    hit.0,
+                    m.offset()
+                );
+            }
+        }
+        what
+    }
+
     /// The same, against the level and its doors only.
     fn raycast_level(&self, origin: Vec3, dir: Vec3, max: f32) -> Hit {
         let mut best: Hit = None;
