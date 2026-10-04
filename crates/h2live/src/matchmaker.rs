@@ -395,7 +395,7 @@ fn host_order(pcs: &[(u64, u32, usize)], penalties: &HashMap<u64, u8>) -> Vec<u6
     for pcs in [&mut first, &mut last] {
         while let Some(fastest) = pcs.iter().map(|pc| pc.1).min() {
             let best = (0..pcs.len())
-                .filter(|&k| pcs[k].1 <= fastest + RTT_TIE)
+                .filter(|&k| pcs[k].1 <= fastest.saturating_add(RTT_TIE))
                 .max_by_key(|&k| (pcs[k].2, Reverse(pcs[k].1), Reverse(pcs[k].0)));
             let Some(best) = best else { break };
             order.push(pcs.remove(best).0);

@@ -732,6 +732,22 @@ fn the_fastest_pc_hosts_unless_a_bigger_party_is_nearly_as_fast() {
 }
 
 #[test]
+fn pcs_with_no_round_trip_measured_yet_can_still_host() {
+    // A PC that hasn't answered a ping yet counts as the slowest there is.
+    let none = HashMap::new();
+    assert_eq!(host_order(&[(1, u32::MAX, 1), (2, 20, 1)], &none), [2, 1]);
+    let mut mm = matchmaker();
+    mm.search(party(1, HEAD_TO_HEAD, vec![pc(1, u32::MAX)]), 0.0)
+        .unwrap();
+    mm.search(party(2, HEAD_TO_HEAD, vec![pc(2, u32::MAX)]), 0.0)
+        .unwrap();
+    let m = formed(&run(&mut mm, 0.0, 0.0))[0].1.clone();
+    assert_eq!(m.host, 1);
+    let next = Event::NewHost { id: m.id, host: 2 };
+    assert_eq!(mm.host_failed(m.id, 1.0), Some(next));
+}
+
+#[test]
 fn a_pc_that_left_its_hosted_match_hosts_last_for_three_matches() {
     let mut mm = matchmaker();
     mm.host_left(1);
