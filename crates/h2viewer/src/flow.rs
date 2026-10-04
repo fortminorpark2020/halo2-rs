@@ -93,6 +93,7 @@ impl App {
             .as_ref()
             .map(|m| m.objectives(&self.scene))
             .unwrap_or_default();
+        let online = self.online.view(self.online.now());
         let ctx = menu::Context {
             maps: &self.maps,
             missions: &self.missions,
@@ -104,6 +105,7 @@ impl App {
             joined,
             host_lobby,
             objectives: &objectives,
+            online: online.as_ref(),
         };
         f(&mut self.menu, &ctx)
     }
@@ -153,6 +155,18 @@ impl App {
             Action::EndGame => self.end_game(),
             Action::Leave => self.leave_game(),
             Action::Quit => self.quit = true,
+            Action::GoOnline => self.go_online(),
+            Action::SignOut => self.sign_out(),
+            Action::Search(_)
+            | Action::CancelSearch
+            | Action::Custom
+            | Action::Invite(_)
+            | Action::JoinParty(_)
+            | Action::Accept(_)
+            | Action::LeaveParty
+            | Action::Kick(_)
+            | Action::Promote(_)
+            | Action::Privacy(_) => self.ask_live(action),
         }
     }
 

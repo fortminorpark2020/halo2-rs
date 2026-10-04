@@ -42,6 +42,7 @@ mod local;
 mod mapinfo;
 mod menu;
 mod objective;
+mod online;
 mod options;
 mod probe;
 mod profile;
@@ -1064,6 +1065,8 @@ struct App {
     lan_wait: f32,
     browser: h2net::Browser,
     lan_games: Vec<h2net::LanGame>,
+    /// Online play: signed in to the online service, or not.
+    online: online::Online,
     /// Tells this running game apart from others on the network.
     session: u64,
     map_path: PathBuf,
@@ -1255,6 +1258,7 @@ impl App {
     }
 
     fn update(&mut self, dt: f32) {
+        self.update_live();
         self.poll_loading();
         self.update_music();
         for (id, press) in self.pads.presses() {
@@ -2446,9 +2450,11 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
-        // No frames, no game; but the PCs we play with still hear from us.
+        // No frames, no game; but the PCs we play with still hear from us,
+        // and so does the online service.
         if self.last_frame.elapsed() > NOT_DRAWING {
             self.keep_alive();
+            self.update_live();
         }
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -2592,6 +2598,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
     let emblem_art = path.parent().and_then(emblem::load).unwrap_or_default();
     let rank_art = path.parent().and_then(rank::load).unwrap_or_default();
+    let live_text = path
+        .parent()
+        .map(online::LiveText::load)
+        .unwrap_or_default();
     // Three computer opponents (H2_BOTS=<n> for another number).
     let bots = env("H2_BOTS")
         .and_then(|v| v.parse().ok())
@@ -2673,6 +2683,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         lan_wait: lan::LAN_WAIT,
         browser: h2net::Browser::new(session),
         lan_games: Vec::new(),
+        online: online::Online::new(live_text, online::identity_path()),
         session,
         map_path: level.path,
         map_name: String::new(),

@@ -4,6 +4,8 @@
 //! The icons come from `ui\global_bitmaps\rank_icons_sm` (17x17) and
 //! `rank_icons` (28x26) in the player's own mainmenu.map, icon k for level
 //! k + 1. Each set is packed into an atlas and drawn in its own colours.
+//! Two of Xbox Live's icons from `live_icons_sm` go in a third atlas: the
+//! party leader's and a party's, shown in the online lists.
 
 use crate::gpu::{hud_mode, RANK_TEXTURES};
 use crate::hud::HudBuilder;
@@ -31,12 +33,29 @@ const ROWS: usize = (MAX_LEVEL as usize).div_ceil(ACROSS);
 const CELL: usize = 32;
 /// Where an icon starts in its square.
 const PAD: usize = 1;
+/// Xbox Live's small icons, and the ones `LiveIcon` names, in its order.
+const LIVE_ICONS: &str = "ui\\global_bitmaps\\live_icons_sm";
+const LIVE_PICKS: [usize; 2] = [29, 19];
+/// Their squares in the atlas, and the middle part of each that is drawn
+/// (both are 42 by 42).
+const LIVE_CELL: usize = 64;
+const LIVE_SIZE: usize = 44;
 
-/// The atlases, small then large.
+/// One of Xbox Live's icons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveIcon {
+    /// A person with a crown: the party leader.
+    Leader,
+    /// Two people: someone in a party.
+    Party,
+}
+
+/// The atlases: small rank icons, large ones, then the live icons.
 pub fn load(dir: &Path) -> Option<Vec<Image>> {
     let mut set = MapSet::open(dir.join("mainmenu.map")).ok()?;
     let group = GroupTag::parse("bitm")?;
-    SETS.iter()
+    let mut atlases: Vec<Image> = SETS
+        .iter()
         .map(|&(name, size)| {
             let tag = set.map.find_tag(group, name)?.datum;
             let icons: Vec<Image> = (0..MAX_LEVEL as usize)
@@ -47,7 +66,14 @@ pub fn load(dir: &Path) -> Option<Vec<Image>> {
             }
             (!icons.is_empty()).then(|| atlas(&icons, size))
         })
-        .collect()
+        .collect::<Option<_>>()?;
+    let tag = set.map.find_tag(group, LIVE_ICONS)?.datum;
+    let icons: Option<Vec<Image>> = LIVE_PICKS
+        .iter()
+        .map(|&i| bitmap::read_bitmap_at(&mut set, tag, i).ok())
+        .collect();
+    atlases.push(live_atlas(&icons?));
+    Some(atlases)
 }
 
 /// The icons copied into a grid, by level, at most `size` of each.
@@ -61,6 +87,27 @@ fn atlas(icons: &[Image], size: [usize; 2]) -> Image {
         for y in 0..(icon.height as usize).min(size[1]) {
             let to = ((oy + y) * w + ox) * 4;
             rgba[to..to + n].copy_from_slice(&icon.rgba[y * iw * 4..][..n]);
+        }
+    }
+    Image {
+        width: w as u32,
+        height: h as u32,
+        rgba,
+    }
+}
+
+/// The live icons side by side, each in the middle of its square.
+fn live_atlas(icons: &[Image]) -> Image {
+    let (w, h) = (icons.len() * LIVE_CELL, LIVE_CELL);
+    let mut rgba = vec![0u8; w * h * 4];
+    for (k, icon) in icons.iter().enumerate() {
+        let (iw, ih) = (icon.width as usize, icon.height as usize);
+        let (cw, ch) = (iw.min(LIVE_SIZE), ih.min(LIVE_SIZE));
+        let ox = k * LIVE_CELL + (LIVE_CELL - cw) / 2;
+        let oy = (LIVE_CELL - ch) / 2;
+        for y in 0..ch {
+            let to = ((oy + y) * w + ox) * 4;
+            rgba[to..to + cw * 4].copy_from_slice(&icon.rgba[y * iw * 4..][..cw * 4]);
         }
     }
     Image {
@@ -85,19 +132,48 @@ fn cell(set: usize, level: u8) -> [f32; 4] {
     ]
 }
 
-/// Draw level `level`'s icon as large as fits in the middle of `rect`
-/// (window pixels), from the set nearer that size.
-pub fn draw(hb: &mut HudBuilder, rect: [f32; 4], level: u8) {
-    let [x0, y0, x1, y1] = rect;
-    let set = (y1 - y0 >= LARGE_FROM) as usize;
-    let [w, h] = SETS[set].1.map(|v| v as f32);
+/// Where a live icon's drawn part sits in its atlas.
+fn live_cell(icon: LiveIcon) -> [f32; 4] {
+    let n = LIVE_PICKS.len();
+    let x = (icon as usize * LIVE_CELL + (LIVE_CELL - LIVE_SIZE) / 2) as f32;
+    let y = ((LIVE_CELL - LIVE_SIZE) / 2) as f32;
+    let (w, h) = ((n * LIVE_CELL) as f32, LIVE_CELL as f32);
+    let size = LIVE_SIZE as f32;
+    [x / w, y / h, (x + size) / w, (y + size) / h]
+}
+
+/// The largest `w` by `h` rectangle that fits in the middle of `rect`.
+fn fit([x0, y0, x1, y1]: [f32; 4], w: f32, h: f32) -> [f32; 4] {
     let scale = ((x1 - x0) / w).min((y1 - y0) / h);
     let (dx, dy) = (w * scale * 0.5, h * scale * 0.5);
     let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+    [cx - dx, cy - dy, cx + dx, cy + dy]
+}
+
+/// Draw level `level`'s icon as large as fits in the middle of `rect`
+/// (window pixels), from the set nearer that size.
+pub fn draw(hb: &mut HudBuilder, rect: [f32; 4], level: u8) {
+    let set = (rect[3] - rect[1] >= LARGE_FROM) as usize;
+    let [w, h] = SETS[set].1.map(|v| v as f32);
+    let uv = cell(set, level);
     hb.quad(
         RANK_TEXTURES + set,
-        [cx - dx, cy - dy, cx + dx, cy + dy],
-        cell(set, level),
+        fit(rect, w, h),
+        uv,
+        [1.0; 4],
+        hud_mode::PLAIN,
+        0.0,
+    );
+}
+
+/// Draw a live icon as large as fits in the middle of `rect`.
+pub fn draw_live(hb: &mut HudBuilder, rect: [f32; 4], icon: LiveIcon) {
+    let uv = live_cell(icon);
+    let texture = RANK_TEXTURES + SETS.len();
+    hb.quad(
+        texture,
+        fit(rect, 1.0, 1.0),
+        uv,
         [1.0; 4],
         hud_mode::PLAIN,
         0.0,
@@ -145,5 +221,35 @@ mod tests {
         assert_eq!(at(18, 18), [0, 0, 0, 0]);
         assert_eq!(at(33, 1), [0, 255, 0, 255]);
         assert_eq!(at(65, 1), [0, 0, 0, 0], "no third icon");
+    }
+
+    #[test]
+    fn live_icons_sit_in_the_middle_of_their_squares() {
+        // A 46x42 leader and a 42x42 party icon.
+        let icon = |w: u32, px: [u8; 4]| Image {
+            width: w,
+            height: 42,
+            rgba: px.repeat(w as usize * 42),
+        };
+        let a = live_atlas(&[icon(46, [255; 4]), icon(42, [9; 4])]);
+        assert_eq!((a.width, a.height), (128, 64));
+        let at = |x: usize, y: usize| a.rgba[(y * 128 + x) * 4];
+        assert_eq!(
+            (at(9, 11), at(10, 11), at(53, 52), at(54, 52)),
+            (0, 255, 255, 0)
+        );
+        assert_eq!(
+            (at(74, 32), at(75, 32), at(116, 32), at(117, 32)),
+            (0, 9, 9, 0)
+        );
+        // Each draws its square's middle 44x44.
+        assert_eq!(
+            live_cell(LiveIcon::Leader),
+            [10.0 / 128.0, 10.0 / 64.0, 54.0 / 128.0, 54.0 / 64.0]
+        );
+        assert_eq!(
+            live_cell(LiveIcon::Party),
+            [74.0 / 128.0, 10.0 / 64.0, 118.0 / 128.0, 54.0 / 64.0]
+        );
     }
 }

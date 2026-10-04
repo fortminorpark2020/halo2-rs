@@ -1026,6 +1026,7 @@ dependencies = [
  "cpal",
  "gilrs",
  "glam",
+ "h2live",
  "h2net",
  "h2sim",
  "pollster",

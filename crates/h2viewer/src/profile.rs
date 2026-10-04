@@ -153,6 +153,12 @@ impl Profile {
     }
 }
 
+/// A file kept beside the profile, like the key the PC signs in online
+/// with.
+pub fn beside(name: &str) -> Option<PathBuf> {
+    Some(path()?.with_file_name(name))
+}
+
 /// Where the profile lives: `H2_PROFILE`, or `halo2-rs\profile.txt` in the
 /// user's application data (on Windows `%APPDATA%`, elsewhere `~/.config`).
 fn path() -> Option<PathBuf> {
