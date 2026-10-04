@@ -1256,8 +1256,14 @@ impl App {
         self.lan_games = self.browser.poll().to_vec();
         self.menu_time += dt;
         if self.mode == Mode::Menu || self.loading.is_some() {
-            // While a map loads too, so other PCs keep hearing from us.
-            self.update_lobby_net();
+            if self.loading.is_none() {
+                self.update_lobby_net();
+            } else {
+                // Other PCs keep hearing from us while a map loads; what
+                // they say waits until it's loaded (a game the host
+                // starts meanwhile may be on another map).
+                self.keep_alive();
+            }
             if self.menu.screen == Screen::Profile {
                 self.animate_preview(dt);
             }
