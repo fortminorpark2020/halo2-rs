@@ -7,6 +7,7 @@ const RUMBLE_PIT: u8 = 0;
 const HEAD_TO_HEAD: u8 = 1;
 const DOUBLE_TEAM: u8 = 2;
 const TEAM_SLAYER: u8 = 3;
+const TEAM_SKIRMISH: u8 = 4;
 const BIG_TEAM: u8 = 5;
 const TEAM_TRAINING: u8 = 6;
 
@@ -219,15 +220,18 @@ fn parties_only_meet_in_the_same_playlist_with_room_for_them() {
     assert_eq!(status_at(&events, 1, 5.0).stage, Stage::Searching);
     assert_eq!(status_at(&events, 2, 5.0).stage, Stage::Searching);
 
-    // Five and four are too many for one game of eight, so they play apart.
+    // Four, three and two are too many for one game of eight, so the two
+    // play apart.
     let mut mm = matchmaker();
-    mm.search(party(10, TEAM_TRAINING, players(1, 5)), 0.0)
+    mm.search(party(10, TEAM_TRAINING, players(1, 4)), 0.0)
         .unwrap();
-    mm.search(party(11, TEAM_TRAINING, players(6, 4)), 0.0)
+    mm.search(party(11, TEAM_TRAINING, players(5, 3)), 0.0)
+        .unwrap();
+    mm.search(party(12, TEAM_TRAINING, players(8, 2)), 0.0)
         .unwrap();
     let matches = formed(&run(&mut mm, 0.0, 20.0));
     let sizes: Vec<usize> = matches.iter().map(|(_, m)| m.players.len()).collect();
-    assert_eq!(sizes, [5, 4]);
+    assert_eq!(sizes, [7, 2]);
 }
 
 #[test]
@@ -538,6 +542,58 @@ fn a_party_that_would_leave_teams_uneven_waits_for_another_match() {
 }
 
 #[test]
+fn a_party_that_would_unbalance_a_ready_match_waits_for_the_next() {
+    // Three pairs: two play two against two, and the third waits rather
+    // than leave them all a player short.
+    let mut mm = matchmaker();
+    for (id, from) in [(10, 1), (11, 3), (12, 5)] {
+        mm.search(party(id, TEAM_SKIRMISH, players(from, 2)), 0.0)
+            .unwrap();
+    }
+    let events = run(&mut mm, 0.0, 20.0);
+    let s = status_at(&events, 10, 0.0);
+    assert_eq!((s.stage, s.have, s.need), (Stage::WaitingToFill, 4, 0));
+    let s = status_at(&events, 12, 0.0);
+    assert_eq!((s.stage, s.have, s.need), (Stage::Searching, 2, 2));
+    let matches = formed(&events);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].0, 20.0);
+    assert_eq!(accounts(&matches[0].1), [1, 2, 3, 4]);
+    assert_eq!(mm.searching(TEAM_SKIRMISH), 2);
+
+    // The same when the third pair arrives during the countdown.
+    let mut mm = matchmaker();
+    mm.search(party(10, TEAM_SLAYER, players(1, 2)), 0.0)
+        .unwrap();
+    mm.search(party(11, TEAM_SLAYER, players(3, 2)), 0.0)
+        .unwrap();
+    let mut events = run(&mut mm, 0.0, 14.75);
+    mm.search(party(12, TEAM_SLAYER, players(5, 2)), 15.0)
+        .unwrap();
+    events.extend(run(&mut mm, 15.0, 20.0));
+    let s = status_at(&events, 10, 15.25);
+    assert_eq!((s.stage, s.have, s.seconds), (Stage::WaitingToFill, 4, 5));
+    let matches = formed(&events);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].0, 20.0);
+    assert_eq!(accounts(&matches[0].1), [1, 2, 3, 4]);
+
+    // But a fourth pair makes four against four, at once.
+    let mut mm = matchmaker();
+    for (id, from) in [(10, 1), (11, 3), (12, 5)] {
+        mm.search(party(id, TEAM_SLAYER, players(from, 2)), 0.0)
+            .unwrap();
+    }
+    assert!(formed(&run(&mut mm, 0.0, 4.75)).is_empty());
+    mm.search(party(13, TEAM_SLAYER, players(7, 2)), 5.0)
+        .unwrap();
+    let m = &formed(&run(&mut mm, 5.0, 5.0))[0].1;
+    assert_eq!(accounts(m), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(m.bots, 0);
+    assert!((1..=7).step_by(2).all(|a| team(m, a) == team(m, a + 1)));
+}
+
+#[test]
 fn without_bots_ranked_teams_must_be_the_same_size() {
     let no_bots = parse(
         "playlist 0 even Even Teams\nranked yes\nhumans 4 8\n\
@@ -584,6 +640,56 @@ fn unranked_matches_fill_up_with_bots() {
     assert_eq!(m.bots, 5);
     let red = m.players.iter().filter(|p| p.team == 0).count();
     assert!(red == 1 || red == 2);
+}
+
+#[test]
+fn unranked_teams_are_even_once_bots_join_the_smaller() {
+    // Team Training is four against four at most, so a party of more than
+    // four could never have enough opponents.
+    let mut mm = matchmaker();
+    for n in [5, 6, 8] {
+        let big = party(10, TEAM_TRAINING, players(1, n));
+        assert_eq!(mm.search(big, 0.0), Err(TOO_LARGE));
+    }
+    // Four play four bots.
+    mm.search(party(10, TEAM_TRAINING, players(1, 4)), 0.0)
+        .unwrap();
+    let m = &formed(&run(&mut mm, 0.0, 20.0))[0].1;
+    assert_eq!(m.bots, 4);
+    assert!(m.players.iter().all(|p| p.team == m.players[0].team));
+
+    // Three, three and two can't be closer than five against three, so the
+    // two play apart.
+    let mut mm = matchmaker();
+    mm.search(party(10, TEAM_TRAINING, players(1, 3)), 0.0)
+        .unwrap();
+    mm.search(party(11, TEAM_TRAINING, players(4, 3)), 0.0)
+        .unwrap();
+    mm.search(party(12, TEAM_TRAINING, players(7, 2)), 0.0)
+        .unwrap();
+    let matches = formed(&run(&mut mm, 0.0, 20.0));
+    let sizes: Vec<(usize, u8)> = matches
+        .iter()
+        .map(|(_, m)| (m.players.len(), m.bots))
+        .collect();
+    assert_eq!(sizes, [(6, 2), (2, 6)]);
+
+    // Six and two in Big Team Battle: the four bots it fills up with join
+    // the two.
+    let mut mm = matchmaker();
+    mm.search(party(10, BIG_TEAM, players(1, 6)), 0.0).unwrap();
+    mm.search(party(11, BIG_TEAM, players(7, 2)), 0.0).unwrap();
+    let m = &formed(&run(&mut mm, 0.0, 20.0))[0].1;
+    assert_eq!(m.bots, 4);
+    assert_ne!(team(m, 1), team(m, 7));
+
+    // A party of eight there waits for seven more to play against.
+    let mut mm = matchmaker();
+    mm.search(party(10, BIG_TEAM, players(1, 8)), 0.0).unwrap();
+    let events = run(&mut mm, 0.0, 30.0);
+    assert!(formed(&events).is_empty());
+    let s = status_at(&events, 10, 30.0);
+    assert_eq!((s.stage, s.have, s.need), (Stage::Balancing, 8, 7));
 }
 
 #[test]

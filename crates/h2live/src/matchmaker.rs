@@ -227,6 +227,7 @@ struct Search {
 }
 
 /// Parties gathered into a match that hasn't started yet.
+#[derive(Clone)]
 struct Group {
     playlist: usize,
     /// Indexes into `Matchmaker::searches`, the oldest party first.
@@ -317,15 +318,34 @@ fn shared_maps(members: &[Member], playlist: &Playlist) -> Vec<(usize, u64)> {
     shared
 }
 
+/// Bots that fill up a game of `people` in a playlist that fills with them.
+fn fill_bots(playlist: &Playlist, people: usize) -> usize {
+    let to = match playlist.bots {
+        Bots::Fill(n) => usize::from(n),
+        _ => 0,
+    };
+    to.min(MAX_PLAYERS).saturating_sub(people)
+}
+
+/// How many people apart the teams of a game of `people` can be. Bots join
+/// the smaller team, and then the teams must be within one of each other,
+/// except that ranked teams with no bot to even them out must be the same
+/// size.
+fn teams_apart(playlist: &Playlist, people: usize) -> usize {
+    match playlist.bots {
+        Bots::None if playlist.ranked => 0,
+        Bots::None | Bots::Even => 1,
+        Bots::Fill(_) => 1 + fill_bots(playlist, people),
+    }
+}
+
 /// How many more people (each searching alone) parties of `sizes` need
-/// before they split into teams the playlist allows, or `None` if they
-/// never can. Ranked team games need teams the same size, or one apart when
-/// a bot evens them out; anything else is always fine.
+/// before they split into teams the playlist allows (see `teams_apart`), or
+/// `None` if they never can. Free-for-all games are always fine.
 fn balance_needed(playlist: &Playlist, sizes: &[usize]) -> Option<usize> {
-    if !(playlist.ranked && playlist.teams) {
+    if !playlist.teams {
         return Some(0);
     }
-    let apart = usize::from(playlist.bots == Bots::Even);
     let total: usize = sizes.iter().sum();
     // Bit n is set when some of the parties add up to n people.
     let mut sums: u64 = 1;
@@ -334,6 +354,7 @@ fn balance_needed(playlist: &Playlist, sizes: &[usize]) -> Option<usize> {
     }
     let room = usize::from(playlist.max).saturating_sub(total);
     (0..=room).find(|&extra| {
+        let apart = teams_apart(playlist, total + extra);
         (0..=total).filter(|&red| sums >> red & 1 == 1).any(|red| {
             (0..=extra).any(|more| (red + more).abs_diff(total - red + extra - more) <= apart)
         })
@@ -628,7 +649,9 @@ impl Matchmaker {
 
     /// Gather the searching parties into matches: the oldest party not yet
     /// in one starts the next, and takes in every younger party that fits,
-    /// oldest first.
+    /// oldest first. If the last to join leave teams that can't be even in
+    /// a match that could have started without them, they're left for
+    /// another.
     fn gather(&self, now: f64) -> Vec<Group> {
         let mut order: Vec<usize> = (0..self.searches.len()).collect();
         order.sort_by(|&a, &b| self.searches[a].since.total_cmp(&self.searches[b].since));
@@ -650,11 +673,22 @@ impl Matchmaker {
                 widened: widening(now - search.since),
             };
             group.add(first, search);
+            // The group as it last could start.
+            let mut ready = self.ready(&group).then(|| group.clone());
             for &other in &order[k + 1..] {
                 if !taken[other] && self.fits(&group, &self.searches[other]) {
                     taken[other] = true;
                     group.add(other, &self.searches[other]);
+                    if self.ready(&group) {
+                        ready = Some(group.clone());
+                    }
                 }
+            }
+            if let Some(ready) = ready {
+                for &i in &group.parties[ready.parties.len()..] {
+                    taken[i] = false;
+                }
+                group = ready;
             }
             groups.push(group);
         }
@@ -680,6 +714,14 @@ impl Matchmaker {
         let mut sizes = group.sizes.clone();
         sizes.push(search.people);
         levels_fit && balance_needed(playlist, &sizes).is_some()
+    }
+
+    /// Whether a group has enough people to start, on teams that can be
+    /// even.
+    fn ready(&self, group: &Group) -> bool {
+        let playlist = &self.playlists[group.playlist];
+        group.people >= usize::from(playlist.min)
+            && balance_needed(playlist, &group.sizes) == Some(0)
     }
 
     /// What a party in `group` is shown.
@@ -774,10 +816,9 @@ impl Matchmaker {
         let blue = group.people - red;
         let bots = match playlist.bots {
             Bots::None => 0,
-            Bots::Even => usize::from(playlist.teams && red.abs_diff(blue) == 1),
-            Bots::Fill(n) => usize::from(n).saturating_sub(group.people),
+            Bots::Even => u8::from(playlist.teams && red.abs_diff(blue) == 1),
+            Bots::Fill(_) => fill_bots(playlist, group.people) as u8,
         };
-        let bots = bots.min(MAX_PLAYERS.saturating_sub(group.people)) as u8;
 
         let mut players = Vec::new();
         let mut pcs = Vec::new();
