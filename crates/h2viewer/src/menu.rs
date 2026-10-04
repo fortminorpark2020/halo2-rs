@@ -462,9 +462,16 @@ impl Row {
             | Row::SearchDetail
             | Row::Starting => false,
             // The party leader's choices.
-            Row::Matchmaking | Row::Quickmatch | Row::CustomGame | Row::Privacy | Row::Cancel => {
+            Row::Matchmaking | Row::Quickmatch | Row::Privacy | Row::Cancel => {
                 ctx.online.is_some_and(|o| o.leads())
             }
+            // Its members can go back into its custom game.
+            Row::CustomGame => ctx.online.is_some_and(|o| {
+                let custom = o
+                    .party()
+                    .is_some_and(|p| p.activity == live::Activity::Custom);
+                o.leads() || custom
+            }),
             _ => true,
         }
     }
@@ -643,10 +650,11 @@ impl Menu {
         }
     }
 
-    fn title(&self) -> &'static str {
+    fn title(&self, ctx: &Context) -> &'static str {
         match self.screen {
             Screen::Main => "HALO 2",
             Screen::Campaign => "CAMPAIGN",
+            Screen::Lobby if in_custom(ctx) => "CUSTOM GAME",
             Screen::Lobby => "MULTIPLAYER",
             Screen::Options => "GAME OPTIONS",
             Screen::SystemLink => "SYSTEM LINK",
@@ -901,6 +909,7 @@ impl Menu {
                 )
             }
             Row::Searching => ("SEARCHING FOR GAMES...".into(), None),
+            Row::Waiting if in_custom(ctx) => ("WAITING FOR THE PARTY LEADER".into(), None),
             Row::Waiting => ("WAITING FOR THE HOST TO START".into(), None),
             Row::Resume => ("RESUME".into(), None),
             Row::EndGame if ctx.joined || in_match(ctx) => ("LEAVE GAME".into(), None),
@@ -1087,7 +1096,7 @@ impl Menu {
         let s = &mut self.settings;
         match row {
             Row::Difficulty => self.difficulty = cycle(self.difficulty, DIFFICULTIES.len()),
-            Row::Map => s.map = cycle(s.map, ctx.maps.len()),
+            Row::Map => s.map = next_map(s.map, step, ctx),
             Row::Score => s.score = cycle(s.score, scores(s.game_type()).0.len()),
             Row::Bots => s.bots = cycle(s.bots, MAX_BOTS + 1),
             Row::GameType => {
@@ -1423,6 +1432,11 @@ impl Menu {
 
     fn back(&mut self, ctx: &Context) -> Action {
         match self.screen {
+            // Back to the party (the custom game is over, if we host it).
+            Screen::Lobby if in_custom(ctx) => {
+                self.back_to(Screen::Live, Row::CustomGame, ctx);
+                Action::Leave
+            }
             Screen::Lobby if ctx.joined => {
                 self.sound = Some(Sound::Back);
                 Action::Leave
@@ -1630,7 +1644,7 @@ impl Menu {
                 );
             }
         }
-        hb.text_left(font, f.at(ROW_X, 48.0), 26.0 * s, self.title(), BRIGHT);
+        hb.text_left(font, f.at(ROW_X, 48.0), 26.0 * s, self.title(ctx), BRIGHT);
         let rule = f.rect([ROW_X, 84.0, ROW_X + 300.0, 86.0]);
         hb.quad(white, rule, [0.0; 4], HIGHLIGHT, hud_mode::PLAIN, 0.0);
 
@@ -1753,6 +1767,7 @@ impl Menu {
             Screen::Live if ctx.online.is_some_and(|o| o.live.is_some()) => {
                 "ENTER OR A: SELECT   ESC OR B: SIGN OUT"
             }
+            Screen::Lobby if in_custom(ctx) => "ENTER OR A: SELECT   ESC OR B: BACK TO THE PARTY",
             _ => "ENTER OR A: SELECT   ESC OR B: BACK",
         };
         hb.text_left(font, f.at(ROW_X, 440.0), 8.0 * s, hint, DIM);
@@ -1953,6 +1968,25 @@ impl Menu {
 /// In an online match.
 fn in_match(ctx: &Context) -> bool {
     ctx.online.is_some_and(|o| o.game.is_some())
+}
+
+/// In the party's custom game, online.
+fn in_custom(ctx: &Context) -> bool {
+    ctx.online.is_some_and(|o| o.custom)
+}
+
+/// The map `step` on from map `k`, of those that can be played: in a
+/// custom game, the ones everyone in the party has.
+fn next_map(k: usize, step: i32, ctx: &Context) -> usize {
+    let party = ctx.online.filter(|o| o.custom).and_then(|o| o.party());
+    let playable = |m: &MapChoice| {
+        party.is_none_or(|p| p.maps.iter().any(|n| n.eq_ignore_ascii_case(&m.name)))
+    };
+    let n = ctx.maps.len() as i32;
+    (1..=n)
+        .map(|i| (k as i32 + step * i).rem_euclid(n) as usize)
+        .find(|&j| playable(&ctx.maps[j]))
+        .unwrap_or(k)
 }
 
 /// The lowest the pregame's player list reaches (screen units), above the
@@ -2749,6 +2783,7 @@ mod tests {
             game: None,
             countdown: None,
             returning: None,
+            custom: false,
         }
     }
 
@@ -2818,6 +2853,57 @@ mod tests {
         assert_eq!(m.notice, None);
         assert_eq!(m.screen, Screen::Main);
         assert_eq!(m.rows(&c)[m.cursor], Row::Online);
+    }
+
+    #[test]
+    fn custom_games_are_played_on_the_partys_maps() {
+        let maps: Vec<MapChoice> = ["lockout", "midship", "zanzibar"]
+            .iter()
+            .map(|n| MapChoice::new(Path::new(&format!("maps/{n}.map"))))
+            .collect();
+        let mut view = signed_in(1, &[(1, "JOHN"), (2, "SARGE")]);
+        let party = view.party.as_mut().unwrap();
+        party.activity = Activity::Custom;
+        party.maps = vec!["zanzibar".into(), "lockout".into()];
+        let o = OnlineView {
+            custom: true,
+            ..online(Some(&view))
+        };
+        let c = Context {
+            online: Some(&o),
+            ..ctx(&maps, &[])
+        };
+        // The leader's lobby, with only the maps everyone has.
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Lobby);
+        assert_eq!(m.title(&c), "CUSTOM GAME");
+        m.input(Input::Down, &c);
+        m.input(Input::Right, &c);
+        assert_eq!(m.settings.map, 2, "midship isn't everyone's");
+        m.input(Input::Right, &c);
+        assert_eq!(m.settings.map, 0);
+        m.input(Input::Left, &c);
+        assert_eq!(m.settings.map, 2);
+        // Backing out leaves it, for the party lobby.
+        assert_eq!(m.input(Input::Back, &c), Action::Leave);
+        assert_eq!(m.screen, Screen::Live);
+        assert_eq!(m.rows(&c)[m.cursor], Row::CustomGame);
+        // A member who left can go back in while it's on.
+        let mut view = signed_in(2, &[(2, "SARGE"), (1, "JOHN")]);
+        let o = online(Some(&view));
+        let c = Context {
+            online: Some(&o),
+            ..ctx(&maps, &[])
+        };
+        assert!(!Row::CustomGame.selectable(&c));
+        view.party.as_mut().unwrap().activity = Activity::Custom;
+        let o = online(Some(&view));
+        let c = Context {
+            online: Some(&o),
+            ..ctx(&maps, &[])
+        };
+        assert!(Row::CustomGame.selectable(&c));
+        assert_eq!(m.input(Input::Select, &c), Action::Custom);
     }
 
     #[test]

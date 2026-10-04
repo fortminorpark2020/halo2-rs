@@ -739,11 +739,14 @@ impl App {
         self.set_capture(false);
     }
 
-    /// Back to the menus because a LAN game (or an online match's) went
-    /// wrong: to the games on the network, or the party when online.
+    /// Back to the menus because a LAN game (or an online match's, or a
+    /// custom game's) went wrong: to the games on the network, or the party
+    /// when online.
     pub(crate) fn drop_out(&mut self, why: String) {
         if self.online.in_match() {
             self.quit_match(true);
+        } else if self.online.in_custom() {
+            self.custom_over();
         } else {
             self.net = Net::Offline;
             self.back_to_lobby();

@@ -28,8 +28,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+mod custom;
 mod matches;
 
+use custom::Custom;
 use matches::Matched;
 
 /// The service tried without H2_LIVE: one on this PC.
@@ -197,6 +199,8 @@ pub struct OnlineView<'a> {
     pub countdown: Option<f64>,
     /// After its game: seconds until we're back in the party lobby.
     pub returning: Option<f64>,
+    /// In the party's custom game.
+    pub custom: bool,
 }
 
 impl OnlineView<'_> {
@@ -407,6 +411,8 @@ pub struct Online {
     activity: Activity,
     /// The match we're in, until we're back in the party lobby.
     matched: Option<Matched>,
+    /// The party's custom game we're in, until we're back in its lobby.
+    custom: Option<Custom>,
     /// Relay legs on their way to the other end.
     legs: Vec<Leg>,
     /// A service run in the game, for testing.
@@ -483,6 +489,7 @@ impl Online {
             asked: None,
             activity: Activity::Lobby,
             matched: None,
+            custom: None,
             legs: Vec::new(),
             test: None,
             text,
@@ -516,6 +523,7 @@ impl Online {
             game: m.map(|m| &m.info),
             countdown: m.and_then(|m| m.countdown(now)),
             returning: m.and_then(|m| m.returning(now)),
+            custom: self.custom.is_some(),
         })
     }
 
@@ -563,6 +571,7 @@ impl Online {
         self.asked = None;
         self.activity = Activity::Lobby;
         self.matched = None;
+        self.custom = None;
         self.legs.clear();
         self.test = None;
     }
@@ -591,6 +600,23 @@ impl Online {
     /// In a match, from MATCH until back in the party lobby.
     pub fn in_match(&self) -> bool {
         self.matched.is_some()
+    }
+
+    /// In the party's custom game, from CUSTOM_OPEN until back in the
+    /// party lobby.
+    pub fn in_custom(&self) -> bool {
+        self.custom.is_some()
+    }
+
+    /// In the party's custom game: a member's level (their best), by
+    /// gamertag.
+    pub fn party_level(&self, gamertag: &str) -> Option<u8> {
+        let Link::Live(client) = &self.link else {
+            return None;
+        };
+        let party = client.view.party.as_ref().filter(|_| self.in_custom())?;
+        let member = party.members.iter().find(|m| m.gamertag == gamertag)?;
+        Some(member.best)
     }
 
     /// Open a relay leg for `link` (LINK): a new connection to the
@@ -748,11 +774,10 @@ impl Online {
         client.send(message);
     }
 
-    /// Follow the party into and out of searches its leader starts and
-    /// stops: true when it started, false when it stopped (or the service
-    /// wouldn't start ours). A search that found a match isn't stopped:
-    /// the match comes next.
-    pub fn follow_party(&mut self, now: f64) -> Option<bool> {
+    /// Follow the party into and out of what its leader starts and stops:
+    /// searches (one that found a match isn't stopped: the match comes
+    /// next), and custom games.
+    pub fn follow_party(&mut self, now: f64) -> Option<Followed> {
         let Link::Live(client) = &self.link else {
             return None;
         };
@@ -770,7 +795,7 @@ impl Online {
             (_, Activity::Searching) => {
                 let playlist = party.map_or(QUICKMATCH, |p| p.playlist);
                 self.search.get_or_insert((playlist, now));
-                Some(true)
+                Some(Followed::Searching)
             }
             (Activity::Searching, Activity::Playing) => {
                 self.search = None;
@@ -778,11 +803,24 @@ impl Online {
             }
             (Activity::Searching, _) => {
                 self.search = None;
-                Some(false)
+                Some(Followed::Stopped)
             }
+            (Activity::Custom, Activity::Custom) => None,
+            (Activity::Custom, _) => Some(Followed::CustomOver),
             _ => None,
         }
     }
+}
+
+/// What the party did, for us to follow (see `Online::follow_party`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Followed {
+    /// It started searching.
+    Searching,
+    /// It stopped (or the service wouldn't start our search).
+    Stopped,
+    /// Its custom game is over.
+    CustomOver,
 }
 
 /// The online screens (out of a match).
@@ -828,9 +866,13 @@ impl App {
                 LiveEvent::Welcomed => {}
                 LiveEvent::Refused(why) | LiveEvent::Lost(why) => {
                     println!("live: {}", why.to_lowercase());
-                    // A match's links go through the service: it's over.
+                    // A match's links go through the service: it's over
+                    // (and so is a custom game).
                     if self.online.in_match() {
                         self.back_to_party();
+                    }
+                    if self.online.in_custom() {
+                        self.custom_over();
                     }
                     if !online_screen(self.menu.screen) {
                         continue;
@@ -852,29 +894,47 @@ impl App {
                 LiveEvent::Notice(text) => self.menu.notice = Some(text.to_uppercase()),
                 LiveEvent::Match(info) => self.match_ready(info),
                 LiveEvent::HostMatch(id) => self.host_match(id),
-                LiveEvent::Link(link) if self.online.in_match() => self.online.open_leg(link, now),
+                LiveEvent::Link(link) if self.online.in_match() || self.online.in_custom() => {
+                    self.online.open_leg(link, now)
+                }
+                LiveEvent::Link(_) => {}
                 LiveEvent::Go(id) => self.match_go(id),
                 LiveEvent::MatchOver(over) => self.match_over(over),
-                // Custom games aren't played online yet.
-                LiveEvent::Link(_) | LiveEvent::CustomOpen { .. } => {}
+                LiveEvent::CustomOpen { party, leader, map } => {
+                    self.custom_open(party, leader, map)
+                }
             }
         }
         let screen = self.menu.screen;
         match self.online.follow_party(now) {
-            Some(true) if online_screen(screen) && screen != Screen::Matchmaking => {
+            Some(Followed::Searching) if online_screen(screen) && screen != Screen::Matchmaking => {
                 self.menu.show(Screen::Matchmaking);
                 self.sound.play_ui(&self.scene, Sound::Advance);
             }
-            Some(false) if screen == Screen::Matchmaking => {
+            Some(Followed::Stopped) if screen == Screen::Matchmaking => {
                 self.menu.show(Screen::Live);
                 let view = self.online.view(now);
                 if let Some(failed) = view.and_then(|v| v.search_failed()) {
                     self.menu.notice = Some(failed);
                 }
             }
+            Some(Followed::CustomOver) if self.online.in_custom() => {
+                self.custom_over();
+                self.menu.notice = Some("THE CUSTOM GAME IS OVER".into());
+                self.sound.play_ui(&self.scene, Sound::Back);
+            }
             _ => {}
         }
+        // Relay legs whose other end came, for the match or custom game.
+        for (link, conn) in self.online.linked() {
+            if self.online.in_match() {
+                self.match_linked(link, conn);
+            } else {
+                self.custom_linked(link, conn);
+            }
+        }
         self.update_match();
+        self.update_custom();
         self.auto_search(now);
     }
 
@@ -1309,7 +1369,7 @@ mod tests {
             }
             online.follow_party(now)
         });
-        assert_eq!(stopped, Some(false));
+        assert_eq!(stopped, Some(Followed::Stopped));
         assert_eq!(
             notices,
             ["YOUR PARTY HAS NO MAP FROM THIS PLAYLIST IN COMMON"]
@@ -1323,7 +1383,7 @@ mod tests {
             }
         };
         set(&mut online, Activity::Searching);
-        assert_eq!(online.follow_party(now), Some(true));
+        assert_eq!(online.follow_party(now), Some(Followed::Searching));
         assert!(online.view(now).unwrap().search.is_some());
         assert_eq!(online.follow_party(now), None, "still searching");
         set(&mut online, Activity::Playing);
@@ -1334,11 +1394,22 @@ mod tests {
         set(&mut online, Activity::Searching);
         online.follow_party(now);
         set(&mut online, Activity::Lobby);
-        assert_eq!(online.follow_party(now), Some(false), "cancelled");
+        assert_eq!(
+            online.follow_party(now),
+            Some(Followed::Stopped),
+            "cancelled"
+        );
         // One the service never answers is given up on.
         online.ask(&Action::Search(None), now);
         assert_eq!(online.follow_party(now + 1.0), None);
-        assert_eq!(online.follow_party(now + ASK_WAIT), Some(false));
+        let given_up = online.follow_party(now + ASK_WAIT);
+        assert_eq!(given_up, Some(Followed::Stopped));
+        // The leader's custom games, open and then over.
+        set(&mut online, Activity::Custom);
+        assert_eq!(online.follow_party(now), None);
+        assert_eq!(online.follow_party(now), None, "still open");
+        set(&mut online, Activity::Lobby);
+        assert_eq!(online.follow_party(now), Some(Followed::CustomOver));
     }
 
     #[test]

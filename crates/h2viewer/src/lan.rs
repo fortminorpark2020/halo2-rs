@@ -97,7 +97,9 @@ impl App {
                     self.net = Net::Offline;
                     return;
                 }
-                if matches!(self.net, Net::Offline) && self.can_host {
+                // The party's custom game is hosted only as it opens.
+                let custom = self.online.in_custom();
+                if matches!(self.net, Net::Offline) && self.can_host && !custom {
                     self.start_hosting();
                 }
                 self.lobby_info()
@@ -127,6 +129,16 @@ impl App {
         }
     }
 
+    /// How players on other PCs in the lobby play: online, in the party's
+    /// custom game.
+    fn remote_how(&self) -> &'static str {
+        if self.online.in_custom() {
+            "ONLINE"
+        } else {
+            "SYSTEM LINK"
+        }
+    }
+
     /// Players on PCs that joined our lobby.
     fn lan_members(&self) -> Vec<SeatInfo> {
         let Net::Hosting(host) = &self.net else {
@@ -138,7 +150,7 @@ impl App {
                 seats.push(SeatInfo {
                     name: guest_name(&name, k),
                     look: look.guest(k),
-                    how: "SYSTEM LINK",
+                    how: self.remote_how(),
                     team,
                     // Listed after the people here.
                     level: crate::rank::test_level(self.seats.len() + seats.len()),
@@ -153,25 +165,31 @@ impl App {
         if let Some(seats) = self.match_seats() {
             return seats;
         }
-        if let Net::Joined {
-            lobby: Some(lobby), ..
-        } = &self.net
-        {
-            return lobby
+        let mut seats = match &self.net {
+            Net::Joined {
+                lobby: Some(lobby), ..
+            } => lobby
                 .players
                 .iter()
                 .enumerate()
                 .map(|(k, p)| SeatInfo {
                     name: p.name.clone(),
                     look: p.look,
-                    how: if p.remote { "SYSTEM LINK" } else { "HOST" },
+                    how: if p.remote { self.remote_how() } else { "HOST" },
                     team: p.team,
                     level: crate::rank::test_level(k),
                 })
-                .collect();
+                .collect(),
+            _ => {
+                let mut seats = self.seat_infos();
+                seats.extend(self.lan_members());
+                seats
+            }
+        };
+        // In the party's custom game, everyone's level.
+        for seat in &mut seats {
+            seat.level = self.online.party_level(&seat.name).or(seat.level);
         }
-        let mut seats = self.seat_infos();
-        seats.extend(self.lan_members());
         seats
     }
 
@@ -182,7 +200,7 @@ impl App {
             .lobby_seats()
             .into_iter()
             .map(|seat| LobbyPlayer {
-                remote: seat.how == "SYSTEM LINK",
+                remote: seat.how == self.remote_how(),
                 name: seat.name,
                 look: seat.look,
                 team: seat.team,
@@ -353,7 +371,7 @@ impl App {
             match s {
                 ClientEvent::Welcomed { computer, players } => {
                     // Online, the host is known by its gamertag.
-                    let online = self.online.in_match();
+                    let online = self.online.in_match() || self.online.in_custom();
                     if let Net::Joined { computer: name, .. } = &mut self.net {
                         if !online {
                             *name = computer;
@@ -405,6 +423,10 @@ impl App {
         }
         if self.mode == Mode::Playing {
             self.back_to_lobby();
+        } else if self.online.in_custom() && self.menu.screen != Screen::Lobby {
+            // Through to the party leader's lobby.
+            self.menu.show(Screen::Lobby);
+            self.menu.notice = None;
         }
     }
 
@@ -446,6 +468,10 @@ impl App {
     pub(crate) fn leave_game(&mut self) {
         if self.online.in_match() {
             self.quit_match(false);
+            return;
+        }
+        if self.online.in_custom() {
+            self.leave_custom();
             return;
         }
         self.net = Net::Offline;

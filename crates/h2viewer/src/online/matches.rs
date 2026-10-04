@@ -224,7 +224,7 @@ impl App {
 
     /// A relay leg's other end came: as the host, a PC joining; otherwise,
     /// the host, whose lobby we wait in until its game starts.
-    fn linked(&mut self, link: LinkInfo, conn: Connection) {
+    pub(super) fn match_linked(&mut self, link: LinkInfo, conn: Connection) {
         let gamertag = self.online.me().map(|(_, g)| g.to_string());
         let Some(m) = self
             .online
@@ -293,14 +293,10 @@ impl App {
         println!("live: the match's game started");
     }
 
-    /// Keep the match going, every frame: take relay legs that came, start
-    /// the game when it's time (hosting), say how it ended, and go back to
-    /// the party a while after.
+    /// Keep the match going, every frame: start the game when it's time
+    /// (hosting), say how it ended, and go back to the party a while after.
     pub(super) fn update_match(&mut self) {
         let now = self.online.now();
-        for (link, conn) in self.online.linked() {
-            self.linked(link, conn);
-        }
         let Some(m) = &self.online.matched else {
             return;
         };
