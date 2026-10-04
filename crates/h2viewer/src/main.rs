@@ -230,6 +230,7 @@ fn new_game(
     game.hills = objective::hills(scene);
     game.territories = objective::territories(scene);
     game.kill_zones = kill_zones(scene);
+    game.teleporters = objective::teleporters(scene);
     game.set_vehicles(scene.vehicles.defs.clone(), scene.vehicles.spawns.clone());
     game.apply_options(options.shared(scene));
     game
@@ -503,7 +504,8 @@ fn simulate(level: &Level, settings: &Settings, seconds: f32) {
                 Event::PickedUp {
                     kind: ItemKind::Powerup(_) | ItemKind::Ammo { .. },
                     ..
-                } => println!("{t:6.1} {e:?}"),
+                }
+                | Event::Teleported { .. } => println!("{t:6.1} {e:?}"),
                 _ => {}
             }
         }
@@ -1075,6 +1077,13 @@ impl App {
                         l.camera.yaw = yaw;
                         l.camera.pitch = 0.0;
                         l.view.switched = true;
+                    }
+                }
+                Event::Teleported { player, .. } => {
+                    // Straight there, without the view gliding across.
+                    let eye = local::view_point(&self.game, player);
+                    if let Some(l) = self.local_of(player) {
+                        l.eyes = (eye, eye);
                     }
                 }
                 Event::PickedUp { player, kind } => {

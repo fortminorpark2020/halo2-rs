@@ -12,7 +12,7 @@ use crate::App;
 use blam_cache::scenario::NetgameFlagKind;
 use glam::{Mat4, Vec3};
 use h2sim::game::{
-    Emblem, Event, FlagEvent, Hill, HillControl, HillEvent, Territory, NEUTRAL, TEAMS,
+    Emblem, Event, FlagEvent, Hill, HillControl, HillEvent, Teleporter, Territory, NEUTRAL, TEAMS,
 };
 use h2sim::{Game, GameType};
 use std::collections::BTreeMap;
@@ -90,6 +90,24 @@ pub fn territories(scene: &Scene) -> Vec<Territory> {
         }
     }
     points.into_values().map(Territory::new).collect()
+}
+
+/// The map's teleporters: each entry pad to the exit on its channel.
+pub fn teleporters(scene: &Scene) -> Vec<Teleporter> {
+    let flags = &scene.netgame_flags;
+    flags
+        .iter()
+        .filter(|f| f.kind == NetgameFlagKind::TeleporterSource)
+        .filter_map(|entry| {
+            let exit = flags.iter().find(|f| {
+                f.kind == NetgameFlagKind::TeleporterDestination && f.identifier == entry.identifier
+            })?;
+            Some(Teleporter {
+                entry: Vec3::from(entry.position),
+                exit: Vec3::from(exit.position),
+            })
+        })
+        .collect()
 }
 
 /// Every place an objective game sends players (for the bots' routes).

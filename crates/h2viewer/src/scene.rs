@@ -383,6 +383,7 @@ pub struct GameSounds {
     /// Ticks counting down to respawning, and respawning.
     pub respawn_tick: Option<usize>,
     pub respawn: Option<usize>,
+    pub teleport: Option<usize>,
     pub announcer: Announcer,
     pub ui: UiSounds,
 }
@@ -1647,6 +1648,10 @@ impl Scene {
                 "sound\\game_sfx\\multiplayer\\countdown_for_respawn",
             ),
             respawn: named(&mut loader, "sound\\game_sfx\\multiplayer\\player_respawn"),
+            teleport: named(
+                &mut loader,
+                "sound\\game_sfx\\multiplayer\\teleporter_activate",
+            ),
             ui: UiSounds {
                 cursor: named(&mut loader, "sound\\ui\\cursor1"),
                 forward: named(&mut loader, "sound\\ui\\forward1"),

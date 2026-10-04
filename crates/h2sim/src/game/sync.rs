@@ -455,6 +455,12 @@ impl Event {
                 w.index(hit_player);
                 w.bool(exploded);
             }
+            Event::Teleported { player, from, to } => {
+                w.u8(24);
+                w.index(Some(player));
+                w.vec3(from);
+                w.vec3(to);
+            }
         }
     }
 
@@ -608,6 +614,11 @@ impl Event {
                 normal: r.vec3()?,
                 hit_player: opt_player(r)?,
                 exploded: r.bool()?,
+            },
+            24 => Event::Teleported {
+                player: r.index_below(players)?,
+                from: r.vec3()?,
+                to: r.vec3()?,
             },
             _ => return Err(Malformed),
         })

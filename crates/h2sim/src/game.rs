@@ -19,6 +19,7 @@ mod powerups;
 mod projectiles;
 mod sensor;
 mod sync;
+mod teleporters;
 mod vehicles;
 mod zones;
 pub use ctf::{Flag, FlagEvent, NEUTRAL};
@@ -27,6 +28,7 @@ pub use powerups::Powerup;
 pub use projectiles::{Homing, Projectile, StuckRound};
 pub use sensor::{Blip, SENSOR_RANGE};
 pub use sync::{Malformed, Reader, Writer};
+pub use teleporters::Teleporter;
 pub use vehicles::{VehicleAction, VehicleSpawn};
 pub use zones::{Hill, HillControl, HillEvent, Territory};
 
@@ -539,6 +541,9 @@ pub struct Spartan {
     pub camo: f32,
     /// How much firing and getting hurt give a camouflaged player away (0-1).
     pub reveal: f32,
+    /// Came out of a teleporter and hasn't stepped off its pad yet (so a
+    /// two-way one doesn't send them straight back).
+    teleported: bool,
     pub alive: bool,
     /// Seconds until respawning, while dead.
     pub respawn_in: f32,
@@ -695,6 +700,12 @@ pub enum Event {
         player: usize,
         kind: ItemKind,
     },
+    /// Sent by a teleporter from one place to another.
+    Teleported {
+        player: usize,
+        from: Vec3,
+        to: Vec3,
+    },
     /// Pulled the trigger with no ammo left at all.
     DryFire {
         player: usize,
@@ -800,6 +811,7 @@ pub struct Game {
     pub flag_bases: Vec<(u8, Vec3)>,
     /// Places that kill whoever enters them.
     pub kill_zones: Vec<KillZone>,
+    pub teleporters: Vec<Teleporter>,
     /// King of the Hill: the map's hills, which one is in play and how long
     /// until it moves, and who holds it.
     pub hills: Vec<Hill>,
@@ -882,6 +894,7 @@ impl Game {
             flags: Vec::new(),
             flag_bases: Vec::new(),
             kill_zones: Vec::new(),
+            teleporters: Vec::new(),
             hills: Vec::new(),
             hill: 0,
             hill_moves_in: 0.0,
@@ -1007,6 +1020,7 @@ impl Game {
             overshield_charge: 0.0,
             camo: 0.0,
             reveal: 0.0,
+            teleported: false,
             alive: true,
             respawn_in: 0.0,
             weapons,
@@ -1188,6 +1202,7 @@ impl Game {
             self.players[i].last = cmd;
             return;
         }
+        self.teleport(i);
         self.pick_up(i, cmd.action && !at_vehicle && !riding, dt);
         self.touch_flags(i, cmd.action && !at_vehicle, dt);
 

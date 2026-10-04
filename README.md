@@ -24,7 +24,7 @@ install. No game files are included in this repository.
   the maps' power-ups (the overshield charges shields to three times and
   drains back over a minute; active camouflage all but hides a player for 45
   seconds, less so while they fire or get hurt) and ammo packs for power
-  weapons, timed from their tags,
+  weapons, timed from their tags, the maps' teleporters,
   the rules of every Halo 2 game type: Slayer, Capture the Flag, King of the
   Hill, Oddball, Juggernaut, Territories and Assault, with team versions of
   Slayer, King and Oddball (shields, health, grenades, pickups, respawns,

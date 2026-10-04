@@ -412,6 +412,11 @@ impl Soundscape {
                     });
                 self.play(scene, s, body(player), Some(player), listeners, 1.0);
             }
+            Event::Teleported { from, to, .. } => {
+                for at in [from, to] {
+                    self.play(scene, g.teleport, at, None, listeners, 1.0);
+                }
+            }
             Event::VehicleDestroyed { position, .. } => {
                 self.play(scene, g.explosion[0], position, None, listeners, 1.0);
             }
