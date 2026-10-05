@@ -274,6 +274,8 @@ impl App {
                     }
                 }
                 HostEvent::Added { player } => {
+                    // Back in the game, they take over from their bot.
+                    self.bots.retain(|(i, _)| *i != player);
                     self.announce(&format!("{} JOINED", self.game.name(player)));
                 }
                 HostEvent::Removed { player } => {

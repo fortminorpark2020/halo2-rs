@@ -749,6 +749,26 @@ fn welcomed(
     mine
 }
 
+/// Poll until the host takes another player at `client` into its game
+/// (ADD_LOCAL): who they play.
+fn added(
+    host: &mut Host,
+    hg: &mut h2sim::Game,
+    client: &mut Client,
+    cg: &mut h2sim::Game,
+) -> usize {
+    let mut added = None;
+    pump(host, hg, client, cg, |_, ce, _| {
+        for e in ce {
+            if let ClientEvent::Added(p) = e {
+                added = Some(*p);
+            }
+        }
+        added.is_some()
+    });
+    added.unwrap()
+}
+
 /// Poll the host until a PC leaves: the players it had.
 fn left(host: &mut Host, hg: &mut h2sim::Game) -> Vec<usize> {
     let start = Instant::now();
@@ -845,6 +865,32 @@ fn an_online_pc_that_comes_back_plays_on_where_it_left_off() {
     }
     let mut client = come_back(&mut host, &cg, "SARGE 2", &[ANY_TEAM]);
     assert_eq!(welcomed(&mut host, &mut hg, &mut client, &mut cg), [3]);
+}
+
+#[test]
+fn a_player_back_later_than_the_rest_of_their_pc_plays_on_too() {
+    let mut hg = game();
+    hg.add_player();
+    let mut cg = game();
+    let who = verified("SARGE", ANY_TEAM);
+    let teams = [ANY_TEAM, ANY_TEAM];
+    let (mut host, mut client) = online("testmap", &cg, "testmap", &teams, me(), who.clone());
+    let mine = welcomed(&mut host, &mut hg, &mut client, &mut cg);
+    drop(client);
+    assert_eq!(left(&mut host, &mut hg), mine);
+    // Back with one player; then the other joins in (controller Start):
+    // they play the Spartan they left, not a new one.
+    let (a, b) = Connection::pair();
+    host.add_connection(a, who);
+    let mut client = Client::over(b, &cg, "testmap", &[ANY_TEAM], me());
+    assert_eq!(welcomed(&mut host, &mut hg, &mut client, &mut cg), [1]);
+    client.add_local();
+    assert_eq!(added(&mut host, &mut hg, &mut client, &mut cg), 2);
+    assert_eq!(hg.players.len(), 3);
+    assert!(host.is_remote(2));
+    // Another joins in: someone new.
+    client.add_local();
+    assert_eq!(added(&mut host, &mut hg, &mut client, &mut cg), 3);
 }
 
 // Heartbeats, with a short timeout instead of the real ten seconds.

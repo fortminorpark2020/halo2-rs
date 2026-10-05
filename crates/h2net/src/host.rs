@@ -34,7 +34,8 @@ pub enum HostEvent {
         computer: String,
         players: Vec<usize>,
     },
-    /// Someone on a joined PC started playing in splitscreen.
+    /// Someone on a joined PC started playing in splitscreen: with the
+    /// Spartan they left the game playing, if that PC left one.
     Added { player: usize },
     /// A joined PC's splitscreen player stopped playing; no one controls
     /// their Spartan now.
@@ -635,10 +636,26 @@ impl Host {
                     }
                 }
                 kind::ADD_LOCAL if r.in_game => {
-                    if game.players.len() < max_players && r.players.len() < 4 {
-                        // Online, on the team the service gave that PC.
-                        let team = r.verified.as_ref().map_or(ANY_TEAM, |v| v.team);
-                        let p = add_player(game, team);
+                    // A player that PC left the game with plays on with
+                    // their Spartan.
+                    let who = r.who();
+                    let left = self.left.iter().position(|l| l.0 == who);
+                    if (left.is_some() || game.players.len() < max_players) && r.players.len() < 4 {
+                        let p = match left {
+                            Some(i) => {
+                                let theirs = &mut self.left[i].1;
+                                theirs.sort_unstable();
+                                let p = theirs.remove(0);
+                                if theirs.is_empty() {
+                                    self.left.remove(i);
+                                }
+                                p
+                            }
+                            // Online, on the team the service gave that PC.
+                            None => {
+                                add_player(game, r.verified.as_ref().map_or(ANY_TEAM, |v| v.team))
+                            }
+                        };
                         game.set_name(p, &guest_name(&r.name, r.players.len()));
                         game.set_look(p, r.look.guest(r.players.len()));
                         r.players.push(seat(game, p));
