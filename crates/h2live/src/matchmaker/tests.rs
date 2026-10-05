@@ -428,6 +428,60 @@ fn everyone_needs_the_same_copy_of_a_map() {
 }
 
 #[test]
+fn no_one_is_matched_on_a_map_they_dont_have() {
+    // Four search Team Slayer: one without Lockout, one with another copy
+    // of Midship. The game wouldn't let them, but whoever searches anyway
+    // only plays the maps everyone has.
+    let mut maps = HashSet::new();
+    for seed in 0..40 {
+        let mut mm = Matchmaker::new(built_in(), seed);
+        let mut without = member(1, 5);
+        without.maps.retain(|(m, _)| m != "lockout");
+        let mut other_copy = member(2, 5);
+        for (m, hash) in &mut other_copy.maps {
+            if m == "midship" {
+                *hash = 8;
+            }
+        }
+        mm.search(party(1, TEAM_SLAYER, vec![without]), 0.0)
+            .unwrap();
+        mm.search(party(2, TEAM_SLAYER, vec![other_copy]), 0.0)
+            .unwrap();
+        mm.search(solo(3, TEAM_SLAYER, 5), 0.0).unwrap();
+        mm.search(solo(4, TEAM_SLAYER, 5), 0.0).unwrap();
+        let m = &formed(&run(&mut mm, 0.0, 30.0))[0].1;
+        assert_eq!(accounts(m), [1, 2, 3, 4]);
+        assert!(
+            !["lockout", "midship"].contains(&m.map.as_str()),
+            "{}",
+            m.map
+        );
+        assert_eq!(m.hash, 7);
+        maps.insert(m.map.clone());
+    }
+    // Any of the other eight.
+    assert!(maps.len() > 4, "{maps:?}");
+
+    // Quickmatch passes over playlists the party lacks a map of, as the
+    // game marks them: Rumble Pit is busiest, but plays Warlock.
+    let mut mm = matchmaker();
+    for id in 1..=6 {
+        mm.search(solo(id, RUMBLE_PIT, 5), 0.0).unwrap();
+    }
+    mm.search(solo(7, TEAM_SLAYER, 5), 0.0).unwrap();
+    let mut no_warlock = solo(10, QUICKMATCH, 5);
+    no_warlock.members[0].maps.retain(|(m, _)| m != "warlock");
+    assert_eq!(mm.search(no_warlock, 0.0), Ok(TEAM_SLAYER));
+    // With Lockout alone, no playlist has every map, though Head to Head
+    // can still be searched by name.
+    let mut only_lockout = solo(20, QUICKMATCH, 5);
+    only_lockout.members[0].maps = vec![("lockout".into(), 7)];
+    assert_eq!(mm.search(only_lockout.clone(), 0.0), Err(NO_PLAYLIST));
+    only_lockout.playlist = HEAD_TO_HEAD;
+    assert_eq!(mm.search(only_lockout, 0.0), Ok(HEAD_TO_HEAD));
+}
+
+#[test]
 fn a_match_is_never_on_the_map_a_party_just_played() {
     let mut maps = HashSet::new();
     for seed in 0..20 {

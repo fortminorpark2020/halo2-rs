@@ -50,8 +50,9 @@ pub const MAX_NAME: usize = 64;
 const MAX_TEXT: usize = 1024;
 /// Longest stat card, in bytes.
 pub const MAX_CARD: usize = 8 << 10;
-/// Most maps a PC can list.
+/// Most maps a PC can list, and a playlist can play.
 pub const MAX_MAPS: usize = 1024;
+pub const MAX_PLAYLIST_MAPS: usize = 64;
 /// Most players in a match or its results.
 const MAX_PLAYERS: usize = 16;
 /// Most players an ONLINE list holds.
@@ -259,6 +260,8 @@ pub struct PlaylistInfo {
     pub playing: u16,
     /// The player's level in it (0 if it isn't ranked).
     pub level: u8,
+    /// The maps it plays: file names, without `.map`.
+    pub maps: Vec<String>,
 }
 
 /// A signed-in player, as the ONLINE list shows them.
@@ -412,6 +415,9 @@ pub struct MatchOver {
     /// Each playlist the game was rated in (none if it didn't count for
     /// this PC): its id, the old level and the new.
     pub levels: Vec<(u8, u8, u8)>,
+    /// Everyone the game was rated for, this PC's player too: their account
+    /// and their level in its playlist now, for the carnage report.
+    pub players: Vec<(u64, u8)>,
 }
 
 /// How one PC's player finished a match.
@@ -635,6 +641,11 @@ impl PlaylistInfo {
         w.u16(self.searching);
         w.u16(self.playing);
         w.u8(self.level);
+        let maps = &self.maps[..self.maps.len().min(MAX_PLAYLIST_MAPS)];
+        count(w, maps.len());
+        for map in maps {
+            w.str(map);
+        }
     }
 
     fn read(r: &mut Reader) -> Result<PlaylistInfo, Malformed> {
@@ -643,6 +654,12 @@ impl PlaylistInfo {
         if flags > 7 {
             return Err(Malformed);
         }
+        let (min, max, party_max) = (r.u8()?, r.u8()?, r.u8()?);
+        let (searching, playing, level) = (r.u16()?, r.u16()?, r.u8()?);
+        let n = read_count(r, MAX_PLAYLIST_MAPS)?;
+        let maps = (0..n)
+            .map(|_| read_str(r, MAX_NAME))
+            .collect::<Result<_, _>>()?;
         Ok(PlaylistInfo {
             id,
             key,
@@ -650,12 +667,13 @@ impl PlaylistInfo {
             ranked: flags & 1 != 0,
             teams: flags & 2 != 0,
             guests: flags & 4 != 0,
-            min: r.u8()?,
-            max: r.u8()?,
-            party_max: r.u8()?,
-            searching: r.u16()?,
-            playing: r.u16()?,
-            level: r.u8()?,
+            min,
+            max,
+            party_max,
+            searching,
+            playing,
+            level,
+            maps,
         })
     }
 }
@@ -871,6 +889,12 @@ impl MatchOver {
             w.u8(old);
             w.u8(new);
         }
+        let players = &self.players[..self.players.len().min(MAX_PLAYERS)];
+        count(w, players.len());
+        for &(account, level) in players {
+            w.u64(account);
+            w.u8(level);
+        }
     }
 
     fn read(r: &mut Reader) -> Result<MatchOver, Malformed> {
@@ -880,12 +904,17 @@ impl MatchOver {
         let levels = (0..n)
             .map(|_| Ok((r.u8()?, r.u8()?, r.u8()?)))
             .collect::<Result<_, _>>()?;
+        let n = read_count(r, MAX_PLAYERS)?;
+        let players = (0..n)
+            .map(|_| Ok((r.u64()?, r.u8()?)))
+            .collect::<Result<_, _>>()?;
         Ok(MatchOver {
             id,
             counted,
             reason,
             card,
             levels,
+            players,
         })
     }
 }
@@ -1338,6 +1367,7 @@ mod tests {
                 searching: 6,
                 playing: 300,
                 level: 9,
+                maps: vec!["lockout".into(), "beavercreek".into()],
             }]),
             ToPc::Online(vec![OnlinePlayer {
                 account: 4,
@@ -1410,6 +1440,7 @@ mod tests {
                 reason: "THE HOST LEFT. THE GAME DIDN'T COUNT.".into(),
                 card: "card".into(),
                 levels: vec![(2, 3, 4)],
+                players: vec![(2, 4), (5, 50)],
             }),
             ToPc::Notice("THE PARTY IS FULL".into()),
             ToPc::CustomOpen {
@@ -1520,6 +1551,30 @@ mod tests {
         let at = 8 + 1 + 1 + 2 + m.map.len() + 8;
         body[at] = GameType::ALL.len() as u8;
         assert!(ToPc::read(kind, &body).is_err());
+        // A playlist playing more maps than any can.
+        let ToPc::Playlists(p) = &every_message_to_a_pc()[3] else {
+            panic!("not the playlists");
+        };
+        let most = PlaylistInfo {
+            maps: vec!["m".into(); MAX_PLAYLIST_MAPS],
+            ..p[0].clone()
+        };
+        let (kind, mut body) = ToPc::Playlists(vec![most]).write();
+        assert!(ToPc::read(kind, &body).is_ok());
+        // Its maps come last: how many, then each name ("m", 3 bytes).
+        let at = body.len() - 3 * MAX_PLAYLIST_MAPS - 1;
+        body[at] += 1;
+        body.extend([1, 0, b'm']);
+        assert!(ToPc::read(kind, &body).is_err());
+        // A match over for 17 players.
+        let mut w = Writer::default();
+        w.u64(1);
+        w.bool(true);
+        w.str("");
+        w.str("");
+        w.u8(0);
+        w.u8(17);
+        assert!(ToPc::read(kind::MATCH_OVER, &w.0).is_err());
     }
 
     #[test]

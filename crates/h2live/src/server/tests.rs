@@ -285,10 +285,15 @@ fn a_pc_signs_in_with_its_key() {
     assert_eq!(welcome.gamertag, "NOBLE SIX");
     assert_eq!((welcome.best, welcome.levels.len()), (1, 0));
     assert_eq!(w.pcs[a].view.motd, "Have fun");
-    // Every playlist, with a level in the ranked ones.
+    // Every playlist, with a level in the ranked ones, and its maps.
     let playlists = &w.pcs[a].view.playlists;
-    assert_eq!(playlists.len(), crate::playlists::built_in().len());
+    let built_in = crate::playlists::built_in();
+    assert_eq!(playlists.len(), built_in.len());
     assert!(playlists.iter().all(|p| p.level == p.ranked as u8));
+    assert!(playlists
+        .iter()
+        .zip(&built_in)
+        .all(|(p, b)| p.maps == b.maps));
     assert_eq!(w.server.players_online(), 1);
     // The account is on disk.
     let account = w.server.account(welcome.account).unwrap();

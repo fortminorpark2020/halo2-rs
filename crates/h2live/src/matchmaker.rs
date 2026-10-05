@@ -17,7 +17,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 
 /// The playlist number that asks for Quickmatch: whichever playlist the
-/// party can search has the most people searching.
+/// party can search, and has every map of, has the most people searching.
 pub const QUICKMATCH: u8 = 255;
 
 /// Seconds between searches.
@@ -510,11 +510,12 @@ impl Matchmaker {
     }
 
     /// The playlist Quickmatch picks for `ticket`: of those the party can
-    /// search, the one with the most people searching, at random among the
-    /// busiest.
+    /// search and has every map of (the only ones the game lets it choose),
+    /// the one with the most people searching, at random among the busiest.
     fn quickmatch(&mut self, ticket: &Ticket) -> Option<usize> {
+        let every_map = |p: &Playlist| shared_maps(&ticket.members, p).len() == p.maps.len();
         let open: Vec<usize> = (0..self.playlists.len())
-            .filter(|&i| self.refusal(ticket, i).is_none())
+            .filter(|&i| self.refusal(ticket, i).is_none() && every_map(&self.playlists[i]))
             .collect();
         let busiest = open.iter().map(|&i| self.searching_in(i)).max()?;
         let open: Vec<usize> = open

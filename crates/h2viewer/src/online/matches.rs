@@ -170,6 +170,15 @@ fn players_of(info: &MatchInfo, game: &Game) -> Vec<(u64, usize)> {
         .collect()
 }
 
+/// A person's level in a match, by name: as the match left it if the
+/// service said (`over`), otherwise as it began. Guests have their PC's.
+fn level_after(info: &MatchInfo, over: Option<&MatchOver>, name: &str) -> Option<u8> {
+    let (p, ..) = roster(info).find(|(_, n, _)| n == name)?;
+    let players = over.map_or(&[][..], |o| &o.players);
+    let after = players.iter().find(|&&(account, _)| account == p.account);
+    Some(after.map_or(p.level, |&(_, level)| level))
+}
+
 /// What a match did to our level in `playlist` (by name), or why it
 /// didn't count.
 fn over_notice(over: &MatchOver, playlist: &str) -> Option<String> {
@@ -467,14 +476,11 @@ impl App {
         Some(seats.collect())
     }
 
-    /// A player's level in the match, by name: ours as the match left it,
-    /// once the service says.
+    /// A player's level in the match, by name: as the match left it, once
+    /// the service says.
     pub(crate) fn match_level(&self, name: &str) -> Option<u8> {
         let m = self.online.matched.as_ref()?;
-        let (p, ..) = roster(&m.info).find(|(_, n, _)| n == name)?;
-        let ours = self.online.me().is_some_and(|(a, _)| a == p.account);
-        let after = m.over.as_ref().and_then(|o| o.levels.first());
-        Some(after.filter(|_| ours).map_or(p.level, |l| l.2))
+        level_after(&m.info, m.over.as_ref(), name)
     }
 
     /// The match's game type and score to win, while in one.
@@ -678,6 +684,30 @@ mod tests {
     }
 
     #[test]
+    fn the_carnage_report_shows_everyones_new_level() {
+        let info = double_team();
+        // As the match began, until the service says.
+        let level = |over: Option<&MatchOver>, name: &str| level_after(&info, over, name);
+        assert_eq!(level(None, "ALPHA"), Some(3));
+        assert_eq!(level(None, "CHARLIE"), Some(2));
+        // Then everyone's, guests with their PC's; whoever it wasn't
+        // rated for keeps theirs.
+        let over = MatchOver {
+            id: 7,
+            counted: true,
+            reason: String::new(),
+            card: String::new(),
+            levels: vec![(2, 3, 4)],
+            players: vec![(1, 4), (3, 1), (4, 2)],
+        };
+        assert_eq!(level(Some(&over), "ALPHA"), Some(4));
+        assert_eq!(level(Some(&over), "BRAVO"), Some(1));
+        assert_eq!(level(Some(&over), "CHARLIE"), Some(1));
+        assert_eq!(level(Some(&over), &guest_name("DELTA", 1)), Some(2));
+        assert_eq!(level(Some(&over), "SARGE"), None, "a bot");
+    }
+
+    #[test]
     fn levels_won_and_lost_are_told() {
         let over = |reason: &str, levels| MatchOver {
             id: 7,
@@ -685,6 +715,7 @@ mod tests {
             reason: reason.into(),
             card: String::new(),
             levels,
+            players: Vec::new(),
         };
         let told = |o: MatchOver| over_notice(&o, "DOUBLE TEAM");
         assert_eq!(

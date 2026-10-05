@@ -4,8 +4,9 @@
 //! The icons come from `ui\global_bitmaps\rank_icons_sm` (17x17) and
 //! `rank_icons` (28x26) in the player's own mainmenu.map, icon k for level
 //! k + 1. Each set is packed into an atlas and drawn in its own colours.
-//! Two of Xbox Live's icons from `live_icons_sm` go in a third atlas: the
-//! party leader's and a party's, shown in the online lists.
+//! Three of Xbox Live's icons from `live_icons_sm` go in a third atlas: the
+//! party leader's and a party's, shown in the online lists, and the
+//! download arrow that marks playlists the party lacks maps for.
 
 use crate::gpu::{hud_mode, RANK_TEXTURES};
 use crate::hud::HudBuilder;
@@ -35,9 +36,9 @@ const CELL: usize = 32;
 const PAD: usize = 1;
 /// Xbox Live's small icons, and the ones `LiveIcon` names, in its order.
 const LIVE_ICONS: &str = "ui\\global_bitmaps\\live_icons_sm";
-const LIVE_PICKS: [usize; 2] = [29, 19];
+const LIVE_PICKS: [usize; 3] = [29, 19, 8];
 /// Their squares in the atlas, and the middle part of each that is drawn
-/// (both are 42 by 42).
+/// (each about 42 by 42).
 const LIVE_CELL: usize = 64;
 const LIVE_SIZE: usize = 44;
 
@@ -48,6 +49,8 @@ pub enum LiveIcon {
     Leader,
     /// Two people: someone in a party.
     Party,
+    /// A down arrow: maps to get.
+    Download,
 }
 
 /// The atlases: small rank icons, large ones, then the live icons.
@@ -234,15 +237,15 @@ mod tests {
 
     #[test]
     fn live_icons_sit_in_the_middle_of_their_squares() {
-        // A 46x42 leader and a 42x42 party icon.
+        // A 46x42 leader, then 42x42 party and download icons.
         let icon = |w: u32, px: [u8; 4]| Image {
             width: w,
             height: 42,
             rgba: px.repeat(w as usize * 42),
         };
-        let a = live_atlas(&[icon(46, [255; 4]), icon(42, [9; 4])]);
-        assert_eq!((a.width, a.height), (128, 64));
-        let at = |x: usize, y: usize| a.rgba[(y * 128 + x) * 4];
+        let a = live_atlas(&[icon(46, [255; 4]), icon(42, [9; 4]), icon(42, [5; 4])]);
+        assert_eq!((a.width, a.height), (192, 64));
+        let at = |x: usize, y: usize| a.rgba[(y * 192 + x) * 4];
         assert_eq!(
             (at(9, 11), at(10, 11), at(53, 52), at(54, 52)),
             (0, 255, 255, 0)
@@ -251,14 +254,19 @@ mod tests {
             (at(74, 32), at(75, 32), at(116, 32), at(117, 32)),
             (0, 9, 9, 0)
         );
+        assert_eq!((at(138, 32), at(139, 32), at(180, 32)), (0, 5, 5));
         // Each draws its square's middle 44x44.
         assert_eq!(
             live_cell(LiveIcon::Leader),
-            [10.0 / 128.0, 10.0 / 64.0, 54.0 / 128.0, 54.0 / 64.0]
+            [10.0 / 192.0, 10.0 / 64.0, 54.0 / 192.0, 54.0 / 64.0]
         );
         assert_eq!(
             live_cell(LiveIcon::Party),
-            [74.0 / 128.0, 10.0 / 64.0, 118.0 / 128.0, 54.0 / 64.0]
+            [74.0 / 192.0, 10.0 / 64.0, 118.0 / 192.0, 54.0 / 64.0]
+        );
+        assert_eq!(
+            live_cell(LiveIcon::Download),
+            [138.0 / 192.0, 10.0 / 64.0, 182.0 / 192.0, 54.0 / 64.0]
         );
     }
 }

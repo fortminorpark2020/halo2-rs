@@ -1673,10 +1673,20 @@ impl Menu {
             let selectable = row.selectable(ctx);
             let selected = k == cursor && selectable && !fixed;
             let (label, value) = self.label(row, ctx);
+            // Playlists the party lacks maps for are marked, as Halo 2 did.
+            let missing = match (row, ctx.online) {
+                (Row::Playlist(i), Some(o)) => o
+                    .playlists()
+                    .get(i)
+                    .is_some_and(|p| !o.missing_maps(p).is_empty()),
+                _ => false,
+            };
             let (bg, fg) = if selected {
                 (HIGHLIGHT, BRIGHT)
-            } else if selectable {
+            } else if selectable && !missing {
                 (PANEL, TEXT)
+            } else if selectable {
+                (PANEL, DIM)
             } else if matches!(row, Row::SearchStatus | Row::Starting) {
                 ([0.0; 4], BRIGHT)
             } else {
@@ -1797,7 +1807,8 @@ impl Menu {
     }
 
     /// What shows where notices go when there's none: the chosen
-    /// playlist's description, or the online service's message of the day.
+    /// playlist's description (or who lacks which of its maps), or the
+    /// online service's message of the day.
     fn note(&self, ctx: &Context) -> Option<String> {
         let o = ctx.online?;
         match self.screen {
@@ -1805,7 +1816,11 @@ impl Menu {
                 let Some(&Row::Playlist(i)) = self.rows(ctx).get(self.cursor) else {
                     return None;
                 };
-                Some(o.text.playlist_description(o.playlists().get(i)?))
+                let p = o.playlists().get(i)?;
+                Some(
+                    o.missing_text(p)
+                        .unwrap_or_else(|| o.text.playlist_description(p)),
+                )
             }
             Screen::Live => Some(o.live?.motd.to_uppercase()),
             _ => None,
@@ -2203,13 +2218,14 @@ fn draw_icons(
             rank::draw_live(hb, f.rect([x, mid - 7.0, x + 14.0, mid + 7.0]), icon);
         }
         Row::Playlist(i) => {
-            let level = o.playlists().get(i).map_or(0, |p| p.level);
-            if level > 0 {
-                rank::draw(
-                    hb,
-                    f.rect([x1 - 24.0, mid - 7.0, x1 - 10.0, mid + 7.0]),
-                    level,
-                );
+            let Some(p) = o.playlists().get(i) else {
+                return;
+            };
+            let rect = f.rect([x1 - 24.0, mid - 7.0, x1 - 10.0, mid + 7.0]);
+            if !o.missing_maps(p).is_empty() {
+                rank::draw_live(hb, rect, LiveIcon::Download);
+            } else if p.level > 0 {
+                rank::draw(hb, rect, p.level);
             }
         }
         _ => {}
@@ -2764,6 +2780,7 @@ mod tests {
             searching: 3,
             playing: 8,
             level,
+            maps: Vec::new(),
         };
         View {
             welcome: Some(Welcome {
@@ -2808,6 +2825,7 @@ mod tests {
             countdown: None,
             returning: None,
             custom: false,
+            maps: &[],
         }
     }
 
@@ -3184,6 +3202,72 @@ mod tests {
         assert_eq!(m.input(Input::Select, &c), Action::None);
         assert_eq!(m.input(Input::Back, &c), Action::None);
         assert_eq!(m.screen, Screen::Live);
+    }
+
+    #[test]
+    fn playlists_the_party_lacks_maps_for_are_marked_and_not_searched() {
+        let maps = maps();
+        // Alone, with Lockout and Midship: Double Team plays Warlock too.
+        let mut view = signed_in(1, &[(1, "JOHN")]);
+        let ours: Vec<String> = vec!["lockout".into(), "midship".into()];
+        view.party.as_mut().unwrap().maps = ours.clone();
+        view.playlists[0].maps = vec!["lockout".into(), "warlock".into()];
+        view.playlists[1].maps = ours.clone();
+        let o = OnlineView {
+            maps: &ours,
+            ..online(Some(&view))
+        };
+        let c = Context {
+            online: Some(&o),
+            ..ctx(&maps, &[])
+        };
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Playlists);
+        assert_eq!(o.missing_maps(&view.playlists[0]), ["warlock"]);
+        assert!(o.missing_maps(&view.playlists[1]).is_empty());
+        // Marked with a download arrow where our level would be, and why.
+        let download = |m: &Menu, c: &Context| {
+            let mut hb = HudBuilder::new(1280.0, 720.0);
+            m.draw(&mut hb, 0, 1, 1280.0, 720.0, c);
+            let live = |t| t == crate::gpu::RANK_TEXTURES + 2;
+            quads(&hb.finish(), live).len()
+        };
+        assert_eq!(download(&m, &c), 1);
+        let why = "YOU'RE MISSING MAPS: WARLOCK";
+        assert_eq!(m.note(&c).as_deref(), Some(why));
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.notice.as_deref(), Some(why));
+        assert_eq!(m.screen, Screen::Playlists);
+        // Big Team Battle plays only what we have.
+        m.input(Input::Down, &c);
+        assert_eq!(m.input(Input::Select, &c), Action::Search(Some(5)));
+
+        // Many missing are summed up, ours first. Once we have them all,
+        // someone else in the party doesn't (or not the same copy).
+        let mut ours = ours.clone();
+        ours.push("warlock".into());
+        view.playlists[0].maps = ["warlock", "cyclotron", "deltatap", "gemini", "backwash"]
+            .map(String::from)
+            .to_vec();
+        let o = OnlineView {
+            maps: &ours,
+            ..online(Some(&view))
+        };
+        assert_eq!(
+            o.cant_search(&view.playlists[0]).as_deref(),
+            Some("YOU'RE MISSING MAPS: IVORY TOWER, SANCTUARY, GEMINI AND 1 MORE")
+        );
+        ours.extend(["cyclotron", "deltatap", "gemini", "backwash"].map(String::from));
+        let o = OnlineView {
+            maps: &ours,
+            ..online(Some(&view))
+        };
+        assert_eq!(
+            o.cant_search(&view.playlists[0]).as_deref(),
+            Some(
+                "SOMEONE IN YOUR PARTY IS MISSING MAPS: WARLOCK, IVORY TOWER, SANCTUARY AND 2 MORE"
+            )
+        );
     }
 
     #[test]

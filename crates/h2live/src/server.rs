@@ -593,7 +593,7 @@ impl Server {
     }
 
     /// The playlists as a player sees them, with how many people search
-    /// and play each.
+    /// and play each, and their maps.
     fn playlists_for(&self, id: u64, counts: &[(u16, u16)]) -> Vec<PlaylistInfo> {
         let account = self.accounts.get(&id);
         self.playlists
@@ -618,6 +618,7 @@ impl Server {
                         Some(s) => s.rank.level,
                         None => 1,
                     },
+                    maps: p.maps.clone(),
                 }
             })
             .collect()

@@ -7,8 +7,8 @@
 //! by then is left out of it. When the game ends each PC says how it saw it
 //! end (RESULT). If at least half of the joined PCs that answer within 30
 //! seconds of the end (the host's result, or half of theirs) saw it as the
-//! host did, levels change as `levels` says, and everyone hears how
-//! (MATCH_OVER). The host's word alone isn't enough: unless every joined
+//! host did, levels change as `levels` says, and everyone hears how, theirs
+//! and everyone else's (MATCH_OVER). The host's word alone isn't enough: unless every joined
 //! PC left the game, at least one must have answered.
 //!
 //! A host that leaves ends the match: it doesn't count for anyone, except
@@ -554,6 +554,7 @@ impl Server {
             reason: NOT_JOINED.into(),
             card: self.card_of(account),
             levels: Vec::new(),
+            players: Vec::new(),
         };
         self.tell(account, &ToPc::MatchOver(over));
         self.free_party(account);
@@ -858,6 +859,8 @@ impl Server {
         ));
         self.unlink(id, None);
 
+        // Everyone hears everyone's new level, for their carnage report.
+        let players: Vec<(u64, u8)> = ranks.iter().map(|&(a, _, new)| (a, new.level)).collect();
         for s in &seats {
             let mine = ranks.iter().find(|r| r.0 == s.account);
             let reason = match mine {
@@ -873,6 +876,7 @@ impl Server {
                 levels: mine.map_or(Vec::new(), |&(_, old, new)| {
                     vec![(m.info.playlist, old.level, new.level)]
                 }),
+                players: players.clone(),
             };
             self.tell(s.account, &ToPc::MatchOver(over));
             if mine.is_some() {

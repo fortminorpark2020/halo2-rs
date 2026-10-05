@@ -10,7 +10,7 @@
 //! made-up players signed in to it: some in parties, one inviting us into
 //! theirs, all taking our invites.
 
-use crate::menu::{Action, MapChoice, Screen, Sound};
+use crate::menu::{map_title, Action, MapChoice, Screen, Sound};
 use crate::{App, Mode};
 use blam_cache::{text, GroupTag, MapSet};
 use h2live::client::{self, LiveClient, LiveEvent, RelayLeg, View};
@@ -212,6 +212,8 @@ pub struct OnlineView<'a> {
     pub returning: Option<f64>,
     /// In the party's custom game.
     pub custom: bool,
+    /// The maps this PC has, by file name.
+    pub maps: &'a [String],
 }
 
 impl OnlineView<'_> {
@@ -305,8 +307,48 @@ impl OnlineView<'_> {
         members.iter().map(|m| 1 + usize::from(m.guests)).sum()
     }
 
+    /// The playlist's maps someone in the party doesn't have (or not the
+    /// same copy of as the others). Halo 2 marked the playlists of a map
+    /// pack a player didn't have, and they couldn't search them.
+    pub fn missing_maps<'p>(&self, p: &'p PlaylistInfo) -> Vec<&'p str> {
+        let Some(party) = self.party() else {
+            return Vec::new();
+        };
+        let shared = |map: &&str| party.maps.iter().any(|m| m.eq_ignore_ascii_case(map));
+        p.maps
+            .iter()
+            .map(String::as_str)
+            .filter(|m| !shared(m))
+            .collect()
+    }
+
+    /// Who's missing which of a playlist's maps, if anyone is: "YOU'RE
+    /// MISSING MAPS: WARLOCK, GEMINI", or someone else in the party is.
+    pub fn missing_text(&self, p: &PlaylistInfo) -> Option<String> {
+        let missing = self.missing_maps(p);
+        let ours = |map: &&str| self.maps.iter().any(|m| m.eq_ignore_ascii_case(map));
+        let mine: Vec<&str> = missing.iter().copied().filter(|m| !ours(m)).collect();
+        let (who, maps) = if mine.is_empty() {
+            ("SOMEONE IN YOUR PARTY IS", missing)
+        } else {
+            ("YOU'RE", mine)
+        };
+        if maps.is_empty() {
+            return None;
+        }
+        let titles: Vec<String> = maps.iter().take(3).map(|m| map_title(m)).collect();
+        let mut names = titles.join(", ");
+        if maps.len() > 3 {
+            names += &format!(" AND {} MORE", maps.len() - 3);
+        }
+        Some(format!("{who} MISSING MAPS: {names}"))
+    }
+
     /// Why the party can't search a playlist, if it can't.
     pub fn cant_search(&self, p: &PlaylistInfo) -> Option<String> {
+        if let Some(missing) = self.missing_text(p) {
+            return Some(missing);
+        }
         let t = &self.text.lobby;
         let members = self.party().map_or(&[][..], |p| &p.members);
         if !p.guests && members.iter().any(|m| m.guests > 0) {
@@ -429,6 +471,8 @@ pub struct Online {
     /// A service run in the game, for testing.
     test: Option<TestService>,
     pub text: LiveText,
+    /// The maps this PC signed in with, by file name.
+    maps: Vec<String>,
     /// For testing (H2_LIVE_AUTO=search:<key>, or H2_LIVE_BOT=<key>): the
     /// playlist the party searches by itself, and when it was last busy.
     auto: Option<String>,
@@ -537,6 +581,7 @@ impl Online {
             legs: Vec::new(),
             test: None,
             text,
+            maps: Vec::new(),
             auto: std::env::var("H2_LIVE_AUTO")
                 .ok()
                 .and_then(|v| Some(v.strip_prefix("search:")?.to_string()))
@@ -569,6 +614,7 @@ impl Online {
             countdown: m.and_then(|m| m.countdown(now)),
             returning: m.and_then(|m| m.returning(now)),
             custom: self.custom.is_some(),
+            maps: &self.maps,
         })
     }
 
@@ -578,6 +624,7 @@ impl Online {
         self.sign_out();
         self.address = address.to_string();
         self.dialed = now;
+        self.maps = profile.maps.iter().map(|(name, _)| name.clone()).collect();
         match self.dial(address, fakes, now) {
             Ok(connection) => self.link = Link::Dialing(connection, profile),
             Err(why) => self.failed = Some(why),
@@ -993,7 +1040,8 @@ impl App {
 
     /// For testing (H2_LIVE_AUTO=search:<key>): lead the party into that
     /// playlist's searches, each time it's been back in its lobby a while,
-    /// signing in again if need be.
+    /// signing in again if need be. It searches even where the menus
+    /// wouldn't (the party lacks a map, say), to try the service.
     fn auto_search(&mut self, now: f64) {
         let Some(key) = &self.online.auto else {
             return;
@@ -1009,15 +1057,20 @@ impl App {
         let lobby = |v: &OnlineView| v.party().is_some_and(|p| p.activity == Activity::Lobby);
         let ready =
             view.filter(|v| v.leads() && v.search.is_none() && v.game.is_none() && lobby(v));
-        let playlist =
-            ready.and_then(|v| v.playlists().iter().find(|p| p.key == *key).map(|p| p.id));
-        let Some(id) = playlist else {
+        let playlist = ready.and_then(|v| {
+            let p = v.playlists().iter().find(|p| p.key == *key)?;
+            Some((p.id, v.missing_text(p)))
+        });
+        let Some((id, missing)) = playlist else {
             self.online.idle = now;
             return;
         };
         if now - self.online.idle >= AUTO_WAIT {
             self.online.idle = now;
             self.menu.show(Screen::Matchmaking);
+            if let Some(missing) = missing {
+                println!("live: searching anyway: {}", missing.to_lowercase());
+            }
             self.ask_live(Action::Search(Some(id)));
         }
     }

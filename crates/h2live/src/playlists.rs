@@ -39,9 +39,10 @@
 //!   `team_oddball`, `juggernaut`, `territories` and `assault`; presets are
 //!   `default`, `swat`, `rockets`, `snipers`, `swords` and `shotguns`. At
 //!   least one, all team games or all free-for-all.
-//! - `maps <name>...`: map file names without `.map`. At least one; the
-//!   line can repeat.
+//! - `maps <name>...`: map file names without `.map`. At least one and at
+//!   most 64; the line can repeat.
 
+use h2net::live::{MAX_NAME, MAX_PLAYLIST_MAPS};
 use h2sim::GameType;
 use std::path::Path;
 
@@ -294,6 +295,12 @@ fn check(p: &mut Playlist) -> Result<(), String> {
     if p.maps.is_empty() {
         return Err("no maps".into());
     }
+    if p.maps.len() > MAX_PLAYLIST_MAPS {
+        return Err(format!("more than {MAX_PLAYLIST_MAPS} maps"));
+    }
+    if let Some(long) = p.maps.iter().find(|m| m.len() > MAX_NAME) {
+        return Err(format!("\"{long}\" is longer than a map's name can be"));
+    }
     if p.ranked && p.guests {
         return Err("ranked playlists can't have guests".into());
     }
@@ -504,6 +511,22 @@ maps warlock
         assert_eq!(
             check("playlist 1 a A\nhumans 2 4\nbots even\nvariant slayer default 1 0\nmaps x\n"),
             "line 1: playlist a: only team games have teams to even out"
+        );
+        // As many maps as a PC is sent, with names as long as it reads.
+        let maps =
+            |n: usize, name: &str| format!("{DOUBLE_TEAM}maps {}\n", [name].repeat(n).join(" "));
+        assert!(parse(&maps(MAX_PLAYLIST_MAPS - 3, "lockout")).is_ok());
+        assert_eq!(
+            check(&maps(MAX_PLAYLIST_MAPS - 2, "lockout")),
+            "line 1: playlist double_team: more than 64 maps"
+        );
+        assert!(parse(&maps(1, &"x".repeat(MAX_NAME))).is_ok());
+        assert_eq!(
+            check(&maps(1, &"x".repeat(MAX_NAME + 1))),
+            format!(
+                "line 1: playlist double_team: \"{}\" is longer than a map's name can be",
+                "x".repeat(MAX_NAME + 1)
+            )
         );
         assert_eq!(
             check(&format!(

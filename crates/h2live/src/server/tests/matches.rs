@@ -811,11 +811,17 @@ fn four_players_play_double_team_through_the_relay() {
     // Levels moved as the tables say, for whichever team won.
     assert_double_team_counted(&a);
     let (alpha_won, expected) = double_team_after(&a);
+    let mut everyone: Vec<(u64, u8)> = (0..4).map(|i| (a.id(i), expected[i].1)).collect();
+    everyone.sort_unstable();
     for (i, &(_, level)) in expected.iter().enumerate() {
         let over = a.over(i, m.id);
         assert!(over.counted);
         assert_eq!(over.reason, "");
         assert_eq!(over.levels, [(DOUBLE_TEAM, LEVELS[i], level)]);
+        // Everyone's new level, for the carnage report.
+        let mut players = over.players.clone();
+        players.sort_unstable();
+        assert_eq!(players, everyone);
         // The new stat card, kept for next time.
         assert_eq!(a.w.card(i as u8 + 1), over.card);
         let stats = a.account(i).stats("double_team").unwrap();
@@ -832,6 +838,19 @@ fn four_players_play_double_team_through_the_relay() {
         let playlists = &a.w.pcs[i].view.playlists;
         let double_team = playlists.iter().find(|p| p.id == DOUBLE_TEAM).unwrap();
         assert_eq!(double_team.level, level);
+        assert_eq!(a.w.party(i).members[0].best, level);
+    }
+    // The online list shows everyone's new level too.
+    a.run(1.5);
+    for i in 0..4 {
+        let mut online: Vec<(u64, u8)> = a.w.pcs[i]
+            .view
+            .online
+            .iter()
+            .map(|p| (p.account, p.best))
+            .collect();
+        online.sort_unstable();
+        assert_eq!(online, everyone);
     }
     // The match is logged, and the levels are on disk.
     let log = a.games_log();
