@@ -10,10 +10,12 @@ use super::online_screen;
 use crate::lan::Net;
 use crate::menu::{self, Screen, SeatInfo, Sound};
 use crate::options::{presets, GameOptions};
+use crate::scene;
 use crate::{App, Mode, Then};
 use h2net::live::{LinkInfo, MatchInfo, MatchOver, MatchPlayer, ToServer};
 use h2net::{Client, Connection, Host, Lobby, LobbyPlayer, Verified};
-use h2sim::game::{guest_name, GameType, Look};
+use h2sim::bot::bot_name;
+use h2sim::game::{guest_name, GameType, Look, TEAMS};
 use h2sim::Game;
 
 /// Seconds from a match's carnage report coming up to everyone going back
@@ -129,8 +131,35 @@ pub fn lobby_of(info: &MatchInfo) -> Lobby {
     }
 }
 
+/// A match's bots, as its host seats them: each on the team with the
+/// fewest players so far (everyone's guests and the bots before it
+/// counted), and each by a bot name no one in the match goes by, so every
+/// PC tells people from bots by name. Each is its team and the number of
+/// its name (see `bot_name`).
+fn bots_of(info: &MatchInfo) -> Vec<(u8, usize)> {
+    let mut sizes = [0; TEAMS as usize];
+    let mut taken = Vec::new();
+    for (p, name, _) in roster(info) {
+        if let Some(n) = sizes.get_mut(usize::from(p.team)) {
+            *n += 1;
+        }
+        taken.push(name);
+    }
+    let free = |k: &usize| !taken.iter().any(|n| n == bot_name(*k));
+    let mut names = (0..scene::MAX_BODIES).filter(free).chain(0..);
+    (0..info.bots)
+        .map(|_| {
+            let team = (0..TEAMS)
+                .min_by_key(|&t| sizes[usize::from(t)])
+                .unwrap_or(0);
+            sizes[usize::from(team)] += 1;
+            (team, names.next().unwrap_or(0))
+        })
+        .collect()
+}
+
 /// The Spartan each PC's person played in `game`, by their account:
-/// known by their gamertag.
+/// known by their gamertag (which no bot has; see `bots_of`).
 fn players_of(info: &MatchInfo, game: &Game) -> Vec<(u64, usize)> {
     info.players
         .iter()
@@ -277,7 +306,7 @@ impl App {
         for seat in &mut self.seats {
             seat.team = mine.map_or(0, |p| p.team);
         }
-        self.seat_players(usize::from(info.bots), &match_options(&info));
+        self.seat_players(&bots_of(&info), &match_options(&info));
         if let Some(p) = mine {
             for (k, l) in self.locals.iter().enumerate() {
                 self.game.set_name(l.player, &guest_name(&p.gamertag, k));
@@ -536,6 +565,98 @@ mod tests {
         );
         assert!(!lobby.players[0].remote && lobby.players[1].remote);
         assert_eq!(lobby.players[4].team, 1);
+    }
+
+    /// A match's game as its host seats it: its own person, then its
+    /// bots, then each PC joining, on the team the service gave it.
+    fn seated(info: &MatchInfo) -> Game {
+        let mut game = h2sim::testing::game();
+        game.rules.game_type = info.game_type;
+        let (host, joiners): (Vec<_>, Vec<_>) =
+            info.players.iter().partition(|p| p.account == info.host);
+        let seat = |game: &mut Game, p: &MatchPlayer| {
+            for k in 0..=usize::from(p.guests) {
+                let i = game.add_player_on(p.team);
+                game.set_name(i, &guest_name(&p.gamertag, k));
+            }
+        };
+        host.into_iter().for_each(|p| seat(&mut game, p));
+        for (team, k) in bots_of(info) {
+            let i = game.add_player_on(team);
+            game.set_name(i, bot_name(k));
+        }
+        joiners.into_iter().for_each(|p| seat(&mut game, p));
+        game
+    }
+
+    fn team_sizes(game: &Game) -> [usize; 2] {
+        let on = |t| game.players.iter().filter(|p| p.team == t).count();
+        [on(0), on(1)]
+    }
+
+    #[test]
+    fn bots_even_out_the_teams_the_service_made() {
+        // Two against one, and a bot: on the one's team, though the host
+        // is alone when it seats its bots.
+        let info = MatchInfo {
+            bots: 1,
+            players: vec![
+                player(1, "ALPHA", 1, 1),
+                player(2, "KILO", 0, 1),
+                player(3, "LIMA", 0, 1),
+            ],
+            ..double_team()
+        };
+        assert_eq!(bots_of(&info), [(1, 0)]);
+        assert_eq!(team_sizes(&seated(&info)), [2, 2]);
+        // Big Team Battle: nine people and three bots make six a side,
+        // guests counted.
+        let mut players: Vec<_> = (0..8)
+            .map(|k| player(k + 1, "", (k % 2) as u8, 1))
+            .collect();
+        players[0].guests = 1;
+        for (k, p) in players.iter_mut().enumerate() {
+            p.gamertag = format!("PLAYER{k}");
+        }
+        let info = MatchInfo {
+            bots: 3,
+            players,
+            ..double_team()
+        };
+        let teams: Vec<u8> = bots_of(&info).iter().map(|b| b.0).collect();
+        assert_eq!(teams, [1, 0, 1]);
+        assert_eq!(team_sizes(&seated(&info)), [6, 6]);
+    }
+
+    #[test]
+    fn people_named_like_bots_are_told_from_them() {
+        // VIPER and SARGE are people here, so no bot is.
+        let info = MatchInfo {
+            bots: 1,
+            players: vec![
+                player(1, "ALPHA", 0, 1),
+                player(2, "SARGE", 0, 1),
+                player(3, "VIPER", 1, 1),
+            ],
+            ..double_team()
+        };
+        let bots = bots_of(&info);
+        assert_eq!(bots.len(), 1);
+        assert!(!["ALPHA", "SARGE", "VIPER"].contains(&bot_name(bots[0].1)));
+        let mut game = seated(&info);
+        // VIPER joined last.
+        let viper = game.players.len() - 1;
+        assert_eq!(game.name(viper), "VIPER");
+        game.players[viper].kills = 10;
+        game.players[viper].score = 10;
+        game.winning_team = Some(1);
+        let played = players_of(&info, &game);
+        assert_eq!(played.len(), 3);
+        let results = h2live::client::results(&game, &played, &[]);
+        let viper = results.iter().find(|r| r.account == 3).unwrap();
+        assert_eq!((viper.team, viper.place, viper.kills), (1, 0, 10));
+        let sarge = results.iter().find(|r| r.account == 2).unwrap();
+        assert_eq!((sarge.team, sarge.place), (0, 1));
     }
 
     #[test]

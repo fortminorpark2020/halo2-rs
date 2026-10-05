@@ -74,7 +74,7 @@ impl App {
             // loaded here goes straight into it. (The host's options arrive
             // with its game.)
             if let Some(players) = self.welcome.take() {
-                self.seat_players(0, &GameOptions::default());
+                self.seat_players(&[], &GameOptions::default());
                 self.welcome = Some(players);
                 self.menu.notice = None;
                 return;
@@ -460,7 +460,7 @@ impl App {
             return;
         }
         // The host's options arrive with its game.
-        self.seat_players(0, &GameOptions::default());
+        self.seat_players(&[], &GameOptions::default());
         let mut wanted = self.wanted_teams();
         wanted.truncate(self.locals.len());
         if let Net::Joined {

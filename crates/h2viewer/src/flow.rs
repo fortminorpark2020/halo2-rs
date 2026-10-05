@@ -387,7 +387,7 @@ impl App {
         for seat in &mut self.seats {
             seat.team = campaign::players_team(&self.scene);
         }
-        self.seat_players(0, &GameOptions::default());
+        self.seat_players(&[], &GameOptions::default());
         for l in &self.locals {
             let mut look = self.game.players[l.player].look;
             look.elite = arbiter;
@@ -567,8 +567,10 @@ impl App {
         }
     }
 
-    /// A fresh game for the people here; `bots` computer players join them.
-    pub(crate) fn seat_players(&mut self, bots: usize, options: &GameOptions) {
+    /// A fresh game for the people here; computer players join them, each
+    /// `bots` entry one: its team (`ANY_TEAM`: the one with the fewest
+    /// players) and the number of its name and look (see `bot_name`).
+    pub(crate) fn seat_players(&mut self, bots: &[(u8, usize)], options: &GameOptions) {
         self.reset_match();
         self.game = self.fresh_game(options);
         let seats = self.seats.clone();
@@ -620,13 +622,16 @@ impl App {
             self.locals[0].flying = true;
             self.locals[0].camera = overview(self.focus, -std::f32::consts::FRAC_PI_4);
         }
-        for _ in 0..bots {
+        for &(team, k) in bots {
             if self.game.players.len() >= scene::MAX_BODIES {
                 break;
             }
-            let i = self.game.add_player();
-            self.game.set_name(i, bot_name(i));
-            self.game.set_look(i, bot_look(i));
+            let i = match team {
+                h2net::ANY_TEAM => self.game.add_player(),
+                t => self.game.add_player_on(t),
+            };
+            self.game.set_name(i, bot_name(k));
+            self.game.set_look(i, bot_look(k));
             self.bots.push(bot_for(i));
         }
         self.game.events.clear();
@@ -673,7 +678,12 @@ impl App {
             .settings
             .bots
             .min(scene::MAX_BODIES.saturating_sub(people));
-        self.seat_players(bots, &options);
+        // Each by its seat's name, on the team with the fewest players.
+        let first = self.seats.len();
+        let bots: Vec<_> = (first..first + bots)
+            .map(|k| (h2net::ANY_TEAM, k))
+            .collect();
+        self.seat_players(&bots, &options);
         match &mut self.net {
             Net::Hosting(host) => {
                 host.start(&self.map_name);
@@ -687,7 +697,7 @@ impl App {
     pub(crate) fn begin_join(&mut self, game: &LanGame) {
         // The host's options arrive with its game; start from the map as
         // it comes.
-        self.seat_players(0, &GameOptions::default());
+        self.seat_players(&[], &GameOptions::default());
         self.connect(game);
     }
 
