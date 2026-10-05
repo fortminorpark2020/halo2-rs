@@ -6,11 +6,11 @@
 //! later. Nothing is ranked. When the leader backs out it's over, and
 //! everyone is back in the party lobby.
 
-use super::online_screen;
+use super::{online_screen, recent};
 use crate::lan::Net;
 use crate::menu::{Screen, Sound};
 use crate::{App, Mode};
-use h2net::live::{LinkInfo, ToServer};
+use h2net::live::{LinkInfo, PartyMember, ToServer};
 use h2net::{Client, Connection, Host, Verified};
 
 /// The party's custom game we're in, from CUSTOM_OPEN until we're back in
@@ -21,6 +21,9 @@ pub(super) struct Custom {
     leader: u64,
     /// The map its lobby is on, as the service last heard.
     map: String,
+    /// The members we've played the game going on with (by account): our
+    /// recent players now.
+    met: Vec<u64>,
 }
 
 impl App {
@@ -35,6 +38,7 @@ impl App {
             party,
             leader,
             map: map.clone(),
+            met: Vec::new(),
         };
         if self.online.custom.replace(open).is_some() {
             return;
@@ -123,6 +127,30 @@ impl App {
             c.map = map.clone();
             self.online.send(ToServer::CustomMap(map));
         }
+        self.meet_custom_players();
+    }
+
+    /// The party's members in the custom game's game with us are our recent
+    /// players, from when each is first seen in it.
+    fn meet_custom_players(&mut self) {
+        let members = self.online.party_members();
+        let playing = self.mode == Mode::Playing;
+        let Some(c) = &mut self.online.custom else {
+            return;
+        };
+        if !playing {
+            c.met.clear();
+            return;
+        }
+        let game = &self.game;
+        let in_game = |name: &str| (0..game.players.len()).any(|i| game.name(i) == name);
+        let new: Vec<PartyMember> = members
+            .into_iter()
+            .filter(|m| !c.met.contains(&m.account) && in_game(&m.gamertag))
+            .collect();
+        c.met.extend(new.iter().map(|m| m.account));
+        let players = new.iter().map(|m| (m.account, m.gamertag.as_str(), m.best));
+        self.online.met(players, recent::CUSTOM, &self.map_name);
     }
 
     /// Hosting the party's custom game (whose lobby stays up while a map

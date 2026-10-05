@@ -41,8 +41,9 @@ install. No game files are included in this repository.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
 - `h2live`: online play, like Halo 2 on Xbox Live: Bungie's levels 1 to 50
   (hidden XP per ranked playlist, won and lost against each opponent), Halo
-  2's launch playlists (replaceable by a `playlists.txt`), and matchmaking
-  (level ranges that widen, even teams, map choice and host choice).
+  2's launch playlists and its later Team Snipers and Team Hardcore
+  (replaceable by a `playlists.txt`), and matchmaking (level ranges that
+  widen, even teams, map choice and host choice).
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
 - `h2viewer`: the game: Halo 2 style menus and lobby, Halo 2's maps with their
@@ -60,7 +61,8 @@ folders, with Halo 2's own picture and description from `mainmenu.map`), score t
 Halo 2's variant settings: the weapons on the map, primary and secondary
 starting weapons, starting grenades, shields, motion sensor, vehicles, respawn
 time, friendly fire and a time limit (none, or 5 to 30 minutes), plus the SWAT,
-Rockets, Snipers, Swords and Shotguns variants. The motion sensor shows teammates (yellow) and enemies (red) within
+Rockets, Snipers, Swords and Shotguns variants and Team Hardcore's (battle
+rifle starts, no motion sensor). The motion sensor shows teammates (yellow) and enemies (red) within
 25 metres who move faster than a crouch-walk or fire. In team games, T
 (or X on a controller) puts you on the red or blue team; bots fill the smaller
 team. System Link lists games other PCs on the network are hosting.
@@ -255,7 +257,11 @@ Games sign in to h2live on the same PC if it's running, or else the server a
 `server=` line in `profile.txt` names, or else the one built into the game;
 `H2_LIVE=<address>` overrides them all. [docs/ONLINE.md](docs/ONLINE.md) has
 the steps for running the server online (on Render's free plan, from
-`render.yaml` and `Dockerfile.live`) or on a PC at home.
+`render.yaml` and `Dockerfile.live`) or on a PC at home. Online, RECENT
+PLAYERS lists the last 50 people you played a match or custom game with,
+newest first, with what, where and when, to invite or join if they're
+online; each PC keeps its own list in `recent-players.txt` beside
+`identity.key`.
 
 For testing a service, `H2_LIVE_BOT=<playlist key>` runs h2viewer with no
 window or sound as a player who signs in (to the service `H2_LIVE` names),

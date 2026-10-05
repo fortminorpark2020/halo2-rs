@@ -10,7 +10,6 @@ use crate::online::{clock_text, OnlineView};
 use crate::options::{presets, GameOptions, RESPAWN_TIMES, TIME_LIMITS};
 use crate::profile::{color_name, Profile};
 use crate::rank::{self, LiveIcon};
-use h2net::live::OnlinePlayer;
 use h2net::live::{self, Privacy};
 use h2net::{LanGame, Lobby};
 use h2sim::game::{
@@ -35,7 +34,9 @@ pub enum Screen {
     Live,
     /// Everyone else online.
     Players,
-    /// What to do about one of them (`Menu::player`).
+    /// Who we played with lately.
+    RecentPlayers,
+    /// What to do about one of them, or of those online (`Menu::player`).
     Player,
     /// The matchmaking playlists.
     Playlists,
@@ -416,6 +417,7 @@ enum Row {
     Quickmatch,
     CustomGame,
     OnlinePlayers,
+    RecentPlayers,
     /// Who can join the party.
     Privacy,
     /// Join the party that last invited us.
@@ -423,6 +425,8 @@ enum Row {
     LeaveParty,
     /// Someone else online.
     Player(usize),
+    /// Someone we played with lately.
+    RecentPlayer(usize),
     Invite,
     JoinTheirParty,
     MakeLeader,
@@ -506,8 +510,10 @@ pub struct Menu {
     pub editing: bool,
     /// The campaign's difficulty, in `DIFFICULTIES`.
     pub difficulty: usize,
-    /// The account picked from the online list.
+    /// The account picked from the online or recent players, and which
+    /// list it was.
     player: u64,
+    list: Screen,
 }
 
 /// Layout, in Halo 2's 640x480 screen units.
@@ -614,6 +620,7 @@ impl Menu {
             editing: false,
             difficulty: 1,
             player: 0,
+            list: Screen::Players,
         }
     }
 
@@ -627,7 +634,7 @@ impl Menu {
     fn lists(&self) -> bool {
         matches!(
             self.screen,
-            Screen::SystemLink | Screen::Players | Screen::Playlists
+            Screen::SystemLink | Screen::Players | Screen::RecentPlayers | Screen::Playlists
         )
     }
 
@@ -663,6 +670,7 @@ impl Menu {
             Screen::PostGame => "GAME OVER",
             Screen::Live => "ONLINE",
             Screen::Players => "ONLINE PLAYERS",
+            Screen::RecentPlayers => "RECENT PLAYERS",
             Screen::Player => "PLAYER",
             Screen::Playlists => "PLAYLISTS",
             Screen::Matchmaking => "MATCHMAKING",
@@ -726,6 +734,10 @@ impl Menu {
                 0 => vec![Row::Nothing],
                 n => (0..n).map(Row::Player).collect(),
             },
+            Screen::RecentPlayers => match ctx.online.map_or(0, |o| o.recent.len()) {
+                0 => vec![Row::Nothing],
+                n => (0..n).map(Row::RecentPlayer).collect(),
+            },
             Screen::Player => self.player_rows(ctx),
             Screen::Playlists => match ctx.online.map_or(0, |o| o.playlists().len()) {
                 0 => vec![Row::Nothing],
@@ -748,7 +760,9 @@ impl Menu {
         }
     }
 
-    /// What can be done about the player picked from the online list.
+    /// What can be done about the player picked, if they're online: invite
+    /// them, or join their party (if it's open and not in a match); or, in
+    /// the party we lead, hand it over to them or remove them.
     fn player_rows(&self, ctx: &Context) -> Vec<Row> {
         let Some((o, p)) = ctx.online.and_then(|o| Some((o, o.player(self.player)?))) else {
             return vec![Row::Nothing];
@@ -756,7 +770,7 @@ impl Menu {
         let mut rows = Vec::new();
         if !o.with_us(p) {
             rows.push(Row::Invite);
-            if p.open {
+            if p.open && p.activity != live::Activity::Playing {
                 rows.push(Row::JoinTheirParty);
             }
         } else if o.leads() {
@@ -934,9 +948,11 @@ impl Menu {
             Row::Remove => ("REMOVE FROM PARTY".into(), None),
             Row::Cancel => ("CANCEL".into(), None),
             Row::OnlinePlayers
+            | Row::RecentPlayers
             | Row::Privacy
             | Row::AcceptInvite
             | Row::Player(_)
+            | Row::RecentPlayer(_)
             | Row::Nothing
             | Row::Playlist(_)
             | Row::SearchStatus
@@ -952,6 +968,7 @@ impl Menu {
     fn online_label(&self, row: Row, o: &OnlineView) -> (String, Option<String>) {
         match row {
             Row::OnlinePlayers => ("ONLINE PLAYERS".into(), Some(o.others().len().to_string())),
+            Row::RecentPlayers => ("RECENT PLAYERS".into(), Some(o.recent.len().to_string())),
             Row::Privacy => {
                 let open = o.party().is_none_or(|p| p.privacy == Privacy::Open);
                 let privacy = if open { "OPEN" } else { "INVITE ONLY" };
@@ -965,14 +982,28 @@ impl Menu {
                 Some(p) => (p.gamertag.clone(), Some(o.doing(p))),
                 None => (String::new(), None),
             },
+            // Known by the gamertag they have now, if they're online.
+            Row::RecentPlayer(i) => match o.recent.get(i) {
+                Some(r) => {
+                    let p = o.player(r.account);
+                    let gamertag = p.map_or(&r.gamertag, |p| &p.gamertag);
+                    (gamertag.clone(), Some(o.status(r.account)))
+                }
+                None => (String::new(), None),
+            },
             Row::Nothing => {
+                let gone = o.player(self.player).is_none();
                 let why = match self.screen {
-                    Screen::Players => "NO ONE ELSE IS ONLINE",
-                    Screen::Player if o.player(self.player).is_none() => "NO LONGER ONLINE",
-                    Screen::Player => "IN YOUR PARTY",
-                    _ => "NO PLAYLISTS",
+                    Screen::Players => "NO ONE ELSE IS ONLINE".into(),
+                    Screen::RecentPlayers => "NO RECENT PLAYERS YET".into(),
+                    Screen::Player if gone && self.list == Screen::RecentPlayers => {
+                        o.status(self.player)
+                    }
+                    Screen::Player if gone => "NO LONGER ONLINE".into(),
+                    Screen::Player => "IN YOUR PARTY".into(),
+                    _ => "NO PLAYLISTS".into(),
                 };
-                (why.into(), None)
+                (why, None)
             }
             Row::Playlist(i) => match o.playlists().get(i) {
                 Some(p) => {
@@ -1245,6 +1276,7 @@ impl Menu {
             }
             Row::Matchmaking => forward(self, Screen::Playlists),
             Row::OnlinePlayers => forward(self, Screen::Players),
+            Row::RecentPlayers => forward(self, Screen::RecentPlayers),
             Row::Quickmatch => {
                 self.show(Screen::Matchmaking);
                 self.sound = Some(Sound::Advance);
@@ -1279,7 +1311,14 @@ impl Menu {
             }
             Row::Player(i) => match ctx.online.and_then(|o| o.others().get(i).copied()) {
                 Some(p) => {
-                    self.player = p.account;
+                    (self.player, self.list) = (p.account, Screen::Players);
+                    forward(self, Screen::Player)
+                }
+                None => Action::None,
+            },
+            Row::RecentPlayer(i) => match ctx.online.and_then(|o| o.recent.get(i)) {
+                Some(r) => {
+                    (self.player, self.list) = (r.account, Screen::RecentPlayers);
                     forward(self, Screen::Player)
                 }
                 None => Action::None,
@@ -1300,7 +1339,7 @@ impl Menu {
         }
     }
 
-    /// Do what was chosen about the player picked from the online list.
+    /// Do what was chosen about the player picked.
     fn player_option(&mut self, row: Row, ctx: &Context) -> Action {
         let Some(o) = ctx.online else {
             return Action::None;
@@ -1311,8 +1350,7 @@ impl Menu {
         if row == Row::JoinTheirParty {
             self.show(Screen::Live);
         } else {
-            let k = o.others().iter().position(|q| q.account == p.account);
-            self.back_to(Screen::Players, Row::Player(k.unwrap_or(0)), ctx);
+            self.back_to_list(ctx);
         }
         self.sound = Some(Sound::Advance);
         match row {
@@ -1422,6 +1460,22 @@ impl Menu {
         self.sound = Some(Sound::Back);
     }
 
+    /// Back from the player picked to the list they were picked from, on
+    /// their row.
+    fn back_to_list(&mut self, ctx: &Context) {
+        let o = ctx.online;
+        let row = if self.list == Screen::RecentPlayers {
+            let recent = o.map_or(&[][..], |o| o.recent);
+            let k = recent.iter().position(|r| r.account == self.player);
+            Row::RecentPlayer(k.unwrap_or(0))
+        } else {
+            let others = o.map(|o| o.others()).unwrap_or_default();
+            let k = others.iter().position(|p| p.account == self.player);
+            Row::Player(k.unwrap_or(0))
+        };
+        self.back_to(self.list, row, ctx);
+    }
+
     /// Back to `screen`, on `row`, leaving any notice behind.
     fn back_to(&mut self, screen: Screen, row: Row, ctx: &Context) {
         self.show(screen);
@@ -1477,10 +1531,12 @@ impl Menu {
                 self.back_to(Screen::Live, Row::OnlinePlayers, ctx);
                 Action::None
             }
+            Screen::RecentPlayers => {
+                self.back_to(Screen::Live, Row::RecentPlayers, ctx);
+                Action::None
+            }
             Screen::Player => {
-                let others = ctx.online.map(|o| o.others()).unwrap_or_default();
-                let k = others.iter().position(|p| p.account == self.player);
-                self.back_to(Screen::Players, Row::Player(k.unwrap_or(0)), ctx);
+                self.back_to_list(ctx);
                 Action::None
             }
             Screen::Playlists => {
@@ -1502,13 +1558,11 @@ impl Menu {
     fn row_rect(&self, k: usize) -> [f32; 4] {
         let wide = matches!(self.screen, Screen::SystemLink | Screen::Options);
         // The online lists are wider still, for players' doings.
-        let list = matches!(
-            self.screen,
-            Screen::Players | Screen::Playlists | Screen::Matchmaking
-        );
-        // The game options' eleven rows (and the online players) sit closer
-        // to fit above the hint.
-        let step = if matches!(self.screen, Screen::Options | Screen::Players) {
+        let players = matches!(self.screen, Screen::Players | Screen::RecentPlayers);
+        let list = players || matches!(self.screen, Screen::Playlists | Screen::Matchmaking);
+        // The game options' eleven rows (and the lists of players) sit
+        // closer to fit above the hint.
+        let step = if self.screen == Screen::Options || players {
             ROW_STEP - 4.0
         } else {
             ROW_STEP
@@ -1610,6 +1664,7 @@ impl Menu {
             | Screen::Profile
             | Screen::Live
             | Screen::Players
+            | Screen::RecentPlayers
             | Screen::Player
             | Screen::Playlists
             | Screen::Matchmaking
@@ -1673,17 +1728,22 @@ impl Menu {
             let selectable = row.selectable(ctx);
             let selected = k == cursor && selectable && !fixed;
             let (label, value) = self.label(row, ctx);
-            // Playlists the party lacks maps for are marked, as Halo 2 did.
-            let missing = match (row, ctx.online) {
+            // Playlists the party lacks maps for are marked, as Halo 2 did,
+            // and recent players who are offline dimmed.
+            let dimmed = match (row, ctx.online) {
                 (Row::Playlist(i), Some(o)) => o
                     .playlists()
                     .get(i)
                     .is_some_and(|p| !o.missing_maps(p).is_empty()),
+                (Row::RecentPlayer(i), Some(o)) => o
+                    .recent
+                    .get(i)
+                    .is_some_and(|r| o.player(r.account).is_none()),
                 _ => false,
             };
             let (bg, fg) = if selected {
                 (HIGHLIGHT, BRIGHT)
-            } else if selectable && !missing {
+            } else if selectable && !dimmed {
                 (PANEL, TEXT)
             } else if selectable {
                 (PANEL, DIM)
@@ -1696,7 +1756,7 @@ impl Menu {
             let text_y = rect[1] + (ROW_H - 11.0) * 0.5;
             // Players have icons on the left; playlists, on the right.
             let (left, right) = match row {
-                Row::Player(_) => (30.0, 10.0),
+                Row::Player(_) | Row::RecentPlayer(_) => (30.0, 10.0),
                 Row::Playlist(_) => (10.0, 30.0),
                 _ => (10.0, 10.0),
             };
@@ -1707,7 +1767,9 @@ impl Menu {
                     Row::Join(_)
                         | Row::Name
                         | Row::OnlinePlayers
+                        | Row::RecentPlayers
                         | Row::Player(_)
+                        | Row::RecentPlayer(_)
                         | Row::Playlist(_)
                         | Row::SearchStatus
                 );
@@ -1740,11 +1802,7 @@ impl Menu {
         if let Some(o) = ctx.online {
             match self.screen {
                 Screen::Live => draw_party(hb, font, white, &f, o),
-                Screen::Player => {
-                    if let Some(p) = o.player(self.player) {
-                        draw_player(hb, font, white, &f, o, p);
-                    }
-                }
+                Screen::Player => draw_player(hb, font, white, &f, o, self.player),
                 _ => {}
             }
         }
@@ -1807,11 +1865,18 @@ impl Menu {
     }
 
     /// What shows where notices go when there's none: the chosen
-    /// playlist's description (or who lacks which of its maps), or the
-    /// online service's message of the day.
+    /// playlist's description (or who lacks which of its maps), what we
+    /// last played with the chosen recent player and when, or the online
+    /// service's message of the day.
     fn note(&self, ctx: &Context) -> Option<String> {
         let o = ctx.online?;
         match self.screen {
+            Screen::RecentPlayers => {
+                let Some(&Row::RecentPlayer(i)) = self.rows(ctx).get(self.cursor) else {
+                    return None;
+                };
+                Some(o.last_played(o.recent.get(i)?))
+            }
             Screen::Playlists => {
                 let Some(&Row::Playlist(i)) = self.rows(ctx).get(self.cursor) else {
                     return None;
@@ -2093,6 +2158,7 @@ fn live_rows(ctx: &Context) -> Vec<Row> {
         Row::Quickmatch,
         Row::CustomGame,
         Row::OnlinePlayers,
+        Row::RecentPlayers,
         Row::Privacy,
     ];
     if o.invite().is_some() {
@@ -2153,21 +2219,32 @@ fn draw_party(hb: &mut HudBuilder, font: usize, white: usize, f: &Frame, o: &Onl
     }
 }
 
-/// The player picked from the online list, beside what can be done about
-/// them: their level, gamertag and what they're doing.
+/// The player picked (by account), beside what can be done about them:
+/// their level, gamertag and what they're doing (or that they're offline),
+/// and what we last played with them if we have lately.
 fn draw_player(
     hb: &mut HudBuilder,
     font: usize,
     white: usize,
     f: &Frame,
     o: &OnlineView,
-    p: &OnlinePlayer,
+    account: u64,
 ) {
+    let recent = o.recent_player(account);
+    let (level, gamertag) = match (o.player(account), recent) {
+        (Some(p), _) => (p.best, &p.gamertag),
+        (None, Some(r)) => (r.level, &r.gamertag),
+        (None, None) => return,
+    };
     let s = f.s;
     let (x, y) = (PANEL_X, ROW_Y);
     let text_x = x + 38.0;
     let per_line = ((PANEL_X + PANEL_W - text_x) / (9.0 * crate::font::ASPECT)) as usize;
-    let lines = wrap(&o.doing(p), per_line);
+    let mut lines = wrap(&o.status(account), per_line);
+    if let Some(r) = recent {
+        let played = format!("LAST PLAYED {}", o.last_played(r));
+        lines.extend(wrap(&played, per_line));
+    }
     let height = (20.0 + 12.0 * lines.len() as f32).max(26.0);
     hb.quad(
         white,
@@ -2177,16 +2254,17 @@ fn draw_player(
         hud_mode::PLAIN,
         0.0,
     );
-    rank::draw(hb, f.rect([x, y, x + 28.0, y + 26.0]), p.best);
-    hb.text_left(font, f.at(text_x, y), 11.0 * s, &p.gamertag, BRIGHT);
+    rank::draw(hb, f.rect([x, y, x + 28.0, y + 26.0]), level);
+    hb.text_left(font, f.at(text_x, y), 11.0 * s, gamertag, BRIGHT);
     for (k, line) in lines.iter().enumerate() {
         let at = f.at(text_x, y + 18.0 + 12.0 * k as f32);
         hb.text_left(font, at, 9.0 * s, line, TEXT);
     }
 }
 
-/// The icons on the online lists' rows: a player's level, then their
-/// party's (a crown for our party's leader); the level we have in a
+/// The icons on the online lists' rows: a player's level (as it was when
+/// we played, for recent players offline), then their party's if they're
+/// online (a crown for our party's leader); the level we have in a
 /// playlist.
 fn draw_icons(
     hb: &mut HudBuilder,
@@ -2199,15 +2277,26 @@ fn draw_icons(
     let [x0, y0, x1, _] = rect;
     let mid = y0 + ROW_H * 0.5;
     match row {
-        Row::Player(i) => {
-            let Some(p) = o.others().get(i).copied() else {
+        Row::Player(_) | Row::RecentPlayer(_) => {
+            let (level, p) = match row {
+                Row::Player(i) => match o.others().get(i).copied() {
+                    Some(p) => (p.best, Some(p)),
+                    None => return,
+                },
+                Row::RecentPlayer(i) => match o.recent.get(i) {
+                    Some(r) => {
+                        let p = o.player(r.account);
+                        (p.map_or(r.level, |p| p.best), p)
+                    }
+                    None => return,
+                },
+                _ => return,
+            };
+            let at = f.rect([x0 + 9.0, mid - 7.0, x0 + 23.0, mid + 7.0]);
+            rank::draw(hb, at, level);
+            let Some(p) = p else {
                 return;
             };
-            rank::draw(
-                hb,
-                f.rect([x0 + 9.0, mid - 7.0, x0 + 23.0, mid + 7.0]),
-                p.best,
-            );
             let leads = o.party().is_some_and(|party| party.leader == p.account);
             let icon = if leads {
                 LiveIcon::Leader
@@ -2418,6 +2507,7 @@ pub fn draw_scoreboard(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::online::recent::Recent;
     use h2live::client::View;
     use h2net::live::{
         Activity, MatchInfo, OnlinePlayer, PartyInfo, PartyMember, PlaylistInfo, SearchStatus,
@@ -2828,6 +2918,8 @@ mod tests {
             returning: None,
             custom: false,
             maps: &[],
+            recent: &[],
+            time: 0,
         }
     }
 
@@ -2968,6 +3060,7 @@ mod tests {
                 Row::Quickmatch,
                 Row::CustomGame,
                 Row::OnlinePlayers,
+                Row::RecentPlayers,
                 Row::Privacy,
                 Row::AcceptInvite,
             ],
@@ -2981,7 +3074,7 @@ mod tests {
         assert_eq!(m.screen, Screen::Matchmaking);
         m.show(Screen::Live);
         // The party's privacy steps between open and invite only.
-        for _ in 0..4 {
+        for _ in 0..5 {
             m.input(Input::Down, &c);
         }
         assert_eq!(m.label(Row::Privacy, &c).1.as_deref(), Some("OPEN"));
@@ -3004,7 +3097,9 @@ mod tests {
         assert!(m.rows(&c).contains(&Row::LeaveParty));
         // They're read only: the cursor passes them by.
         m.input(Input::Down, &c);
+        m.input(Input::Down, &c);
         assert_eq!(m.rows(&c)[m.cursor], Row::AcceptInvite);
+        m.input(Input::Up, &c);
         m.input(Input::Up, &c);
         assert_eq!(m.rows(&c)[m.cursor], Row::OnlinePlayers);
         assert_eq!(m.input(Input::Right, &c), Action::None);
@@ -3073,6 +3168,122 @@ mod tests {
         m.input(Input::Back, &c);
         assert_eq!(m.screen, Screen::Live);
         assert_eq!(m.rows(&c)[m.cursor], Row::OnlinePlayers);
+    }
+
+    #[test]
+    fn recent_players_are_listed_newest_first_with_what_they_do_now() {
+        let maps = maps();
+        let mut view = signed_in(1, &[(1, "JOHN")]);
+        // VIPER's party is playing a match now.
+        view.online[2].activity = Activity::Playing;
+        let now = 1_000_000;
+        let recent = |account, gamertag: &str, played: &str, map: &str, ago| Recent {
+            account,
+            gamertag: gamertag.into(),
+            level: 4,
+            played: played.into(),
+            map: map.into(),
+            when: now - ago,
+        };
+        // SARGE has a new gamertag since; GHOST is offline.
+        let recent = [
+            recent(2, "OLD SARGE", "double_team", "lockout", 300),
+            recent(9, "GHOST", "custom", "midship", 2 * 86400),
+            recent(3, "VIPER", "team_snipers", "cyclotron", 7200),
+        ];
+        let o = OnlineView {
+            recent: &recent,
+            time: now,
+            ..online(Some(&view))
+        };
+        let c = Context {
+            online: Some(&o),
+            ..ctx(&maps, &[])
+        };
+        // Beside ONLINE PLAYERS in the party lobby.
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Live);
+        assert_eq!(m.label(Row::RecentPlayers, &c).1.as_deref(), Some("3"));
+        for _ in 0..4 {
+            m.input(Input::Down, &c);
+        }
+        m.input(Input::Select, &c);
+        assert_eq!(m.screen, Screen::RecentPlayers);
+        assert_eq!(m.title(&c), "RECENT PLAYERS");
+        assert_eq!(
+            m.rows(&c),
+            [
+                Row::RecentPlayer(0),
+                Row::RecentPlayer(1),
+                Row::RecentPlayer(2)
+            ]
+        );
+        let label = |m: &Menu, k| m.label(Row::RecentPlayer(k), &c);
+        assert_eq!(
+            label(&m, 0),
+            ("SARGE".into(), Some("IN A PARTY, 14 OPENINGS".into()))
+        );
+        assert_eq!(label(&m, 1), ("GHOST".into(), Some("OFFLINE".into())));
+        // What we played with them, where and when.
+        assert_eq!(
+            m.note(&c).as_deref(),
+            Some("DOUBLE TEAM ON LOCKOUT, 5 MINUTES AGO")
+        );
+        m.input(Input::Down, &c);
+        assert_eq!(
+            m.note(&c).as_deref(),
+            Some("CUSTOM GAME ON MIDSHIP, 2 DAYS AGO")
+        );
+        m.input(Input::Down, &c);
+        assert_eq!(
+            m.note(&c).as_deref(),
+            Some("TEAM SNIPERS ON IVORY TOWER, 2 HOURS AGO")
+        );
+        // Each one's level, and the parties of those online.
+        let icons = |m: &Menu| {
+            let mut hb = HudBuilder::new(1280.0, 720.0);
+            m.draw(&mut hb, 0, 1, 1280.0, 720.0, &c);
+            let ranks = |t| t >= crate::gpu::RANK_TEXTURES;
+            quads(&hb.finish(), ranks).len()
+        };
+        assert_eq!(icons(&m), 5);
+        // SARGE: invite them, or join their open party, then back here.
+        m.input(Input::Up, &c);
+        m.input(Input::Up, &c);
+        m.input(Input::Select, &c);
+        assert_eq!(m.screen, Screen::Player);
+        assert_eq!(m.rows(&c), [Row::Invite, Row::JoinTheirParty]);
+        assert_eq!(m.input(Input::Select, &c), Action::Invite(2));
+        assert_eq!(m.screen, Screen::RecentPlayers);
+        assert_eq!(m.rows(&c)[m.cursor], Row::RecentPlayer(0));
+        assert_eq!(m.notice.as_deref(), Some("PARTY INVITE SENT TO SARGE"));
+        // GHOST is offline: nothing to do but see when we played.
+        m.input(Input::Down, &c);
+        m.input(Input::Select, &c);
+        assert_eq!(m.rows(&c), [Row::Nothing]);
+        assert_eq!(m.label(Row::Nothing, &c).0, "OFFLINE");
+        assert_eq!(icons(&m), 1, "their level as it was");
+        m.input(Input::Back, &c);
+        assert_eq!(m.screen, Screen::RecentPlayers);
+        assert_eq!(m.rows(&c)[m.cursor], Row::RecentPlayer(1));
+        // VIPER is in a match: no joining their party until it's over.
+        m.input(Input::Down, &c);
+        m.input(Input::Select, &c);
+        assert_eq!(m.rows(&c), [Row::Invite]);
+        // Back goes up a screen at a time.
+        m.input(Input::Back, &c);
+        m.input(Input::Back, &c);
+        assert_eq!(m.screen, Screen::Live);
+        assert_eq!(m.rows(&c)[m.cursor], Row::RecentPlayers);
+        // No one yet.
+        let o = online(Some(&view));
+        let c = Context {
+            online: Some(&o),
+            ..ctx(&maps, &[])
+        };
+        m.show(Screen::RecentPlayers);
+        assert_eq!(m.rows(&c), [Row::Nothing]);
+        assert_eq!(m.label(Row::Nothing, &c).0, "NO RECENT PLAYERS YET");
     }
 
     #[test]

@@ -1,7 +1,7 @@
-# The matchmaking playlists: Halo 2's launch playlists, as far as this game
-# can play them. A playlists.txt in the server's data folder replaces all of
-# them; copy this file there to start from it. The format is described at
-# the top of crates/h2live/src/playlists.rs.
+# The matchmaking playlists: Halo 2's launch playlists and two it added
+# later, as far as this game can play them. A playlists.txt in the server's
+# data folder replaces all of them; copy this file there to start from it.
+# The format is described at the top of crates/h2live/src/playlists.rs.
 
 playlist 0 ffa Rumble Pit
 ranked yes
@@ -91,3 +91,27 @@ variant team_oddball default 150 720
 variant territories default 300 900
 maps lockout midship ascension zanzibar headlong coagulation beavercreek
 maps colossus turf foundation backwash deltatap
+
+playlist 7 team_snipers Team Snipers
+ranked no
+humans 2 8
+party 4
+guests yes
+bots fill 8
+variant team_slayer snipers 50 720
+maps lockout ascension zanzibar headlong coagulation beavercreek colossus
+maps turf cyclotron deltatap midship foundation
+
+playlist 8 team_hardcore Team Hardcore
+ranked yes
+humans 4 8
+party 4
+guests no
+bots even
+variant team_slayer hardcore 50 720
+variant team_slayer snipers 50 720
+variant ctf hardcore 3 900
+variant team_oddball hardcore 150 720
+variant team_king hardcore 150 720
+maps midship lockout warlock deltatap cyclotron beavercreek ascension zanzibar
+maps coagulation

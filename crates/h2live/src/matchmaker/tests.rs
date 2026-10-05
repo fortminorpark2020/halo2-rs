@@ -1,5 +1,6 @@
 use super::*;
 use crate::playlists::{built_in, parse};
+use h2sim::GameType;
 use std::collections::HashSet;
 
 // The built-in playlists by id.
@@ -10,6 +11,8 @@ const TEAM_SLAYER: u8 = 3;
 const TEAM_SKIRMISH: u8 = 4;
 const BIG_TEAM: u8 = 5;
 const TEAM_TRAINING: u8 = 6;
+const TEAM_SNIPERS: u8 = 7;
+const TEAM_HARDCORE: u8 = 8;
 
 /// Every map in the built-in playlists, everyone's copy the same.
 fn every_map() -> Vec<(String, u64)> {
@@ -28,7 +31,7 @@ fn every_map() -> Vec<(String, u64)> {
 fn member(account: u64, level: u8) -> Member {
     Member {
         account,
-        levels: (0..7).map(|p| (p, level)).collect(),
+        levels: built_in().iter().map(|p| (p.id, level)).collect(),
         guests: 0,
         maps: every_map(),
         rtt: 50,
@@ -697,6 +700,58 @@ fn unranked_matches_fill_up_with_bots() {
 }
 
 #[test]
+fn team_snipers_is_unranked_team_slayer_with_sniper_rifles() {
+    // Two are enough: bots make it four against four. Guests come too.
+    let mut mm = matchmaker();
+    let host = Member {
+        guests: 1,
+        ..member(1, 5)
+    };
+    assert_eq!(
+        mm.search(party(1, TEAM_SNIPERS, vec![host]), 0.0),
+        Ok(TEAM_SNIPERS)
+    );
+    mm.search(solo(2, TEAM_SNIPERS, 30), 0.0).unwrap();
+    let m = &formed(&run(&mut mm, 0.0, 30.0))[0].1;
+    assert_eq!((m.playlist, m.ranked, m.bots), (TEAM_SNIPERS, false, 5));
+    assert_eq!(m.variant.game_type, GameType::TeamSlayer);
+    assert_eq!(m.variant.preset, "SNIPERS");
+    assert_ne!(team(m, 1), team(m, 2));
+    // Parties of up to four, so teams can always be even.
+    let five = party(10, TEAM_SNIPERS, players(10, 5));
+    assert_eq!(mm.search(five, 0.0), Err(TOO_LARGE));
+}
+
+#[test]
+fn team_hardcore_is_ranked_four_against_four_in_its_own_variants() {
+    let mut mm = matchmaker();
+    let ranked = party(
+        10,
+        TEAM_HARDCORE,
+        vec![Member {
+            guests: 1,
+            ..member(10, 5)
+        }],
+    );
+    assert_eq!(mm.search(ranked, 0.0), Err(NO_RANKED_GUESTS));
+    mm.search(party(1, TEAM_HARDCORE, players(1, 4)), 0.0)
+        .unwrap();
+    for id in 5..=8 {
+        mm.search(solo(id, TEAM_HARDCORE, 5), 0.0).unwrap();
+    }
+    let m = &formed(&run(&mut mm, 0.0, 0.0))[0].1;
+    assert_eq!((m.playlist, m.ranked, m.bots), (TEAM_HARDCORE, true, 0));
+    assert_eq!(m.players.len(), 8);
+    // The party of four stays together, against the four alone.
+    assert!((1..=4).all(|a| team(m, a) == team(m, 1)));
+    assert!((5..=8).all(|a| team(m, a) != team(m, 1)));
+    let playlist = &built_in()[usize::from(TEAM_HARDCORE)];
+    assert!(playlist.variants.contains(&m.variant));
+    assert!(playlist.maps.contains(&m.map));
+    assert!(["HARDCORE", "SNIPERS"].contains(&m.variant.preset.as_str()));
+}
+
+#[test]
 fn unranked_teams_are_even_once_bots_join_the_smaller() {
     // Team Training is four against four at most, so a party of more than
     // four could never have enough opponents.
@@ -761,7 +816,7 @@ fn quickmatch_picks_the_busiest_playlist_the_party_fits() {
     assert_eq!(mm.searching(TEAM_SLAYER), 5);
     assert_eq!(mm.search(solo(30, QUICKMATCH, 5), 0.0), Ok(RUMBLE_PIT));
     // Guests only fit the unranked playlists, where no one's searching yet:
-    // either will do.
+    // any will do.
     let mut picked = HashSet::new();
     for seed in 0..20 {
         let mut mm = Matchmaker::new(built_in(), seed);
@@ -771,7 +826,10 @@ fn quickmatch_picks_the_busiest_playlist_the_party_fits() {
         };
         picked.insert(mm.search(party(40, QUICKMATCH, vec![host]), 0.0).unwrap());
     }
-    assert_eq!(picked, HashSet::from([BIG_TEAM, TEAM_TRAINING]));
+    assert_eq!(
+        picked,
+        HashSet::from([BIG_TEAM, TEAM_TRAINING, TEAM_SNIPERS])
+    );
     let nine = party(50, QUICKMATCH, players(50, 9));
     assert_eq!(mm.search(nine, 0.0), Err(NO_PLAYLIST));
 }

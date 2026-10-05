@@ -16,8 +16,8 @@ use blam_cache::{text, GroupTag, MapSet};
 use h2live::client::{self, LiveClient, LiveEvent, RelayLeg, View};
 use h2live::server::{Route, Server};
 use h2net::live::{
-    self, Activity, LinkInfo, MatchInfo, OnlinePlayer, PartyInfo, PlaylistInfo, Privacy, Stage,
-    ToServer, QUICKMATCH,
+    self, Activity, LinkInfo, MatchInfo, OnlinePlayer, PartyInfo, PartyMember, PlaylistInfo,
+    Privacy, Stage, ToServer, QUICKMATCH,
 };
 use h2net::Connection;
 use h2sim::bot::{bot_look, bot_name};
@@ -31,9 +31,11 @@ use std::time::{Duration, Instant};
 
 mod custom;
 mod matches;
+pub mod recent;
 
 use custom::Custom;
 use matches::Matched;
+use recent::{Recent, RecentPlayers};
 
 /// The online server everyone signs in to, unless H2_LIVE or a `server=`
 /// line in the profile names another. None yet: until there is, it's the
@@ -214,6 +216,10 @@ pub struct OnlineView<'a> {
     pub custom: bool,
     /// The maps this PC has, by file name.
     pub maps: &'a [String],
+    /// Who we played with lately, newest first.
+    pub recent: &'a [Recent],
+    /// Now, in Unix time (to say how long ago that was).
+    pub time: u64,
 }
 
 impl OnlineView<'_> {
@@ -253,6 +259,32 @@ impl OnlineView<'_> {
 
     pub fn player(&self, account: u64) -> Option<&OnlinePlayer> {
         self.others().into_iter().find(|p| p.account == account)
+    }
+
+    /// Someone we played with lately, by their account.
+    pub fn recent_player(&self, account: u64) -> Option<&Recent> {
+        self.recent.iter().find(|r| r.account == account)
+    }
+
+    /// What someone is doing if they're online (see `doing`), or else
+    /// that they're offline.
+    pub fn status(&self, account: u64) -> String {
+        match self.player(account) {
+            Some(p) => self.doing(p),
+            None => words(&self.text.players, "offline", "OFFLINE"),
+        }
+    }
+
+    /// What we last played with a recent player, where and when: "TEAM
+    /// SNIPERS ON LOCKOUT, 5 MINUTES AGO".
+    pub fn last_played(&self, r: &Recent) -> String {
+        let what = match self.playlists().iter().find(|p| p.key == r.played) {
+            Some(p) => self.text.playlist_name(p),
+            None if r.played == recent::CUSTOM => "CUSTOM GAME".into(),
+            None => r.played.replace('_', " ").to_uppercase(),
+        };
+        let when = recent::ago(r.when, self.time);
+        format!("{what} ON {}, {when}", map_title(&r.map))
     }
 
     pub fn playlists(&self) -> &[PlaylistInfo] {
@@ -473,6 +505,8 @@ pub struct Online {
     pub text: LiveText,
     /// The maps this PC signed in with, by file name.
     maps: Vec<String>,
+    /// Who we played with lately, kept beside our key once signed in.
+    recent: RecentPlayers,
     /// For testing (H2_LIVE_AUTO=search:<key>, or H2_LIVE_BOT=<key>): the
     /// playlist the party searches by itself, and when it was last busy.
     auto: Option<String>,
@@ -503,15 +537,17 @@ pub fn identity_path() -> Option<PathBuf> {
     }
 }
 
-/// Where the stat card for the key at `identity` is kept: live-card.txt
-/// beside identity.key, and `<name>-card.txt` beside any other key, so keys
-/// that share a folder (H2_IDENTITY's, say) don't share a card.
-fn card_path(identity: &Path) -> PathBuf {
+/// Where a file of the key at `identity`'s own is kept: as `usual` beside
+/// identity.key, and as `<name>-<kind>.txt` beside any other key, so keys
+/// that share a folder (H2_IDENTITY's, say) don't share it. Its stat card
+/// is live-card.txt (or `<name>-card.txt`), and its recent players
+/// recent-players.txt (or `<name>-recent.txt`).
+fn kept_with(identity: &Path, usual: &str, kind: &str) -> PathBuf {
     if identity.file_name() == Some("identity.key".as_ref()) {
-        return identity.with_file_name("live-card.txt");
+        return identity.with_file_name(usual);
     }
     let name = identity.file_stem().unwrap_or_default().to_string_lossy();
-    identity.with_file_name(format!("{name}-card.txt"))
+    identity.with_file_name(format!("{name}-{kind}.txt"))
 }
 
 /// Where on the service at `address` a path is (`live` for signing in,
@@ -582,6 +618,7 @@ impl Online {
             test: None,
             text,
             maps: Vec::new(),
+            recent: RecentPlayers::default(),
             auto: std::env::var("H2_LIVE_AUTO")
                 .ok()
                 .and_then(|v| Some(v.strip_prefix("search:")?.to_string()))
@@ -615,6 +652,8 @@ impl Online {
             returning: m.and_then(|m| m.returning(now)),
             custom: self.custom.is_some(),
             maps: &self.maps,
+            recent: &self.recent.list,
+            time: recent::unix_now(),
         })
     }
 
@@ -689,6 +728,40 @@ impl Online {
         }
     }
 
+    /// We just played with `players` (their account, gamertag and level),
+    /// in the playlist `played` (by key) or a custom game, on `map`: they're
+    /// our most recent players.
+    fn met<'p>(
+        &mut self,
+        players: impl Iterator<Item = (u64, &'p str, u8)>,
+        played: &str,
+        map: &str,
+    ) {
+        let me = self.me().map(|(account, _)| account);
+        let when = recent::unix_now();
+        let recent = |(account, gamertag, level): (u64, &str, u8)| Recent {
+            account,
+            gamertag: gamertag.to_string(),
+            level,
+            played: played.to_string(),
+            map: map.to_string(),
+            when,
+        };
+        let others = players.filter(|&(account, ..)| Some(account) != me);
+        self.recent.met(others.map(recent).collect());
+    }
+
+    /// A playlist's key, by its id ("matchmaking" if the service never
+    /// said).
+    fn playlist_key(&self, id: u8) -> String {
+        let playlists = match &self.link {
+            Link::Live(client) => &client.view.playlists[..],
+            _ => &[],
+        };
+        let p = playlists.iter().find(|p| p.id == id);
+        p.map_or_else(|| "matchmaking".into(), |p| p.key.clone())
+    }
+
     /// In a match, from MATCH until back in the party lobby.
     pub fn in_match(&self) -> bool {
         self.matched.is_some()
@@ -698,6 +771,15 @@ impl Online {
     /// party lobby.
     pub fn in_custom(&self) -> bool {
         self.custom.is_some()
+    }
+
+    /// The party's members, as the service last said.
+    fn party_members(&self) -> Vec<PartyMember> {
+        let party = match &self.link {
+            Link::Live(client) => client.view.party.as_ref(),
+            _ => None,
+        };
+        party.map_or_else(Vec::new, |p| p.members.clone())
     }
 
     /// In the party's custom game: a member's level (their best), by
@@ -811,9 +893,9 @@ impl Online {
         vec![LiveEvent::Lost(why)]
     }
 
-    /// Sign in over `conn` with this PC's key, keeping our stat card beside
-    /// it (or with the service, when it runs in the game: its cards are no
-    /// good to a real one).
+    /// Sign in over `conn` with this PC's key, keeping our stat card and
+    /// recent players beside it (or with the service, when it runs in the
+    /// game: its cards and players are no good to a real one).
     fn sign_in(
         &mut self,
         conn: Connection,
@@ -826,10 +908,17 @@ impl Online {
         }
         let key = client::identity(&path)
             .map_err(|e| format!("CAN'T READ {}: {e}", path.display()).to_uppercase())?;
-        let card = match &self.test {
-            Some(test) => test.dir.join("live-card.txt"),
-            None => card_path(&path),
+        let (card, recent) = match &self.test {
+            Some(test) => (
+                test.dir.join("live-card.txt"),
+                test.dir.join("recent-players.txt"),
+            ),
+            None => (
+                kept_with(&path, "live-card.txt", "card"),
+                kept_with(&path, "recent-players.txt", "recent"),
+            ),
         };
+        self.recent = RecentPlayers::load(&recent);
         let client = LiveClient::new(conn, key, profile, &card, now);
         self.link = Link::Live(Box::new(client));
         Ok(())
@@ -919,7 +1008,12 @@ pub enum Followed {
 fn online_screen(screen: Screen) -> bool {
     matches!(
         screen,
-        Screen::Live | Screen::Players | Screen::Player | Screen::Playlists | Screen::Matchmaking
+        Screen::Live
+            | Screen::Players
+            | Screen::RecentPlayers
+            | Screen::Player
+            | Screen::Playlists
+            | Screen::Matchmaking
     )
 }
 
@@ -1548,10 +1642,16 @@ mod tests {
     }
 
     #[test]
-    fn cards_are_kept_beside_their_keys() {
-        let card = |key: &str| card_path(Path::new(key));
+    fn cards_and_recent_players_are_kept_beside_their_keys() {
+        let card = |key: &str| kept_with(Path::new(key), "live-card.txt", "card");
         assert_eq!(card("/h/identity.key"), Path::new("/h/live-card.txt"));
         assert_eq!(card("/h/alpha.key"), Path::new("/h/alpha-card.txt"));
         assert_eq!(card("/h/bravo"), Path::new("/h/bravo-card.txt"));
+        let recent = |key: &str| kept_with(Path::new(key), "recent-players.txt", "recent");
+        assert_eq!(
+            recent("/h/identity.key"),
+            Path::new("/h/recent-players.txt")
+        );
+        assert_eq!(recent("/h/alpha.key"), Path::new("/h/alpha-recent.txt"));
     }
 }

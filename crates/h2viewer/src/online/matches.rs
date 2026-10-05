@@ -15,7 +15,7 @@ use crate::{App, Mode, Then};
 use h2net::live::{LinkInfo, MatchInfo, MatchOver, MatchPlayer, ToServer};
 use h2net::{Client, Connection, Host, Lobby, LobbyPlayer, Verified};
 use h2sim::bot::bot_name;
-use h2sim::game::{guest_name, GameType, Look, TEAMS};
+use h2sim::game::{guest_name, GameType, Look, MapWeapons, TEAMS};
 use h2sim::Game;
 
 /// Seconds from a match's carnage report coming up to everyone going back
@@ -179,6 +179,31 @@ fn level_after(info: &MatchInfo, over: Option<&MatchOver>, name: &str) -> Option
     Some(after.map_or(p.level, |&(_, level)| level))
 }
 
+/// How a game is set up, for the log: its game type and score to win, what
+/// everyone starts with, the weapons on the map and the motion sensor.
+fn setup_text(game: &Game) -> String {
+    let name = |k: usize| game.weapons.get(k).map_or("?", |w| w.name.as_str());
+    let start: Vec<&str> = game
+        .rules
+        .starting_weapons
+        .iter()
+        .map(|&k| name(k))
+        .collect();
+    let options = game.rules.options;
+    let map_weapons = match options.map_weapons {
+        MapWeapons::MapDefault => "the map's",
+        MapWeapons::None => "none",
+        MapWeapons::Only(k) => name(k),
+    };
+    format!(
+        "{:?} to {}, starting with {}, weapons on the map {map_weapons}, motion sensor {}",
+        game.rules.game_type,
+        game.rules.score_to_win,
+        start.join(" and "),
+        if options.radar { "on" } else { "off" }
+    )
+}
+
 /// What a match did to our level in `playlist` (by name), or why it
 /// didn't count.
 fn over_notice(over: &MatchOver, playlist: &str) -> Option<String> {
@@ -209,6 +234,11 @@ impl App {
             return;
         }
         println!("live: a match on {}", info.map);
+        // Everyone in it is a recent player now.
+        let key = self.online.playlist_key(info.playlist);
+        let players = info.players.iter();
+        let players = players.map(|p| (p.account, p.gamertag.as_str(), p.level));
+        self.online.met(players, &key, &info.map);
         // Whatever was going on here stops for it.
         self.net = Net::Offline;
         if self.mode == Mode::Playing {
@@ -328,7 +358,7 @@ impl App {
         if let Some(m) = &mut self.online.matched {
             m.started = true;
         }
-        println!("live: the match's game started");
+        println!("live: the match's game started: {}", setup_text(&self.game));
     }
 
     /// Keep the match going, every frame: start the game when it's time
@@ -512,6 +542,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::{Choice, WEAPONS};
 
     fn player(account: u64, gamertag: &str, team: u8, level: u8) -> MatchPlayer {
         MatchPlayer {
@@ -558,7 +589,7 @@ mod tests {
         assert_eq!(options.preset(), Some(2), "rockets");
         assert_eq!(options.time_limit, 600);
         let unknown = MatchInfo {
-            preset: "HARDCORE".into(),
+            preset: "PISTOLS".into(),
             ..double_team()
         };
         assert_eq!(match_options(&unknown).preset(), Some(0));
@@ -581,6 +612,42 @@ mod tests {
         );
         assert!(!lobby.players[0].remote && lobby.players[1].remote);
         assert_eq!(lobby.players[4].team, 1);
+    }
+
+    #[test]
+    fn team_snipers_and_team_hardcore_are_played_as_halo_2_played_them() {
+        // The service's variants are all the game's.
+        let names: Vec<&str> = presets().iter().map(|p| p.0).collect();
+        assert_eq!(names, h2live::playlists::PRESETS);
+        let playlists = h2live::playlists::built_in();
+        let options = |key: &str| -> Vec<GameOptions> {
+            let p = playlists.iter().find(|p| p.key == key).unwrap();
+            let infos = p.variants.iter().map(|v| MatchInfo {
+                playlist: p.id,
+                game_type: v.game_type,
+                preset: v.preset.clone(),
+                score: v.score,
+                time_limit: v.time_limit,
+                ..double_team()
+            });
+            infos.map(|info| match_options(&info)).collect()
+        };
+        let weapon = |name| Choice::Weapon(WEAPONS.iter().position(|w| w.0 == name).unwrap());
+        // Team Snipers: sniper rifles everywhere, and no motion sensor.
+        let sniper = weapon("sniper_rifle");
+        for o in options("team_snipers") {
+            assert_eq!((o.map_weapons, o.primary), (sniper, sniper));
+            assert!(!o.radar && !o.vehicles);
+            assert_eq!(o.time_limit, 720);
+        }
+        // Team Hardcore: battle rifle starts (or sniper rifles), and no
+        // motion sensor.
+        let hardcore = options("team_hardcore");
+        assert_eq!(hardcore.len(), 5);
+        for o in hardcore {
+            assert!(o.primary == weapon("battle_rifle") || o.primary == sniper);
+            assert!(!o.radar && o.shields);
+        }
     }
 
     /// A match's game as its host seats it: its own person, then its

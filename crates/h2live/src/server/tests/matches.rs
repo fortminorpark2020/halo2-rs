@@ -1167,6 +1167,42 @@ fn big_team_battle_fills_up_with_bots_and_starts_without_a_pc_that_never_links()
 }
 
 #[test]
+fn team_snipers_and_team_hardcore_matches_say_how_theyre_played() {
+    // The built-in playlists, on the two maps every test PC has: four PCs
+    // search each, alone.
+    for (playlist, ranked, bots, presets) in [
+        (7, false, 4, &["SNIPERS"][..]),
+        (8, true, 0, &["HARDCORE", "SNIPERS"][..]),
+    ] {
+        let mut w = World::new(&format!("playlist-{playlist}"));
+        for n in 1..=4 {
+            w.sign_in(n, GAMERTAGS[usize::from(n) - 1]);
+            w.send(usize::from(n) - 1, ToServer::Search(playlist));
+        }
+        let matched = |w: &World| {
+            w.events[0].iter().find_map(|e| match e {
+                LiveEvent::Match(info) => Some(info.clone()),
+                _ => None,
+            })
+        };
+        w.until(|w| matched(w).is_some());
+        let m = matched(&w).unwrap();
+        assert_eq!((m.playlist, m.ranked, m.bots), (playlist, ranked, bots));
+        assert_eq!(m.players.len(), 4);
+        assert!(m.game_type.teams());
+        assert!(presets.contains(&m.preset.as_str()), "{}", m.preset);
+        let playlists = playlists::built_in();
+        let p = playlists.iter().find(|p| p.id == playlist).unwrap();
+        let variant = p
+            .variants
+            .iter()
+            .find(|v| v.game_type == m.game_type && v.preset == m.preset)
+            .unwrap();
+        assert_eq!((m.score, m.time_limit), (variant.score, variant.time_limit));
+    }
+}
+
+#[test]
 fn another_pc_hosts_if_the_first_asked_doesnt() {
     let mut a = Arena::new("next-host", 4, Some(("double_team", &LEVELS)));
     for g in &mut a.gamers {

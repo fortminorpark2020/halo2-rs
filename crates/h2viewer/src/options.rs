@@ -106,8 +106,10 @@ impl Default for GameOptions {
     }
 }
 
-/// Halo 2's built-in variants offered, by name.
-pub fn presets() -> [(&'static str, GameOptions); 6] {
+/// Halo 2's built-in variants offered, by name, and the one its Team
+/// Hardcore playlist played: battle rifle starts and no motion sensor.
+/// (h2live's playlists name them the same way.)
+pub fn presets() -> [(&'static str, GameOptions); 7] {
     let only = |name: &str, backup: Choice| GameOptions {
         map_weapons: Choice::weapon(name),
         primary: Choice::weapon(name),
@@ -131,9 +133,25 @@ pub fn presets() -> [(&'static str, GameOptions); 6] {
             },
         ),
         ("ROCKETS", only("rocket_launcher", Choice::None)),
-        ("SNIPERS", only("sniper_rifle", Choice::weapon("magnum"))),
+        (
+            // "All weapons are sniper rifles and there's no motion sensor."
+            "SNIPERS",
+            GameOptions {
+                radar: false,
+                ..only("sniper_rifle", Choice::weapon("magnum"))
+            },
+        ),
         ("SWORDS", only("energy_blade", Choice::None)),
         ("SHOTGUNS", only("shotgun", Choice::None)),
+        (
+            "HARDCORE",
+            GameOptions {
+                primary: Choice::weapon("battle_rifle"),
+                secondary: Choice::weapon("smg"),
+                radar: false,
+                ..GameOptions::default()
+            },
+        ),
     ]
 }
 

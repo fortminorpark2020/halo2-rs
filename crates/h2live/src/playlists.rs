@@ -1,7 +1,8 @@
 //! Matchmaking playlists: who can search each one, how many play, and the
-//! games and maps it rotates through. Halo 2's launch playlists are built
-//! in, as far as this game can play them, and a `playlists.txt` replaces
-//! them without a rebuild.
+//! games and maps it rotates through. Halo 2's launch playlists (and Team
+//! Snipers and Team Hardcore, which came later) are built in, as far as
+//! this game can play them, and a `playlists.txt` replaces them without a
+//! rebuild.
 //!
 //! A playlists file has one setting per line. Blank lines and lines
 //! starting with `#` are skipped. For example:
@@ -37,8 +38,9 @@
 //!   Territories) and the time limit in seconds (0 for none). Game types are
 //!   `slayer`, `team_slayer`, `ctf`, `king`, `team_king`, `oddball`,
 //!   `team_oddball`, `juggernaut`, `territories` and `assault`; presets are
-//!   `default`, `swat`, `rockets`, `snipers`, `swords` and `shotguns`. At
-//!   least one, all team games or all free-for-all.
+//!   `default`, `swat`, `rockets`, `snipers`, `swords`, `shotguns` and
+//!   `hardcore` (battle rifle starts, no motion sensor). At least one, all
+//!   team games or all free-for-all.
 //! - `maps <name>...`: map file names without `.map`. At least one and at
 //!   most 64; the line can repeat.
 
@@ -65,8 +67,8 @@ pub const GAME_TYPES: [(GameType, &str); 10] = [
 
 /// The game's built-in variants, as the game's options name them
 /// (h2viewer's `options::presets`).
-pub const PRESETS: [&str; 6] = [
-    "DEFAULT", "SWAT", "ROCKETS", "SNIPERS", "SWORDS", "SHOTGUNS",
+pub const PRESETS: [&str; 7] = [
+    "DEFAULT", "SWAT", "ROCKETS", "SNIPERS", "SWORDS", "SHOTGUNS", "HARDCORE",
 ];
 
 /// Most people (and bots) in a game.
@@ -120,7 +122,8 @@ pub struct Variant {
     pub time_limit: u16,
 }
 
-/// Halo 2's launch playlists, as far as this game can play them.
+/// Halo 2's launch playlists and two later ones, as far as this game can
+/// play them.
 pub fn built_in() -> Vec<Playlist> {
     parse(BUILT_IN).expect("the built-in playlists are valid")
 }
@@ -362,6 +365,8 @@ maps warlock
                 (4, "small_team", "Team Skirmish"),
                 (5, "big_team", "Big Team Battle"),
                 (6, "small_team_unranked", "Team Training"),
+                (7, "team_snipers", "Team Snipers"),
+                (8, "team_hardcore", "Team Hardcore"),
             ]
         );
         let rumble = &playlists[0];
@@ -397,6 +402,39 @@ maps warlock
             assert!(other.variants.iter().all(|v| training.variants.contains(v)));
             assert!(other.maps.iter().all(|m| training.maps.contains(m)));
         }
+        // Team Snipers, as Halo 2 described it: "unranked Team Slayer games
+        // using only your wits and a sniper rifle. Guests are allowed and
+        // any size party can join" (four, so teams can be even).
+        let snipers = &playlists[7];
+        assert!(!snipers.ranked && snipers.teams && snipers.guests);
+        assert_eq!((snipers.min, snipers.max, snipers.party_max), (2, 8, 4));
+        assert_eq!(snipers.bots, Bots::Fill(8));
+        assert!(snipers
+            .variants
+            .iter()
+            .all(|v| (v.game_type, v.preset.as_str()) == (GameType::TeamSlayer, "SNIPERS")));
+        // Team Hardcore: "two teams of four wage war in a variety of ranked
+        // gametypes featuring non-default starting weapons. Motion sensor is
+        // disabled."
+        let hardcore = &playlists[8];
+        assert!(hardcore.ranked && hardcore.teams && !hardcore.guests);
+        assert_eq!((hardcore.min, hardcore.max, hardcore.party_max), (4, 8, 4));
+        assert_eq!(hardcore.bots, Bots::Even);
+        let types: Vec<GameType> = hardcore.variants.iter().map(|v| v.game_type).collect();
+        assert_eq!(
+            types,
+            [
+                GameType::TeamSlayer,
+                GameType::TeamSlayer,
+                GameType::Ctf,
+                GameType::TeamOddball,
+                GameType::TeamKing
+            ]
+        );
+        assert!(hardcore
+            .variants
+            .iter()
+            .all(|v| v.preset == "HARDCORE" || v.preset == "SNIPERS"));
     }
 
     #[test]
@@ -434,7 +472,7 @@ maps warlock
         assert_eq!(
             error_with("variant team_slayer pistols 25 600"),
             "line 9: unknown preset \"pistols\" (the presets are default, swat, rockets, \
-             snipers, swords, shotguns)"
+             snipers, swords, shotguns, hardcore)"
         );
         assert_eq!(
             error_with("variant team_slayer default 25"),
