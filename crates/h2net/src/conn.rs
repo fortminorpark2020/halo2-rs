@@ -1,7 +1,8 @@
 //! Messages between two PCs, each a kind and a body: length-prefixed over
 //! a non-blocking TCP connection, one to a WebSocket message (online), or
 //! handed straight across between the two ends of a pair in this process
-//! (for tests).
+//! (for tests). For testing play over a slow network, a connection can hold
+//! back what it sends and receives for a while (`Lag`).
 
 use crate::ws::Stream;
 use std::collections::VecDeque;
@@ -30,6 +31,99 @@ pub struct Connection {
     /// When we last sent something, and last heard something.
     sent: Instant,
     heard: Instant,
+    /// Messages held back each way, to make the network seem slower.
+    lag: Option<Box<Lagging>>,
+}
+
+/// How much slower to make a connection seem (for testing).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Lag {
+    /// Added to the round trip: half on the way out, half on the way in.
+    pub round_trip: Duration,
+    /// Up to this much more each way, at random (messages still arrive in
+    /// the order sent).
+    pub jitter: Duration,
+    /// The share of messages lost on the way (0-1). As over TCP, a lost
+    /// one comes a round trip later, and holds up those behind it.
+    pub loss: f32,
+}
+
+impl Lag {
+    /// The lag the test hooks ask for: H2_NET_LAG=<round trip in ms>,
+    /// H2_NET_JITTER=<ms> and H2_NET_LOSS=<percent>. None if none is set.
+    pub fn from_env() -> Option<Lag> {
+        let var = |name| std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok());
+        let (round_trip, jitter, loss) =
+            (var("H2_NET_LAG"), var("H2_NET_JITTER"), var("H2_NET_LOSS"));
+        if round_trip.is_none() && jitter.is_none() && loss.is_none() {
+            return None;
+        }
+        let ms = |v: Option<f32>| Duration::from_secs_f32(v.unwrap_or(0.0).max(0.0) / 1000.0);
+        Some(Lag {
+            round_trip: ms(round_trip),
+            jitter: ms(jitter),
+            loss: (loss.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0),
+        })
+    }
+}
+
+/// Messages held back on a lagged connection, each with when it's due.
+type Held = VecDeque<(Instant, Message)>;
+
+/// What a lagged connection holds back each way.
+struct Lagging {
+    lag: Lag,
+    out: Held,
+    inbound: Held,
+    random: u32,
+}
+
+impl Lagging {
+    fn new(lag: Lag) -> Lagging {
+        let seed = crate::session_id();
+        Lagging {
+            lag,
+            out: Held::new(),
+            inbound: Held::new(),
+            random: (seed ^ seed >> 32) as u32 | 1,
+        }
+    }
+
+    /// A random number in 0..1.
+    fn random(&mut self) -> f32 {
+        let mut x = self.random;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.random = x;
+        (x >> 8) as f32 / (1 << 24) as f32
+    }
+
+    /// Hold a message going out (or coming in) until it's due: half the
+    /// round trip and some jitter from now, a round trip more if lost, and
+    /// never before the one ahead of it.
+    fn hold(&mut self, outgoing: bool, m: Message) {
+        let lag = self.lag;
+        let mut wait = lag.round_trip / 2 + lag.jitter.mul_f32(self.random());
+        if self.random() < lag.loss {
+            wait += lag.round_trip;
+        }
+        let held = if outgoing {
+            &mut self.out
+        } else {
+            &mut self.inbound
+        };
+        let due = Instant::now() + wait;
+        let due = held.back().map_or(due, |m| m.0.max(due));
+        held.push_back((due, m));
+    }
+}
+
+/// The messages in `held` that have waited long enough.
+fn due(held: &mut Held) -> Vec<Message> {
+    let now = Instant::now();
+    let n = held.iter().take_while(|m| m.0 <= now).count();
+    held.drain(..n).map(|m| m.1).collect()
 }
 
 enum Link {
@@ -106,7 +200,13 @@ impl Connection {
             back: Vec::new(),
             sent: Instant::now(),
             heard: Instant::now(),
+            lag: None,
         }
+    }
+
+    /// Hold back what goes either way by `lag` from now on (for testing).
+    pub fn set_lag(&mut self, lag: Lag) {
+        self.lag = Some(Box::new(Lagging::new(lag)));
     }
 
     /// The TCP connection it's over, to wait for something to come on
@@ -139,6 +239,13 @@ impl Connection {
 
     pub fn send(&mut self, kind: u8, body: &[u8]) {
         self.sent = Instant::now();
+        match &mut self.lag {
+            Some(lag) => lag.hold(true, (kind, body.to_vec())),
+            None => self.send_now(kind, body),
+        }
+    }
+
+    fn send_now(&mut self, kind: u8, body: &[u8]) {
         match &mut self.link {
             Link::Tcp { outbox, .. } => {
                 outbox.extend_from_slice(&(body.len() as u32 + 1).to_le_bytes());
@@ -173,6 +280,10 @@ impl Connection {
     pub fn flush(&mut self) -> Result<(), String> {
         if let Some(why) = &self.closed {
             return Err(why.clone());
+        }
+        let held = self.lag.as_mut().map(|lag| due(&mut lag.out));
+        for (kind, body) in held.unwrap_or_default() {
+            self.send_now(kind, &body);
         }
         let gone = match &mut self.link {
             Link::Tcp { stream, outbox, .. } => write_out(stream, outbox),
@@ -212,23 +323,38 @@ impl Connection {
                 Ok(out)
             };
         }
+        let mut arrived = Vec::new();
         let ended = match &mut self.link {
             Link::Tcp { stream, inbox, .. } => {
                 let ended = read_in(stream, inbox);
-                if !split(inbox, &mut out) {
+                if !split(inbox, &mut arrived) {
                     return self.close("bad message");
                 }
                 ended
             }
             Link::Memory { rx, .. } => loop {
                 match rx.try_recv() {
-                    Ok(m) => out.push(m),
+                    Ok(m) => arrived.push(m),
                     Err(TryRecvError::Empty) => break None,
                     Err(TryRecvError::Disconnected) => break Some("connection closed".into()),
                 }
             },
-            Link::Ws { socket, handed, .. } => read_ws(socket, handed, &mut out),
+            Link::Ws { socket, handed, .. } => read_ws(socket, handed, &mut arrived),
         };
+        match &mut self.lag {
+            // What arrived waits its turn (and what's held comes at once
+            // when the connection goes).
+            Some(lag) => {
+                for m in arrived {
+                    lag.hold(false, m);
+                }
+                match ended {
+                    Some(_) => out.extend(lag.inbound.drain(..).map(|m| m.1)),
+                    None => out.extend(due(&mut lag.inbound)),
+                }
+            }
+            None => out.append(&mut arrived),
+        }
         if !out.is_empty() {
             self.heard = Instant::now();
         }

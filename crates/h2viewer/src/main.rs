@@ -42,6 +42,7 @@ mod local;
 mod mapinfo;
 mod memory;
 mod menu;
+mod netprobe;
 mod objective;
 mod online;
 mod options;
@@ -1123,6 +1124,9 @@ struct App {
     start_weapon: Option<usize>,
     /// For testing (H2_AUTOPILOT=1): a bot plays player one.
     autopilot: Option<Bot>,
+    /// For testing (H2_NET_PROBE=1): player one goes through a routine on
+    /// a joined PC, and the game says how quickly it shows.
+    probe: Option<netprobe::NetProbe>,
     /// For testing (H2_LIVE_BOT): no window, so nothing is drawn or heard.
     headless: bool,
 }
@@ -1322,6 +1326,7 @@ impl App {
             // What would be shown goes.
             self.body_actions.clear();
             self.effects.update(dt);
+            self.watch_probe();
             return;
         }
         let notice = self.lan_notice();
@@ -1329,6 +1334,7 @@ impl App {
             l.notice = notice.clone().filter(|_| l.keyboard);
             l.update_camera(&self.game, &self.world, self.pending, dt);
         }
+        self.watch_probe();
         self.animate_bodies(dt);
         for l in &mut self.locals {
             l.animate_view_model(&self.scene, &self.game, dt);
@@ -1500,6 +1506,23 @@ impl App {
         l.camera.yaw = command.yaw;
         l.camera.pitch = command.pitch;
         Some((l.player, command))
+    }
+
+    /// For testing (H2_NET_PROBE=1): where player one is shown on a joined
+    /// PC this frame, and the view (their eyes, without a window).
+    fn watch_probe(&mut self) {
+        let seated = matches!(self.net, Net::Joined { seated: true, .. });
+        let (Some(probe), Some(l)) = (&mut self.probe, self.locals.first()) else {
+            return;
+        };
+        if !seated || self.mode != Mode::Playing || l.player >= self.game.players.len() {
+            return;
+        }
+        let view = match self.headless {
+            true => local::view_point(&self.game, l.player),
+            false => l.camera.position,
+        };
+        probe.watch(self.game.players[l.player].body.position, view);
     }
 
     /// Where each view hears from.
@@ -2773,6 +2796,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         start_weapon: env("H2_WEAPON").and_then(|v| v.parse().ok()),
         // H2_AUTOPILOT=1: a bot plays player one (for testing).
         autopilot: (env("H2_AUTOPILOT").is_some() || headless).then(|| Bot::new(4099)),
+        probe: netprobe::NetProbe::from_env(),
         headless,
     };
     app.level_changed();

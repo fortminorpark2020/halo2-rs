@@ -1727,6 +1727,74 @@ fn messages_put_back_come_again_before_the_end_goes() {
     assert!(b.receive().is_err());
 }
 
+/// Until the messages `count` says are all there have come out of both
+/// ends: what `a` and `b` received, and when.
+fn both_ways(a: &mut Connection, b: &mut Connection, count: usize) -> [Vec<(u8, Duration)>; 2] {
+    let start = Instant::now();
+    let mut got = [Vec::new(), Vec::new()];
+    while got[0].len() + got[1].len() < count {
+        for (k, end) in [&mut *a, &mut *b].into_iter().enumerate() {
+            end.flush().unwrap();
+            for (kind, _) in end.receive().unwrap() {
+                got[k].push((kind, start.elapsed()));
+            }
+        }
+        assert!(start.elapsed() < Duration::from_secs(3), "still waiting");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    got
+}
+
+/// How long a message takes each way, `a` lagged by `lag`: to `b`, and
+/// back.
+fn lagged_by(lag: Lag) -> [u128; 2] {
+    let (mut a, mut b) = Connection::pair();
+    a.set_lag(lag);
+    a.send(1, &[]);
+    b.send(2, &[]);
+    let [to_a, to_b] = both_ways(&mut a, &mut b, 2);
+    assert_eq!((to_a[0].0, to_b[0].0), (2, 1));
+    [to_b[0].1.as_millis(), to_a[0].1.as_millis()]
+}
+
+#[test]
+fn a_lagged_connection_holds_messages_back_each_way() {
+    let round_trip = Duration::from_millis(200);
+    // Half the round trip each way.
+    let lag = Lag {
+        round_trip,
+        ..Lag::default()
+    };
+    for ms in lagged_by(lag) {
+        assert!((100..180).contains(&ms), "{ms} ms");
+    }
+    // Lost on the way, it comes a round trip later.
+    let lost = Lag { loss: 1.0, ..lag };
+    for ms in lagged_by(lost) {
+        assert!((300..380).contains(&ms), "{ms} ms");
+    }
+}
+
+#[test]
+fn lagged_messages_jitter_in_order() {
+    let (mut a, mut b) = Connection::pair();
+    a.set_lag(Lag {
+        round_trip: Duration::from_millis(40),
+        jitter: Duration::from_millis(30),
+        loss: 0.1,
+    });
+    for k in 0..100 {
+        a.send(k, &[]);
+        b.send(k, &[]);
+    }
+    for got in both_ways(&mut a, &mut b, 200) {
+        let kinds: Vec<u8> = got.iter().map(|m| m.0).collect();
+        assert_eq!(kinds, (0..100).collect::<Vec<u8>>());
+        // Not all at once.
+        assert!(got[99].1 > got[0].1, "{got:?}");
+    }
+}
+
 // Under lag, as over the internet: every message 100-200 ms late.
 
 /// Timeouts for games under lag: ten heartbeats, against messages up to a

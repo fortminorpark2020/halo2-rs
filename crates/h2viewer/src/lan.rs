@@ -365,7 +365,16 @@ impl App {
                 (l.player, l.command(l.keyboard.then_some(&keyboard), pad))
             })
             .collect();
-        if let Some((p, command)) = self.autopilot_command() {
+        // The probe takes over player one from the autopilot.
+        if let (Some(probe), Some(l), Some(c)) = (
+            &mut self.probe,
+            self.locals.first_mut(),
+            commands.first_mut(),
+        ) {
+            probe.frame(dt, &mut l.camera);
+            (c.1.yaw, c.1.pitch) = (l.camera.yaw, l.camera.pitch);
+            probe.steer(&mut c.1, self.game.players[c.0].body.position);
+        } else if let Some((p, command)) = self.autopilot_command() {
             for c in commands.iter_mut().filter(|c| c.0 == p) {
                 c.1 = command;
             }

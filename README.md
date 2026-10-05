@@ -273,6 +273,15 @@ over. Each takes little CPU, so many can run on one PC (give each its own
 prints the memory it has and the most it has had (`memory: ...`), so a long
 session's log shows whether it keeps growing.
 
+To try a slow connection, `H2_NET_LAG=<ms>` adds that much to the round
+trip between a PC and the host it joins (half each way), `H2_NET_JITTER=<ms>`
+up to that much more at random, and `H2_NET_LOSS=<percent>` loses that share
+of messages (each comes a round trip later, holding up those behind it, as
+over TCP); only a PC that joins uses them. `H2_NET_PROBE=1` makes player
+one on a joined PC stand, run, jump, crouch and strafe while turning, over
+and over, and print how long each start took to show and where the view is
+every frame.
+
 ## Roadmap
 
 1. Map file reader (done)

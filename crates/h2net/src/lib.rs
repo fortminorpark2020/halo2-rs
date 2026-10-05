@@ -26,7 +26,7 @@ mod ws;
 use std::time::{Duration, Instant};
 
 pub use client::{Client, ClientEvent};
-pub use conn::Connection;
+pub use conn::{Connection, Lag};
 pub use discovery::{local_ip, Browser, LanGame};
 pub use host::{Host, HostEvent, Verified};
 pub use lobby::{Lobby, LobbyPlayer};

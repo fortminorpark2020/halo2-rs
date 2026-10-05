@@ -113,7 +113,8 @@ impl Client {
     }
 
     /// Join a host over `conn` (through the online service, say), as
-    /// `connect` does.
+    /// `connect` does. For testing, the H2_NET_LAG hooks (see `Lag`) make
+    /// the connection slower.
     pub fn over(
         mut conn: Connection,
         game: &Game,
@@ -121,6 +122,10 @@ impl Client {
         teams: &[u8],
         me: (&str, Look),
     ) -> Client {
+        if let Some(lag) = crate::Lag::from_env() {
+            println!("lan: lagging the connection to the host: {lag:?}");
+            conn.set_lag(lag);
+        }
         conn.send(kind::HELLO, &hello(game, map, teams, me).0);
         // Errors surface as Lost on the first poll.
         let _ = conn.flush();
