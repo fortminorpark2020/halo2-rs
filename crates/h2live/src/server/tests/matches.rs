@@ -1150,9 +1150,18 @@ fn a_member_who_leaves_a_custom_game_can_come_back() {
     a.gamers[1].custom = None;
     a.until(5.0, |a| a.hosted(0).is_some_and(|h| h.host.joined() == 0));
     assert_eq!(a.w.party(1).activity, Activity::Custom);
-    // And come back into it.
+    // It moves to another map without them.
+    a.send(0, ToServer::CustomMap("midship".into()));
+    let leader = a.id(0);
+    a.until(5.0, |a| {
+        a.gamers[0].custom == Some((leader, "midship".into()))
+    });
+    a.run(1.0);
+    assert_eq!(a.gamers[1].custom, None);
+    // And they come back into it.
     a.send(1, ToServer::Custom);
     a.until(5.0, |a| a.gamers[1].custom.is_some());
+    assert_eq!(a.gamers[1].custom, Some((leader, "midship".into())));
     a.until(5.0, |a| a.hosted(0).is_some_and(|h| h.host.joined() == 1));
     assert_eq!(a.w.server.custom_games(), 1);
 }

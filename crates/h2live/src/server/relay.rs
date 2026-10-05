@@ -114,6 +114,16 @@ impl Server {
         }
     }
 
+    /// `account` has a link for `id`, given out or joined.
+    pub(super) fn has_link(&self, id: u64, account: u64) -> bool {
+        let theirs = |link: u64, accounts: &[u64; 2]| link == id && accounts.contains(&account);
+        self.tokens.values().any(|t| theirs(t.id, &t.accounts))
+            || self
+                .links
+                .iter()
+                .any(|l| !l.over && theirs(l.id, &l.accounts))
+    }
+
     fn gamertag(&self, account: u64) -> String {
         self.accounts
             .get(&account)

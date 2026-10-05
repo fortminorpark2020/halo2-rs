@@ -973,7 +973,13 @@ impl Server {
             leader: me,
             map,
         };
-        self.tell_party(id, &open);
+        // Those in it hear: members who left it hear again if they come
+        // back.
+        for account in self.members_of(id) {
+            if account == me || self.has_link(id, account) {
+                self.tell(account, &open);
+            }
+        }
     }
 
     /// `me` is back in the party lobby: if they host its custom game, it's
