@@ -13,6 +13,7 @@ use h2sim::vehicle::{
     SUSPENSION_TRAVEL,
 };
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// A posable vehicle model: the vehicle itself, or its turret.
 pub struct VehiclePart {
@@ -764,9 +765,17 @@ impl Loader {
     }
 }
 
-/// Seat animation names live as long as the program (there are a few).
+/// Seat animation names live as long as the program (there are a few):
+/// each one once, however many maps load.
 fn leak(s: &str) -> &'static str {
-    Box::leak(s.to_string().into_boxed_str())
+    static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&name) = names.iter().find(|&&n| n == s) {
+        return name;
+    }
+    let name = Box::leak(s.to_string().into_boxed_str());
+    names.push(name);
+    name
 }
 
 /// The map's vehicles.
@@ -780,4 +789,16 @@ pub struct Vehicles {
     /// The spawn of each squad starting location's vehicle, by squad and
     /// location.
     pub squad_vehicles: HashMap<(u16, u16), usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seat_names_are_kept_once() {
+        let first = leak("warthog_d");
+        assert!(std::ptr::eq(first, leak(&String::from("warthog_d"))));
+        assert_eq!(leak("ghost_d"), "ghost_d");
+    }
 }
