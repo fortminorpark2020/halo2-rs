@@ -54,6 +54,7 @@ const NO_RANKED_GUESTS: &str = "Guests are not allowed in ranked matchmade games
 const NO_GUESTS: &str = "Guests are not allowed in this matchmaking playlist";
 const NO_MAPS: &str = "Your party has no map from this playlist in common";
 const NO_PLAYLIST: &str = "No matchmaking playlist fits your party";
+const MISSING_CONTENT: &str = "You or someone in your party is missing some content";
 
 /// A party asking for a match.
 #[derive(Debug, Clone)]
@@ -460,7 +461,7 @@ impl Matchmaker {
     pub fn search(&mut self, ticket: Ticket, now: f64) -> Result<u8, &'static str> {
         self.cancel(ticket.party);
         let i = if ticket.playlist == QUICKMATCH {
-            self.quickmatch(&ticket).ok_or(NO_PLAYLIST)?
+            self.quickmatch(&ticket)?
         } else {
             let i = self.playlists.iter().position(|p| p.id == ticket.playlist);
             let i = i.ok_or(INVALID)?;
@@ -512,17 +513,29 @@ impl Matchmaker {
     /// The playlist Quickmatch picks for `ticket`: of those the party can
     /// search and has every map of (the only ones the game lets it choose),
     /// the one with the most people searching, at random among the busiest.
-    fn quickmatch(&mut self, ticket: &Ticket) -> Option<usize> {
-        let every_map = |p: &Playlist| shared_maps(&ticket.members, p).len() == p.maps.len();
-        let open: Vec<usize> = (0..self.playlists.len())
-            .filter(|&i| self.refusal(ticket, i).is_none() && every_map(&self.playlists[i]))
+    /// Or why there's none: the party's missing maps, if it fits some.
+    fn quickmatch(&mut self, ticket: &Ticket) -> Result<usize, &'static str> {
+        let fits: Vec<usize> = (0..self.playlists.len())
+            .filter(|&i| matches!(self.refusal(ticket, i), None | Some(NO_MAPS)))
             .collect();
-        let busiest = open.iter().map(|&i| self.searching_in(i)).max()?;
+        let every_map = |p: &Playlist| shared_maps(&ticket.members, p).len() == p.maps.len();
+        let open: Vec<usize> = fits
+            .iter()
+            .copied()
+            .filter(|&i| every_map(&self.playlists[i]))
+            .collect();
+        let Some(busiest) = open.iter().map(|&i| self.searching_in(i)).max() else {
+            return Err(if fits.is_empty() {
+                NO_PLAYLIST
+            } else {
+                MISSING_CONTENT
+            });
+        };
         let open: Vec<usize> = open
             .into_iter()
             .filter(|&i| self.searching_in(i) == busiest)
             .collect();
-        Some(open[self.rng.below(open.len())])
+        Ok(open[self.rng.below(open.len())])
     }
 
     /// Stop `party` searching. Returns whether it was.

@@ -50,8 +50,9 @@ pub const MAX_NAME: usize = 64;
 const MAX_TEXT: usize = 1024;
 /// Longest stat card, in bytes.
 pub const MAX_CARD: usize = 8 << 10;
-/// Most maps a PC can list, and a playlist can play.
+/// Most maps a PC can list.
 pub const MAX_MAPS: usize = 1024;
+/// Most maps a playlist can play.
 pub const MAX_PLAYLIST_MAPS: usize = 64;
 /// Most players in a match or its results.
 const MAX_PLAYERS: usize = 16;
@@ -288,7 +289,8 @@ pub struct PartyInfo {
     pub leader: u64,
     pub privacy: Privacy,
     pub activity: Activity,
-    /// The playlist it searches or plays, while it does.
+    /// The playlist it searches or plays, while it does, or the one it
+    /// played last, back in its lobby.
     pub playlist: u8,
     /// Members, the longest-standing first.
     pub members: Vec<PartyMember>,

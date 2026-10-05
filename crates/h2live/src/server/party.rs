@@ -293,8 +293,8 @@ impl Server {
         let playlist = self.playlists.iter().find(|p| p.id == party.playlist);
         let members = party.members.iter().filter_map(|&a| {
             let account = self.accounts.get(&a)?;
-            // Their level in the ranked playlist the party searches or
-            // plays, if it does; otherwise their best.
+            // Their level in the ranked playlist the party searches, plays
+            // or just played, if it does; otherwise their best.
             let level = match playlist.filter(|p| p.ranked) {
                 Some(p) => account.stats(&p.key).map_or(1, |s| s.rank.level),
                 None => account.best_level(),

@@ -2105,7 +2105,9 @@ fn live_rows(ctx: &Context) -> Vec<Row> {
 }
 
 /// The party beside the online lobby: the leader's crown, then each
-/// member's emblem, gamertag (with their splitscreen guests) and level.
+/// member's emblem, gamertag (with their splitscreen guests) and level: in
+/// the ranked playlist the party searches, plays or just played, as Halo 2
+/// showed new levels back in the lobby, otherwise their best.
 fn draw_party(hb: &mut HudBuilder, font: usize, white: usize, f: &Frame, o: &OnlineView) {
     let Some(party) = o.party() else {
         return;
@@ -2146,7 +2148,7 @@ fn draw_party(hb: &mut HudBuilder, font: usize, white: usize, f: &Frame, o: &Onl
         let fg = if m.account == o.me() { BRIGHT } else { TEXT };
         hb.text_left(font, f.at(x + 31.0, y), 9.0 * s, &name, fg);
         let icon = f.rect([x + PANEL_W - 13.0, y - 2.0, x + PANEL_W, y + 11.0]);
-        rank::draw(hb, icon, m.best);
+        rank::draw(hb, icon, m.level);
         y += 16.0;
     }
 }
@@ -3300,6 +3302,37 @@ mod tests {
         assert_eq!(draw(Screen::Players), 4);
         // Playlists: our level in the ranked one.
         assert_eq!(draw(Screen::Playlists), 1);
+    }
+
+    #[test]
+    fn the_party_shows_levels_in_the_playlist_it_played() {
+        // The level icon the party shows for us, by its place in the rank
+        // atlases, back from Double Team: our best level, and in it.
+        let maps = maps();
+        let drawn = |best: u8, level: u8| {
+            let mut view = signed_in(1, &[(1, "JOHN")]);
+            let party = view.party.as_mut().unwrap();
+            party.playlist = 2;
+            (party.members[0].best, party.members[0].level) = (best, level);
+            let o = online(Some(&view));
+            let c = Context {
+                online: Some(&o),
+                ..ctx(&maps, &[])
+            };
+            let mut m = Menu::new(Settings::default(), Profile::default());
+            m.show(Screen::Live);
+            let mut hb = HudBuilder::new(1280.0, 720.0);
+            m.draw(&mut hb, 0, 1, 1280.0, 720.0, &c);
+            let ranks = |t| t == crate::gpu::RANK_TEXTURES || t == crate::gpu::RANK_TEXTURES + 1;
+            let batches = hb.finish();
+            let icons = batches.into_iter().filter(|b| ranks(b.texture));
+            icons
+                .flat_map(|b| b.vertices.into_iter().map(|v| v.uv))
+                .collect::<Vec<_>>()
+        };
+        // Level 12 in Double Team, though our best is 30.
+        assert_eq!(drawn(30, 12), drawn(12, 12));
+        assert_ne!(drawn(30, 12), drawn(30, 30));
     }
 
     /// The quads drawn with `texture`, as rectangles (pixels).

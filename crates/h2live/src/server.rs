@@ -143,7 +143,8 @@ struct Party {
     invited: Vec<(u64, u64)>,
     /// Members the leader removed, who need an invite to come back.
     booted: Vec<u64>,
-    /// What it's doing, and the playlist it searches or plays.
+    /// What it's doing, and the playlist it searches or plays (or last
+    /// played, back in its lobby).
     activity: Activity,
     playlist: u8,
     /// The map of its last match, which its next won't be on.

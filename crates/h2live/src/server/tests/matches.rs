@@ -162,24 +162,29 @@ struct Arena {
     seen: Vec<usize>,
 }
 
-/// Give PCs numbered from 1 accounts at `levels` in the playlist `key`, as
-/// if they had played there.
-fn at_levels(w: &mut World, key: &str, levels: &[u8]) {
-    let accounts: Vec<Account> = (1..)
-        .zip(levels)
-        .map(|(n, &level)| {
+/// Give PCs numbered from 1 accounts at `levels` in each playlist (by
+/// key), as if they had played there.
+fn at_levels(w: &mut World, levels: &[(&str, &[u8])]) {
+    let pcs = levels.iter().map(|(_, l)| l.len()).max().unwrap_or(0);
+    let accounts: Vec<Account> = (1..=pcs as u8)
+        .map(|n| {
             let mut a = Account::new(key_of(n), 1_600_000_000);
             a.gamertag = GAMERTAGS[usize::from(n) - 1].into();
             a.look = profile("").look;
-            a.stats.push(Stats {
-                playlist: key.into(),
-                rank: Rank {
-                    xp: min_xp(level),
-                    level,
-                },
-                games: 10,
-                wins: 5,
-            });
+            for &(key, levels) in levels {
+                let Some(&level) = levels.get(usize::from(n) - 1) else {
+                    continue;
+                };
+                a.stats.push(Stats {
+                    playlist: key.into(),
+                    rank: Rank {
+                        xp: min_xp(level),
+                        level,
+                    },
+                    games: 10,
+                    wins: 5,
+                });
+            }
             a
         })
         .collect();
@@ -194,10 +199,15 @@ impl Arena {
     /// A server with the test playlists and `pcs` PCs signed in, each in a
     /// party of its own; with levels in the playlist `key`, if given.
     fn new(name: &str, pcs: usize, levels: Option<(&str, &[u8])>) -> Arena {
+        Arena::with_levels(name, pcs, levels.as_slice())
+    }
+
+    /// The same, with levels in each playlist given (by key).
+    fn with_levels(name: &str, pcs: usize, levels: &[(&str, &[u8])]) -> Arena {
         let mut w = World::new(name);
         std::fs::write(w.data.0.join("playlists.txt"), PLAYLISTS).unwrap();
-        if let Some((key, levels)) = levels {
-            at_levels(&mut w, key, levels);
+        if !levels.is_empty() {
+            at_levels(&mut w, levels);
         }
         w.restart();
         let points: Vec<glam::Vec3> = (-4..=4)
@@ -747,7 +757,9 @@ fn assert_double_team_counted(a: &Arena) {
 
 #[test]
 fn four_players_play_double_team_through_the_relay() {
-    let mut a = Arena::new("double-team", 4, Some(("double_team", &LEVELS)));
+    // Alpha's best level is in Rumble Pit.
+    let levels: [(&str, &[u8]); 2] = [("double_team", &LEVELS), ("ffa", &[20])];
+    let mut a = Arena::with_levels("double-team", 4, &levels);
     a.search(DOUBLE_TEAM);
     let m = a.formed();
     assert_eq!((m.playlist, m.ranked, m.bots), (DOUBLE_TEAM, true, 0));
@@ -833,15 +845,26 @@ fn four_players_play_double_team_through_the_relay() {
         (0..4).all(|i| a.w.party(i).activity == Activity::Lobby)
     });
     assert_eq!(a.w.server.matches_in_progress(), 0);
+    let best = |i: usize| if i == 0 { 20 } else { expected[i].1 };
     for (i, &(_, level)) in expected.iter().enumerate() {
-        assert_eq!(a.w.welcome(i).levels, [(DOUBLE_TEAM, level, 11)]);
+        let welcome = &a.w.welcome(i).levels;
+        assert!(welcome.contains(&(DOUBLE_TEAM, level, 11)), "{welcome:?}");
         let playlists = &a.w.pcs[i].view.playlists;
         let double_team = playlists.iter().find(|p| p.id == DOUBLE_TEAM).unwrap();
         assert_eq!(double_team.level, level);
-        assert_eq!(a.w.party(i).members[0].best, level);
+        // The party shows their level in the playlist just played, which
+        // isn't Alpha's best.
+        let party = a.w.party(i);
+        assert_eq!(party.playlist, DOUBLE_TEAM);
+        assert_eq!(
+            (party.members[0].level, party.members[0].best),
+            (level, best(i))
+        );
     }
-    // The online list shows everyone's new level too.
+    // The online list shows everyone's new best level.
     a.run(1.5);
+    let mut bests: Vec<(u64, u8)> = (0..4).map(|i| (a.id(i), best(i))).collect();
+    bests.sort_unstable();
     for i in 0..4 {
         let mut online: Vec<(u64, u8)> = a.w.pcs[i]
             .view
@@ -850,7 +873,7 @@ fn four_players_play_double_team_through_the_relay() {
             .map(|p| (p.account, p.best))
             .collect();
         online.sort_unstable();
-        assert_eq!(online, everyone);
+        assert_eq!(online, bests);
     }
     // The match is logged, and the levels are on disk.
     let log = a.games_log();

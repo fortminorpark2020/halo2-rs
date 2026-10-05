@@ -8,8 +8,8 @@
 //! end (RESULT). If at least half of the joined PCs that answer within 30
 //! seconds of the end (the host's result, or half of theirs) saw it as the
 //! host did, levels change as `levels` says, and everyone hears how, theirs
-//! and everyone else's (MATCH_OVER). The host's word alone isn't enough: unless every joined
-//! PC left the game, at least one must have answered.
+//! and everyone else's (MATCH_OVER). The host's word alone isn't enough:
+//! unless every joined PC left the game, at least one must have answered.
 //!
 //! A host that leaves ends the match: it doesn't count for anyone, except
 //! as a loss for the host if it quit or its link to the server died. Joined
@@ -573,7 +573,8 @@ impl Server {
     }
 
     /// `account`'s party goes back to its lobby, if it was playing a match
-    /// and none of its members is any more.
+    /// and none of its members is any more. It keeps the match's playlist,
+    /// so its members show their new level in it.
     fn free_party(&mut self, account: u64) {
         let Some(k) = self.pc_of(account) else {
             return;
@@ -584,7 +585,6 @@ impl Server {
         if playing && !members.iter().any(|&a| self.busy(a)) {
             if let Some(party) = self.parties.get_mut(&id) {
                 party.activity = Activity::Lobby;
-                party.playlist = QUICKMATCH;
             }
             self.party_changed(id);
         }

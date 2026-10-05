@@ -472,11 +472,11 @@ fn no_one_is_matched_on_a_map_they_dont_have() {
     let mut no_warlock = solo(10, QUICKMATCH, 5);
     no_warlock.members[0].maps.retain(|(m, _)| m != "warlock");
     assert_eq!(mm.search(no_warlock, 0.0), Ok(TEAM_SLAYER));
-    // With Lockout alone, no playlist has every map, though Head to Head
-    // can still be searched by name.
+    // With Lockout alone, no playlist has every map, and Quickmatch says
+    // so, though Head to Head can still be searched by name.
     let mut only_lockout = solo(20, QUICKMATCH, 5);
     only_lockout.members[0].maps = vec![("lockout".into(), 7)];
-    assert_eq!(mm.search(only_lockout.clone(), 0.0), Err(NO_PLAYLIST));
+    assert_eq!(mm.search(only_lockout.clone(), 0.0), Err(MISSING_CONTENT));
     only_lockout.playlist = HEAD_TO_HEAD;
     assert_eq!(mm.search(only_lockout, 0.0), Ok(HEAD_TO_HEAD));
 }
