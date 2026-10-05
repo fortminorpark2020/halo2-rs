@@ -406,6 +406,16 @@ impl App {
             }
             return;
         };
+        if !over.players.is_empty() {
+            // The carnage report's levels, as the service left them.
+            let levels: Vec<String> = roster(&m.info)
+                .filter_map(|(_, name, _)| {
+                    let level = level_after(&m.info, Some(&over), &name)?;
+                    Some(format!("{name} {level}"))
+                })
+                .collect();
+            println!("live: levels now: {}", levels.join(", "));
+        }
         let ended = m.ended.is_some();
         m.over = Some(over);
         if !ended {
