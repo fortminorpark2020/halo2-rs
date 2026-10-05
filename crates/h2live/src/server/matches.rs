@@ -14,16 +14,19 @@
 //! A host that leaves ends the match: it doesn't count for anyone, except
 //! as a loss for the host if it quit or its link to the server died. Joined
 //! PCs saying they lost the host end it too, if at least half of them say
-//! so and the relay saw it go. A player who quits a game in progress (or
-//! says it lost a host that was there) loses it as `levels` says: last in
-//! free-for-all, with their team otherwise. Leaving once the game is over
-//! (after one's own result, or the host's) isn't quitting. A game that
-//! runs five minutes past its time limit is given up on.
+//! so and the relay saw it go (a loss for the host too if its link to the
+//! server had gone quiet as well: its PC or its network died). A player
+//! who quits a game in progress (or says it lost a host that was there)
+//! loses it as `levels` says: last in free-for-all, with their team
+//! otherwise. Leaving once the game is over (after one's own result, or
+//! the host's) isn't quitting. A game that runs five minutes past its
+//! time limit is given up on.
 //!
 //! Parties play custom games too: the leader hosts on a map everyone has,
 //! and every member is linked to them, those who join later as well. They
 //! change no levels.
 
+use super::relay::HOST_QUIET;
 use super::{log, Server};
 use crate::card;
 use crate::levels::{self, Finish, Placed, Rank, MAX_LEVEL};
@@ -89,7 +92,7 @@ pub(super) struct Match {
     /// Joining PCs whose relay link to the host broke on the host's side.
     host_dropped: Vec<u64>,
     /// The host quit, through its menu or because its link to the server
-    /// died.
+    /// died (or went quiet as the joined PCs lost it).
     host_quit: bool,
     /// Why it can't count for anyone, if it can't.
     void: Option<&'static str>,
@@ -554,6 +557,12 @@ impl Server {
         self.free_party(account);
     }
 
+    /// `account`'s PC hasn't been heard from for a while, or is gone.
+    fn quiet(&self, account: u64, now: f64) -> bool {
+        self.pc_of(account)
+            .is_none_or(|k| now - self.pcs[k].heard >= HOST_QUIET)
+    }
+
     fn card_of(&self, account: u64) -> String {
         self.accounts
             .get(&account)
@@ -640,7 +649,13 @@ impl Server {
     /// Match `k` is over: work out what it was worth to each player, keep
     /// it, and tell them.
     fn end(&mut self, k: usize, now: f64) {
-        let m = self.matches.remove(k);
+        let mut m = self.matches.remove(k);
+        // A host lost to the joined PCs and quiet on its link to the server
+        // too has gone (its PC or its network died): as if that link had
+        // died, though the server has yet to give up on it.
+        if m.lost_the_host() && self.quiet(m.info.host, now) {
+            m.host_quit = true;
+        }
         let (id, host, teams) = (m.info.id, m.info.host, m.info.game_type.teams());
         let key = self
             .playlists

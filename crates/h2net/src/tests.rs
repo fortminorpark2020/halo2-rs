@@ -732,6 +732,121 @@ fn online_pcs_on_any_team_choose_their_own() {
     assert_eq!(hg.players[mine.unwrap()].team, 1);
 }
 
+/// Poll until the host takes `client` into its game: its players.
+fn welcomed(
+    host: &mut Host,
+    hg: &mut h2sim::Game,
+    client: &mut Client,
+    cg: &mut h2sim::Game,
+) -> Vec<usize> {
+    let mut mine = Vec::new();
+    pump(host, hg, client, cg, |_, ce, _| {
+        if let Some(ClientEvent::Welcomed { players, .. }) = ce.first() {
+            mine = players.clone();
+        }
+        !mine.is_empty()
+    });
+    mine
+}
+
+/// Poll the host until a PC leaves: the players it had.
+fn left(host: &mut Host, hg: &mut h2sim::Game) -> Vec<usize> {
+    let start = Instant::now();
+    loop {
+        if let Some(HostEvent::Left { players, .. }) = host.poll(hg, 16).first() {
+            return players.clone();
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "still there");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn a_pc_that_comes_back_plays_on_where_it_left_off() {
+    let mut hg = game();
+    hg.add_player();
+    let any = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let mut host = Host::bind("testmap", 30, any, false).unwrap();
+    let join = |host: &Host, cg: &h2sim::Game, name| {
+        let me = (name, Look::default());
+        Client::connect(address(host), cg, "testmap", &[ANY_TEAM], me).unwrap()
+    };
+    let mut cg = game();
+    let mut client = join(&host, &cg, "NOBLE SIX");
+    let mine = welcomed(&mut host, &mut hg, &mut client, &mut cg);
+    hg.players[mine[0]].kills = 3;
+    hg.players[mine[0]].score = 3;
+    // Leaving, they leave their Spartan in the game (for a bot to play).
+    drop(client);
+    assert_eq!(left(&mut host, &mut hg), mine);
+    assert_eq!(hg.players.len(), 2);
+    // Back from the same PC as the same player, they play it again, with
+    // their score so far: there's still one of them.
+    let mut cg = game();
+    let mut client = join(&host, &cg, "NOBLE SIX");
+    assert_eq!(welcomed(&mut host, &mut hg, &mut client, &mut cg), mine);
+    assert!(host.is_remote(mine[0]));
+    assert_eq!(hg.players.len(), 2);
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, _, cg| {
+        cg.players.len() == 2
+    });
+    assert_eq!(cg.players[mine[0]].name, "NOBLE SIX");
+    assert_eq!(
+        (cg.players[mine[0]].kills, cg.players[mine[0]].score),
+        (3, 3)
+    );
+    // Someone else from that PC is someone new.
+    let mut og = game();
+    let mut other = join(&host, &og, "KAT");
+    assert_eq!(welcomed(&mut host, &mut hg, &mut other, &mut og), [2]);
+}
+
+#[test]
+fn an_online_pc_that_comes_back_plays_on_where_it_left_off() {
+    // Two play at that PC, known by its account.
+    let mut hg = game();
+    hg.add_player();
+    let mut cg = game();
+    let who = verified("SARGE", ANY_TEAM);
+    let teams = [ANY_TEAM, ANY_TEAM];
+    let (mut host, mut client) = online("testmap", &cg, "testmap", &teams, me(), who.clone());
+    let mine = welcomed(&mut host, &mut hg, &mut client, &mut cg);
+    assert_eq!(mine, [1, 2]);
+    drop(client);
+    assert_eq!(left(&mut host, &mut hg), mine);
+    // Back with one player (and a new gamertag): the first is theirs again,
+    // as they go by now.
+    let come_back = |host: &mut Host, cg: &h2sim::Game, gamertag: &str, teams: &[u8]| {
+        let (a, b) = Connection::pair();
+        let who = Verified {
+            gamertag: gamertag.into(),
+            ..who.clone()
+        };
+        host.add_connection(a, who);
+        Client::over(b, cg, "testmap", teams, me())
+    };
+    let mut client = come_back(&mut host, &cg, "SARGE 2", &[ANY_TEAM]);
+    assert_eq!(welcomed(&mut host, &mut hg, &mut client, &mut cg), [1]);
+    assert_eq!(hg.players.len(), 3);
+    assert_eq!(hg.players[1].name, "SARGE 2");
+    // Back with both, after leaving again: both are.
+    drop(client);
+    assert_eq!(left(&mut host, &mut hg), [1]);
+    let mut client = come_back(&mut host, &cg, "SARGE 2", &teams);
+    assert_eq!(welcomed(&mut host, &mut hg, &mut client, &mut cg), mine);
+    assert_eq!(hg.players.len(), 3);
+    drop(client);
+    assert_eq!(left(&mut host, &mut hg), mine);
+    // In the host's next game they're new.
+    host.start("testmap");
+    let mut hg = game();
+    for _ in 0..3 {
+        hg.add_player();
+    }
+    let mut client = come_back(&mut host, &cg, "SARGE 2", &[ANY_TEAM]);
+    assert_eq!(welcomed(&mut host, &mut hg, &mut client, &mut cg), [3]);
+}
+
 // Heartbeats, with a short timeout instead of the real ten seconds.
 
 const SHORT: Duration = Duration::from_millis(300);

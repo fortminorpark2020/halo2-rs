@@ -22,7 +22,7 @@ const MAX_BEHIND: usize = 2 << 20;
 pub(super) const LEGS_WAITING: usize = 32;
 /// A host's end that sent nothing for this long (seconds) has gone: its
 /// game sends something every second while it runs.
-const HOST_QUIET: f64 = 5.0;
+pub(super) const HOST_QUIET: f64 = 5.0;
 
 /// A relay leg, waiting for its other end.
 pub(super) struct Leg {

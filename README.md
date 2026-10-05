@@ -185,7 +185,9 @@ the one you pick. Joined PCs wait in the host's lobby, seeing its choices and
 everyone in it (T or X picks your team there), and follow the host into each game it starts (loading the map
 if needed; the game holds its start for them) and back to the lobby after it.
 The host runs the game and its bots (fewer bots when more people join); if the
-host leaves, the joined PCs go back to System Link.
+host leaves, the joined PCs go back to System Link. A PC that leaves a game in
+progress leaves its Spartan to a bot, and takes it back, score and all, if it
+joins again (so does a member back in their party's custom game online).
 
 Sound: weapons, reloads, grenades, footsteps, landings, shield recharge, the
 low shield alarm and rockets in flight play from the game's own sound files, placed left or right and

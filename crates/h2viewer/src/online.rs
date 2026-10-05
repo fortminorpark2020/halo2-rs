@@ -11,7 +11,7 @@
 //! theirs, all taking our invites.
 
 use crate::menu::{Action, MapChoice, Screen, Sound};
-use crate::App;
+use crate::{App, Mode};
 use blam_cache::{text, GroupTag, MapSet};
 use h2live::client::{self, LiveClient, LiveEvent, RelayLeg, View};
 use h2live::server::{Route, Server};
@@ -966,8 +966,14 @@ impl App {
                 }
             }
             Some(Followed::CustomOver) if self.online.in_custom() => {
+                // Over mid-game, the host left it.
+                let notice = if self.mode == Mode::Playing {
+                    "THE HOST LEFT. THE CUSTOM GAME IS OVER."
+                } else {
+                    "THE CUSTOM GAME IS OVER"
+                };
                 self.custom_over();
-                self.menu.notice = Some("THE CUSTOM GAME IS OVER".into());
+                self.menu.notice = Some(notice.into());
                 self.sound.play_ui(&self.scene, Sound::Back);
             }
             _ => {}

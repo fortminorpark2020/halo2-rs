@@ -28,7 +28,8 @@ const IN_FLIGHT: u32 = 20;
 pub enum HostEvent {
     /// A PC came into the lobby.
     Arrived { computer: String },
-    /// A PC joined the game with these players.
+    /// A PC joined the game with these players: those it left the game
+    /// playing, if it comes back to it.
     Joined {
         computer: String,
         players: Vec<usize>,
@@ -121,6 +122,15 @@ impl Remote {
             behind: None,
         }
     }
+
+    /// Who plays there, to know them again if they leave the game and come
+    /// back: their account online, their gamertag and PC on a LAN.
+    fn who(&self) -> String {
+        match &self.verified {
+            Some(v) => format!("account {}", v.account),
+            None => format!("{} at {}", self.name, self.computer),
+        }
+    }
 }
 
 pub struct Host {
@@ -149,6 +159,9 @@ pub struct Host {
     last: Vec<u8>,
     /// Bytes of snapshots sent so far.
     sent: u64,
+    /// The Spartans PCs left playing on when they left the game, by who
+    /// played them (see `Remote::who`): theirs again if they come back.
+    left: Vec<(String, Vec<usize>)>,
 }
 
 /// A snapshot: the numbered game, then what happened.
@@ -315,6 +328,7 @@ impl Host {
             seq: 0,
             last: Vec::new(),
             sent: 0,
+            left: Vec::new(),
         }
     }
 
@@ -416,6 +430,7 @@ impl Host {
         }
         self.changed = false;
         self.held.clear();
+        self.left.clear();
     }
 
     /// Whether a joined PC controls this player.
@@ -446,6 +461,13 @@ impl Host {
                 Err(reason) => {
                     let r = self.remotes.remove(k);
                     println!("lan: {} ({}) left: {reason}", r.computer, r.address);
+                    if r.in_game && !r.players.is_empty() {
+                        let (who, players) = (r.who(), r.players.iter().map(|p| p.0));
+                        match self.left.iter_mut().find(|l| l.0 == who) {
+                            Some(l) => l.1.extend(players),
+                            None => self.left.push((who, players.collect())),
+                        }
+                    }
                     if r.welcomed {
                         events.push(HostEvent::Left {
                             computer: r.computer,
@@ -556,14 +578,34 @@ impl Host {
                         }
                         continue;
                     }
-                    if game.players.len() + teams.len() > max_players {
+                    // Coming back to the game, they play on with the
+                    // Spartans they left (and their scores so far).
+                    let who = r.who();
+                    let left = self.left.iter().position(|l| l.0 == who);
+                    let back = left.map_or(0, |i| self.left[i].1.len());
+                    if game.players.len() + teams.len().saturating_sub(back) > max_players {
                         let mut w = Writer::default();
                         w.str("THE GAME IS FULL");
                         r.conn.send(kind::REFUSED, &w.0);
                         let _ = r.conn.flush();
                         return Err("game full".into());
                     }
-                    let players: Vec<usize> = teams.iter().map(|&t| add_player(game, t)).collect();
+                    let mut theirs = left.map_or(Vec::new(), |i| self.left.remove(i).1);
+                    theirs.sort_unstable();
+                    let players: Vec<usize> = teams
+                        .iter()
+                        .map(|&t| {
+                            if theirs.is_empty() {
+                                add_player(game, t)
+                            } else {
+                                theirs.remove(0)
+                            }
+                        })
+                        .collect();
+                    // Back with fewer players, the rest stay theirs.
+                    if !theirs.is_empty() {
+                        self.left.push((who, theirs));
+                    }
                     for (k, &p) in players.iter().enumerate() {
                         game.set_name(p, &guest_name(&name, k));
                         game.set_look(p, look.guest(k));

@@ -941,6 +941,39 @@ fn a_host_whose_link_to_the_server_dies_loses_too() {
 }
 
 #[test]
+fn a_host_whose_pc_dies_loses_too() {
+    let mut a = Arena::new("host-dies", 4, Some(("double_team", &LEVELS)));
+    a.search(DOUBLE_TEAM);
+    let m = a.formed();
+    a.playing(&m, 4);
+    // Its PC stops: the server hears nothing more from it, and soon its
+    // game drops off the relay too.
+    let host = a.pc(m.host);
+    a.gamers[host].paused = true;
+    a.w.frozen.push(host);
+    a.run(6.0);
+    a.gamers[host].hosted = None;
+    a.gamers[host].reported = true;
+    // The others lose it, well before the server would give up on it.
+    let joiners: Vec<usize> = (0..4).filter(|&i| i != host).collect();
+    a.until(5.0, |a| {
+        joiners.iter().all(|&i| !a.gamers[i].over.is_empty())
+    });
+    for &i in &joiners {
+        let over = a.over(i, m.id);
+        assert_eq!(over.reason, "THE HOST LEFT. THE GAME DIDN'T COUNT.");
+        assert_eq!(a.rank(i, "double_team"), after(LEVELS[i], 0));
+    }
+    // It loses, as if it had quit.
+    let rank = after(LEVELS[host], last_place_loss(&m, m.host));
+    assert_eq!(a.rank(host, "double_team"), rank);
+    let (counted, players) = a.logged(m.id);
+    assert_eq!(counted, 2);
+    let logged = players.iter().find(|p| p.account == m.host).unwrap();
+    assert_eq!((logged.place, logged.left, logged.new), (1, true, rank));
+}
+
+#[test]
 fn a_player_who_quits_loses_and_comes_last() {
     // Rumble Pit, all at level 10.
     let mut a = Arena::new("joiner-quits", 3, Some(("ffa", &[10, 10, 10])));
@@ -1164,6 +1197,40 @@ fn a_member_who_leaves_a_custom_game_can_come_back() {
     assert_eq!(a.gamers[1].custom, Some((leader, "midship".into())));
     a.until(5.0, |a| a.hosted(0).is_some_and(|h| h.host.joined() == 1));
     assert_eq!(a.w.server.custom_games(), 1);
+}
+
+#[test]
+fn a_member_back_in_a_custom_games_game_plays_on_as_they_left_it() {
+    let mut a = Arena::new("custom_back", 2, None);
+    let party = a.w.party(0).id;
+    a.send(1, ToServer::JoinParty(party));
+    a.until(5.0, |a| a.w.members(0).len() == 2);
+    a.send(0, ToServer::Custom);
+    a.until(5.0, |a| a.hosted(0).is_some_and(|h| h.host.joined() == 1));
+    // A game starts (and stands still, so it doesn't end meanwhile).
+    a.gamers[0].paused = true;
+    a.gamers[0].hosted.as_mut().unwrap().start();
+    let in_game = |a: &Arena| {
+        a.gamers[1]
+            .joined
+            .as_ref()
+            .is_some_and(|j| j.client.in_game)
+    };
+    a.until(5.0, in_game);
+    let theirs = a.gamers[1].joined.as_ref().unwrap().client.players.clone();
+    assert_eq!(theirs, [1]);
+    a.gamers[0].hosted.as_mut().unwrap().game.players[1].kills = 2;
+    // They leave mid-game: their Spartan stays.
+    a.gamers[1].joined = None;
+    a.gamers[1].custom = None;
+    a.until(5.0, |a| a.hosted(0).is_some_and(|h| h.host.joined() == 0));
+    // Back, they play it again, kills and all: one of them, not two.
+    a.send(1, ToServer::Custom);
+    a.until(5.0, in_game);
+    assert_eq!(a.gamers[1].joined.as_ref().unwrap().client.players, theirs);
+    let game = &a.hosted(0).unwrap().game;
+    assert_eq!(game.players.len(), 2);
+    assert_eq!((game.name(1), game.players[1].kills), ("BRAVO", 2));
 }
 
 #[test]

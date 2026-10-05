@@ -266,6 +266,9 @@ impl App {
             match e {
                 HostEvent::Arrived { .. } => {}
                 HostEvent::Joined { players, .. } => {
+                    // Back in the game, they take over from the bots that
+                    // played on for them.
+                    self.bots.retain(|(i, _)| !players.contains(i));
                     for p in players {
                         self.announce(&format!("{} JOINED", self.game.name(p)));
                     }
