@@ -639,6 +639,8 @@ pub struct Spartan {
     board_held: f32,
     /// Dropped from a dropship: the next landing doesn't hurt.
     soft_landing: bool,
+    /// Stands still at the next tick (see `Game::hold_still`).
+    still: bool,
     last: Command,
 }
 
@@ -670,12 +672,16 @@ impl Spartan {
         (f, r, r.cross(f))
     }
 
-    /// Look where `cmd` aims, and walk, jump and crouch as it says (riders
-    /// go where their vehicle takes them). A joined PC moves its own
-    /// players this way too, so they answer their controls at once.
-    pub fn move_with(&mut self, world: &World, cmd: &Command, dt: f32) {
+    /// Look where `cmd` aims.
+    fn look_with(&mut self, cmd: &Command) {
         self.yaw = cmd.yaw;
         self.pitch = cmd.pitch.clamp(-1.5, 1.5);
+    }
+
+    /// Look where `cmd` aims, and walk, jump and crouch as it says (riders
+    /// go where their vehicle takes them).
+    fn move_with(&mut self, world: &World, cmd: &Command, dt: f32) {
+        self.look_with(cmd);
         if self.seat.is_none() {
             let input = Input {
                 movement: cmd.movement,
@@ -1166,6 +1172,7 @@ impl Game {
             seat: None,
             board_held: 0.0,
             soft_landing: false,
+            still: false,
             last: Command::default(),
         }
     }
@@ -1251,7 +1258,27 @@ impl Game {
         self.step_checkpoint(world, dt);
     }
 
+    /// Only move player `i` by `cmd`, as a tick would: look and walk (if
+    /// alive and the game's on), kept out of vehicles. A host runs a joined
+    /// PC's controls that came late this way, and the joined PC its own
+    /// players', so each of its controls moves them once, alike on both.
+    pub fn walk(&mut self, world: &World, i: usize, cmd: &Command) {
+        if !self.players[i].alive || self.over() {
+            return;
+        }
+        self.players[i].move_with(world, cmd, TICK);
+        self.keep_clear(i);
+    }
+
+    /// At the next tick, player `i` aims and acts but doesn't move: a host
+    /// holds a joined PC's player still while its controls for the tick
+    /// are late (each of them moves the player once).
+    pub fn hold_still(&mut self, i: usize) {
+        self.players[i].still = true;
+    }
+
     fn step_player(&mut self, world: &World, i: usize, cmd: Command, dt: f32) {
+        let still = std::mem::take(&mut self.players[i].still);
         if !self.players[i].alive {
             let p = &mut self.players[i];
             p.respawn_in -= dt;
@@ -1265,7 +1292,10 @@ impl Game {
         let pressed = |now: bool, before: bool| now && !before;
         {
             let p = &mut self.players[i];
-            p.move_with(world, &cmd, dt);
+            match still {
+                true => p.look_with(&cmd),
+                false => p.move_with(world, &cmd, dt),
+            }
             // Shields recharge after a while without damage.
             p.since_damage += dt;
             let full = p.full;

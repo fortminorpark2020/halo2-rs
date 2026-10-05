@@ -5,10 +5,10 @@
 //! put where the host has them, and the controls it hasn't run yet are run
 //! again from there. What's shown eases over to where that puts them,
 //! unless it's far (a teleporter, a respawn). Only Spartans on foot move
-//! here: in a vehicle, or dead, they're shown as the host has them.
+//! here: in a vehicle, or dead, they're shown as the host has them. If the
+//! host goes quiet, our players stand where they are until it answers.
 
 use glam::Vec3;
-use h2sim::game::TICK;
 use h2sim::player::Player;
 use h2sim::{Command, Game, World};
 use std::collections::VecDeque;
@@ -20,6 +20,10 @@ const MAX_KEPT: usize = 120;
 const EASE: f32 = 0.8;
 /// Farther than this, it goes there at once.
 const SNAP: f32 = 1.0;
+/// After this many ticks without a snapshot (half a second), our players
+/// stand where they are, and our controls don't go, until the host
+/// answers: it stands them still too, so nothing needs putting right.
+const HOLD: u32 = 30;
 
 #[derive(Default)]
 pub(crate) struct Prediction {
@@ -33,6 +37,8 @@ pub(crate) struct Prediction {
     ran: Option<Vec<(usize, u32)>>,
     /// Our players moved here.
     moved: Vec<Moved>,
+    /// Ticks since the last snapshot.
+    quiet: u32,
 }
 
 struct Moved {
@@ -64,6 +70,12 @@ impl Prediction {
         self.sent.clear();
         self.ran = None;
         self.moved.clear();
+        self.quiet = 0;
+    }
+
+    /// Whether the host has gone quiet (see `HOLD`).
+    pub fn held(&self) -> bool {
+        self.quiet >= HOLD
     }
 
     /// How far from where our controls take `player` they're shown, if
@@ -90,26 +102,27 @@ impl Prediction {
         number: u32,
         commands: &[(usize, Command)],
     ) {
+        self.quiet += 1;
         for &(p, cmd) in commands {
             if !movable(game, p) {
                 self.moved.retain(|m| m.player != p);
                 continue;
             }
-            let shown = &mut game.players[p];
             let k = match self.moved.iter().position(|m| m.player == p) {
                 Some(k) => k,
                 None => {
                     self.moved.push(Moved {
                         player: p,
-                        body: shown.body.clone(),
+                        body: game.players[p].body.clone(),
                         off: Vec3::ZERO,
                     });
                     self.moved.len() - 1
                 }
             };
             let m = &mut self.moved[k];
-            shown.body.clone_from(&m.body);
-            shown.move_with(world, &cmd, TICK);
+            game.players[p].body.clone_from(&m.body);
+            game.walk(world, p, &cmd);
+            let shown = &mut game.players[p];
             m.body.clone_from(&shown.body);
             m.off *= EASE;
             shown.body.position += m.off;
@@ -126,6 +139,7 @@ impl Prediction {
         let Some(ran) = self.ran.take() else {
             return;
         };
+        self.quiet = 0;
         self.moved.retain(|m| players.contains(&m.player));
         let ran_for = |p: usize| ran.iter().find(|r| r.0 == p).map_or(0, |r| r.1);
         for &p in players {
@@ -134,15 +148,16 @@ impl Prediction {
                 continue;
             }
             let last = ran_for(p);
-            let shown = &mut game.players[p];
             // As the host left them: jumping only if they let go first.
             let held = self.sent.iter().find(|s| s.0 == last);
-            shown.body.jump_held = held.is_some_and(|s| s.1.iter().any(|c| c.0 == p && c.1.jump));
+            game.players[p].body.jump_held =
+                held.is_some_and(|s| s.1.iter().any(|c| c.0 == p && c.1.jump));
             for (_, commands) in self.sent.iter().filter(|s| after(s.0, last)) {
                 if let Some((_, cmd)) = commands.iter().find(|c| c.0 == p) {
-                    shown.move_with(world, cmd, TICK);
+                    game.walk(world, p, cmd);
                 }
             }
+            let shown = &mut game.players[p];
             let body = shown.body.clone();
             let before = self.moved.iter().position(|m| m.player == p);
             // Shown where it was, then eased over (unless far off).

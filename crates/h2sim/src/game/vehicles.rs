@@ -938,18 +938,13 @@ impl Game {
             if !p.alive || p.seat.is_some() {
                 continue;
             }
-            let (r, h) = (p.body.biped.radius, p.body.height());
             for v in 0..self.vehicles.len() {
-                let veh = &self.vehicles[v];
-                if veh.destroyed {
-                    continue;
-                }
-                let def = &self.vehicle_defs[veh.def];
-                let feet = self.players[j].body.position;
-                let Some((n, depth, at)) = touch(veh, def, feet, r, h) else {
+                let Some((n, depth, at)) = self.touching(j, v) else {
                     continue;
                 };
                 // How fast the hull comes at them, along the way out of it.
+                let veh = &self.vehicles[v];
+                let def = &self.vehicle_defs[veh.def];
                 let closing = (veh.point_velocity(at) - self.players[j].body.velocity).dot(n);
                 let driver = def
                     .driver_seat()
@@ -968,20 +963,50 @@ impl Game {
                     }
                     break;
                 }
-                let body = &mut self.players[j].body;
-                if n.z > 0.7 {
-                    // Standing on it.
-                    body.position.z += depth;
-                    body.velocity.z = body.velocity.z.max(veh.velocity.z);
-                    body.grounded = true;
-                } else {
-                    let flat = Vec3::new(n.x, n.y, 0.0).normalize_or(Vec3::X);
-                    body.position += flat * depth;
-                    let into = body.velocity.dot(flat);
-                    if into < 0.0 {
-                        body.velocity -= flat * into;
-                    }
-                }
+                self.push_off(j, v, n, depth);
+            }
+        }
+    }
+
+    /// Push player `j`, on foot, out of any vehicle in their way, or up
+    /// onto one they stand on, as each tick does (but never run over).
+    pub(super) fn keep_clear(&mut self, j: usize) {
+        if self.players[j].seat.is_some() {
+            return;
+        }
+        for v in 0..self.vehicles.len() {
+            if let Some((n, depth, _)) = self.touching(j, v) {
+                self.push_off(j, v, n, depth);
+            }
+        }
+    }
+
+    /// How player `j` overlaps vehicle `v`'s hull, if they do (see `touch`).
+    fn touching(&self, j: usize, v: usize) -> Option<(Vec3, f32, Vec3)> {
+        let veh = &self.vehicles[v];
+        if veh.destroyed {
+            return None;
+        }
+        let body = &self.players[j].body;
+        let def = &self.vehicle_defs[veh.def];
+        touch(veh, def, body.position, body.biped.radius, body.height())
+    }
+
+    /// Push player `j` `depth` out of vehicle `v` along `n`: up onto it if
+    /// they stand on it, aside otherwise.
+    fn push_off(&mut self, j: usize, v: usize, n: Vec3, depth: f32) {
+        let body = &mut self.players[j].body;
+        if n.z > 0.7 {
+            // Standing on it.
+            body.position.z += depth;
+            body.velocity.z = body.velocity.z.max(self.vehicles[v].velocity.z);
+            body.grounded = true;
+        } else {
+            let flat = Vec3::new(n.x, n.y, 0.0).normalize_or(Vec3::X);
+            body.position += flat * depth;
+            let into = body.velocity.dot(flat);
+            if into < 0.0 {
+                body.velocity -= flat * into;
             }
         }
     }

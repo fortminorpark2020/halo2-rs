@@ -97,7 +97,7 @@ fn a_joined_pc_plays_in_the_hosts_game() {
         std::thread::sleep(Duration::from_millis(2));
         host.poll(&mut hg, 16);
         let mut commands = vec![Command::default(); hg.players.len()];
-        commands[mine] = host.command(mine).unwrap();
+        commands[mine] = host.command(&mut hg, &world, mine).unwrap();
         hg.step(&world, &commands);
         let events = std::mem::take(&mut hg.events);
         host.send(&hg, &events, true);
@@ -133,6 +133,7 @@ fn a_joined_pc_plays_in_the_hosts_game() {
 
 #[test]
 fn taps_between_ticks_are_not_lost() {
+    let world = floor();
     let mut hg = game();
     hg.add_player();
     let mut host = Host::new("testmap", 2).unwrap();
@@ -153,12 +154,15 @@ fn taps_between_ticks_are_not_lost() {
     client.send_commands(&[(mine, tap)]);
     client.send_commands(&[(mine, Command::default())]);
     let start = Instant::now();
-    while host.command(mine) == Some(Command::default()) {
+    while host.command(&mut hg, &world, mine) == Some(Command::default()) {
         host.poll(&mut hg, 16);
         assert!(start.elapsed() < Duration::from_secs(5));
     }
     // Pressed for one tick, then released.
-    assert_eq!(host.command(mine), Some(Command::default()));
+    assert_eq!(
+        host.command(&mut hg, &world, mine),
+        Some(Command::default())
+    );
 }
 
 #[test]
@@ -415,7 +419,7 @@ fn plays_in_the_hosts_game(pair: (Connection, Connection)) {
         client.send_commands(&[(mine, walk)]);
         host.poll(&mut hg, 16);
         let mut commands = vec![Command::default(); hg.players.len()];
-        commands[mine] = host.command(mine).unwrap();
+        commands[mine] = host.command(&mut hg, &world, mine).unwrap();
         hg.step(&world, &commands);
         let events = std::mem::take(&mut hg.events);
         host.send(&hg, &events, true);
@@ -462,6 +466,7 @@ fn websocket_taps_between_ticks_are_not_lost() {
 }
 
 fn taps_between_ticks_are_not_lost_over(pair: (Connection, Connection)) {
+    let world = floor();
     let mut hg = game();
     hg.add_player();
     let mut cg = game();
@@ -486,8 +491,11 @@ fn taps_between_ticks_are_not_lost_over(pair: (Connection, Connection)) {
     std::thread::sleep(Duration::from_millis(20));
     host.poll(&mut hg, 16);
     // Pressed for one tick, then released.
-    assert_eq!(host.command(mine), Some(tap));
-    assert_eq!(host.command(mine), Some(Command::default()));
+    assert_eq!(host.command(&mut hg, &world, mine), Some(tap));
+    assert_eq!(
+        host.command(&mut hg, &world, mine),
+        Some(Command::default())
+    );
 }
 
 #[test]
@@ -1212,7 +1220,11 @@ impl BotGame {
     /// Run a tick on the host and send it. What happened in it.
     fn tick(&mut self) -> Vec<Event> {
         let mut commands: Vec<Command> = (0..self.hg.players.len())
-            .map(|i| self.host.command(i).unwrap_or_default())
+            .map(|i| {
+                self.host
+                    .command(&mut self.hg, &self.world, i)
+                    .unwrap_or_default()
+            })
             .collect();
         for (i, bot) in &mut self.bots {
             commands[*i] = bot.think(&self.hg, &self.world, &self.nav, *i);
@@ -1949,7 +1961,7 @@ fn routine(i: usize, k: u32) -> Command {
 /// A tick on the host, sent.
 fn host_tick(host: &mut Host, hg: &mut h2sim::Game, world: &h2sim::World) {
     let commands: Vec<Command> = (0..hg.players.len())
-        .map(|i| host.command(i).unwrap_or_default())
+        .map(|i| host.command(hg, world, i).unwrap_or_default())
         .collect();
     hg.step(world, &commands);
     let events = std::mem::take(&mut hg.events);
@@ -2097,12 +2109,16 @@ fn online_hosts_run_each_ticks_controls_in_turn() {
     pump(&mut host, &mut hg, &mut client, &mut cg, |_, _, cg| {
         cg.players.len() == 1
     });
+    host.set_rate(0);
     let mine = client.players[0];
     // Each tick's controls aim a little further round, and every seventh
     // taps melee.
     let mut sent = 0;
     let mut send = |client: &mut Client, cg: &mut h2sim::Game, count: u32| {
         for _ in 0..count {
+            // Hearing from the host as it goes.
+            client.poll(cg);
+            client.predict(cg, &world);
             sent += 1;
             let cmd = Command {
                 yaw: sent as f32 * 0.01,
@@ -2116,7 +2132,8 @@ fn online_hosts_run_each_ticks_controls_in_turn() {
     let mut taps = 0;
     let mut run = |host: &mut Host, hg: &mut h2sim::Game| {
         host.poll(hg, 16);
-        let cmd = host.command(mine).unwrap();
+        let cmd = host.command(hg, &world, mine).unwrap();
+        host.send(hg, &[], true);
         taps += cmd.melee as u32;
         ((cmd.yaw * 100.0).round() as u32, taps)
     };
@@ -2169,8 +2186,182 @@ fn lan_hosts_run_the_latest_controls_with_any_taps() {
         client.tick(&mut cg, &world, &[(mine, cmd)]);
     }
     host.poll(&mut hg, 16);
-    assert_eq!(host.command(mine), Some(aim(3.0, true)));
-    assert_eq!(host.command(mine), Some(aim(3.0, false)));
+    assert_eq!(host.command(&mut hg, &world, mine), Some(aim(3.0, true)));
+    assert_eq!(host.command(&mut hg, &world, mine), Some(aim(3.0, false)));
+}
+
+/// Where a PC joined online showed its player each tick, and how far that
+/// was from where its controls took them; and where the host had them at
+/// the end.
+type Solo = (Vec<(glam::Vec3, glam::Vec3)>, glam::Vec3);
+
+/// One player on a PC joined online plays `ticks` of `controls`. At each
+/// of the PC's ticks, `link` says whether the host hears from it then and
+/// how many ticks the host runs (none in a slow frame, more after it),
+/// once `push` has done as it likes to the host's game. Both games start
+/// with `setup`. At the end, the host runs the controls it has left.
+fn solo(
+    ticks: u32,
+    setup: fn(&mut h2sim::Game),
+    controls: impl Fn(u32) -> Command,
+    link: impl Fn(u32) -> (bool, u32),
+    mut push: impl FnMut(u32, &mut h2sim::Game, usize),
+) -> Solo {
+    let world = floor();
+    let (mut hg, mut cg) = (game(), game());
+    setup(&mut hg);
+    setup(&mut cg);
+    let who = verified("TESTER", ANY_TEAM);
+    let (mut host, mut client) = online("testmap", &cg, "testmap", &[ANY_TEAM], me(), who);
+    host.set_rate(0);
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, _, cg| {
+        cg.players.len() == 1
+    });
+    // Standing on the floor once they've landed.
+    for _ in 0..60 {
+        host.poll(&mut hg, 16);
+        host_tick(&mut host, &mut hg, &world);
+        client.poll(&mut cg);
+    }
+    let mine = client.players[0];
+    let mut shown = Vec::new();
+    for k in 1..=ticks {
+        client.poll(&mut cg);
+        client.predict(&mut cg, &world);
+        client.tick(&mut cg, &world, &[(mine, controls(k))]);
+        let off = client.shown_off(mine).unwrap_or(glam::Vec3::NAN);
+        shown.push((cg.players[mine].body.position, off));
+        let (hears, runs) = link(k);
+        if hears {
+            host.poll(&mut hg, 16);
+        }
+        push(k, &mut hg, mine);
+        for _ in 0..runs {
+            host_tick(&mut host, &mut hg, &world);
+        }
+    }
+    host.poll(&mut hg, 16);
+    for _ in 0..60 {
+        host_tick(&mut host, &mut hg, &world);
+    }
+    (shown, hg.players[mine].body.position)
+}
+
+/// Running ahead (+x, facing the way they spawned).
+fn run(_: u32) -> Command {
+    Command {
+        movement: glam::Vec2::new(0.0, 1.0),
+        ..Command::default()
+    }
+}
+
+/// Shown just where the PC's controls take its player, never stepping
+/// back, and where the host has them in the end.
+fn steady((shown, end): &Solo) {
+    for (k, w) in shown.windows(2).enumerate() {
+        let tick = k + 2;
+        assert!(w[1].1.length() < 1e-4, "{} off at {tick}", w[1].1);
+        assert!(
+            w[1].0.x >= w[0].0.x,
+            "back {} at {tick}",
+            w[0].0.x - w[1].0.x
+        );
+    }
+    let last = shown.last().unwrap().0;
+    assert!(last.distance(*end) < 1e-4, "{last} {end}");
+}
+
+#[test]
+fn a_joined_pcs_player_runs_on_smoothly_when_its_controls_are_held_up() {
+    // The host hears nothing from the PC for 9 ticks (150 ms) once, and
+    // for 2 now and then.
+    let quiet = |k: u32| (100..109).contains(&k) || (160..162).contains(&k) || k % 50 < 2;
+    steady(&solo(300, |_| {}, run, |k| (!quiet(k), 1), |_, _, _| {}));
+}
+
+#[test]
+fn a_joined_pcs_player_runs_on_smoothly_when_the_host_loses_ticks() {
+    // A 300 ms frame on the host runs only 6 ticks (the viewer's longest
+    // frame is 0.1 s of game), and later a 500 ms one.
+    let link = |k: u32| match k {
+        100..118 | 200..230 => (false, 0),
+        118 | 230 => (true, 6),
+        _ => (true, 1),
+    };
+    steady(&solo(400, |_| {}, run, link, |_, _, _| {}));
+}
+
+#[test]
+fn a_joined_pcs_player_stands_still_while_the_host_is_frozen() {
+    // For three seconds the host runs and sends nothing, then has a frame
+    // of 6 ticks and goes on as before.
+    let link = |k: u32| match k {
+        100..280 => (false, 0),
+        280 => (true, 6),
+        _ => (true, 1),
+    };
+    let solo = solo(400, |_| {}, run, link, |_, _, _| {});
+    // Half a second's running (0.0375 a tick) at most, then it waits.
+    let ran = solo.0[279].0.x - solo.0[99].0.x;
+    assert!(ran < 1.2, "{ran}");
+    steady(&solo);
+}
+
+/// A parked vehicle the size of a Warthog, 2.5 ahead of where the first
+/// player spawns, side on.
+fn parked(game: &mut h2sim::Game) {
+    use h2sim::vehicle::{Drive, HullBox};
+    let def = h2sim::VehicleDef {
+        name: "parked".into(),
+        drive: Drive::Fixed,
+        health: 250.0,
+        ..Default::default()
+    }
+    .with_hull(vec![HullBox {
+        center: glam::Vec3::new(0.0, 0.0, 0.45),
+        half_extents: glam::Vec3::new(0.43, 0.9, 0.27),
+        axes: glam::Mat3::IDENTITY,
+    }]);
+    let spawn = h2sim::game::VehicleSpawn {
+        def: 0,
+        position: glam::Vec3::new(2.5, 0.0, 0.0),
+        yaw: 0.0,
+        respawn: 30.0,
+    };
+    game.set_vehicles(vec![def], vec![spawn]);
+}
+
+#[test]
+fn a_joined_pc_shows_its_player_stopped_by_a_vehicle_as_the_host_does() {
+    // The host hears from the PC every 9 ticks (150 ms).
+    let (shown, end) = solo(150, parked, run, |k| (k % 9 == 0, 1), |_, _, _| {});
+    assert!(end.x > 1.5 && end.x < 2.0, "{end}");
+    for (k, &(at, _)) in shown.iter().enumerate() {
+        assert!(at.x < end.x + 1e-4, "{} into it at {}", at.x - end.x, k + 1);
+    }
+    assert!(shown.last().unwrap().0.distance(end) < 1e-4);
+}
+
+#[test]
+fn a_joined_pc_shows_its_player_standing_on_a_vehicle_as_the_host_does() {
+    // Put on its roof, they stand there.
+    let (shown, end) = solo(
+        150,
+        parked,
+        |_| Command::default(),
+        |k| (k % 9 == 0, 1),
+        |k, hg, p| {
+            if k == 1 {
+                hg.move_player(p, glam::Vec3::new(2.5, 0.0, 0.8), 0.0);
+            }
+        },
+    );
+    assert!(end.z > 0.7, "{end}");
+    // Once the PC hears they're up there.
+    for (k, &(at, off)) in shown.iter().enumerate().skip(30) {
+        assert!(at.distance(end) < 1e-4, "{at} {end} at {}", k + 1);
+        assert!(off.length() < 1e-4, "{off} at {}", k + 1);
+    }
 }
 
 // WebSockets: dialing a server, what a server takes, and the limits.

@@ -300,7 +300,7 @@ impl App {
     pub(crate) fn remote_commands(&mut self, commands: &mut [Command]) {
         if let Net::Hosting(host) = &mut self.net {
             for (i, c) in commands.iter_mut().enumerate() {
-                if let Some(cmd) = host.command(i) {
+                if let Some(cmd) = host.command(&mut self.game, &self.world, i) {
                     *c = cmd;
                 }
             }

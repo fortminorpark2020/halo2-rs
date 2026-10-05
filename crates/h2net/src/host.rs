@@ -8,7 +8,7 @@ use crate::discovery::Beacon;
 use crate::live::ToServer;
 use crate::{after, kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
 use h2sim::game::{guest_name, Event, Look, Reader, Writer};
-use h2sim::{Command, Game};
+use h2sim::{Command, Game, World};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -30,8 +30,9 @@ const IN_FLIGHT: usize = 20;
 /// that waited all along for this many ticks are caught up on.
 const SPARE: usize = 1;
 const SPARE_TICKS: u32 = 30;
-/// The most controls kept waiting (half a second's).
-const MAX_WAITING: usize = 30;
+/// The most controls kept waiting (two seconds', as many as a joined PC
+/// keeps to run again).
+const MAX_WAITING: usize = 120;
 
 /// Things the host's game should show or act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,17 +232,19 @@ impl Seat {
         }
     }
 
-    /// This tick's controls. On a LAN, the latest, with any button tapped
-    /// since the last tick. Online, the next in turn, as the PC ran them
-    /// itself to show its player moving at once (the last again if none
-    /// has come): just as many are kept waiting as ride out the network's
-    /// ups and downs, and any more lately are caught up on.
-    fn next(&mut self, online: bool) -> Command {
+    /// This tick's controls, and whether they move the player. On a LAN,
+    /// the latest, with any button tapped since the last tick. Online, the
+    /// next in turn, as the PC ran them itself to show its player moving at
+    /// once, and each moves the player once: if none has come, the last
+    /// again, standing still. Just as many are kept waiting as ride out
+    /// the network's ups and downs, and any more lately are caught up on:
+    /// `early` gets those to move the player by first.
+    fn next(&mut self, online: bool, early: &mut Vec<Command>) -> (Command, bool) {
         let Some((mut number, mut cmd)) = self.waiting.pop_front() else {
             if online {
                 self.count_waiting();
             }
-            return self.last.1;
+            return (self.last.1, !online);
         };
         let more = match online {
             true => std::mem::take(&mut self.surplus),
@@ -249,6 +252,9 @@ impl Seat {
         };
         let mut taps = cmd;
         for _ in 0..more.min(self.waiting.len()) {
+            if online {
+                early.push(cmd);
+            }
             (number, cmd) = self.waiting.pop_front().unwrap();
             taps = cmd.with_presses_from(&taps);
         }
@@ -256,7 +262,7 @@ impl Seat {
         if online {
             self.count_waiting();
         }
-        taps
+        (taps, true)
     }
 
     /// Note how many controls wait after a tick. Over a while, any more
@@ -835,14 +841,25 @@ impl Host {
     /// This tick's controls for a player on a joined PC: on a LAN, their
     /// latest controls plus any button they tapped since the last tick;
     /// online, their controls for the tick, in turn (see `Seat::next`).
-    pub fn command(&mut self, player: usize) -> Option<Command> {
+    /// Online, each of their controls moves them once, as their PC moved
+    /// them: any caught up on move them in `game` (on `world`) now, and if
+    /// none came for this tick they stand still in it.
+    pub fn command(&mut self, game: &mut Game, world: &World, player: usize) -> Option<Command> {
         let online = self.online;
         let seat = self
             .remotes
             .iter_mut()
             .flat_map(|r| r.players.iter_mut())
             .find(|s| s.player == player)?;
-        Some(seat.next(online))
+        let mut early = Vec::new();
+        let (cmd, moves) = seat.next(online, &mut early);
+        for c in &early {
+            game.walk(world, player, c);
+        }
+        if !moves {
+            game.hold_still(player);
+        }
+        Some(cmd)
     }
 
     /// Send the game and what happened since the last call (or keep what

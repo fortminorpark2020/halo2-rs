@@ -378,8 +378,12 @@ impl Client {
     /// A tick of our players' controls, run here at once on those on foot
     /// (in `game`, on `world`) as the host will run them: they go to the
     /// host numbered, and are kept until it says it has run them (see
-    /// `predict`).
+    /// `predict`). If the host has gone quiet, our players stand where
+    /// they are, and their controls don't go, until it answers.
     pub fn tick(&mut self, game: &mut Game, world: &World, commands: &[(usize, Command)]) {
+        if self.prediction.held() {
+            return;
+        }
         let number = self.prediction.next_number();
         self.send_input(number, commands);
         self.prediction.tick(game, world, number, commands);
