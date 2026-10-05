@@ -512,6 +512,7 @@ impl App {
         self.nav = level.nav;
         self.map_path = level.path;
         self.level_changed();
+        crate::release_memory();
     }
 
     /// Settle everything that follows from the level in play.
