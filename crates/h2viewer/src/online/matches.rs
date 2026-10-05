@@ -335,6 +335,13 @@ impl App {
         if let Some(result) = result {
             println!("live: the game is over");
             self.online.send(result);
+            if let Net::Hosting(host) = &self.net {
+                let rate = host.sent() as f64 * 8.0 / 1000.0 / self.game.time.max(1.0);
+                println!(
+                    "live: sent {} bytes of the game, {rate:.0} kbit/s",
+                    host.sent()
+                );
+            }
         }
         if back {
             self.back_to_party();

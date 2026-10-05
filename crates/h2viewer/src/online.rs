@@ -46,6 +46,10 @@ const LEG_WAIT: Duration = Duration::from_secs(20);
 /// For testing (H2_LIVE_AUTO): seconds the party stays in its lobby before
 /// it searches again by itself.
 const AUTO_WAIT: f64 = 10.0;
+/// For testing: seconds after it began before signing in that failed is
+/// tried again (the service turns away more than a few sign-ins a minute
+/// from one address).
+const AUTO_RETRY: f64 = 15.0;
 /// Shown when the service turned down our gamertag.
 const TAKEN: &str = "THAT GAMERTAG IS TAKEN. TYPE ANOTHER, THEN SIGN IN";
 /// Most made-up players an in-game service has.
@@ -418,8 +422,8 @@ pub struct Online {
     /// A service run in the game, for testing.
     test: Option<TestService>,
     pub text: LiveText,
-    /// For testing (H2_LIVE_AUTO=search:<key>): the playlist the party
-    /// searches by itself, and when it was last busy.
+    /// For testing (H2_LIVE_AUTO=search:<key>, or H2_LIVE_BOT=<key>): the
+    /// playlist the party searches by itself, and when it was last busy.
     auto: Option<String>,
     idle: f64,
 }
@@ -495,7 +499,8 @@ impl Online {
             text,
             auto: std::env::var("H2_LIVE_AUTO")
                 .ok()
-                .and_then(|v| Some(v.strip_prefix("search:")?.to_string())),
+                .and_then(|v| Some(v.strip_prefix("search:")?.to_string()))
+                .or_else(|| std::env::var("H2_LIVE_BOT").ok()),
             idle: 0.0,
         }
     }
@@ -939,11 +944,18 @@ impl App {
     }
 
     /// For testing (H2_LIVE_AUTO=search:<key>): lead the party into that
-    /// playlist's searches, each time it's been back in its lobby a while.
+    /// playlist's searches, each time it's been back in its lobby a while,
+    /// signing in again if need be.
     fn auto_search(&mut self, now: f64) {
         let Some(key) = &self.online.auto else {
             return;
         };
+        if self.online.failed.is_some() && now - self.online.dialed >= AUTO_RETRY {
+            println!("live: signing in again");
+            self.menu.show(Screen::Live);
+            self.go_online();
+            return;
+        }
         let here = self.menu.screen == Screen::Live && self.loading.is_none();
         let view = self.online.view(now).filter(|_| here);
         let lobby = |v: &OnlineView| v.party().is_some_and(|p| p.activity == Activity::Lobby);

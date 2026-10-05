@@ -93,6 +93,8 @@ const GAME_OVER_DELAY: f32 = 4.0;
 /// minimized, say).
 const NOT_DRAWING: Duration = Duration::from_millis(250);
 const MUSIC_VOLUME: f32 = 0.5;
+/// Without a window (H2_LIVE_BOT), a frame comes each tick.
+const HEADLESS_FRAME: Duration = Duration::from_micros(16_667);
 
 const DEFAULT_MAP_DIRS: &[&str] = &[
     r"C:\Games\Halo 2 Project Cartographer\maps",
@@ -1120,6 +1122,8 @@ struct App {
     start_weapon: Option<usize>,
     /// For testing (H2_AUTOPILOT=1): a bot plays player one.
     autopilot: Option<Bot>,
+    /// For testing (H2_LIVE_BOT): no window, so nothing is drawn or heard.
+    headless: bool,
 }
 
 impl App {
@@ -1313,6 +1317,12 @@ impl App {
         } else {
             self.step_game(dt);
         }
+        if self.headless {
+            // What would be shown goes.
+            self.body_actions.clear();
+            self.effects.update(dt);
+            return;
+        }
         let notice = self.lan_notice();
         for l in &mut self.locals {
             l.notice = notice.clone().filter(|_| l.keyboard);
@@ -1367,6 +1377,19 @@ impl App {
         }
         let listeners = self.listeners();
         self.sound.update(&self.scene, &self.game, &listeners, dt);
+    }
+
+    /// For testing (H2_LIVE_BOT): play on without a window, a frame a
+    /// tick, until told to quit.
+    fn run_headless(&mut self) {
+        self.last_frame = Instant::now();
+        while !self.quit {
+            let now = Instant::now();
+            let dt = (now - self.last_frame).as_secs_f32().min(0.1);
+            self.last_frame = now;
+            self.update(dt);
+            std::thread::sleep(HEADLESS_FRAME.saturating_sub(now.elapsed()));
+        }
     }
 
     /// Run the game here: fixed ticks with everyone's controls (people at
@@ -2621,14 +2644,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             campaign_player: 0,
         })
     });
+    // H2_LIVE_BOT=<playlist key>: no window and no sound; online at once,
+    // searching that playlist by itself with a bot playing for us, match
+    // after match (for testing, many at once).
+    let headless = env("H2_LIVE_BOT").is_some();
+    // Pictures go with the window.
+    let dir = path.parent().filter(|_| !headless);
     let mut maps = path.parent().map(menu::find_maps).unwrap_or_default();
     let missions = path.parent().map(menu::find_missions).unwrap_or_default();
-    let map_pictures = path
-        .parent()
+    let map_pictures = dir
         .map(|dir| mapinfo::describe_maps(dir, &mut maps))
         .unwrap_or_default();
-    let emblem_art = path.parent().and_then(emblem::load).unwrap_or_default();
-    let rank_art = path.parent().and_then(rank::load).unwrap_or_default();
+    let emblem_art = dir.and_then(emblem::load).unwrap_or_default();
+    let rank_art = dir.and_then(rank::load).unwrap_or_default();
     let live_text = path
         .parent()
         .map(online::LiveText::load)
@@ -2676,13 +2704,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // The menu music is read in the background.
     let (tx, music) = mpsc::channel();
     let music_map = path;
-    std::thread::spawn(move || {
-        let _ = tx.send(scene::load_music(&music_map));
-    });
+    if !headless {
+        std::thread::spawn(move || {
+            let _ = tx.send(scene::load_music(&music_map));
+        });
+    }
 
     let session = h2net::session_id();
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
         game: new_game(&level.scene, GameType::Slayer, 0, &Default::default()),
         scene: level.scene,
@@ -2742,7 +2770,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         start_pos,
         start_weapon: env("H2_WEAPON").and_then(|v| v.parse().ok()),
         // H2_AUTOPILOT=1: a bot plays player one (for testing).
-        autopilot: env("H2_AUTOPILOT").map(|_| Bot::new(4099)),
+        autopilot: (env("H2_AUTOPILOT").is_some() || headless).then(|| Bot::new(4099)),
+        headless,
     };
     app.level_changed();
     // H2_SPLIT=<n> starts with n people in splitscreen (for testing).
@@ -2764,7 +2793,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     // H2_LIVE_AUTO=search:<playlist key> goes online at once, then searches
     // that playlist by itself (for testing).
-    if env("H2_LIVE_AUTO").is_some() {
+    if env("H2_LIVE_AUTO").is_some() || headless {
         app.menu.show(Screen::Live);
         app.go_online();
     }
@@ -2781,6 +2810,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         l.camera.yaw = yaw.to_radians();
         l.camera.pitch = pitch.to_radians();
     }
+    if headless {
+        app.run_headless();
+        return Ok(());
+    }
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

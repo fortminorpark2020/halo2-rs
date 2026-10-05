@@ -236,8 +236,12 @@ fn open(mixer: Arc<Mutex<Mixer>>) -> Result<cpal::Stream, String> {
 impl Audio {
     pub fn new() -> Audio {
         let mixer = Arc::new(Mutex::new(Mixer::default()));
-        // H2_MUTE=1 starts silent (tests).
-        let output = if std::env::var("H2_MUTE").is_ok() {
+        // H2_MUTE=1 starts silent (tests), as does a game without a window
+        // (H2_LIVE_BOT).
+        let silent = ["H2_MUTE", "H2_LIVE_BOT"]
+            .iter()
+            .any(|v| std::env::var_os(v).is_some());
+        let output = if silent {
             Output::None
         } else if let Ok(path) = std::env::var("H2_AUDIO_WAV") {
             match record(mixer.clone(), &path) {
