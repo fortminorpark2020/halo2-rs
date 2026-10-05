@@ -1992,38 +1992,62 @@ fn next_map(k: usize, step: i32, ctx: &Context) -> usize {
 /// The lowest the pregame's player list reaches (screen units), above the
 /// notice line.
 const ROSTER_BOTTOM: f32 = 392.0;
+/// Most players the pregame lists in one column; more go in two, a team
+/// in each in team games.
+const ROSTER_ROWS: usize = 8;
 
 /// Everyone in an online match, beside its pregame lobby: their team's
 /// colour (or their own), emblem, gamertag and rank, large.
 fn draw_roster(hb: &mut HudBuilder, font: usize, white: usize, f: &Frame, ctx: &Context, top: f32) {
     let s = f.s;
     let teams = ctx.host_lobby.is_some_and(|l| l.teams);
-    let (x, mut y) = (PANEL_X, top);
-    let n = ctx.seats.len().max(1) as f32;
+    let seats = ctx.seats;
+    let columns: Vec<Vec<&SeatInfo>> = if seats.len() <= ROSTER_ROWS {
+        vec![seats.iter().collect()]
+    } else if teams {
+        let team = |t: u8| seats.iter().filter(|p| p.team.min(1) == t).collect();
+        vec![team(0), team(1)]
+    } else {
+        let half = seats.len().div_ceil(2);
+        seats.chunks(half).map(|c| c.iter().collect()).collect()
+    };
+    let x = PANEL_X;
+    // Rows in two columns are as small as in a full one, so long gamertags
+    // fit beside the ranks.
+    let longest = columns.iter().map(Vec::len).max().unwrap_or(0);
+    let n = longest.max(if columns.len() > 1 { ROSTER_ROWS } else { 1 }) as f32;
     let step = ((ROSTER_BOTTOM - top - 30.0) / n).clamp(10.0, 22.0);
-    let back = f.rect([x - 8.0, y - 8.0, x + PANEL_W + 8.0, y + 30.0 + step * n]);
+    let back = f.rect([x - 8.0, top - 8.0, x + PANEL_W + 8.0, top + 30.0 + step * n]);
     hb.quad(white, back, [0.0; 4], PANEL, hud_mode::PLAIN, 0.0);
-    hb.text_left(font, f.at(x, y), 11.0 * s, "PLAYERS", BRIGHT);
-    y += 26.0;
-    for seat in ctx.seats {
-        let c = if teams {
-            crate::local::TEAM_COLORS[seat.team.min(1) as usize]
-        } else {
-            crate::local::armor_colors(seat.look)[0]
-        };
-        let h = step - 4.0;
-        let bar = f.rect([x, y, x + 3.0, y + h]);
-        hb.quad(white, bar, [0.0; 4], gamma_color(c), hud_mode::PLAIN, 0.0);
-        let badge = f.rect([x + 6.0, y, x + 6.0 + h, y + h]);
-        crate::emblem::draw(hb, badge, seat.look.emblem);
-        let size = (h - 4.0).min(10.0);
-        let at = f.at(x + 12.0 + h, y + (h - size) * 0.5);
-        hb.text_left(font, at, size * s, &seat.name, TEXT);
-        if let Some(level) = seat.level {
-            let icon = f.rect([x + PANEL_W - h - 2.0, y - 1.0, x + PANEL_W, y + h + 1.0]);
-            rank::draw(hb, icon, level);
+    hb.text_left(font, f.at(x, top), 11.0 * s, "PLAYERS", BRIGHT);
+    // Columns a little apart.
+    let width = (PANEL_W + 8.0) / columns.len() as f32 - 8.0;
+    for (k, column) in columns.iter().enumerate() {
+        let x = PANEL_X + (width + 8.0) * k as f32;
+        let mut y = top + 26.0;
+        for seat in column {
+            let c = if teams {
+                crate::local::TEAM_COLORS[seat.team.min(1) as usize]
+            } else {
+                crate::local::armor_colors(seat.look)[0]
+            };
+            let h = step - 4.0;
+            let bar = f.rect([x, y, x + 3.0, y + h]);
+            hb.quad(white, bar, [0.0; 4], gamma_color(c), hud_mode::PLAIN, 0.0);
+            let badge = f.rect([x + 6.0, y, x + 6.0 + h, y + h]);
+            crate::emblem::draw(hb, badge, seat.look.emblem);
+            // Long gamertags shrink to fit beside the rank.
+            let room = width - 18.0 - 2.0 * h;
+            let fits = room / (seat.name.chars().count().max(1) as f32 * crate::font::ASPECT);
+            let size = (h - 4.0).clamp(6.0, 10.0).min(fits);
+            let at = f.at(x + 12.0 + h, y + (h - size) * 0.5);
+            hb.text_left(font, at, size * s, &seat.name, TEXT);
+            if let Some(level) = seat.level {
+                let icon = f.rect([x + width - h - 2.0, y - 1.0, x + width, y + h + 1.0]);
+                rank::draw(hb, icon, level);
+            }
+            y += step;
         }
-        y += step;
     }
 }
 
@@ -3192,6 +3216,110 @@ mod tests {
         assert_eq!(draw(Screen::Players), 4);
         // Playlists: our level in the ranked one.
         assert_eq!(draw(Screen::Playlists), 1);
+    }
+
+    /// The quads drawn with `texture`, as rectangles (pixels).
+    fn quads(batches: &[crate::gpu::HudBatch], texture: impl Fn(usize) -> bool) -> Vec<[f32; 4]> {
+        let corners = batches.iter().filter(|b| texture(b.texture));
+        corners
+            .flat_map(|b| b.vertices.chunks(6))
+            .map(|v| {
+                [
+                    v[0].position[0],
+                    v[0].position[1],
+                    v[2].position[0],
+                    v[2].position[1],
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_big_matchs_pregame_lists_everyone_readably() {
+        let mut maps = maps();
+        maps[0].picture = Some(0);
+        let view = signed_in(1, &[(1, "JOHN")]);
+        let info = MatchInfo {
+            id: 7,
+            playlist: 2,
+            ranked: true,
+            map: "lockout".into(),
+            hash: 0,
+            game_type: GameType::TeamSlayer,
+            preset: "DEFAULT".into(),
+            score: 50,
+            time_limit: 600,
+            bots: 0,
+            host: 1,
+            countdown: 20,
+            players: Vec::new(),
+        };
+        let lobby = Lobby {
+            map: "lockout".into(),
+            game_type: "TEAM SLAYER".into(),
+            score: "50".into(),
+            options: "DEFAULT, 10 MIN".into(),
+            teams: true,
+            players: Vec::new(),
+            bots: 0,
+        };
+        let o = OnlineView {
+            game: Some(&info),
+            countdown: Some(14.2),
+            ..online(Some(&view))
+        };
+        for n in [4, 8, 12, 16] {
+            // Gamertags as long as they come.
+            let seats: Vec<SeatInfo> = (0..n)
+                .map(|k| SeatInfo {
+                    name: format!("SPARTAN {k:07}"),
+                    how: "ONLINE",
+                    team: (k % 2) as u8,
+                    look: Look::default(),
+                    level: Some(k as u8 + 1),
+                })
+                .collect();
+            let c = Context {
+                online: Some(&o),
+                host_lobby: Some(&lobby),
+                seats: &seats,
+                ..ctx(&maps, &[])
+            };
+            let mut m = Menu::new(Settings::default(), Profile::default());
+            m.show(Screen::Pregame);
+            let mut hb = HudBuilder::new(1280.0, 720.0);
+            m.draw(&mut hb, 0, 1, 1280.0, 720.0, &c);
+            let f = Frame::new(1280.0, 720.0);
+            let batches = hb.finish();
+            let ranks = quads(&batches, |t| {
+                t == crate::gpu::RANK_TEXTURES || t == crate::gpu::RANK_TEXTURES + 1
+            });
+            assert_eq!(ranks.len(), n, "everyone's rank");
+            // The roster's text: the panel's, below the map.
+            let panel = f.at(PANEL_X, ROW_Y + PICTURE[1] + 20.0);
+            let text: Vec<_> = quads(&batches, |t| t == 0)
+                .into_iter()
+                .filter(|q| q[0] >= panel[0] && q[1] >= panel[1])
+                .collect();
+            let lowest = text.iter().map(|q| q[3]).fold(0.0, f32::max);
+            assert!(
+                lowest <= f.at(0.0, ROSTER_BOTTOM)[1],
+                "{n}: above the notice line"
+            );
+            let smallest = text.iter().map(|q| q[3] - q[1]).fold(f32::MAX, f32::min);
+            assert!(smallest >= 6.0 * f.s, "{n}: glyphs {smallest} px tall");
+            let right = f.at(PANEL_X + PANEL_W, 0.0)[0];
+            let overlap = |a: &[f32; 4], b: &[f32; 4]| {
+                a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+            };
+            for q in &text {
+                assert!(q[2] <= right + 0.01, "{n}: in the panel");
+                assert!(
+                    !ranks.iter().any(|r| overlap(q, r)),
+                    "{n}: clear of the ranks"
+                );
+            }
+        }
     }
 
     #[test]
