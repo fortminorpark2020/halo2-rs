@@ -249,6 +249,12 @@ An `h2live.txt` next to it can set `port=` and `data=`. On a host online,
 set the same; `/health` answers health checks, and `/` says how many
 players are online. `H2LIVE_UPNP=0` leaves the router alone.
 
+For testing a service, `H2_LIVE_BOT=<playlist key>` runs h2viewer with no
+window or sound as a player who signs in (to the service `H2_LIVE` names),
+searches that playlist and plays each match it finds with a bot, over and
+over. Each takes little CPU, so many can run on one PC (give each its own
+`H2_NAME`, `H2_PROFILE` and `H2_IDENTITY`).
+
 ## Roadmap
 
 1. Map file reader (done)
