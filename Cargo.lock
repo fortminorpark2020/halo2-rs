@@ -1023,6 +1023,7 @@ dependencies = [
  "h2net",
  "h2sim",
  "igd-next",
+ "rustix 1.1.5",
  "sha2",
  "socket2",
 ]

@@ -56,6 +56,14 @@ pub(crate) struct Tcp {
     deadline: Option<Instant>,
 }
 
+impl Stream {
+    /// The TCP connection under it.
+    pub(crate) fn tcp(&self) -> &TcpStream {
+        let (Stream::Plain(tcp) | Stream::Tls(_, tcp)) = self;
+        &tcp.stream
+    }
+}
+
 impl Tcp {
     /// The stream, to wait on for no longer than the time left.
     fn in_time(&self) -> io::Result<&TcpStream> {

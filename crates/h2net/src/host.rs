@@ -488,13 +488,28 @@ impl Host {
                         } else if r.welcomed && !h.map.eq_ignore_ascii_case(&self.map) {
                             // Sent from the lobby as the game started.
                             Ok(None)
+                        } else if r.verified.is_some() && !r.welcomed {
+                            // Online, one that comes during a game loads it.
+                            Ok(None)
                         } else {
                             Err(format!("HOST IS PLAYING {}", self.map.to_uppercase()))
                         }
                     });
                     let hello = match checked {
                         Ok(Some(v)) => v,
-                        Ok(None) => continue,
+                        Ok(None) if r.welcomed => continue,
+                        Ok(None) => {
+                            // As if it had been in the lobby when the game
+                            // started: it says hello again from there.
+                            r.welcomed = true;
+                            let mut w = Writer::default();
+                            w.str(&self.map);
+                            r.conn.send(kind::START, &w.0);
+                            let computer = r.computer.clone();
+                            println!("lan: {computer} ({}) is loading the game", r.address);
+                            events.push(HostEvent::Arrived { computer });
+                            continue;
+                        }
                         Err(why) => {
                             let mut w = Writer::default();
                             w.str(&why);
@@ -511,12 +526,16 @@ impl Host {
                         ..
                     } = hello;
                     // Online, they're who the service says: known by that
-                    // gamertag (not their PC's name), all on its team.
+                    // gamertag (not their PC's name), all on its team (if
+                    // it gave one).
                     let (computer, name, teams) = match &r.verified {
                         Some(v) => (
                             r.computer.clone(),
                             v.gamertag.clone(),
-                            vec![v.team; teams.len()],
+                            teams
+                                .iter()
+                                .map(|&t| if v.team == ANY_TEAM { t } else { v.team })
+                                .collect(),
                         ),
                         None => (computer, name, teams),
                     };

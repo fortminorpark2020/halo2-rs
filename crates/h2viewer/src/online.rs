@@ -4,19 +4,20 @@
 //! last said through an `OnlineView`, and what players choose there comes
 //! back as menu actions, which become requests to the service.
 //!
-//! H2_LIVE names the service. `mem` runs one inside the game, for testing,
-//! with H2_LIVE_FAKE_PLAYERS=<n> made-up players signed in to it: some in
-//! parties, one inviting us into theirs, all taking our invites. Services
-//! on the network (ws:// and wss:// addresses) need a transport that isn't
-//! here yet.
+//! H2_LIVE names the service: ws://host:port or wss://host for one on the
+//! network (reached over a WebSocket, dialed in the background), or `mem`
+//! to run one inside the game, for testing, with H2_LIVE_FAKE_PLAYERS=<n>
+//! made-up players signed in to it: some in parties, one inviting us into
+//! theirs, all taking our invites.
 
 use crate::menu::{Action, MapChoice, Screen, Sound};
 use crate::App;
 use blam_cache::{text, GroupTag, MapSet};
-use h2live::client::{self, LiveClient, LiveEvent, View};
+use h2live::client::{self, LiveClient, LiveEvent, RelayLeg, View};
 use h2live::server::{Route, Server};
 use h2net::live::{
-    self, Activity, OnlinePlayer, PartyInfo, PlaylistInfo, Privacy, Stage, ToServer, QUICKMATCH,
+    self, Activity, LinkInfo, MatchInfo, OnlinePlayer, PartyInfo, PlaylistInfo, Privacy, Stage,
+    ToServer, QUICKMATCH,
 };
 use h2net::Connection;
 use h2sim::bot::{bot_look, bot_name};
@@ -24,8 +25,15 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
+
+mod custom;
+mod matches;
+
+use custom::Custom;
+use matches::Matched;
 
 /// The online server everyone signs in to, unless H2_LIVE or a `server=`
 /// line in the profile names another. None yet: until there is, it's the
@@ -35,12 +43,27 @@ const DEFAULT_LIVE_SERVER: &str = "";
 /// where it listens, and how long it has to answer.
 const HERE: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 47050);
 const HERE_WAIT: Duration = Duration::from_millis(100);
-/// Why a ws:// or wss:// service can't be reached yet.
-pub const NO_TRANSPORT: &str = "ONLINE PLAY OVER THE NETWORK ISN'T AVAILABLE YET";
+/// Longest signing in waits for the service to answer: one hosted for free
+/// sleeps while no one plays, and takes up to a minute to wake.
+const DIAL_WAIT: Duration = Duration::from_secs(90);
+/// Seconds of waiting after which the service is probably waking up.
+const WAKING: f64 = 5.0;
+/// Longest a relay leg's connection may take.
+const LEG_WAIT: Duration = Duration::from_secs(20);
+/// For testing (H2_LIVE_AUTO): seconds the party stays in its lobby before
+/// it searches again by itself.
+const AUTO_WAIT: f64 = 10.0;
+/// For testing: seconds after it began before signing in that failed is
+/// tried again (the service turns away more than a few sign-ins a minute
+/// from one address).
+const AUTO_RETRY: f64 = 15.0;
 /// Shown when the service turned down our gamertag.
 const TAKEN: &str = "THAT GAMERTAG IS TAKEN. TYPE ANOTHER, THEN SIGN IN";
 /// Most made-up players an in-game service has.
 const MAX_FAKES: usize = 15;
+/// Seconds a search we asked for may take to start before we give up on
+/// it (the service always answers sooner).
+const ASK_WAIT: f64 = 10.0;
 
 /// Halo 2's string lists the online screens use, in mainmenu.map.
 const PLAYLIST_TEXT: &str = "multiplayer\\matchmaking_hopper_descriptions";
@@ -174,10 +197,21 @@ pub struct OnlineView<'a> {
     /// Why signing in failed or the link was lost (otherwise, until signed
     /// in, still signing in).
     pub failed: Option<&'a str>,
+    /// The service is slow to answer: waking up, probably.
+    pub waking: bool,
     pub text: &'a LiveText,
     /// The party's search: its playlist (or `QUICKMATCH`) and seconds so
     /// far.
     pub search: Option<(u8, f64)>,
+    /// The match we're in, from MATCH until we're back in the party lobby.
+    pub game: Option<&'a MatchInfo>,
+    /// Before its game: seconds left to the pregame countdown, until the
+    /// service says to start.
+    pub countdown: Option<f64>,
+    /// After its game: seconds until we're back in the party lobby.
+    pub returning: Option<f64>,
+    /// In the party's custom game.
+    pub custom: bool,
 }
 
 impl OnlineView<'_> {
@@ -288,10 +322,27 @@ impl OnlineView<'_> {
 
     /// The name of what the party searches.
     pub fn search_name(&self) -> String {
-        let playlist = self.search.map_or(QUICKMATCH, |(p, _)| p);
-        match self.playlists().iter().find(|p| p.id == playlist) {
+        self.playlist_name(self.search.map_or(QUICKMATCH, |(p, _)| p))
+    }
+
+    /// A playlist's name, by its id.
+    pub fn playlist_name(&self, id: u8) -> String {
+        match self.playlists().iter().find(|p| p.id == id) {
             Some(p) => self.text.playlist_name(p),
             None => "QUICKMATCH".into(),
+        }
+    }
+
+    /// How the match's pregame is going: "GAME ABOUT TO START!" with the
+    /// countdown, then waiting for everyone's map once the service said to
+    /// start.
+    pub fn pregame_status(&self) -> (String, Option<String>) {
+        match self.countdown {
+            Some(left) => ("GAME ABOUT TO START!".into(), Some(clock_text(left.ceil()))),
+            None => {
+                let otherwise = "WAITING FOR EVERYONE TO LOAD THE MAP...";
+                (words(&self.text.lobby, "precaching", otherwise), None)
+            }
         }
     }
 
@@ -328,8 +379,16 @@ impl OnlineView<'_> {
             }
             Stage::Joining => (words(t, "joining_game", "JOINING A GAME..."), None),
             Stage::Starting => (words(t, "starting_game", "STARTING THE GAME..."), None),
-            Stage::Failed => (words(t, "matchmaking_failed", "MATCHMAKING FAILED"), None),
+            Stage::Failed => (words(t, "matchmaking_failed", "MATCHMAKING FAILED!"), None),
         }
+    }
+
+    /// Why the party's last search ended, if it gave up: "MATCHMAKING
+    /// FAILED!"
+    pub fn search_failed(&self) -> Option<String> {
+        let failed = self.live?.status?.stage == Stage::Failed;
+        let t = &self.text.progress;
+        failed.then(|| words(t, "matchmaking_failed", "MATCHMAKING FAILED!"))
     }
 
     /// "SARGE IS THE PARTY LEADER": Halo 2's text marks where the name
@@ -344,6 +403,9 @@ impl OnlineView<'_> {
 /// This PC's link to the online service.
 pub struct Online {
     link: Link,
+    /// The service's address (H2_LIVE), and when we began to dial it.
+    address: String,
+    dialed: f64,
     /// The clock the service's messages are timed by.
     clock: Instant,
     /// Where the PC's key is kept (identity.key).
@@ -353,11 +415,24 @@ pub struct Online {
     /// The party's search: its playlist (or `QUICKMATCH`) and when it began,
     /// while it searches.
     search: Option<(u8, f64)>,
+    /// When we asked for a search, until the service starts it or says why
+    /// not. (It shows as searching meanwhile.)
+    asked: Option<f64>,
     /// What the party was last doing.
     activity: Activity,
+    /// The match we're in, until we're back in the party lobby.
+    matched: Option<Matched>,
+    /// The party's custom game we're in, until we're back in its lobby.
+    custom: Option<Custom>,
+    /// Relay legs on their way to the other end.
+    legs: Vec<Leg>,
     /// A service run in the game, for testing.
     test: Option<TestService>,
     pub text: LiveText,
+    /// For testing (H2_LIVE_AUTO=search:<key>, or H2_LIVE_BOT=<key>): the
+    /// playlist the party searches by itself, and when it was last busy.
+    auto: Option<String>,
+    idle: f64,
 }
 
 enum Link {
@@ -368,6 +443,13 @@ enum Link {
     Live(Box<LiveClient>),
 }
 
+/// A relay leg on its way: its connection to the service being dialed,
+/// then waiting there for the other end.
+enum Leg {
+    Dialing(LinkInfo, Receiver<Result<Connection, String>>),
+    Open(RelayLeg),
+}
+
 /// Where the PC's key is kept: H2_IDENTITY, or identity.key beside the
 /// profile.
 pub fn identity_path() -> Option<PathBuf> {
@@ -375,6 +457,28 @@ pub fn identity_path() -> Option<PathBuf> {
         Some(p) => Some(PathBuf::from(p)),
         None => crate::profile::beside("identity.key"),
     }
+}
+
+/// Where the stat card for the key at `identity` is kept: live-card.txt
+/// beside identity.key, and `<name>-card.txt` beside any other key, so keys
+/// that share a folder (H2_IDENTITY's, say) don't share a card.
+fn card_path(identity: &Path) -> PathBuf {
+    if identity.file_name() == Some("identity.key".as_ref()) {
+        return identity.with_file_name("live-card.txt");
+    }
+    let name = identity.file_stem().unwrap_or_default().to_string_lossy();
+    identity.with_file_name(format!("{name}-card.txt"))
+}
+
+/// Where on the service at `address` a path is (`live` for signing in,
+/// `link` for relay legs), whatever path the address had.
+fn service_url(address: &str, path: &str) -> String {
+    let base = address.trim_end_matches('/');
+    let base = ["/live", "/link"]
+        .iter()
+        .find_map(|p| base.strip_suffix(p))
+        .unwrap_or(base);
+    format!("{base}/{path}")
 }
 
 /// The maps this PC has, as the service names them.
@@ -420,13 +524,24 @@ impl Online {
     pub fn new(text: LiveText, identity: Option<PathBuf>) -> Online {
         Online {
             link: Link::Offline,
+            address: String::new(),
+            dialed: 0.0,
             clock: Instant::now(),
             identity,
             failed: None,
             search: None,
+            asked: None,
             activity: Activity::Lobby,
+            matched: None,
+            custom: None,
+            legs: Vec::new(),
             test: None,
             text,
+            auto: std::env::var("H2_LIVE_AUTO")
+                .ok()
+                .and_then(|v| Some(v.strip_prefix("search:")?.to_string()))
+                .or_else(|| std::env::var("H2_LIVE_BOT").ok()),
+            idle: 0.0,
         }
     }
 
@@ -443,11 +558,17 @@ impl Online {
             Link::Live(client) if client.signed_in() => Some(&client.view),
             _ => None,
         };
+        let m = self.matched.as_ref();
         Some(OnlineView {
             live,
             failed: self.failed.as_deref(),
+            waking: matches!(self.link, Link::Dialing(..)) && now - self.dialed > WAKING,
             text: &self.text,
             search: self.search.map(|(p, since)| (p, now - since)),
+            game: m.map(|m| &m.info),
+            countdown: m.and_then(|m| m.countdown(now)),
+            returning: m.and_then(|m| m.returning(now)),
+            custom: self.custom.is_some(),
         })
     }
 
@@ -455,6 +576,8 @@ impl Online {
     /// `fakes` made-up players if the service runs in the game.
     pub fn connect(&mut self, address: &str, profile: client::Profile, fakes: usize, now: f64) {
         self.sign_out();
+        self.address = address.to_string();
+        self.dialed = now;
         match self.dial(address, fakes, now) {
             Ok(connection) => self.link = Link::Dialing(connection, profile),
             Err(why) => self.failed = Some(why),
@@ -473,15 +596,14 @@ impl Online {
         let (tx, rx) = mpsc::channel();
         if address == "mem" {
             let mut test = TestService::start(fakes, now)?;
-            let ours = test.connect(IpAddr::V4(Ipv4Addr::LOCALHOST), now);
+            let ours = test.connect(Route::Live, IpAddr::V4(Ipv4Addr::LOCALHOST), now);
             self.test = Some(test);
             let _ = tx.send(Ok(ours));
             return Ok(rx);
         }
         let lower = address.to_ascii_lowercase();
         if lower.starts_with("ws://") || lower.starts_with("wss://") {
-            // h2net::dial(address, ...) once that transport is here.
-            return Err(NO_TRANSPORT.into());
+            return Ok(h2net::dial(&service_url(address, "live"), DIAL_WAIT));
         }
         Err(format!("NO ONLINE SERVICE AT {}", address.to_uppercase()))
     }
@@ -491,8 +613,107 @@ impl Online {
         self.link = Link::Offline;
         self.failed = None;
         self.search = None;
+        self.asked = None;
         self.activity = Activity::Lobby;
+        self.matched = None;
+        self.custom = None;
+        self.legs.clear();
         self.test = None;
+    }
+
+    /// Signed in, and still connected.
+    pub fn signed_in(&self) -> bool {
+        matches!(&self.link, Link::Live(client) if client.signed_in())
+    }
+
+    /// Our account and gamertag, once signed in.
+    fn me(&self) -> Option<(u64, &str)> {
+        let Link::Live(client) = &self.link else {
+            return None;
+        };
+        let welcome = client.view.welcome.as_ref()?;
+        Some((welcome.account, &welcome.gamertag))
+    }
+
+    /// Tell the service something.
+    fn send(&mut self, message: ToServer) {
+        if let Link::Live(client) = &mut self.link {
+            client.send(message);
+        }
+    }
+
+    /// In a match, from MATCH until back in the party lobby.
+    pub fn in_match(&self) -> bool {
+        self.matched.is_some()
+    }
+
+    /// In the party's custom game, from CUSTOM_OPEN until back in the
+    /// party lobby.
+    pub fn in_custom(&self) -> bool {
+        self.custom.is_some()
+    }
+
+    /// In the party's custom game: a member's level (their best), by
+    /// gamertag.
+    pub fn party_level(&self, gamertag: &str) -> Option<u8> {
+        let Link::Live(client) = &self.link else {
+            return None;
+        };
+        let party = client.view.party.as_ref().filter(|_| self.in_custom())?;
+        let member = party.members.iter().find(|m| m.gamertag == gamertag)?;
+        Some(member.best)
+    }
+
+    /// Open a relay leg for `link` (LINK): a new connection to the
+    /// service, which joins it to the other end.
+    fn open_leg(&mut self, link: LinkInfo, now: f64) {
+        let Link::Live(client) = &self.link else {
+            return;
+        };
+        let leg = match &mut self.test {
+            Some(test) => {
+                let conn = test.connect(Route::Link, IpAddr::V4(Ipv4Addr::LOCALHOST), now);
+                Leg::Open(client.open_leg(link, conn))
+            }
+            None => {
+                let url = service_url(&self.address, "link");
+                Leg::Dialing(link, h2net::dial(&url, LEG_WAIT))
+            }
+        };
+        self.legs.push(leg);
+    }
+
+    /// Relay legs whose other end came: the link each is for, and the
+    /// connection to that end. Legs that failed are given up on.
+    fn linked(&mut self) -> Vec<(LinkInfo, Connection)> {
+        let Link::Live(client) = &self.link else {
+            self.legs.clear();
+            return Vec::new();
+        };
+        let mut linked = Vec::new();
+        for leg in std::mem::take(&mut self.legs) {
+            let leg = match leg {
+                Leg::Dialing(link, rx) => match rx.try_recv() {
+                    Ok(Ok(conn)) => Leg::Open(client.open_leg(link, conn)),
+                    Err(TryRecvError::Empty) => Leg::Dialing(link, rx),
+                    Ok(Err(why)) => {
+                        println!("live: no relay leg to {}: {why}", link.gamertag);
+                        continue;
+                    }
+                    Err(TryRecvError::Disconnected) => continue,
+                },
+                open => open,
+            };
+            match leg {
+                Leg::Open(mut relay) => match relay.poll() {
+                    Ok(Some(conn)) => linked.push((relay.link, conn)),
+                    Ok(None) => self.legs.push(Leg::Open(relay)),
+                    Err(why) => println!("live: relay leg to {}: {why}", relay.link.gamertag),
+                },
+                dialing => self.legs.push(dialing),
+            }
+        }
+        linked
     }
 
     /// Keep up with the service at time `now`: what it said. Signing in
@@ -519,11 +740,18 @@ impl Online {
             return Vec::new();
         };
         let events = client.poll(now);
+        let searching = client.view.party.as_ref().map(|p| p.activity) == Some(Activity::Searching);
         for e in &events {
-            if let LiveEvent::Refused(why) | LiveEvent::Lost(why) = e {
-                self.link = Link::Offline;
-                self.failed = Some(why.to_uppercase());
-                self.search = None;
+            match e {
+                LiveEvent::Refused(why) | LiveEvent::Lost(why) => {
+                    self.link = Link::Offline;
+                    self.failed = Some(why.to_uppercase());
+                    self.search = None;
+                }
+                // The service says why it won't start a search we asked
+                // for with a notice.
+                LiveEvent::Notice(_) if !searching => self.asked = None,
+                _ => {}
             }
         }
         events
@@ -553,7 +781,7 @@ impl Online {
             .map_err(|e| format!("CAN'T READ {}: {e}", path.display()).to_uppercase())?;
         let card = match &self.test {
             Some(test) => test.dir.join("live-card.txt"),
-            None => path.with_file_name("live-card.txt"),
+            None => card_path(&path),
         };
         let client = LiveClient::new(conn, key, profile, &card, now);
         self.link = Link::Live(Box::new(client));
@@ -569,6 +797,8 @@ impl Online {
             Action::Search(playlist) => {
                 let playlist = playlist.unwrap_or(QUICKMATCH);
                 self.search = Some((playlist, now));
+                self.asked = Some(now);
+                self.activity = Activity::Searching;
                 client.view.status = None;
                 ToServer::Search(playlist)
             }
@@ -589,32 +819,56 @@ impl Online {
         client.send(message);
     }
 
-    /// Follow the party into and out of searches its leader starts and
-    /// stops: true when it started, false when it stopped.
-    pub fn follow_party(&mut self, now: f64) -> Option<bool> {
+    /// Follow the party into and out of what its leader starts and stops:
+    /// searches (one that found a match isn't stopped: the match comes
+    /// next), and custom games.
+    pub fn follow_party(&mut self, now: f64) -> Option<Followed> {
         let Link::Live(client) = &self.link else {
             return None;
         };
         let party = client.view.party.as_ref();
         let activity = party.map_or(Activity::Lobby, |p| p.activity);
+        if let Some(asked) = self.asked {
+            if activity == Activity::Lobby && now - asked < ASK_WAIT {
+                return None;
+            }
+            self.asked = None;
+        }
         let was = std::mem::replace(&mut self.activity, activity);
         match (was, activity) {
             (Activity::Searching, Activity::Searching) => None,
             (_, Activity::Searching) => {
                 let playlist = party.map_or(QUICKMATCH, |p| p.playlist);
                 self.search.get_or_insert((playlist, now));
-                Some(true)
+                Some(Followed::Searching)
+            }
+            (Activity::Searching, Activity::Playing) => {
+                self.search = None;
+                None
             }
             (Activity::Searching, _) => {
                 self.search = None;
-                Some(false)
+                Some(Followed::Stopped)
             }
+            (Activity::Custom, Activity::Custom) => None,
+            (Activity::Custom, _) => Some(Followed::CustomOver),
             _ => None,
         }
     }
 }
 
-/// The online screens.
+/// What the party did, for us to follow (see `Online::follow_party`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Followed {
+    /// It started searching.
+    Searching,
+    /// It stopped (or the service wouldn't start our search).
+    Stopped,
+    /// Its custom game is over.
+    CustomOver,
+}
+
+/// The online screens (out of a match).
 fn online_screen(screen: Screen) -> bool {
     matches!(
         screen,
@@ -659,6 +913,14 @@ impl App {
                 LiveEvent::Welcomed => {}
                 LiveEvent::Refused(why) | LiveEvent::Lost(why) => {
                     println!("live: {}", why.to_lowercase());
+                    // A match's links go through the service: it's over
+                    // (and so is a custom game).
+                    if self.online.in_match() {
+                        self.back_to_party();
+                    }
+                    if self.online.in_custom() {
+                        self.custom_over();
+                    }
                     if !online_screen(self.menu.screen) {
                         continue;
                     }
@@ -677,25 +939,80 @@ impl App {
                     self.sound.play_ui(&self.scene, Sound::Advance);
                 }
                 LiveEvent::Notice(text) => self.menu.notice = Some(text.to_uppercase()),
-                // Matches aren't played from the menus yet.
-                LiveEvent::Match(_)
-                | LiveEvent::HostMatch(_)
-                | LiveEvent::Link(_)
-                | LiveEvent::Go(_)
-                | LiveEvent::MatchOver(_)
-                | LiveEvent::CustomOpen { .. } => {}
+                LiveEvent::Match(info) => self.match_ready(info),
+                LiveEvent::HostMatch(id) => self.host_match(id),
+                LiveEvent::Link(link) if self.online.in_match() || self.online.in_custom() => {
+                    self.online.open_leg(link, now)
+                }
+                LiveEvent::Link(_) => {}
+                LiveEvent::Go(id) => self.match_go(id),
+                LiveEvent::MatchOver(over) => self.match_over(over),
+                LiveEvent::CustomOpen { party, leader, map } => {
+                    self.custom_open(party, leader, map)
+                }
             }
         }
         let screen = self.menu.screen;
         match self.online.follow_party(now) {
-            Some(true) if online_screen(screen) && screen != Screen::Matchmaking => {
+            Some(Followed::Searching) if online_screen(screen) && screen != Screen::Matchmaking => {
                 self.menu.show(Screen::Matchmaking);
                 self.sound.play_ui(&self.scene, Sound::Advance);
             }
-            Some(false) if screen == Screen::Matchmaking => {
+            Some(Followed::Stopped) if screen == Screen::Matchmaking => {
                 self.menu.show(Screen::Live);
+                let view = self.online.view(now);
+                if let Some(failed) = view.and_then(|v| v.search_failed()) {
+                    self.menu.notice = Some(failed);
+                }
+            }
+            Some(Followed::CustomOver) if self.online.in_custom() => {
+                self.custom_over();
+                self.menu.notice = Some("THE CUSTOM GAME IS OVER".into());
+                self.sound.play_ui(&self.scene, Sound::Back);
             }
             _ => {}
+        }
+        // Relay legs whose other end came, for the match or custom game.
+        for (link, conn) in self.online.linked() {
+            if self.online.in_match() {
+                self.match_linked(link, conn);
+            } else {
+                self.custom_linked(link, conn);
+            }
+        }
+        self.update_match();
+        self.update_custom();
+        self.auto_search(now);
+    }
+
+    /// For testing (H2_LIVE_AUTO=search:<key>): lead the party into that
+    /// playlist's searches, each time it's been back in its lobby a while,
+    /// signing in again if need be.
+    fn auto_search(&mut self, now: f64) {
+        let Some(key) = &self.online.auto else {
+            return;
+        };
+        if self.online.failed.is_some() && now - self.online.dialed >= AUTO_RETRY {
+            println!("live: signing in again");
+            self.menu.show(Screen::Live);
+            self.go_online();
+            return;
+        }
+        let here = self.menu.screen == Screen::Live && self.loading.is_none();
+        let view = self.online.view(now).filter(|_| here);
+        let lobby = |v: &OnlineView| v.party().is_some_and(|p| p.activity == Activity::Lobby);
+        let ready =
+            view.filter(|v| v.leads() && v.search.is_none() && v.game.is_none() && lobby(v));
+        let playlist =
+            ready.and_then(|v| v.playlists().iter().find(|p| p.key == *key).map(|p| p.id));
+        let Some(id) = playlist else {
+            self.online.idle = now;
+            return;
+        };
+        if now - self.online.idle >= AUTO_WAIT {
+            self.online.idle = now;
+            self.menu.show(Screen::Matchmaking);
+            self.ask_live(Action::Search(Some(id)));
         }
     }
 
@@ -719,9 +1036,31 @@ struct TestService {
     done: Vec<bool>,
 }
 
+/// Test services started in this process, to tell their folders apart.
+static TEST_SERVICES: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether the process `pid` still runs. Only Linux can say (elsewhere it
+/// might, so its folder is left alone).
+fn running(pid: &str) -> bool {
+    !cfg!(target_os = "linux") || Path::new("/proc").join(pid).exists()
+}
+
 impl TestService {
     fn start(fakes: usize, now: f64) -> Result<TestService, String> {
-        let dir = std::env::temp_dir().join(format!("h2live-mem-{}", std::process::id()));
+        // Each in a folder of its own, named for the process; those left
+        // by games that didn't stop cleanly go.
+        let temp = std::env::temp_dir();
+        for entry in std::fs::read_dir(&temp).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let pid = name
+                .strip_prefix("h2live-mem-")
+                .and_then(|n| n.split('-').next());
+            if pid.is_some_and(|pid| !running(pid)) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+        let n = TEST_SERVICES.fetch_add(1, Ordering::Relaxed);
+        let dir = temp.join(format!("h2live-mem-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let server = Server::open(&dir, Some("an in-game test service"))?;
         let mut service = TestService {
@@ -743,7 +1082,8 @@ impl TestService {
             };
             // Each from an address of its own (sign-ins are limited by
             // address).
-            let conn = service.connect(IpAddr::V4(Ipv4Addr::new(10, 0, 0, k as u8 + 1)), now);
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, k as u8 + 1));
+            let conn = service.connect(Route::Live, ip, now);
             let card = service.dir.join(format!("fake-{k}-card.txt"));
             let account = h2live::store::account_id(&key.verifying_key().to_bytes());
             let fake = LiveClient::new(conn, key, &profile, &card, now);
@@ -754,10 +1094,11 @@ impl TestService {
         Ok(service)
     }
 
-    /// A new control link to the service from `ip`: the PC's end.
-    fn connect(&mut self, ip: IpAddr, now: f64) -> Connection {
+    /// A new link to the service from `ip` (to sign in, or a relay leg):
+    /// the PC's end.
+    fn connect(&mut self, route: Route, ip: IpAddr, now: f64) -> Connection {
         let (server_end, pc_end) = Connection::pair();
-        self.server.accept(server_end, Route::Live, ip, now);
+        self.server.accept(server_end, route, ip, now);
         pc_end
     }
 
@@ -922,10 +1263,236 @@ mod tests {
         until(&mut online, &mut now, |v| v.party_size() == 5);
         let v = online.view(now).unwrap();
         assert_eq!(v.search_status().0, "SEARCHING FOR A GAME...");
-        // Signing out leaves; a service on the network isn't there yet.
+        // Signing out leaves.
         online.sign_out();
         assert!(online.view(now).is_none());
-        online.connect("wss://h2live.example.com/live", profile("JOHN"), 0, now);
-        assert_eq!(online.view(now).unwrap().failed, Some(NO_TRANSPORT));
+    }
+
+    /// A service on a port of its own, as the h2live program runs one:
+    /// WebSockets that come to it are the server's, by their path.
+    struct NetService {
+        server: Server,
+        asked: Receiver<Result<h2net::Request, String>>,
+        port: u16,
+        clock: Instant,
+    }
+
+    impl NetService {
+        fn start(dir: &Path) -> NetService {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, asked) = mpsc::channel();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let _ = tx.send(h2net::accept(stream, &["/live", "/link"]));
+                }
+            });
+            NetService {
+                server: Server::open(dir, Some("a test service")).unwrap(),
+                asked,
+                port,
+                clock: Instant::now(),
+            }
+        }
+
+        /// Seconds since it started.
+        fn now(&self) -> f64 {
+            self.clock.elapsed().as_secs_f64()
+        }
+
+        /// Take what came and run the server a step, after a moment.
+        fn poll(&mut self) -> f64 {
+            std::thread::sleep(Duration::from_millis(5));
+            let now = self.now();
+            while let Ok(Ok(h2net::Request::WebSocket(conn, path, _))) = self.asked.try_recv() {
+                let route = if path == "/link" {
+                    Route::Link
+                } else {
+                    Route::Live
+                };
+                self.server
+                    .accept(conn, route, IpAddr::V4(Ipv4Addr::LOCALHOST), now);
+            }
+            self.server.poll(now);
+            now
+        }
+    }
+
+    #[test]
+    fn services_on_the_network_are_dialed_in_the_background() {
+        let home = TempDir(std::env::temp_dir().join(format!("h2-dial-{}", std::process::id())));
+        let mut service = NetService::start(&home.0.join("service"));
+        let mut online = Online::new(LiveText::default(), Some(home.0.join("identity.key")));
+        let address = format!("ws://127.0.0.1:{}/live/", service.port);
+        online.connect(&address, profile("JOHN"), 0, 0.0);
+        let view = online.view(0.0).unwrap();
+        assert!(view.live.is_none() && view.failed.is_none() && !view.waking);
+        assert!(online.view(WAKING + 1.0).unwrap().waking, "slow to answer");
+        let signed_in = (0..1000).any(|_| {
+            let now = service.poll();
+            online.poll(now);
+            online.view(now).is_some_and(|v| v.party().is_some())
+        });
+        assert!(signed_in);
+        // Nothing there: why comes back, to the notice line.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("ws://127.0.0.1:{}", closed.local_addr().unwrap().port());
+        drop(closed);
+        online.connect(&address, profile("JOHN"), 0, 0.0);
+        let failed = (0..1000).find_map(|_| {
+            std::thread::sleep(Duration::from_millis(5));
+            online.poll(service.now());
+            online.failed.clone()
+        });
+        assert!(failed.unwrap().starts_with("COULDN'T CONNECT"));
+        // Addresses that aren't the service's say so at once.
+        online.connect("h2live.example.com", profile("JOHN"), 0, 0.0);
+        let why = online.view(0.0).unwrap().failed.unwrap();
+        assert_eq!(why, "NO ONLINE SERVICE AT H2LIVE.EXAMPLE.COM");
+    }
+
+    #[test]
+    fn a_matchs_pcs_are_linked_through_the_service() {
+        let home = TempDir(std::env::temp_dir().join(format!("h2-legs-{}", std::process::id())));
+        let mut service = NetService::start(&home.0.join("service"));
+        let address = format!("ws://127.0.0.1:{}", service.port);
+        // Two PCs with the same Lockout, each alone in its party.
+        let mut pcs: Vec<Online> = ["ALPHA", "BRAVO"]
+            .iter()
+            .map(|name| {
+                let key = home.0.join(format!("{name}.key"));
+                let mut online = Online::new(LiveText::default(), Some(key));
+                let me = client::Profile {
+                    maps: vec![("lockout".into(), 99)],
+                    ..profile(name)
+                };
+                online.connect(&address, me, 0, 0.0);
+                online
+            })
+            .collect();
+        let mut linked = [Vec::new(), Vec::new()];
+        let mut hosting = None;
+        for _ in 0..2000 {
+            let now = service.poll();
+            for (k, online) in pcs.iter_mut().enumerate() {
+                for event in online.poll(now) {
+                    match event {
+                        LiveEvent::HostMatch(id) => {
+                            online.send(ToServer::Hosting(id));
+                            hosting = Some(k);
+                        }
+                        LiveEvent::Link(link) => online.open_leg(link, now),
+                        _ => {}
+                    }
+                }
+                // Both search Head to Head.
+                let lobby = online.view(now).and_then(|v| Some(v.party()?.activity));
+                if lobby == Some(Activity::Lobby) && online.search.is_none() {
+                    online.ask(&Action::Search(Some(1)), now);
+                }
+                linked[k].extend(online.linked());
+            }
+            if linked.iter().all(|l| !l.is_empty()) {
+                break;
+            }
+        }
+        // The host's leg is to the PC joining it, and the other's to the
+        // host; what one sends, the other gets.
+        let host = hosting.expect("a host");
+        let (mut ours, mut theirs) = (linked[host].remove(0), linked[1 - host].remove(0));
+        assert!(!ours.0.joiner && theirs.0.joiner);
+        assert_eq!(theirs.0.map, "lockout");
+        ours.1.send(9, b"hello");
+        ours.1.flush().unwrap();
+        let heard = (0..1000).find_map(|_| {
+            service.poll();
+            theirs.1.receive().unwrap().pop()
+        });
+        assert_eq!(heard, Some((9, b"hello".to_vec())));
+    }
+
+    #[test]
+    fn relay_legs_go_to_the_services_link_path() {
+        let url = |address| service_url(address, "link");
+        assert_eq!(url("ws://127.0.0.1:47050"), "ws://127.0.0.1:47050/link");
+        assert_eq!(url("wss://h2.example.com/"), "wss://h2.example.com/link");
+        assert_eq!(
+            url("wss://h2.example.com/live"),
+            "wss://h2.example.com/link"
+        );
+        assert_eq!(service_url("ws://h:1/link/", "live"), "ws://h:1/live");
+    }
+
+    #[test]
+    fn the_party_follows_its_searches() {
+        let home = TempDir(std::env::temp_dir().join(format!("h2-follow-{}", std::process::id())));
+        let mut online = Online::new(LiveText::default(), Some(home.0.join("identity.key")));
+        let mut now = 0.0;
+        online.connect("mem", profile("JOHN"), 0, now);
+        until(&mut online, &mut now, |v| v.party().is_some());
+        // Ours shows at once, but with no maps the service won't start it,
+        // and says why.
+        online.ask(&Action::Search(Some(2)), now);
+        assert_eq!(online.view(now).unwrap().search.map(|s| s.0), Some(2));
+        assert_eq!(online.follow_party(now), None, "until the service answers");
+        let mut notices = Vec::new();
+        let stopped = (0..100).find_map(|_| {
+            now += 0.05;
+            for e in online.poll(now) {
+                if let LiveEvent::Notice(text) = e {
+                    notices.push(text);
+                }
+            }
+            online.follow_party(now)
+        });
+        assert_eq!(stopped, Some(Followed::Stopped));
+        assert_eq!(
+            notices,
+            ["YOUR PARTY HAS NO MAP FROM THIS PLAYLIST IN COMMON"]
+        );
+        assert!(online.view(now).unwrap().search.is_none());
+        // The leader's searches, as the party sees them: started, then
+        // stopped, or on to a match.
+        let set = |online: &mut Online, activity| {
+            if let Link::Live(client) = &mut online.link {
+                client.view.party.as_mut().unwrap().activity = activity;
+            }
+        };
+        set(&mut online, Activity::Searching);
+        assert_eq!(online.follow_party(now), Some(Followed::Searching));
+        assert!(online.view(now).unwrap().search.is_some());
+        assert_eq!(online.follow_party(now), None, "still searching");
+        set(&mut online, Activity::Playing);
+        assert_eq!(online.follow_party(now), None, "a match was found");
+        assert!(online.view(now).unwrap().search.is_none());
+        set(&mut online, Activity::Lobby);
+        assert_eq!(online.follow_party(now), None, "back from the match");
+        set(&mut online, Activity::Searching);
+        online.follow_party(now);
+        set(&mut online, Activity::Lobby);
+        assert_eq!(
+            online.follow_party(now),
+            Some(Followed::Stopped),
+            "cancelled"
+        );
+        // One the service never answers is given up on.
+        online.ask(&Action::Search(None), now);
+        assert_eq!(online.follow_party(now + 1.0), None);
+        let given_up = online.follow_party(now + ASK_WAIT);
+        assert_eq!(given_up, Some(Followed::Stopped));
+        // The leader's custom games, open and then over.
+        set(&mut online, Activity::Custom);
+        assert_eq!(online.follow_party(now), None);
+        assert_eq!(online.follow_party(now), None, "still open");
+        set(&mut online, Activity::Lobby);
+        assert_eq!(online.follow_party(now), Some(Followed::CustomOver));
+    }
+
+    #[test]
+    fn cards_are_kept_beside_their_keys() {
+        let card = |key: &str| card_path(Path::new(key));
+        assert_eq!(card("/h/identity.key"), Path::new("/h/live-card.txt"));
+        assert_eq!(card("/h/alpha.key"), Path::new("/h/alpha-card.txt"));
+        assert_eq!(card("/h/bravo"), Path::new("/h/bravo-card.txt"));
     }
 }

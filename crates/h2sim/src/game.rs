@@ -60,13 +60,22 @@ pub const DEFAULT_COLORS: [[u8; 2]; 12] = [
     [15, 1],
 ];
 
-/// A name as gamertags are shown here: capitals and printable characters,
-/// at most `MAX_NAME` of them, with no spaces at either end. Cleaning a
-/// clean name changes nothing.
+/// Marks a gamertag can have besides letters, digits and spaces: those the
+/// game's font draws, so no two names that look the same differ.
+const NAME_MARKS: &str = "/:.-<>'!?,()+";
+
+/// `c` can be in a gamertag (in either case).
+pub fn name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == ' ' || NAME_MARKS.contains(c)
+}
+
+/// A name as gamertags are shown here: capitals, digits, spaces and the
+/// marks the font has, at most `MAX_NAME` of them, with no spaces at either
+/// end. Cleaning a clean name changes nothing.
 pub fn clean_name(name: &str) -> String {
     let name: String = name
         .chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .filter(|&c| name_char(c))
         .skip_while(|&c| c == ' ')
         .take(MAX_NAME)
         .collect();
@@ -2378,6 +2387,9 @@ pub(crate) mod tests {
         assert_eq!(clean_name("averyveryverylongname"), "AVERYVERYVERYLO");
         // Spaces left at the start once what can't be shown is gone go too.
         assert_eq!(clean_name("\u{e9} Bob"), "BOB");
+        // Only what the font draws, so SARGE_ can't pass for SARGE.
+        assert_eq!(clean_name("Sarge_#%"), "SARGE");
+        assert_eq!(clean_name("(o.o)-<3!?"), "(O.O)-<3!?");
         assert_eq!(
             clean_name("\u{3a9}  Master  Chief \u{3a9}"),
             "MASTER  CHIEF"

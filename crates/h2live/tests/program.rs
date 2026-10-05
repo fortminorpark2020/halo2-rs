@@ -300,3 +300,49 @@ fn the_program_goes_on_when_what_it_says_has_nowhere_to_go() {
     assert!(health.ends_with("\r\n\r\nOK"), "{health}");
     assert!(program.child.try_wait().unwrap().is_none());
 }
+
+/// The program's CPU time so far (Linux says).
+#[cfg(target_os = "linux")]
+fn cpu_time(program: &Program) -> Duration {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", program.child.id())).unwrap();
+    // After the name, in brackets: user and system time are the 12th and
+    // 13th fields, in clock ticks.
+    let fields: Vec<&str> = stat
+        .rsplit(')')
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    let ticks: u64 = fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap();
+    let hz = Command::new("getconf").arg("CLK_TCK").output().unwrap();
+    let hz: u64 = String::from_utf8(hz.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    Duration::from_secs_f64(ticks as f64 / hz as f64)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_program_rests_while_pcs_do_nothing() {
+    let data = TempDir::new("program-rests");
+    let program = Program::start(&data.0);
+    let mut pcs = Pcs::new();
+    for (n, gamertag) in ["ALPHA", "BRAVO", "CHARLIE", "DELTA"].iter().enumerate() {
+        pcs.connect(program.port, n as u8 + 1, gamertag);
+    }
+    pcs.until(|p| p.pcs.iter().all(LiveClient::signed_in));
+    // Four PCs in their lobbies a few seconds, pinging now and then: it
+    // waits for them, not looking every moment.
+    let (start, used) = (Instant::now(), cpu_time(&program));
+    pcs.until(|_| start.elapsed() >= Duration::from_secs(4));
+    let used = cpu_time(&program) - used;
+    assert!(used < Duration::from_millis(40), "{used:?} in 4 s");
+    // And answers at once.
+    let pings: Vec<u32> = pcs.pcs.iter().filter_map(|pc| pc.view.round_trip).collect();
+    assert!(
+        pings.len() == 4 && pings.iter().all(|&ms| ms < 20),
+        "{pings:?}"
+    );
+}

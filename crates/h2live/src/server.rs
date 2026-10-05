@@ -27,7 +27,7 @@ use h2net::Connection;
 use h2sim::game::{clean_name, Look};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
-use std::net::IpAddr;
+use std::net::{IpAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -191,8 +191,6 @@ pub struct Server {
     online_sent: f64,
     /// The Unix time when the server's clock read 0.
     epoch: u64,
-    /// Whether anything came in during this poll.
-    traffic: bool,
 }
 
 impl Server {
@@ -235,13 +233,19 @@ impl Server {
             online_changed: false,
             online_sent: f64::NEG_INFINITY,
             epoch,
-            traffic: false,
         })
     }
 
     /// Connections open now (control links and relay legs).
     pub fn connections(&self) -> usize {
         self.pcs.len() + self.legs.len() + 2 * self.links.len()
+    }
+
+    /// The TCP connections of those open now, to wait for something to
+    /// come on.
+    pub fn streams(&self) -> impl Iterator<Item = &TcpStream> {
+        let pcs = self.pcs.iter().map(|pc| &pc.conn);
+        pcs.chain(self.relay_conns()).filter_map(Connection::stream)
     }
 
     /// Players signed in now.
@@ -300,10 +304,8 @@ impl Server {
 
     /// Read and answer everything that arrived, pass games on, find
     /// matches and see them through, ping, drop connections that went
-    /// quiet, and tell players what changed, at time `now`. True if
-    /// anything came in (so more may soon).
-    pub fn poll(&mut self, now: f64) -> bool {
-        self.traffic = false;
+    /// quiet, and tell players what changed, at time `now`.
+    pub fn poll(&mut self, now: f64) {
         for k in 0..self.pcs.len() {
             self.read_pc(k, now);
         }
@@ -333,7 +335,6 @@ impl Server {
             .retain_mut(|(conn, until)| conn.flush().is_ok() && now < *until);
         self.sign_ins
             .retain(|_, times| times.last().is_some_and(|&t| now - t < 60.0));
-        self.traffic
     }
 
     /// Keep a dropped connection a moment, to send what's left.
@@ -386,7 +387,6 @@ impl Server {
         };
         if !messages.is_empty() {
             self.pcs[k].heard = now;
-            self.traffic = true;
         }
         for (kind, body) in messages {
             if self.pcs[k].gone.is_some() {

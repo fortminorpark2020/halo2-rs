@@ -70,6 +70,15 @@ impl App {
             if !self.client_status(status) || self.loading.is_some() {
                 return;
             }
+            // Online, a PC that comes during the host's game on the map
+            // loaded here goes straight into it. (The host's options arrive
+            // with its game.)
+            if let Some(players) = self.welcome.take() {
+                self.seat_players(&[], &GameOptions::default());
+                self.welcome = Some(players);
+                self.menu.notice = None;
+                return;
+            }
             // Splitscreen players coming and going here, and their teams,
             // show in the host's lobby.
             let wanted = self.wanted_teams();
@@ -87,16 +96,24 @@ impl App {
             }
             return;
         }
-        let in_lobby = matches!(self.menu.screen, Screen::Lobby | Screen::Options);
-        if !in_lobby {
-            // Leaving the lobby closes it.
-            self.net = Net::Offline;
-            return;
-        }
-        if matches!(self.net, Net::Offline) && self.can_host {
-            self.start_hosting();
-        }
-        let lobby = self.lobby_info();
+        // An online match's host keeps its lobby up through the pregame.
+        let lobby = match self.match_lobby().filter(|_| self.hosting_match()) {
+            Some(lobby) => lobby,
+            None => {
+                let in_lobby = matches!(self.menu.screen, Screen::Lobby | Screen::Options);
+                if !in_lobby {
+                    // Leaving the lobby closes it.
+                    self.net = Net::Offline;
+                    return;
+                }
+                // The party's custom game is hosted only as it opens.
+                let custom = self.online.in_custom();
+                if matches!(self.net, Net::Offline) && self.can_host && !custom {
+                    self.start_hosting();
+                }
+                self.lobby_info()
+            }
+        };
         let Net::Hosting(host) = &mut self.net else {
             return;
         };
@@ -121,6 +138,16 @@ impl App {
         }
     }
 
+    /// How players on other PCs in the lobby play: online, in the party's
+    /// custom game.
+    fn remote_how(&self) -> &'static str {
+        if self.online.in_custom() {
+            "ONLINE"
+        } else {
+            "SYSTEM LINK"
+        }
+    }
+
     /// Players on PCs that joined our lobby.
     fn lan_members(&self) -> Vec<SeatInfo> {
         let Net::Hosting(host) = &self.net else {
@@ -132,7 +159,7 @@ impl App {
                 seats.push(SeatInfo {
                     name: guest_name(&name, k),
                     look: look.guest(k),
-                    how: "SYSTEM LINK",
+                    how: self.remote_how(),
                     team,
                     // Listed after the people here.
                     level: crate::rank::test_level(self.seats.len() + seats.len()),
@@ -144,25 +171,34 @@ impl App {
 
     /// Everyone in the lobby, as the menus list them.
     pub(crate) fn lobby_seats(&self) -> Vec<SeatInfo> {
-        if let Net::Joined {
-            lobby: Some(lobby), ..
-        } = &self.net
-        {
-            return lobby
+        if let Some(seats) = self.match_seats() {
+            return seats;
+        }
+        let mut seats = match &self.net {
+            Net::Joined {
+                lobby: Some(lobby), ..
+            } => lobby
                 .players
                 .iter()
                 .enumerate()
                 .map(|(k, p)| SeatInfo {
                     name: p.name.clone(),
                     look: p.look,
-                    how: if p.remote { "SYSTEM LINK" } else { "HOST" },
+                    how: if p.remote { self.remote_how() } else { "HOST" },
                     team: p.team,
                     level: crate::rank::test_level(k),
                 })
-                .collect();
+                .collect(),
+            _ => {
+                let mut seats = self.seat_infos();
+                seats.extend(self.lan_members());
+                seats
+            }
+        };
+        // In the party's custom game, everyone's level.
+        for seat in &mut seats {
+            seat.level = self.online.party_level(&seat.name).or(seat.level);
         }
-        let mut seats = self.seat_infos();
-        seats.extend(self.lan_members());
         seats
     }
 
@@ -173,7 +209,7 @@ impl App {
             .lobby_seats()
             .into_iter()
             .map(|seat| LobbyPlayer {
-                remote: seat.how == "SYSTEM LINK",
+                remote: seat.how == self.remote_how(),
                 name: seat.name,
                 look: seat.look,
                 team: seat.team,
@@ -242,11 +278,14 @@ impl App {
                     self.bots.push(bot_for(player));
                     self.announce(&format!("{} LEFT", self.game.name(player)));
                 }
-                HostEvent::Left { players, .. } => {
+                HostEvent::Left {
+                    computer, players, ..
+                } => {
                     for &p in &players {
                         self.announce(&format!("{} LEFT", self.game.name(p)));
                     }
                     self.bots.extend(players.into_iter().map(bot_for));
+                    self.match_left(&computer);
                 }
             }
         }
@@ -310,7 +349,7 @@ impl App {
             fire_held: self.fire_held,
             zoom_held: self.zoom_held,
         };
-        let commands: Vec<(usize, Command)> = self
+        let mut commands: Vec<(usize, Command)> = self
             .locals
             .iter()
             .map(|l| {
@@ -321,6 +360,11 @@ impl App {
                 (l.player, l.command(l.keyboard.then_some(&keyboard), pad))
             })
             .collect();
+        if let Some((p, command)) = self.autopilot_command() {
+            for c in commands.iter_mut().filter(|c| c.0 == p) {
+                c.1 = command;
+            }
+        }
         if let Net::Joined { client, .. } = &mut self.net {
             client.send_commands(&commands);
         }
@@ -335,8 +379,12 @@ impl App {
         for s in status {
             match s {
                 ClientEvent::Welcomed { computer, players } => {
+                    // Online, the host is known by its gamertag.
+                    let online = self.online.in_match() || self.online.in_custom();
                     if let Net::Joined { computer: name, .. } = &mut self.net {
-                        *name = computer;
+                        if !online {
+                            *name = computer;
+                        }
                     }
                     self.welcome = Some(players);
                 }
@@ -347,6 +395,11 @@ impl App {
                 }
                 ClientEvent::Lost(why) => {
                     println!("lan: lost the host: {why}");
+                    // Online, the host's link goes with the match.
+                    if self.match_game_over() {
+                        self.net = Net::Offline;
+                        return false;
+                    }
                     self.drop_out("LOST CONNECTION TO THE HOST".into());
                     return false;
                 }
@@ -379,6 +432,10 @@ impl App {
         }
         if self.mode == Mode::Playing {
             self.back_to_lobby();
+        } else if self.online.in_custom() && self.menu.screen != Screen::Lobby {
+            // Through to the party leader's lobby.
+            self.menu.show(Screen::Lobby);
+            self.menu.notice = None;
         }
     }
 
@@ -387,6 +444,8 @@ impl App {
         if let Net::Joined { lobby, .. } = &mut self.net {
             *lobby = None;
         }
+        // What we were told while waiting for it is old news.
+        self.menu.notice = None;
         if map.eq_ignore_ascii_case(&self.map_name) {
             self.rejoin_host();
             return;
@@ -403,7 +462,7 @@ impl App {
             return;
         }
         // The host's options arrive with its game.
-        self.seat_players(0, &GameOptions::default());
+        self.seat_players(&[], &GameOptions::default());
         let mut wanted = self.wanted_teams();
         wanted.truncate(self.locals.len());
         if let Net::Joined {
@@ -415,8 +474,17 @@ impl App {
         }
     }
 
-    /// Leave the PC we joined, for the list of games on the network.
+    /// Leave the PC we joined, for the list of games on the network (or
+    /// the party, online).
     pub(crate) fn leave_game(&mut self) {
+        if self.online.in_match() {
+            self.quit_match(false);
+            return;
+        }
+        if self.online.in_custom() {
+            self.leave_custom();
+            return;
+        }
         self.net = Net::Offline;
         self.back_to_lobby();
         self.menu.show(Screen::SystemLink);

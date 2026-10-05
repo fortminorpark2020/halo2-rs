@@ -22,6 +22,8 @@
 use h2live::server::{flush_log, log, log_in_background, say, Route, Server};
 use h2net::Request;
 use igd_next::{AddPortError, Gateway, PortMappingProtocol, SearchOptions};
+use rustix::event::{PollFd, PollFlags, Timespec};
+use rustix::io::Errno;
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -35,11 +37,10 @@ use std::time::{Duration, Instant};
 /// The port and the data folder unless told otherwise.
 const PORT: u16 = 47050;
 const DATA: &str = "h2live-data";
-/// Naps between polls: while things come in, and once nothing has for a
-/// while (seconds).
-const BUSY_NAP: Duration = Duration::from_millis(2);
-const IDLE_NAP: Duration = Duration::from_millis(50);
-const QUIET: f64 = 1.0;
+/// Polls are this far apart at least, so a busy server reads what came
+/// meanwhile all at once; and at most this, with nothing coming in.
+const NAP: Duration = Duration::from_millis(5);
+const IDLE: Duration = Duration::from_millis(50);
 /// Where games come in, as WebSockets: anywhere else isn't found.
 const PATHS: &[&str] = &["/live", "/link"];
 /// New connections still saying what they want, at most: more wait their
@@ -215,16 +216,12 @@ fn serve(listener: &TcpListener, server: &mut Server, stop: &AtomicBool, hosted:
     let mut asking = 0;
     let mut from_each = HashMap::<IpAddr, usize>::new();
     let mut turned_away = HashSet::new();
-    // When something last came in.
-    let mut heard = f64::NEG_INFINITY;
     while !stop.load(Ordering::SeqCst) {
         let now = start.elapsed().as_secs_f64();
-        let mut busy = false;
         while asking < ASKING {
             let Ok((stream, from)) = listener.accept() else {
                 break;
             };
-            busy = true;
             let ip = from.ip();
             let each = from_each.entry(ip).or_default();
             if *each == ASKING_EACH && !hosted {
@@ -251,7 +248,6 @@ fn serve(listener: &TcpListener, server: &mut Server, stop: &AtomicBool, hosted:
                     turned_away.remove(&from);
                 }
             }
-            busy = true;
             match request {
                 Ok(Request::WebSocket(conn, path, forwarded)) => {
                     let ip = forwarded.filter(|_| hosted).unwrap_or(from);
@@ -266,12 +262,29 @@ fn serve(listener: &TcpListener, server: &mut Server, stop: &AtomicBool, hosted:
                 Err(why) => log(format_args!("{from}: {why}")),
             }
         }
-        busy |= server.poll(now);
-        if busy {
-            heard = now;
+        server.poll(now);
+        std::thread::sleep(NAP);
+        // Connections still saying what they want come by channel, which
+        // can't be waited on.
+        let idle = if asking > 0 { Duration::ZERO } else { IDLE };
+        wait(listener, server, idle);
+    }
+}
+
+/// Wait for something to come in, or a connection, for `idle` at most.
+fn wait(listener: &TcpListener, server: &Server, idle: Duration) {
+    let ready = PollFlags::IN;
+    let mut fds: Vec<PollFd> = server.streams().map(|s| PollFd::new(s, ready)).collect();
+    fds.push(PollFd::new(listener, ready));
+    let timeout = Timespec::try_from(idle).ok();
+    match rustix::event::poll(&mut fds, timeout.as_ref()) {
+        // Ctrl+C, say.
+        Ok(_) | Err(Errno::INTR) => {}
+        Err(e) => {
+            // Not to spin, whatever it was.
+            log(format_args!("waiting: {e}"));
+            std::thread::sleep(idle);
         }
-        let quiet = now - heard >= QUIET;
-        std::thread::sleep(if quiet { IDLE_NAP } else { BUSY_NAP });
     }
 }
 
