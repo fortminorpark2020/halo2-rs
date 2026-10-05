@@ -444,6 +444,8 @@ impl App {
         if let Net::Joined { lobby, .. } = &mut self.net {
             *lobby = None;
         }
+        // What we were told while waiting for it is old news.
+        self.menu.notice = None;
         if map.eq_ignore_ascii_case(&self.map_name) {
             self.rejoin_host();
             return;

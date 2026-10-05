@@ -125,6 +125,12 @@ impl App {
         }
     }
 
+    /// Hosting the party's custom game (whose lobby stays up while a map
+    /// loads).
+    pub(crate) fn hosting_custom(&self) -> bool {
+        self.online.in_custom() && matches!(self.net, Net::Hosting(_))
+    }
+
     /// Back to the party lobby from its custom game, which is over for
     /// everyone if we host it.
     pub(crate) fn leave_custom(&mut self) {

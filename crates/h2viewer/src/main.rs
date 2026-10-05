@@ -1283,9 +1283,9 @@ impl App {
         self.lan_games = self.browser.poll().to_vec();
         self.menu_time += dt;
         if self.mode == Mode::Menu || self.loading.is_some() {
-            // An online match's host lets PCs into its lobby while its map
-            // loads.
-            if self.loading.is_none() || self.hosting_match() {
+            // An online host (a match's, or the party's custom game's) lets
+            // PCs into its lobby while its map loads.
+            if self.loading.is_none() || self.hosting_match() || self.hosting_custom() {
                 self.update_lobby_net();
             } else {
                 // Other PCs keep hearing from us while a map loads; what
