@@ -5,6 +5,7 @@
 
 use crate::conn::Connection;
 use crate::discovery::Beacon;
+use crate::live::ToServer;
 use crate::{kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
 use h2sim::game::{guest_name, Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
@@ -160,6 +161,11 @@ pub struct Host {
     last: Vec<u8>,
     /// Bytes of snapshots sent so far.
     sent: u64,
+    /// Online through the service's relay: the leg for what goes to many
+    /// joined PCs at once (see `set_fanout`), and the accounts of those the
+    /// last of that went to.
+    fanout: Option<Connection>,
+    fanned: Vec<u64>,
     /// The Spartans PCs left playing on when they left the game, by who
     /// played them (see `Remote::who`): theirs again if they come back.
     left: Vec<(String, Vec<usize>)>,
@@ -329,6 +335,8 @@ impl Host {
             seq: 0,
             last: Vec::new(),
             sent: 0,
+            fanout: None,
+            fanned: Vec::new(),
             left: Vec::new(),
         }
     }
@@ -359,7 +367,18 @@ impl Host {
             .push(Remote::new(conn, address, computer, Some(verified)));
     }
 
-    /// Bytes of snapshots sent to joined PCs so far.
+    /// Send what goes to many joined PCs at once over `conn`, a fan-out leg
+    /// to the online service (`live::End::Fanout`), which passes a copy on
+    /// to each: it's uploaded once rather than once for every PC. That's
+    /// how the game changed since the last snapshot, to the PCs that have
+    /// the last; the rest still goes to each PC over its own connection.
+    pub fn set_fanout(&mut self, conn: Connection) {
+        self.fanout = Some(conn);
+        self.fanned.clear();
+    }
+
+    /// Bytes of snapshots sent to joined PCs so far (once for all those
+    /// that get the same, over a fan-out leg).
     pub fn sent(&self) -> u64 {
         self.sent
     }
@@ -479,6 +498,7 @@ impl Host {
                 }
             }
         }
+        self.keep_fanout();
         let players = match &self.lobby {
             Some(l) => l.players.len(),
             None => game.players.len(),
@@ -487,6 +507,24 @@ impl Host {
             beacon.announce(&self.map, &self.computer, players.min(255) as u8);
         }
         events
+    }
+
+    /// Something goes over the fan-out leg every second, as to joined PCs,
+    /// so nothing along the way closes it while there's no game on; once
+    /// it's gone, everything goes to each PC over its own connection.
+    fn keep_fanout(&mut self) {
+        let Some(leg) = &mut self.fanout else {
+            return;
+        };
+        if leg.since_sent() >= self.timeout / 10 {
+            // To no one.
+            fan_out(leg, &mut self.fanned, Vec::new(), kind::HOST_ALIVE, &[]);
+        }
+        // Nothing more comes on it: only whether it's gone.
+        if let Err(why) = leg.receive().and_then(|_| leg.flush()) {
+            println!("lan: lost the fan-out leg: {why}");
+            self.fanout = None;
+        }
     }
 
     fn read_remote(
@@ -698,6 +736,7 @@ impl Host {
             r.conn.keep_alive(kind::HOST_ALIVE, self.timeout / 10);
             let _ = r.conn.flush();
         }
+        self.keep_fanout();
     }
 
     /// This tick's controls for a player on a joined PC: their latest
@@ -741,8 +780,11 @@ impl Host {
         let state = w.0;
         let body = snapshot(&state, &events);
         // Online, PCs that got the last snapshot get how this one differs;
-        // others (just joined, or behind) get all of it.
+        // others (just joined, or behind) get all of it. Through the relay,
+        // how it differs goes once for all of them, over the fan-out leg:
+        // these are their accounts.
         let mut delta = None;
+        let mut fanned = Vec::new();
         for r in &mut self.remotes {
             if !r.in_game || !(due || r.fresh) {
                 continue;
@@ -774,17 +816,56 @@ impl Host {
                 mine = snapshot(&state, &std::mem::take(&mut r.missed));
                 (kind::SNAPSHOT, &mine, false)
             };
-            r.conn.send(kind, message);
             r.sent = r.sent.wrapping_add(1);
-            self.sent += message.len() as u64;
             r.has = shared.then_some(self.seq);
             r.fresh = false;
             r.behind = None;
-            // A failure shows up as a departure on the next poll.
-            let _ = r.conn.flush();
+            match &r.verified {
+                Some(v) if kind == kind::SNAPSHOT_DELTA && self.fanout.is_some() => {
+                    fanned.push(v.account)
+                }
+                _ => {
+                    r.conn.send(kind, message);
+                    self.sent += message.len() as u64;
+                    // A failure shows up as a departure on the next poll.
+                    let _ = r.conn.flush();
+                }
+            }
+        }
+        if let (Some(leg), Some(delta)) = (&mut self.fanout, &delta) {
+            if !fanned.is_empty() {
+                // A PC that left and came back may be here twice for a
+                // moment.
+                fanned.sort_unstable();
+                fanned.dedup();
+                let sent = fan_out(leg, &mut self.fanned, fanned, kind::SNAPSHOT_DELTA, delta);
+                self.sent += sent as u64;
+                // A failure shows up on the next poll.
+                let _ = leg.flush();
+            }
         }
         if due {
             self.last = body;
         }
     }
+}
+
+/// Send a game message once over a fan-out leg, for the online service to
+/// pass on to the joined PCs with the accounts `to`; `fanned` holds those
+/// the last went to. The bytes sent.
+fn fan_out(
+    leg: &mut Connection,
+    fanned: &mut Vec<u64>,
+    to: Vec<u64>,
+    kind: u8,
+    body: &[u8],
+) -> usize {
+    let to = (to != *fanned).then(|| {
+        fanned.clone_from(&to);
+        to
+    });
+    let body = body.to_vec();
+    let (kind, body) = ToServer::Fanout { to, kind, body }.write();
+    leg.send(kind, &body);
+    1 + body.len()
 }

@@ -124,6 +124,11 @@ impl Connection {
         self.heard.elapsed()
     }
 
+    /// How long since something was last sent.
+    pub fn since_sent(&self) -> Duration {
+        self.sent.elapsed()
+    }
+
     /// After `quiet` with nothing sent, send an empty `kind` message so the
     /// other end knows we're still here.
     pub fn keep_alive(&mut self, kind: u8, quiet: Duration) {

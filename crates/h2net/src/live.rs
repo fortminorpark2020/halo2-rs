@@ -3,7 +3,9 @@
 //! over it, and the server tells it who's online, what its party is doing
 //! and when a match is ready. Games go over relay legs: connections the
 //! server pairs up by a token and then passes h2net's own game messages
-//! between, untouched.
+//! between, untouched. A host also has a fan-out leg, for what goes to
+//! many of the PCs joining it at once: it sends that once, and the server
+//! passes a copy on to each.
 //!
 //! Each message is a kind and a body, as in LAN games. Reading one checks
 //! every count and length, so bytes from a broken or hostile peer are an
@@ -56,6 +58,10 @@ pub const MAX_MAPS: usize = 1024;
 pub const MAX_PLAYLIST_MAPS: usize = 64;
 /// Most players in a match or its results.
 const MAX_PLAYERS: usize = 16;
+/// Most PCs a FANOUT names (far more than ever join one host), and what it
+/// says instead to mean the same PCs as the last.
+const MAX_FANOUT: usize = 254;
+const SAME_PCS: u8 = 255;
 /// Most players an ONLINE list holds.
 const MAX_ONLINE: usize = 2000;
 /// The bytes of a map file its hash covers.
@@ -89,6 +95,8 @@ pub mod kind {
     pub const BACK: u8 = 33;
     // PC to server, first on a relay leg.
     pub const LINK_HELLO: u8 = 40;
+    // Host to server, on its fan-out leg once linked.
+    pub const FANOUT: u8 = 42;
     // Server to PC, on the control link.
     pub const CHALLENGE: u8 = 101;
     pub const WELCOME: u8 = 102;
@@ -165,6 +173,14 @@ pub enum ToServer {
     LinkHello {
         token: [u8; 16],
         account: u64,
+    },
+    /// On a host's fan-out leg: a game message for the PCs joining it with
+    /// these accounts (`None`: the same PCs as the last), which the server
+    /// passes on to each. Sent to no one, it says the host is still there.
+    Fanout {
+        to: Option<Vec<u64>>,
+        kind: u8,
+        body: Vec<u8>,
     },
 }
 
@@ -397,13 +413,25 @@ pub struct LinkInfo {
     pub token: [u8; 16],
     /// The match (or custom game's party) it's for.
     pub id: u64,
-    /// This end joins the other's game; otherwise this end hosts it.
-    pub joiner: bool,
+    pub end: End,
+    /// Who's at the other end (no one, on a fan-out leg).
     pub peer: u64,
     pub gamertag: String,
     pub level: u8,
     pub team: u8,
     pub map: String,
+}
+
+/// Which end of a relayed game a leg is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// The host's, to a PC joining it.
+    Host,
+    /// A joining PC's, to the host.
+    Joiner,
+    /// The host's leg for what goes to many joining PCs at once
+    /// (`ToServer::Fanout`).
+    Fanout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -857,7 +885,7 @@ impl LinkInfo {
     fn write(&self, w: &mut Writer) {
         bytes(w, &self.token);
         w.u64(self.id);
-        w.bool(self.joiner);
+        w.u8(self.end as u8);
         w.u64(self.peer);
         w.str(&self.gamertag);
         w.u8(self.level);
@@ -869,7 +897,12 @@ impl LinkInfo {
         Ok(LinkInfo {
             token: read_bytes(r)?,
             id: r.u64()?,
-            joiner: read_bool(r)?,
+            end: match r.u8()? {
+                0 => End::Host,
+                1 => End::Joiner,
+                2 => End::Fanout,
+                _ => return Err(Malformed),
+            },
             peer: r.u64()?,
             gamertag: read_str(r, MAX_NAME)?,
             level: r.u8()?,
@@ -1038,6 +1071,21 @@ impl ToServer {
                 w.u64(*account);
                 kind::LINK_HELLO
             }
+            ToServer::Fanout { to, kind, body } => {
+                match to {
+                    Some(to) => {
+                        let to = &to[..to.len().min(MAX_FANOUT)];
+                        w.u8(to.len() as u8);
+                        for &account in to {
+                            w.u64(account);
+                        }
+                    }
+                    None => w.u8(SAME_PCS),
+                }
+                w.u8(*kind);
+                w.0.extend_from_slice(body);
+                kind::FANOUT
+            }
         };
         (kind, w.0)
     }
@@ -1085,6 +1133,17 @@ impl ToServer {
                 token: read_bytes(r)?,
                 account: r.u64()?,
             },
+            kind::FANOUT => {
+                let to = match r.u8()? {
+                    SAME_PCS => None,
+                    n => Some((0..n).map(|_| r.u64()).collect::<Result<Vec<_>, _>>()?),
+                };
+                let kind = r.u8()?;
+                // The game message's body is the rest, however long.
+                let at = 2 + 8 * to.as_ref().map_or(0, Vec::len);
+                let body = body[at..].to_vec();
+                return Ok(ToServer::Fanout { to, kind, body });
+            }
             _ => return Err(Malformed),
         };
         if !r.at_end() {
@@ -1322,6 +1381,11 @@ mod tests {
                 token: [3; 16],
                 account: 20,
             },
+            ToServer::Fanout {
+                to: Some(vec![21, 22]),
+                kind: 107,
+                body: Vec::new(),
+            },
         ]
     }
 
@@ -1428,7 +1492,7 @@ mod tests {
             ToPc::Link(LinkInfo {
                 token: [8; 16],
                 id: 10,
-                joiner: true,
+                end: End::Joiner,
                 peer: 2,
                 gamertag: "JORGE".into(),
                 level: 7,
@@ -1472,10 +1536,40 @@ mod tests {
             kinds.push(kind);
         }
         // Every kind once (pings and pongs once each way).
-        assert_eq!(kinds.len(), 23 + 18);
+        assert_eq!(kinds.len(), 24 + 18);
         kinds.sort_unstable();
         kinds.dedup();
-        assert_eq!(kinds.len(), 23 + 18 - 2);
+        assert_eq!(kinds.len(), 24 + 18 - 2);
+    }
+
+    #[test]
+    fn fan_outs_carry_any_game_message() {
+        let messages = [
+            ToServer::Fanout {
+                to: Some(vec![1, 2, 3]),
+                kind: 108,
+                body: vec![9; 3000],
+            },
+            ToServer::Fanout {
+                to: None,
+                kind: 108,
+                body: vec![1, 2],
+            },
+            ToServer::Fanout {
+                to: Some(Vec::new()),
+                kind: 107,
+                body: Vec::new(),
+            },
+        ];
+        for m in &messages {
+            let (kind, body) = m.write();
+            assert_eq!(ToServer::read(kind, &body).as_ref(), Ok(m));
+        }
+        // The same PCs as the last is one byte; each PC named is eight.
+        let (_, body) = messages[1].write();
+        assert_eq!(body, [SAME_PCS, 108, 1, 2]);
+        // Naming more PCs than follow is an error.
+        assert!(ToServer::read(kind::FANOUT, &[2, 0, 0, 0, 0, 0, 0, 0, 0, 108]).is_err());
     }
 
     #[test]
@@ -1489,8 +1583,12 @@ mod tests {
                     "{m:?} cut at {end}"
                 );
             }
+            // (A fan-out's game message runs to its end, so one with more is
+            // another fan-out.)
             let longer = [&body[..], &[0]].concat();
-            assert!(ToServer::read(kind, &longer).is_err(), "{m:?} with more");
+            if kind != kind::FANOUT {
+                assert!(ToServer::read(kind, &longer).is_err(), "{m:?} with more");
+            }
             // Arbitrary bytes, of many lengths, never panic.
             for len in 0..200 {
                 let junk: Vec<u8> = (0..len).map(|i| (i * 37 + len) as u8).collect();

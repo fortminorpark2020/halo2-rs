@@ -10,7 +10,7 @@ use super::{online_screen, recent};
 use crate::lan::Net;
 use crate::menu::{Screen, Sound};
 use crate::{App, Mode};
-use h2net::live::{LinkInfo, PartyMember, ToServer};
+use h2net::live::{End, LinkInfo, PartyMember, ToServer};
 use h2net::{Client, Connection, Host, Verified};
 
 /// The party's custom game we're in, from CUSTOM_OPEN until we're back in
@@ -69,7 +69,8 @@ impl App {
     }
 
     /// A relay leg's other end came: as the leader, a member coming into
-    /// our lobby; otherwise the leader, whose lobby we wait in.
+    /// our lobby (or the service, on our fan-out leg); otherwise the
+    /// leader, whose lobby we wait in.
     pub(super) fn custom_linked(&mut self, link: LinkInfo, conn: Connection) {
         if !self
             .online
@@ -79,8 +80,15 @@ impl App {
         {
             return;
         }
+        if link.end == End::Fanout {
+            if let Net::Hosting(host) = &mut self.net {
+                println!("live: the fan-out leg is open");
+                host.set_fanout(conn);
+            }
+            return;
+        }
         println!("live: linked to {}", link.gamertag);
-        if !link.joiner {
+        if link.end == End::Host {
             if let Net::Hosting(host) = &mut self.net {
                 let verified = Verified {
                     account: link.peer,

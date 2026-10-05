@@ -164,10 +164,14 @@ pub struct Server {
     motd: String,
     pcs: Vec<Pc>,
     /// Relay legs waiting for their other end, legs joined, and links
-    /// given out whose legs haven't both come (see `relay`).
+    /// given out whose legs haven't both come (see `relay`); hosts'
+    /// fan-out legs, and those given out that haven't come (the match or
+    /// custom game, and the host).
     legs: Vec<relay::Leg>,
     links: Vec<relay::Link>,
     tokens: HashMap<[u8; 16], relay::Token>,
+    fanouts: Vec<relay::Fanout>,
+    fanout_tokens: HashMap<[u8; 16], (u64, u64)>,
     /// Bytes relayed for each match (or party's custom game) so far.
     relayed: HashMap<u64, u64>,
     matchmaker: Matchmaker,
@@ -223,6 +227,8 @@ impl Server {
             legs: Vec::new(),
             links: Vec::new(),
             tokens: HashMap::new(),
+            fanouts: Vec::new(),
+            fanout_tokens: HashMap::new(),
             relayed: HashMap::new(),
             matches: Vec::new(),
             playlists_sent: f64::NEG_INFINITY,
@@ -239,7 +245,7 @@ impl Server {
 
     /// Connections open now (control links and relay legs).
     pub fn connections(&self) -> usize {
-        self.pcs.len() + self.legs.len() + 2 * self.links.len()
+        self.pcs.len() + self.legs.len() + 2 * self.links.len() + self.fanouts.len()
     }
 
     /// The TCP connections of those open now, to wait for something to
@@ -312,6 +318,7 @@ impl Server {
         }
         self.change_profiles(now);
         self.read_legs(now);
+        self.fan_out(now);
         self.relay(now);
         self.keep_up(now);
         self.matchmake(now);

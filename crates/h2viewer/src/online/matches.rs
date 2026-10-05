@@ -12,7 +12,7 @@ use crate::menu::{self, Screen, SeatInfo, Sound};
 use crate::options::{presets, GameOptions};
 use crate::scene;
 use crate::{App, Mode, Then};
-use h2net::live::{LinkInfo, MatchInfo, MatchOver, MatchPlayer, ToServer};
+use h2net::live::{End, LinkInfo, MatchInfo, MatchOver, MatchPlayer, ToServer};
 use h2net::{Client, Connection, Host, Lobby, LobbyPlayer, Verified};
 use h2sim::bot::bot_name;
 use h2sim::game::{guest_name, GameType, Look, MapWeapons, TEAMS};
@@ -285,8 +285,9 @@ impl App {
         }
     }
 
-    /// A relay leg's other end came: as the host, a PC joining; otherwise,
-    /// the host, whose lobby we wait in until its game starts.
+    /// A relay leg's other end came: as the host, a PC joining (or the
+    /// service, on our fan-out leg); otherwise, the host, whose lobby we
+    /// wait in until its game starts.
     pub(super) fn match_linked(&mut self, link: LinkInfo, conn: Connection) {
         let gamertag = self.online.me().map(|(_, g)| g.to_string());
         let Some(m) = self
@@ -297,8 +298,15 @@ impl App {
         else {
             return;
         };
+        if link.end == End::Fanout {
+            if let Net::Hosting(host) = &mut self.net {
+                println!("live: the fan-out leg is open");
+                host.set_fanout(conn);
+            }
+            return;
+        }
         println!("live: linked to {}", link.gamertag);
-        if !link.joiner {
+        if link.end == End::Host {
             if let Net::Hosting(host) = &mut self.net {
                 let verified = Verified {
                     account: link.peer,

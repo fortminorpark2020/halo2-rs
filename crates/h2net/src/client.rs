@@ -9,6 +9,9 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Most snapshots kept that came early: more than a host ever has on their
+/// way to a PC.
+const EARLY: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientEvent {
@@ -50,10 +53,20 @@ pub struct Client {
     /// The last snapshot, and its number: the next may come as how it
     /// differs from this one.
     last: Option<(u32, Vec<u8>)>,
+    /// Snapshots sent as how they differ from one that hasn't come yet,
+    /// by number. Through the online service's relay those go to many PCs
+    /// at once (see `Host::set_fanout`), and can overtake a whole snapshot
+    /// sent to this PC alone.
+    early: Vec<(u32, Vec<u8>)>,
     /// Snapshots that have arrived (taken on or not), and how many of them
     /// the host was last told of.
     arrived: u32,
     told: u32,
+}
+
+/// Snapshot number `a` comes after `b` (in numbers that wrap around).
+fn after(a: u32, b: u32) -> bool {
+    a.wrapping_sub(b) as i32 > 0
 }
 
 /// A command's buttons, without where it aims or moves.
@@ -127,6 +140,7 @@ impl Client {
             sent: Vec::new(),
             input: Pace::new(TICK),
             last: None,
+            early: Vec::new(),
             arrived: 0,
             told: 0,
         }
@@ -184,6 +198,8 @@ impl Client {
                         .collect::<Result<Vec<_>, _>>()?;
                     self.players = players.clone();
                     self.in_game = true;
+                    // (What came early stays: the whole game it follows
+                    // comes next.)
                     self.last = None;
                     out.push(ClientEvent::Welcomed { computer, players });
                     Ok(())
@@ -200,22 +216,23 @@ impl Client {
                     self.in_game = false;
                     self.players.clear();
                     self.last = None;
+                    self.early.clear();
                     out.push(ClientEvent::Lobby(lobby));
                 }),
                 kind::START => r.str().map(|map| {
                     self.in_game = false;
                     self.players.clear();
                     self.last = None;
+                    self.early.clear();
                     out.push(ClientEvent::Start(map));
                 }),
                 kind::HOST_ALIVE => Ok(()),
                 // The last of a game that's over.
-                kind::SNAPSHOT | kind::SNAPSHOT_DELTA if !self.in_game => Ok(()),
-                kind::SNAPSHOT => self.take_snapshot(game, body, &mut events),
-                kind::SNAPSHOT_DELTA => match self.undelta(&body) {
-                    Some(snapshot) => self.take_snapshot(game, snapshot, &mut events),
-                    None => Err(Malformed),
-                },
+                kind::SNAPSHOT if !self.in_game => Ok(()),
+                kind::SNAPSHOT => self
+                    .take_snapshot(game, body, &mut events)
+                    .and_then(|()| self.take_early(game, &mut events)),
+                kind::SNAPSHOT_DELTA => self.take_delta(game, body, &mut events),
                 _ => Err(Malformed),
             };
             if result.is_err() {
@@ -264,6 +281,48 @@ impl Client {
             events.push(Event::read(&mut r, p, w, v)?);
         }
         self.last = Some((seq, snapshot));
+        Ok(())
+    }
+
+    /// Take on a snapshot sent as how it differs from the one before it,
+    /// and those that came early and follow it; or keep it, if the one
+    /// before hasn't come yet. One no newer than the last taken on is from
+    /// before that (the game before, say), and is dropped.
+    fn take_delta(
+        &mut self,
+        game: &mut Game,
+        message: Vec<u8>,
+        events: &mut Vec<Event>,
+    ) -> Result<(), Malformed> {
+        let seq = Reader::new(&message).u32()?;
+        match self.last.as_ref().map(|l| l.0) {
+            Some(last) if !after(seq, last) => Ok(()),
+            Some(last) if seq == last.wrapping_add(1) => {
+                let snapshot = self.undelta(&message).ok_or(Malformed)?;
+                self.take_snapshot(game, snapshot, events)?;
+                self.take_early(game, events)
+            }
+            _ if self.early.len() < EARLY => {
+                self.early.push((seq, message));
+                Ok(())
+            }
+            _ => Err(Malformed),
+        }
+    }
+
+    /// Take on the snapshots that came early and now follow the last one,
+    /// dropping those from before it.
+    fn take_early(&mut self, game: &mut Game, events: &mut Vec<Event>) -> Result<(), Malformed> {
+        while let Some(last) = self.last.as_ref().map(|l| l.0) {
+            self.early.retain(|(seq, _)| after(*seq, last));
+            let next = last.wrapping_add(1);
+            let Some(k) = self.early.iter().position(|(seq, _)| *seq == next) else {
+                break;
+            };
+            let (_, message) = self.early.swap_remove(k);
+            let snapshot = self.undelta(&message).ok_or(Malformed)?;
+            self.take_snapshot(game, snapshot, events)?;
+        }
         Ok(())
     }
 

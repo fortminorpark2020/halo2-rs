@@ -5,7 +5,7 @@ use super::*;
 use crate::client::{results, RelayLeg};
 use crate::levels::{min_xp, Placed};
 use crate::store::RecordedPlayer;
-use h2net::live::{LinkInfo, MatchInfo, MatchOver, PlayerResult, Stage, QUICKMATCH};
+use h2net::live::{End, LinkInfo, MatchInfo, MatchOver, PlayerResult, Stage, QUICKMATCH};
 use h2net::{Client, ClientEvent, Host, HostEvent, Lobby, Verified};
 use h2sim::testing::{floor, game};
 use h2sim::{Bot, Command, Game, GameType, NavGraph};
@@ -380,7 +380,11 @@ impl Arena {
                 Ok(None) => k += 1,
                 Ok(Some(conn)) => {
                     let link = g.legs.remove(k).link;
-                    if let Some(h) = &mut g.hosted {
+                    if link.end == End::Fanout {
+                        if let Some(h) = &mut g.hosted {
+                            h.host.set_fanout(conn);
+                        }
+                    } else if let Some(h) = &mut g.hosted {
                         let verified = Verified {
                             account: link.peer,
                             gamertag: link.gamertag,
@@ -1383,7 +1387,7 @@ fn the_relay_drops_a_link_that_falls_behind_and_legs_left_waiting() {
     a.until(5.0, |a| link(a, 0).is_some() && link(a, 1).is_some());
     let (host_link, joiner_link) = (link(&a, 0).unwrap(), link(&a, 1).unwrap());
     assert_ne!(host_link.token, joiner_link.token);
-    assert_eq!((host_link.joiner, joiner_link.joiner), (false, true));
+    assert_eq!((host_link.end, joiner_link.end), (End::Host, End::Joiner));
     assert_eq!((host_link.peer, joiner_link.peer), (a.id(1), a.id(0)));
     let mut legs = Vec::new();
     for (i, link) in [(0, host_link), (1, joiner_link)] {
@@ -1736,9 +1740,11 @@ fn links_close_with_the_custom_game_they_were_for() {
         (1, a.link(1, ids[0]).unwrap()),
         (0, a.link(0, ids[2]).unwrap()),
         (2, a.link(2, ids[0]).unwrap()),
+        // The leader's fan-out leg (to no one).
+        (0, a.link(0, 0).unwrap()),
     ];
-    let [mut to_bravo, mut bravo, mut to_charlie, mut charlie] =
-        <[Connection; 4]>::try_from(a.join_by_hand(links))
+    let [mut to_bravo, mut bravo, mut to_charlie, mut charlie, mut fanout] =
+        <[Connection; 5]>::try_from(a.join_by_hand(links))
             .ok()
             .unwrap();
     // The leader removes Charlie: Charlie's link closes, Bravo's stays.
@@ -1751,10 +1757,104 @@ fn links_close_with_the_custom_game_they_were_for() {
     a.step();
     assert_eq!(bravo.receive().unwrap(), [(7, b"still here".to_vec())]);
     // The leader goes back to the party lobby: the game is over, and so is
-    // Bravo's link.
+    // Bravo's link, and the fan-out leg.
     a.send(0, ToServer::Back);
     a.run(3.0);
     assert!(closed(&mut bravo));
     assert!(closed(&mut to_bravo));
+    assert!(closed(&mut fanout));
     assert_eq!(a.w.server.connections(), 3);
+}
+
+#[test]
+fn a_hosts_fan_out_leg_passes_what_it_sends_on_to_the_pcs_it_names() {
+    let mut a = Arena::new("fan-out-leg", 3, None);
+    let party = a.w.party(0).id;
+    for i in [1, 2] {
+        a.send(i, ToServer::JoinParty(party));
+    }
+    a.until(5.0, |a| a.w.members(0).len() == 3);
+    for g in &mut a.gamers {
+        g.wont_link = true;
+    }
+    a.send(0, ToServer::Custom);
+    let ids = [a.id(0), a.id(1), a.id(2)];
+    a.until(5.0, |a| {
+        (1..3).all(|i| a.link(0, ids[i]).is_some() && a.link(i, ids[0]).is_some())
+    });
+    // The leader got one fan-out leg, for the custom game, before its
+    // links.
+    let fanouts = a.w.events[0].iter().filter_map(|e| match e {
+        LiveEvent::Link(link) if link.end == End::Fanout => Some(link.clone()),
+        _ => None,
+    });
+    let fanouts: Vec<LinkInfo> = fanouts.collect();
+    assert_eq!(fanouts.len(), 1);
+    assert_eq!((fanouts[0].id, fanouts[0].peer), (party, 0));
+    // Only the leader can say it's theirs.
+    let (server_end, mut fake) = Connection::pair();
+    a.w.server.accept(server_end, Route::Link, ip(2), a.w.now);
+    let hello = ToServer::LinkHello {
+        token: fanouts[0].token,
+        account: ids[1],
+    };
+    hello.send(&mut fake);
+    fake.flush().unwrap();
+    a.step();
+    assert!(closed(&mut fake));
+    let links = vec![
+        (0, fanouts[0].clone()),
+        (0, a.link(0, ids[1]).unwrap()),
+        (1, a.link(1, ids[0]).unwrap()),
+        (0, a.link(0, ids[2]).unwrap()),
+        (2, a.link(2, ids[0]).unwrap()),
+    ];
+    let [mut fanout, _to_bravo, mut bravo, _to_charlie, mut charlie] =
+        <[Connection; 5]>::try_from(a.join_by_hand(links))
+            .ok()
+            .unwrap();
+    // To Bravo, again to the same, then to both; to the leader itself or
+    // someone it isn't linked to, nothing.
+    let relayed = a.w.server.relayed(party);
+    let fan = |to: Option<Vec<u64>>, kind: u8| ToServer::Fanout {
+        to,
+        kind,
+        body: vec![kind; 10],
+    };
+    fan(Some(vec![ids[1]]), 1).send(&mut fanout);
+    fan(None, 2).send(&mut fanout);
+    fan(Some(vec![ids[2], ids[1]]), 3).send(&mut fanout);
+    fan(Some(vec![ids[0], 99]), 4).send(&mut fanout);
+    fanout.flush().unwrap();
+    a.step();
+    let bravo_got = [(1, vec![1; 10]), (2, vec![2; 10]), (3, vec![3; 10])];
+    assert_eq!(bravo.receive().unwrap(), bravo_got);
+    assert_eq!(charlie.receive().unwrap(), [(3, vec![3; 10])]);
+    assert_eq!(a.w.server.relayed(party) - relayed, 4 * 11);
+    // Anything else on it closes it, and leaves the links be.
+    fanout.send(7, b"not a fan-out");
+    fanout.flush().unwrap();
+    a.run(3.0);
+    assert!(closed(&mut fanout));
+    assert_eq!(a.w.server.connections(), 3 + 4);
+}
+
+#[test]
+fn hosts_send_how_the_game_changed_once_for_everyone() {
+    // Rumble Pit, three PCs: what the host sends the two joined PCs, it
+    // mostly sends once, over its fan-out leg.
+    let mut a = Arena::new("fan-out-game", 3, Some(("ffa", &[10, 10, 10])));
+    a.search(RUMBLE_PIT);
+    let m = a.formed();
+    a.playing(&m, 3);
+    let sent = |a: &Arena| a.hosted(a.pc(m.host)).unwrap().host.sent();
+    let (before, relayed) = (sent(&a), a.w.server.relayed(m.id));
+    a.run(5.0);
+    let (sent, relayed) = (sent(&a) - before, a.w.server.relayed(m.id) - relayed);
+    assert!(
+        sent * 3 < relayed * 2,
+        "{sent} bytes sent, {relayed} relayed"
+    );
+    a.finish(&m);
+    assert!((0..3).all(|i| a.over(i, m.id).counted));
 }

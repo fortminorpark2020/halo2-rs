@@ -1545,23 +1545,42 @@ mod tests {
                 }
                 linked[k].extend(online.linked());
             }
-            if linked.iter().all(|l| !l.is_empty()) {
+            // The host's two legs, and the other's one.
+            if linked[0].len() + linked[1].len() == 3 {
                 break;
             }
         }
-        // The host's leg is to the PC joining it, and the other's to the
-        // host; what one sends, the other gets.
+        // The host has a leg to the PC joining it, and a fan-out leg; the
+        // other a leg to the host. What the host sends either way, the
+        // other gets.
         let host = hosting.expect("a host");
-        let (mut ours, mut theirs) = (linked[host].remove(0), linked[1 - host].remove(0));
-        assert!(!ours.0.joiner && theirs.0.joiner);
+        let mut legs = std::mem::take(&mut linked[host]);
+        legs.sort_by_key(|l| l.0.end == live::End::Fanout);
+        let (mut fanout, mut ours) = (legs.pop().unwrap(), legs.pop().unwrap());
+        let mut theirs = linked[1 - host].remove(0);
+        let ends = [ours.0.end, fanout.0.end, theirs.0.end];
+        assert_eq!(
+            ends,
+            [live::End::Host, live::End::Fanout, live::End::Joiner]
+        );
         assert_eq!(theirs.0.map, "lockout");
+        let mut hear = || {
+            (0..1000).find_map(|_| {
+                service.poll();
+                theirs.1.receive().unwrap().pop()
+            })
+        };
         ours.1.send(9, b"hello");
         ours.1.flush().unwrap();
-        let heard = (0..1000).find_map(|_| {
-            service.poll();
-            theirs.1.receive().unwrap().pop()
-        });
-        assert_eq!(heard, Some((9, b"hello".to_vec())));
+        assert_eq!(hear(), Some((9, b"hello".to_vec())));
+        let everyone = ToServer::Fanout {
+            to: Some(vec![ours.0.peer]),
+            kind: 10,
+            body: b"hello all".to_vec(),
+        };
+        everyone.send(&mut fanout.1);
+        fanout.1.flush().unwrap();
+        assert_eq!(hear(), Some((10, b"hello all".to_vec())));
     }
 
     #[test]
