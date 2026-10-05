@@ -109,6 +109,16 @@ impl Connection {
         }
     }
 
+    /// The TCP connection it's over, to wait for something to come on
+    /// (none between the two ends of a pair).
+    pub fn stream(&self) -> Option<&TcpStream> {
+        match &self.link {
+            Link::Tcp { stream, .. } => Some(stream),
+            Link::Memory { .. } => None,
+            Link::Ws { socket, .. } => Some(socket.get_ref().tcp()),
+        }
+    }
+
     /// How long since something last arrived.
     pub fn since_heard(&self) -> Duration {
         self.heard.elapsed()

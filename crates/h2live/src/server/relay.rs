@@ -71,6 +71,12 @@ pub(super) struct Token {
 }
 
 impl Server {
+    /// The relay's connections open now: legs waiting, and links.
+    pub(super) fn relay_conns(&self) -> impl Iterator<Item = &Connection> {
+        let legs = self.legs.iter().map(|leg| &leg.conn);
+        legs.chain(self.links.iter().flat_map(|link| &link.ends))
+    }
+
     /// Link `joiner` to `host` for match (or custom game) `id` on `map`:
     /// tell both who's at the other end, with the token their leg says.
     /// Each is an account, its level and its team.
@@ -142,12 +148,11 @@ impl Server {
     /// first, names a link that wasn't given out (or the other end of
     /// one), or waits too long is dropped.
     pub(super) fn read_legs(&mut self, now: f64) {
-        let (tokens, traffic) = (&self.tokens, &mut self.traffic);
+        let tokens = &self.tokens;
         self.legs.retain_mut(|leg| {
             let Ok(messages) = leg.conn.receive() else {
                 return false;
             };
-            *traffic |= !messages.is_empty();
             for (kind, body) in messages {
                 let Ok(ToServer::LinkHello { token, account }) = ToServer::read(kind, &body) else {
                     return false;
@@ -242,7 +247,6 @@ impl Server {
                 };
                 if !messages.is_empty() {
                     link.heard[from] = now;
-                    self.traffic = true;
                 }
                 let bytes: usize = messages.iter().map(|(_, body)| 1 + body.len()).sum();
                 if let Some(relayed) = self.relayed.get_mut(&link.id) {

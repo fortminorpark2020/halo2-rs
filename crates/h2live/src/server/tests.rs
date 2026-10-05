@@ -953,16 +953,6 @@ fn everyone_online_is_listed_at_most_once_a_second() {
 }
 
 #[test]
-fn polls_say_whether_anything_came_in() {
-    let mut w = World::new("traffic");
-    assert!(!w.server.poll(w.now));
-    // The PC asks to sign in, and waits for the answer.
-    w.connect(1, "ALPHA");
-    assert!(w.server.poll(w.now));
-    assert!(!w.server.poll(w.now));
-}
-
-#[test]
 fn log_lines_start_with_the_date_and_time() {
     assert_eq!(utc(0), "1970-01-01 00:00:00");
     assert_eq!(utc(951_782_400), "2000-02-29 00:00:00");
