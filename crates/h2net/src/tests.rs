@@ -1715,6 +1715,8 @@ fn snapshots_that_come_too_early_are_let_go() {
     assert!(matches!(ce[..], [ClientEvent::Welcomed { .. }]), "{ce:?}");
     let mut w = h2sim::game::Writer::default();
     w.u32(500);
+    // No players of this PC's the host has run controls for.
+    w.u8(0);
     hg.write_state(&mut w);
     w.u16(0);
     host_side.send(kind::SNAPSHOT, &w.0);

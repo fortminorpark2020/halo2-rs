@@ -16,6 +16,8 @@ use h2sim::Command;
 /// Longest a new game waits for PCs from the lobby to load its map.
 pub const LAN_WAIT: f32 = 20.0;
 
+/// The App has just one of these, so its size doesn't matter.
+#[allow(clippy::large_enum_variant)]
 pub enum Net {
     /// Can't host (no network); playing alone.
     Offline,
