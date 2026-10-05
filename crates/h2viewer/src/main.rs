@@ -40,6 +40,7 @@ mod input;
 mod lan;
 mod local;
 mod mapinfo;
+mod memory;
 mod menu;
 mod objective;
 mod online;
@@ -413,27 +414,6 @@ fn load_level(path: &Path) -> Result<Level, String> {
         path: path.to_path_buf(),
     })
 }
-
-/// Hand the memory the last level used back to the system, once it's
-/// gone. On Linux the C library keeps freed memory for later instead, and
-/// a level loads while the last one is still up, so without this the game
-/// grows by hundreds of megabytes over its first few maps (to two or three
-/// times what it uses).
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn release_memory() {
-    extern "C" {
-        fn malloc_trim(pad: usize) -> std::ffi::c_int;
-    }
-    // SAFETY: glibc's malloc_trim takes no pointers; it only gives free
-    // pages back.
-    unsafe {
-        malloc_trim(0);
-    }
-}
-
-/// Elsewhere that's up to the system's allocator.
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-fn release_memory() {}
 
 fn env_set(name: &str) -> bool {
     std::env::var_os(name).is_some()

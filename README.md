@@ -261,7 +261,9 @@ For testing a service, `H2_LIVE_BOT=<playlist key>` runs h2viewer with no
 window or sound as a player who signs in (to the service `H2_LIVE` names),
 searches that playlist and plays each match it finds with a bot, over and
 over. Each takes little CPU, so many can run on one PC (give each its own
-`H2_NAME`, `H2_PROFILE` and `H2_IDENTITY`).
+`H2_NAME`, `H2_PROFILE` and `H2_IDENTITY`). As each map goes in, the game
+prints the memory it has and the most it has had (`memory: ...`), so a long
+session's log shows whether it keeps growing.
 
 ## Roadmap
 

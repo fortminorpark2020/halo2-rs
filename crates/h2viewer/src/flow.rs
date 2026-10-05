@@ -512,7 +512,10 @@ impl App {
         self.nav = level.nav;
         self.map_path = level.path;
         self.level_changed();
-        crate::release_memory();
+        crate::memory::release();
+        if let Some((now, most)) = crate::memory::in_use() {
+            println!("memory: {now} MB, at most {most} MB");
+        }
     }
 
     /// Settle everything that follows from the level in play.
