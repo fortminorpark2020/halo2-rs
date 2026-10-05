@@ -20,9 +20,9 @@ const MAX_BEHIND: usize = 2 << 20;
 /// Legs one address can have waiting at once: enough for a host with 15
 /// PCs joining it and a few more PCs behind the same router.
 pub(super) const LEGS_WAITING: usize = 32;
-/// A host's end that sent nothing for this long (seconds) has gone: its
-/// game sends something every second while it runs.
-pub(super) const HOST_QUIET: f64 = 5.0;
+/// An end that sent nothing for this long (seconds) has gone: a game,
+/// hosted or joined, sends something every second while it runs.
+pub(super) const QUIET: f64 = 5.0;
 
 /// A relay leg, waiting for its other end.
 pub(super) struct Leg {
@@ -222,10 +222,11 @@ impl Server {
     }
 
     /// Pass on what each end of each link sent, counting the bytes. A link
-    /// is dropped when an end goes, or falls too far behind; if that's the
-    /// host's end (or it had gone quiet), the match hears the joining PC
-    /// lost the host. Links that are over close, after a moment (so the
-    /// ends hear why from the server first).
+    /// is dropped when an end goes, or falls too far behind. If that's the
+    /// host's end (unless the joining PC had gone quiet: the host gave up
+    /// on it), or the joining PC's end with the host's gone quiet, the
+    /// match hears the joining PC lost the host. Links that are over
+    /// close, after a moment (so the ends hear why from the server first).
     pub(super) fn relay(&mut self, now: f64) {
         let mut dropped = Vec::new();
         let mut k = 0;
@@ -268,7 +269,8 @@ impl Server {
             }
         }
         for (link, end) in dropped {
-            if end == 0 || now - link.heard[0] >= HOST_QUIET {
+            let quiet = |end: usize| now - link.heard[end] >= QUIET;
+            if end == 0 && !quiet(1) || end == 1 && quiet(0) {
                 self.host_dropped(link.id, link.accounts[1]);
             }
             // What's left to send still goes, for a moment.

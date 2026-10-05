@@ -16,17 +16,18 @@
 //! PCs saying they lost the host end it too, if at least half of them say
 //! so and the relay saw it go (a loss for the host too if its link to the
 //! server had gone quiet as well: its PC or its network died). A player
-//! who quits a game in progress (or says it lost a host that was there)
-//! loses it as `levels` says: last in free-for-all, with their team
-//! otherwise. Leaving once the game is over (after one's own result, or
-//! the host's) isn't quitting. A game that runs five minutes past its
-//! time limit is given up on.
+//! who quits a game in progress (or says it lost a host that was there,
+//! one that gave up on it when it went quiet, say) loses it as `levels`
+//! says: last in free-for-all, with their team otherwise. Leaving once
+//! the game is over (after one's own result, or the host's) isn't
+//! quitting. A game that runs five minutes past its time limit is given
+//! up on.
 //!
 //! Parties play custom games too: the leader hosts on a map everyone has,
 //! and every member is linked to them, those who join later as well. They
 //! change no levels.
 
-use super::relay::HOST_QUIET;
+use super::relay::QUIET;
 use super::{log, Server};
 use crate::card;
 use crate::levels::{self, Finish, Placed, Rank, MAX_LEVEL};
@@ -89,7 +90,8 @@ pub(super) struct Match {
     /// PCs that left once the game was over for them (they or the host had
     /// said how it ended): they're rated as the results say.
     left_at_end: Vec<u64>,
-    /// Joining PCs whose relay link to the host broke on the host's side.
+    /// Joining PCs whose relay link to the host broke as the host went
+    /// (see `Server::relay`).
     host_dropped: Vec<u64>,
     /// The host quit, through its menu or because its link to the server
     /// died (or went quiet as the joined PCs lost it).
@@ -560,7 +562,7 @@ impl Server {
     /// `account`'s PC hasn't been heard from for a while, or is gone.
     fn quiet(&self, account: u64, now: f64) -> bool {
         self.pc_of(account)
-            .is_none_or(|k| now - self.pcs[k].heard >= HOST_QUIET)
+            .is_none_or(|k| now - self.pcs[k].heard >= QUIET)
     }
 
     fn card_of(&self, account: u64) -> String {

@@ -54,6 +54,9 @@ struct Gamer {
     /// to itself for now.
     paused: bool,
     holds_result: bool,
+    /// Its PC stands still: its game, and its links to the host and (see
+    /// `Arena::stop`) to the server.
+    stopped: bool,
     /// The match it's in (MATCH).
     info: Option<MatchInfo>,
     /// The custom game it's in: its leader and map (CUSTOM_OPEN).
@@ -246,12 +249,24 @@ impl Arena {
     fn step(&mut self) {
         self.w.step();
         for i in 0..self.gamers.len() {
+            if self.gamers[i].stopped {
+                continue;
+            }
             let events = self.w.events[i][self.seen[i]..].to_vec();
             self.seen[i] = self.w.events[i].len();
             for event in events {
                 self.act(i, event);
             }
             self.play(i);
+        }
+    }
+
+    /// PC `i` stops (or goes on again), all of it.
+    fn stop(&mut self, i: usize, stopped: bool) {
+        self.gamers[i].stopped = stopped;
+        self.w.frozen.retain(|&f| f != i);
+        if stopped {
+            self.w.frozen.push(i);
         }
     }
 
@@ -946,16 +961,15 @@ fn a_host_whose_pc_dies_loses_too() {
     a.search(DOUBLE_TEAM);
     let m = a.formed();
     a.playing(&m, 4);
-    // Its PC stops: the server hears nothing more from it, and soon its
-    // game drops off the relay too.
+    // Its PC stops: no one hears anything more from it. The others give
+    // up on it, well before the server would.
     let host = a.pc(m.host);
-    a.gamers[host].paused = true;
-    a.w.frozen.push(host);
+    a.stop(host, true);
     a.run(6.0);
-    a.gamers[host].hosted = None;
-    a.gamers[host].reported = true;
-    // The others lose it, well before the server would give up on it.
     let joiners: Vec<usize> = (0..4).filter(|&i| i != host).collect();
+    for &i in &joiners {
+        a.lose_host(i);
+    }
     a.until(5.0, |a| {
         joiners.iter().all(|&i| !a.gamers[i].over.is_empty())
     });
@@ -1002,6 +1016,44 @@ fn a_player_who_quits_loses_and_comes_last() {
     let log = a.games_log();
     let quit = format!("{:016x}:0:2:1:900:860:10:10", a.id(quitter));
     assert!(log.contains(&quit), "{log}");
+}
+
+#[test]
+fn a_player_the_host_gives_up_on_loses_and_comes_last() {
+    // Rumble Pit, all at level 10.
+    let mut a = Arena::new("joiner-stops", 3, Some(("ffa", &[10, 10, 10])));
+    a.search(RUMBLE_PIT);
+    let m = a.formed();
+    a.playing(&m, 3);
+    let host = a.pc(m.host);
+    let stopped = (0..3).find(|&i| i != host).unwrap();
+    // A joined PC stops for a while: long enough for the host's game to
+    // give up on it (that goes by real time: a short wait, here), not for
+    // the server to.
+    a.stop(stopped, true);
+    a.run(6.0);
+    let h = &mut a.gamers[host].hosted.as_mut().unwrap().host;
+    h.set_timeout(Duration::from_millis(50));
+    std::thread::sleep(Duration::from_millis(100));
+    a.step();
+    let h = a.gamers[host].hosted.as_mut().unwrap();
+    h.host.set_timeout(h2net::TIMEOUT);
+    assert_eq!(h.host.joined(), 1);
+    assert!(!h.game.over());
+    // Going on again, it finds it lost the host, and says so; but the
+    // host is still there, so the game goes on without it, to its end.
+    a.stop(stopped, false);
+    a.finish(&m);
+    let over = a.over(stopped, m.id);
+    assert!(over.counted);
+    // Last, as if it had quit.
+    assert_eq!(a.rank(stopped, "ffa"), after(10, -40));
+    for i in (0..3).filter(|&i| i != stopped) {
+        assert!(a.over(i, m.id).counted);
+    }
+    let log = a.games_log();
+    let left = format!("{:016x}:0:2:1:900:860:10:10", a.id(stopped));
+    assert!(log.contains(&left), "{log}");
 }
 
 #[test]
