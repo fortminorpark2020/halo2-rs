@@ -3,6 +3,7 @@
 //! killing the Juggernaut scores and takes the role.
 
 use super::{Event, Game, GameType};
+use blam_cache::physics::PlayerMovement;
 
 /// The Juggernaut takes this share of the damage dealt to them.
 const DAMAGE_TAKEN: f32 = 0.35;
@@ -40,18 +41,27 @@ impl Game {
 
     fn make_juggernaut(&mut self, player: usize) {
         self.juggernaut = Some(player);
-        let m = &mut self.players[player].body.movement;
-        m.run_forward *= SPEED;
-        m.run_backward *= SPEED;
-        m.run_sideways *= SPEED;
+        self.players[player].body.movement = self.movement_of(player);
         self.events.push(Event::Juggernaut { player });
+    }
+
+    /// How a player moves: the Juggernaut faster than the rest. (A joined
+    /// PC needs to know, to move its own players as the host does.)
+    pub(super) fn movement_of(&self, player: usize) -> PlayerMovement {
+        let mut m = self.movement;
+        if self.rules.game_type == GameType::Juggernaut && self.juggernaut == Some(player) {
+            m.run_forward *= SPEED;
+            m.run_backward *= SPEED;
+            m.run_sideways *= SPEED;
+        }
+        m
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::game::tests::game;
-    use crate::game::{Event, GameType};
+    use crate::game::{Event, GameType, Reader, Writer};
 
     #[test]
     fn killing_the_juggernaut_takes_the_role() {
@@ -87,5 +97,24 @@ mod tests {
         kill(&mut g, 1, 2);
         kill(&mut g, 0, 2);
         assert_eq!(g.winner, Some(2));
+    }
+
+    #[test]
+    fn a_joined_pc_knows_the_juggernaut_runs_faster() {
+        let mut g = game();
+        g.rules.game_type = GameType::Juggernaut;
+        for _ in 0..2 {
+            g.add_player();
+        }
+        g.damage(1, Some(0), 10_000.0, false);
+        let mut w = Writer::default();
+        g.write_state(&mut w);
+        let mut joined = game();
+        joined.read_state(&mut Reader::new(&w.0)).unwrap();
+        let speed = |g: &crate::Game, p: usize| g.players[p].body.movement;
+        assert!(speed(&g, 0).run_forward > speed(&g, 1).run_forward);
+        for p in 0..2 {
+            assert_eq!(speed(&joined, p), speed(&g, p));
+        }
     }
 }

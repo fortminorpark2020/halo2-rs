@@ -273,6 +273,13 @@ over. Each takes little CPU, so many can run on one PC (give each its own
 prints the memory it has and the most it has had (`memory: ...`), so a long
 session's log shows whether it keeps growing.
 
+Online, a PC that joins moves its own Spartans on foot (splitscreen guests
+too) the moment their controls say so, and the host's word on where they
+are puts them right a round trip later: eased over if it's close, at once
+after a teleporter, a death or a respawn. In a vehicle they're shown as the
+host has them, as are firing and everyone else. On a LAN, joined PCs show
+the host's game alone, as before.
+
 To try a slow connection, `H2_NET_LAG=<ms>` adds that much to the round
 trip between a PC and the host it joins (half each way), `H2_NET_JITTER=<ms>`
 up to that much more at random, and `H2_NET_LOSS=<percent>` loses that share

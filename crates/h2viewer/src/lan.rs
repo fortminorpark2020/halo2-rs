@@ -10,7 +10,7 @@ use crate::options::GameOptions;
 use crate::{scene, App, Mode, Then};
 use gilrs::GamepadId;
 use h2net::{Client, ClientEvent, Host, HostEvent, LanGame, Lobby, LobbyPlayer};
-use h2sim::game::guest_name;
+use h2sim::game::{guest_name, TICK};
 use h2sim::Command;
 
 /// Longest a new game waits for PCs from the lobby to load its map.
@@ -23,7 +23,7 @@ pub enum Net {
     Hosting(Host),
     /// Playing in another PC's game.
     Joined {
-        client: Client,
+        client: Box<Client>,
         /// The host's name, for messages.
         computer: String,
         /// Our players are in the host's game (otherwise still joining).
@@ -333,21 +333,70 @@ impl App {
                 self.welcome = Some(players);
             }
         }
-        if !matches!(self.net, Net::Joined { seated: true, .. }) {
+        let Net::Joined {
+            client,
+            seated: true,
+            ..
+        } = &mut self.net
+        else {
+            return;
+        };
+        if let (Some(probe), Some(l)) = (&mut self.probe, self.locals.first_mut()) {
+            probe.frame(dt, &mut l.camera);
+        }
+        if client.predicts() {
+            // Our players on foot move here at once, a tick at a time, and
+            // the host's word on them puts them right a round trip later.
+            client.predict(&mut self.game, &self.world);
+            self.game.events = events;
+            self.pending += dt;
+            let mut ticked = false;
+            while self.pending >= TICK {
+                self.pending -= TICK;
+                let commands = self.joined_commands();
+                if let Net::Joined { client, .. } = &mut self.net {
+                    client.tick(&mut self.game, &self.world, &commands);
+                }
+                if !ticked {
+                    for l in &mut self.locals {
+                        l.taps = Default::default();
+                    }
+                    ticked = true;
+                }
+                self.follow_eyes();
+            }
+            self.handle_events();
             return;
         }
         // Follow our eyes from one game state to the next.
         if fresh {
             self.pending = 0.0;
-            for l in &mut self.locals {
-                if l.player < self.game.players.len() {
-                    l.eyes = (l.eyes.1, crate::local::view_point(&self.game, l.player));
-                }
-            }
+            self.follow_eyes();
         } else {
             self.pending += dt;
         }
         self.game.events = events;
+        let commands = self.joined_commands();
+        if let Net::Joined { client, .. } = &mut self.net {
+            client.send_commands(&commands);
+        }
+        for l in &mut self.locals {
+            l.taps = Default::default();
+        }
+        self.handle_events();
+    }
+
+    /// Our players' eyes as the game shows them now, after where they were.
+    fn follow_eyes(&mut self) {
+        for l in &mut self.locals {
+            if l.player < self.game.players.len() {
+                l.eyes = (l.eyes.1, crate::local::view_point(&self.game, l.player));
+            }
+        }
+    }
+
+    /// Joined: our players' controls now.
+    fn joined_commands(&mut self) -> Vec<(usize, Command)> {
         let keyboard = Keyboard {
             keys: &self.keys,
             captured: self.captured,
@@ -366,26 +415,14 @@ impl App {
             })
             .collect();
         // The probe takes over player one from the autopilot.
-        if let (Some(probe), Some(l), Some(c)) = (
-            &mut self.probe,
-            self.locals.first_mut(),
-            commands.first_mut(),
-        ) {
-            probe.frame(dt, &mut l.camera);
-            (c.1.yaw, c.1.pitch) = (l.camera.yaw, l.camera.pitch);
+        if let (Some(probe), Some(c)) = (&mut self.probe, commands.first_mut()) {
             probe.steer(&mut c.1, self.game.players[c.0].body.position);
         } else if let Some((p, command)) = self.autopilot_command() {
             for c in commands.iter_mut().filter(|c| c.0 == p) {
                 c.1 = command;
             }
         }
-        if let Net::Joined { client, .. } = &mut self.net {
-            client.send_commands(&commands);
-        }
-        for l in &mut self.locals {
-            l.taps = Default::default();
-        }
-        self.handle_events();
+        commands
     }
 
     /// Act on what the host said. False once we're no longer joined.
@@ -582,7 +619,7 @@ impl App {
             Ok(client) => {
                 self.announce(&format!("JOINING {}", game.computer.to_uppercase()));
                 self.net = Net::Joined {
-                    client,
+                    client: Box::new(client),
                     computer: game.computer.clone(),
                     seated: false,
                     waiting_pads: Vec::new(),

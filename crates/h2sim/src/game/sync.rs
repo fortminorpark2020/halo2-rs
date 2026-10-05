@@ -980,6 +980,9 @@ impl Game {
             Some(i) if i >= count => return Err(Malformed),
             v => v,
         };
+        for i in 0..count {
+            self.players[i].body.movement = self.movement_of(i);
+        }
         // Vehicles come from the map; their state is sent.
         let n = r.u16()? as usize;
         if n != self.vehicles.len() {

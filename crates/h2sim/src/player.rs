@@ -42,7 +42,8 @@ pub struct Player {
     /// The level's gravity, as a share of normal (scripts lower it where
     /// the air's let out).
     pub gravity: f32,
-    jump_held: bool,
+    /// Jump was held at the last step (another jump takes letting go).
+    pub jump_held: bool,
     accumulator: f32,
     contacts: Vec<Contact>,
 }

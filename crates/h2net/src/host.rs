@@ -10,6 +10,7 @@ use crate::{after, kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
 use h2sim::game::{guest_name, Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
 use socket2::{Domain, Protocol, Socket, Type};
+use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,13 @@ const ONLINE_RATE: u32 = 30;
 /// the way too (the network's, a relay's), not just in ours, and those
 /// that came early and wait on one that hasn't.
 const IN_FLIGHT: usize = 20;
+/// Online, a joined PC's controls for each tick wait their turn: this
+/// many in reserve ride out the network's ups and downs, and any more
+/// that waited all along for this many ticks are caught up on.
+const SPARE: usize = 1;
+const SPARE_TICKS: u32 = 30;
+/// The most controls kept waiting (half a second's).
+const MAX_WAITING: usize = 30;
 
 /// Things the host's game should show or act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,8 +91,8 @@ struct Remote {
     in_game: bool,
     /// Needs the whole game now (just joined).
     fresh: bool,
-    /// Each player's latest controls, and buttons pressed since the last tick.
-    players: Vec<(usize, Command, Command)>,
+    /// Its players, and their controls.
+    players: Vec<Seat>,
     /// The number of the last snapshot it got, if the next can go as how
     /// it differs from that one.
     has: Option<u32>,
@@ -180,14 +188,88 @@ fn snapshot(state: &[u8], events: &[Event]) -> Vec<u8> {
     w.0
 }
 
-/// A player's controls before their PC sends any: stand still, facing the
-/// way they spawned.
-fn seat(game: &Game, player: usize) -> (usize, Command, Command) {
-    let still = Command {
-        yaw: game.players[player].yaw,
-        ..Command::default()
-    };
-    (player, still, Command::default())
+/// A player on a joined PC, and the controls it sends for them, each
+/// numbered.
+struct Seat {
+    player: usize,
+    /// Controls that came and haven't been run yet.
+    waiting: VecDeque<(u32, Command)>,
+    /// The controls last run, and their number (0 before any came).
+    last: (u32, Command),
+    /// Online, the fewest controls left waiting after a tick lately, over
+    /// how many ticks, and how many to catch up on at the next.
+    fewest: usize,
+    ticks: u32,
+    surplus: usize,
+}
+
+impl Seat {
+    /// Before their PC sends any controls, they stand still, facing the way
+    /// they spawned.
+    fn new(game: &Game, player: usize) -> Seat {
+        let still = Command {
+            yaw: game.players[player].yaw,
+            ..Command::default()
+        };
+        Seat {
+            player,
+            waiting: VecDeque::new(),
+            last: (0, still),
+            fewest: usize::MAX,
+            ticks: 0,
+            surplus: 0,
+        }
+    }
+
+    fn take(&mut self, number: u32, cmd: Command) {
+        self.waiting.push_back((number, cmd));
+        // Never far behind, however many come while the game isn't running.
+        while self.waiting.len() > MAX_WAITING {
+            let (_, old) = self.waiting.pop_front().unwrap();
+            let next = &mut self.waiting[0].1;
+            *next = next.with_presses_from(&old);
+        }
+    }
+
+    /// This tick's controls. On a LAN, the latest, with any button tapped
+    /// since the last tick. Online, the next in turn, as the PC ran them
+    /// itself to show its player moving at once (the last again if none
+    /// has come): just as many are kept waiting as ride out the network's
+    /// ups and downs, and any more lately are caught up on.
+    fn next(&mut self, online: bool) -> Command {
+        let Some((mut number, mut cmd)) = self.waiting.pop_front() else {
+            if online {
+                self.count_waiting();
+            }
+            return self.last.1;
+        };
+        let more = match online {
+            true => std::mem::take(&mut self.surplus),
+            false => self.waiting.len(),
+        };
+        let mut taps = cmd;
+        for _ in 0..more.min(self.waiting.len()) {
+            (number, cmd) = self.waiting.pop_front().unwrap();
+            taps = cmd.with_presses_from(&taps);
+        }
+        self.last = (number, cmd);
+        if online {
+            self.count_waiting();
+        }
+        taps
+    }
+
+    /// Note how many controls wait after a tick. Over a while, any more
+    /// than `SPARE` waiting all along are more than needed.
+    fn count_waiting(&mut self) {
+        self.fewest = self.fewest.min(self.waiting.len());
+        self.ticks += 1;
+        if self.ticks == SPARE_TICKS {
+            self.surplus = self.fewest.saturating_sub(SPARE);
+            self.fewest = usize::MAX;
+            self.ticks = 0;
+        }
+    }
 }
 
 /// Add a player to `game` on `team` (`ANY_TEAM`: the smaller one).
@@ -456,7 +538,7 @@ impl Host {
     pub fn is_remote(&self, player: usize) -> bool {
         self.remotes
             .iter()
-            .any(|r| r.players.iter().any(|p| p.0 == player))
+            .any(|r| r.players.iter().any(|s| s.player == player))
     }
 
     /// Accept new PCs and read what joined PCs sent. New players are added
@@ -481,7 +563,7 @@ impl Host {
                     let r = self.remotes.remove(k);
                     println!("lan: {} ({}) left: {reason}", r.computer, r.address);
                     if r.in_game && !r.players.is_empty() {
-                        let (who, players) = (r.who(), r.players.iter().map(|p| p.0));
+                        let (who, players) = (r.who(), r.players.iter().map(|s| s.player));
                         match self.left.iter_mut().find(|l| l.0 == who) {
                             Some(l) => l.1.extend(players),
                             None => self.left.push((who, players.collect())),
@@ -490,7 +572,7 @@ impl Host {
                     if r.welcomed {
                         events.push(HostEvent::Left {
                             computer: r.computer,
-                            players: r.players.iter().map(|p| p.0).collect(),
+                            players: r.players.iter().map(|s| s.player).collect(),
                             reason,
                         });
                     }
@@ -665,18 +747,19 @@ impl Host {
                     r.fresh = true;
                     // Nothing of this game is on its way to it yet.
                     r.on_the_way.clear();
-                    r.players = players.iter().map(|&p| seat(game, p)).collect();
+                    r.players = players.iter().map(|&p| Seat::new(game, p)).collect();
                     println!("lan: {computer} ({}) joined", r.address);
                     events.push(HostEvent::Joined { computer, players });
                 }
                 kind::INPUT if r.in_game => {
+                    let number = rd.u32().map_err(|e| e.to_string())?;
                     let n = rd.u8().map_err(|e| e.to_string())?;
                     for _ in 0..n {
                         let player = rd.index().map_err(|e| e.to_string())?;
                         let cmd = Command::read(&mut rd).map_err(|e| e.to_string())?;
-                        if let Some(slot) = r.players.iter_mut().find(|p| Some(p.0) == player) {
-                            slot.1 = cmd;
-                            slot.2 = slot.2.with_presses_from(&cmd);
+                        if let Some(seat) = r.players.iter_mut().find(|s| Some(s.player) == player)
+                        {
+                            seat.take(number, cmd);
                         }
                     }
                 }
@@ -703,7 +786,7 @@ impl Host {
                         };
                         game.set_name(p, &guest_name(&r.name, r.players.len()));
                         game.set_look(p, r.look.guest(r.players.len()));
-                        r.players.push(seat(game, p));
+                        r.players.push(Seat::new(game, p));
                         let mut w = Writer::default();
                         w.index(Some(p));
                         r.conn.send(kind::ADDED, &w.0);
@@ -713,8 +796,8 @@ impl Host {
                 kind::REMOVE_LOCAL if r.in_game => {
                     let player = rd.index().map_err(|e| e.to_string())?;
                     if r.players.len() > 1 {
-                        if let Some(i) = r.players.iter().position(|p| Some(p.0) == player) {
-                            let (p, ..) = r.players.remove(i);
+                        if let Some(i) = r.players.iter().position(|s| Some(s.player) == player) {
+                            let p = r.players.remove(i).player;
                             events.push(HostEvent::Removed { player: p });
                         }
                     }
@@ -749,17 +832,17 @@ impl Host {
         self.keep_fanout();
     }
 
-    /// This tick's controls for a player on a joined PC: their latest
-    /// controls plus any button they tapped since the last tick.
+    /// This tick's controls for a player on a joined PC: on a LAN, their
+    /// latest controls plus any button they tapped since the last tick;
+    /// online, their controls for the tick, in turn (see `Seat::next`).
     pub fn command(&mut self, player: usize) -> Option<Command> {
-        let slot = self
+        let online = self.online;
+        let seat = self
             .remotes
             .iter_mut()
             .flat_map(|r| r.players.iter_mut())
-            .find(|p| p.0 == player)?;
-        let cmd = slot.1.with_presses_from(&slot.2);
-        slot.2 = Command::default();
-        Some(cmd)
+            .find(|s| s.player == player)?;
+        Some(seat.next(online))
     }
 
     /// Send the game and what happened since the last call (or keep what
@@ -786,6 +869,14 @@ impl Host {
         }
         let mut w = Writer::default();
         w.u32(self.seq);
+        // The number of the controls last run for each player on a joined
+        // PC: what that PC shows of its own players goes on from there.
+        let seats: Vec<&Seat> = self.remotes.iter().flat_map(|r| &r.players).collect();
+        w.u8(seats.len().min(255) as u8);
+        for s in seats.iter().take(255) {
+            w.index(Some(s.player));
+            w.u32(s.last.0);
+        }
         game.write_state(&mut w);
         let state = w.0;
         let body = snapshot(&state, &events);

@@ -325,7 +325,7 @@ impl App {
         // The host knows our team (and gamertag) from the service.
         let teams = self.wanted_teams();
         let me = (gamertag.as_str(), self.menu.profile.look);
-        let client = Client::over(conn, &self.game, &link.map, &teams, me);
+        let client = Box::new(Client::over(conn, &self.game, &link.map, &teams, me));
         self.net = Net::Joined {
             client,
             computer: link.gamertag,

@@ -109,11 +109,13 @@ impl NetProbe {
     }
 
     /// After a frame: whether the latest start shows yet (`shown`: where
-    /// player one is shown), and where the view is.
-    pub fn watch(&mut self, shown: Vec3, view: Vec3) {
+    /// player one is shown), where the view is, and how far player one is
+    /// shown from where their controls take them (if they move here).
+    pub fn watch(&mut self, shown: Vec3, view: Vec3, off: Option<Vec3>) {
         let t = self.clock.elapsed().as_secs_f32();
+        let off = off.map_or("-".into(), |o| format!("{:.4}", o.length()));
         println!(
-            "probe: {t:.4} {:?} {:.4} {:.4} {:.4} view {:.4} {:.4} {:.4}",
+            "probe: {t:.4} {:?} {:.4} {:.4} {:.4} view {:.4} {:.4} {:.4} off {off}",
             self.part(),
             shown.x,
             shown.y,

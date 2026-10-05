@@ -21,6 +21,7 @@ mod discovery;
 mod host;
 pub mod live;
 mod lobby;
+mod predict;
 mod ws;
 
 use std::time::{Duration, Instant};
@@ -50,6 +51,7 @@ const MAGIC: u32 = u32::from_le_bytes(*b"H2RS");
 mod kind {
     // Joined PC to host.
     pub const HELLO: u8 = 1;
+    /// Controls for a tick, numbered, for each player there.
     pub const INPUT: u8 = 2;
     pub const ADD_LOCAL: u8 = 3;
     pub const REMOVE_LOCAL: u8 = 4;
@@ -63,7 +65,8 @@ mod kind {
     pub const WELCOME: u8 = 101;
     pub const REFUSED: u8 = 102;
     pub const ADDED: u8 = 103;
-    /// The game, numbered, then what happened since the last.
+    /// The game, numbered, with the number of the controls last run for
+    /// each player on a joined PC, then what happened since the last.
     pub const SNAPSHOT: u8 = 104;
     /// The host is in its lobby (sent on joining and when it changes).
     pub const LOBBY: u8 = 105;

@@ -669,6 +669,24 @@ impl Spartan {
         let r = f.cross(Vec3::Z).normalize_or(Vec3::X);
         (f, r, r.cross(f))
     }
+
+    /// Look where `cmd` aims, and walk, jump and crouch as it says (riders
+    /// go where their vehicle takes them). A joined PC moves its own
+    /// players this way too, so they answer their controls at once.
+    pub fn move_with(&mut self, world: &World, cmd: &Command, dt: f32) {
+        self.yaw = cmd.yaw;
+        self.pitch = cmd.pitch.clamp(-1.5, 1.5);
+        if self.seat.is_none() {
+            let input = Input {
+                movement: cmd.movement,
+                yaw: cmd.yaw,
+                jump: cmd.jump,
+                crouch: cmd.crouch,
+                lift: cmd.rise,
+            };
+            self.body.update(world, input, dt);
+        }
+    }
 }
 
 /// What walking over a weapon took.
@@ -1247,23 +1265,7 @@ impl Game {
         let pressed = |now: bool, before: bool| now && !before;
         {
             let p = &mut self.players[i];
-            p.yaw = cmd.yaw;
-            p.pitch = cmd.pitch.clamp(-1.5, 1.5);
-            // Riders go where their vehicle takes them.
-            let riding = p.seat.is_some();
-            if !riding {
-                p.body.update(
-                    world,
-                    Input {
-                        movement: cmd.movement,
-                        yaw: cmd.yaw,
-                        jump: cmd.jump,
-                        crouch: cmd.crouch,
-                        lift: cmd.rise,
-                    },
-                    dt,
-                );
-            }
+            p.move_with(world, &cmd, dt);
             // Shields recharge after a while without damage.
             p.since_damage += dt;
             let full = p.full;

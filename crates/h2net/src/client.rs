@@ -2,9 +2,10 @@
 //! host sends back.
 
 use crate::conn::Connection;
+use crate::predict::Prediction;
 use crate::{after, kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
 use h2sim::game::{Event, Look, Malformed, Reader, Writer, TICK};
-use h2sim::{Command, Game};
+use h2sim::{Command, Game, World};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -62,6 +63,10 @@ pub struct Client {
     /// was told of: what it sent since is on its way, or came early.
     got: u32,
     told: u32,
+    /// Online, our players move here at once (see `tick`); on a LAN, as
+    /// the host has them.
+    predicts: bool,
+    prediction: Prediction,
 }
 
 /// A command's buttons, without where it aims or moves.
@@ -108,13 +113,15 @@ impl Client {
     ) -> std::io::Result<Client> {
         let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)?;
         let mut client = Client::over(Connection::tcp(stream)?, game, map, teams, me);
+        client.predicts = false;
         client.conn.flush().map_err(std::io::Error::other)?;
         Ok(client)
     }
 
     /// Join a host over `conn` (through the online service, say), as
-    /// `connect` does. For testing, the H2_NET_LAG hooks (see `Lag`) make
-    /// the connection slower.
+    /// `connect` does, but with our players moving here at once (see
+    /// `tick`). For testing, the H2_NET_LAG hooks (see `Lag`) make the
+    /// connection slower.
     pub fn over(
         mut conn: Connection,
         game: &Game,
@@ -143,7 +150,15 @@ impl Client {
             early: Vec::new(),
             got: 0,
             told: 0,
+            predicts: true,
+            prediction: Prediction::default(),
         }
+    }
+
+    /// Whether our players move here at once: then their controls go by
+    /// `tick`, rather than `send_commands`.
+    pub fn predicts(&self) -> bool {
+        self.predicts
     }
 
     /// Give up on the host if not heard from for this long (`TIMEOUT`
@@ -198,6 +213,7 @@ impl Client {
                     // (What came early stays: the whole game it follows
                     // comes next.)
                     self.last = None;
+                    self.prediction.clear();
                     out.push(ClientEvent::Welcomed { computer, players });
                     Ok(())
                 })(),
@@ -270,7 +286,12 @@ impl Client {
     ) -> Result<(), Malformed> {
         let mut r = Reader::new(&snapshot);
         let seq = r.u32()?;
+        let n = r.u8()?;
+        let ran = (0..n)
+            .map(|_| Ok((r.index_below(256)?, r.u32()?)))
+            .collect::<Result<Vec<_>, Malformed>>()?;
         game.read_state(&mut r)?;
+        self.prediction.ran(ran);
         self.snapshots += 1;
         let n = r.u16()?;
         for _ in 0..n {
@@ -350,7 +371,36 @@ impl Client {
         }
         self.input.went();
         self.sent = commands.to_vec();
+        let number = self.prediction.next_number();
+        self.send_input(number, commands);
+    }
+
+    /// A tick of our players' controls, run here at once on those on foot
+    /// (in `game`, on `world`) as the host will run them: they go to the
+    /// host numbered, and are kept until it says it has run them (see
+    /// `predict`).
+    pub fn tick(&mut self, game: &mut Game, world: &World, commands: &[(usize, Command)]) {
+        let number = self.prediction.next_number();
+        self.send_input(number, commands);
+        self.prediction.tick(game, world, number, commands);
+    }
+
+    /// After `poll`: if the game came, show our players where it has them,
+    /// moved on by the controls the host hasn't run yet.
+    pub fn predict(&mut self, game: &mut Game, world: &World) {
+        self.prediction.predict(game, world, &self.players);
+    }
+
+    /// How far from where our controls take one of our players they're
+    /// shown (easing over after the host put them right), if they move
+    /// here.
+    pub fn shown_off(&self, player: usize) -> Option<glam::Vec3> {
+        self.prediction.off(player)
+    }
+
+    fn send_input(&mut self, number: u32, commands: &[(usize, Command)]) {
         let mut w = Writer::default();
+        w.u32(number);
         w.u8(commands.len().min(255) as u8);
         for (p, c) in commands.iter().take(255) {
             w.index(Some(*p));

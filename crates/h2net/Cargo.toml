@@ -8,6 +8,7 @@ description = "LAN games: hosting, joining and finding games on the local networ
 [dependencies]
 h2sim = { path = "../h2sim" }
 flate2 = "1"
+glam = "0.33"
 httparse = "1"
 # ring rather than the default aws-lc-rs, which is hard to cross-compile for
 # Windows.
@@ -17,5 +18,4 @@ tungstenite = "0.30"
 webpki-roots = "1"
 
 [dev-dependencies]
-glam = "0.33"
 rcgen = "0.14"

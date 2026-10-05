@@ -106,7 +106,7 @@ impl App {
         // We pick our own team, as in a LAN lobby.
         let teams = self.wanted_teams();
         let me = (gamertag.as_str(), self.menu.profile.look);
-        let client = Client::over(conn, &self.game, &self.map_name, &teams, me);
+        let client = Box::new(Client::over(conn, &self.game, &self.map_name, &teams, me));
         self.net = Net::Joined {
             client,
             computer: link.gamertag,

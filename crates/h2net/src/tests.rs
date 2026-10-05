@@ -1101,13 +1101,14 @@ fn state(game: &h2sim::Game) -> Vec<u8> {
     w.0
 }
 
-/// The size of a whole snapshot of `game` with `events`.
-fn whole(game: &h2sim::Game, events: &[Event]) -> u64 {
+/// The size of a whole snapshot of `game` with `events`, for `joined`
+/// players on joined PCs (each with the number of their controls last run).
+fn whole(game: &h2sim::Game, events: &[Event], joined: usize) -> u64 {
     let mut w = h2sim::game::Writer::default();
     for e in events {
         e.write(&mut w);
     }
-    (4 + state(game).len() + 2 + w.0.len()) as u64
+    (4 + 1 + joined * 6 + state(game).len() + 2 + w.0.len()) as u64
 }
 
 #[test]
@@ -1133,7 +1134,7 @@ fn lan_hosts_send_the_whole_game_every_tick() {
         commands[shooter].fire = k % 2 == 0;
         hg.step(&world, &commands);
         let events = std::mem::take(&mut hg.events);
-        size += whole(&hg, &events);
+        size += whole(&hg, &events, 1);
         made += events.len();
         host.send(&hg, &events, true);
         client.keep_alive();
@@ -1919,6 +1920,257 @@ fn a_game_under_lag_goes_on() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(got, made);
+}
+
+// Online, a joined PC's own players move there at once, and the host puts
+// them right a round trip later.
+
+/// The controls for a PC's player `i` at tick `k`: stand, run, jump (and
+/// hold it till after landing), crouch, then strafe, turning all the while.
+fn routine(i: usize, k: u32) -> Command {
+    let forward = glam::Vec2::new(0.0, 1.0);
+    let t = (k + i as u32 * 40) % 240;
+    let (movement, jump, crouch) = match t {
+        0..20 => (glam::Vec2::ZERO, false, false),
+        20..50 => (forward, false, false),
+        50..150 => (forward, true, false),
+        150..170 => (forward, false, true),
+        _ => (glam::Vec2::new(1.0, 0.0), false, false),
+    };
+    Command {
+        movement,
+        jump,
+        crouch,
+        yaw: i as f32 + k as f32 * 0.02,
+        ..Command::default()
+    }
+}
+
+/// A tick on the host, sent.
+fn host_tick(host: &mut Host, hg: &mut h2sim::Game, world: &h2sim::World) {
+    let commands: Vec<Command> = (0..hg.players.len())
+        .map(|i| host.command(i).unwrap_or_default())
+        .collect();
+    hg.step(world, &commands);
+    let events = std::mem::take(&mut hg.events);
+    host.send(hg, &events, true);
+}
+
+/// Each tick on a joined PC, where it showed each of its players, and how
+/// far that was from where its controls took them.
+type Shown = Vec<Vec<(glam::Vec3, glam::Vec3)>>;
+
+/// Two players on a PC joined online play `ticks` of `routine`, their
+/// controls reaching the host `late` ticks' worth at a time (so the host
+/// runs each about that many ticks after the PC did), with `push` doing as
+/// it likes to the host's game before each tick there. What the PC showed,
+/// and where the host had them after running each tick of their controls.
+fn predicted(
+    ticks: u32,
+    late: u32,
+    mut push: impl FnMut(u32, &mut h2sim::Game),
+) -> (Shown, Vec<Vec<glam::Vec3>>) {
+    let world = floor();
+    let mut hg = game();
+    let mut cg = game();
+    let who = verified("TESTER", ANY_TEAM);
+    let teams = [ANY_TEAM, ANY_TEAM];
+    let (mut host, mut client) = online("testmap", &cg, "testmap", &teams, me(), who);
+    host.set_rate(0);
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, _, cg| {
+        cg.players.len() == 2
+    });
+    // Standing on the floor once they've landed.
+    for _ in 0..60 {
+        host.poll(&mut hg, 16);
+        host_tick(&mut host, &mut hg, &world);
+        client.poll(&mut cg);
+    }
+    let mine = client.players.clone();
+    assert_eq!(mine.len(), 2);
+    let at = |g: &h2sim::Game| mine.iter().map(|&p| g.players[p].body.position).collect();
+    let (mut shown, mut ran) = (Vec::new(), Vec::new());
+    for k in 1..=ticks {
+        let (ce, _) = client.poll(&mut cg);
+        assert!(ce.is_empty(), "{ce:?}");
+        client.predict(&mut cg, &world);
+        let commands: Vec<(usize, Command)> = mine
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (p, routine(i, k)))
+            .collect();
+        client.tick(&mut cg, &world, &commands);
+        let each = |&p: &usize| (cg.players[p].body.position, client.shown_off(p).unwrap());
+        shown.push(mine.iter().map(each).collect());
+        if k % late == 0 {
+            assert!(host.poll(&mut hg, 16).is_empty());
+        }
+        if k >= late {
+            push(k, &mut hg);
+            host_tick(&mut host, &mut hg, &world);
+            ran.push(at(&hg));
+        }
+    }
+    // The host runs the rest.
+    for _ in 1..late {
+        host_tick(&mut host, &mut hg, &world);
+        ran.push(at(&hg));
+    }
+    (shown, ran)
+}
+
+#[test]
+fn a_joined_pcs_players_move_at_once_as_the_host_will_move_them() {
+    let (shown, ran) = predicted(360, 9, |_, _| {});
+    // Player one starts running on tick 20, and shows it then (the host
+    // hears of it on tick 27).
+    assert!(shown[19][0].0.distance(shown[18][0].0) > 0.001);
+    // Both players are shown just where the host has them after the same
+    // controls: jumping, crouching and turning too.
+    assert_eq!(ran.len(), shown.len());
+    for (k, (shown, ran)) in shown.iter().zip(&ran).enumerate() {
+        for (i, (&(at, off), &there)) in shown.iter().zip(ran).enumerate() {
+            assert_eq!(off, glam::Vec3::ZERO, "player {i} at tick {}", k + 1);
+            assert_eq!(at, there, "player {i} at tick {}", k + 1);
+        }
+    }
+    let height = |i: usize| shown.iter().map(|s| s[i].0.z).fold(f32::MIN, f32::max);
+    assert!(height(0) > shown[0][0].0.z + 0.1);
+    assert!(height(1) > shown[0][1].0.z + 0.1);
+}
+
+#[test]
+fn a_joined_pc_eases_its_players_over_to_where_the_host_puts_them() {
+    // The host moves them a little on its tick 180, and the PC hears on
+    // its next.
+    let (shown, ran) = predicted(360, 9, |k, hg| {
+        if k == 180 {
+            for p in &mut hg.players {
+                p.body.position.x += 0.3;
+            }
+        }
+    });
+    let off = |k: usize| shown[k - 1][0].1.length();
+    assert!(off(180) == 0.0);
+    // Shown where they were, then eased over.
+    let first = off(181);
+    assert!(first > 0.2 && first < 0.3, "{first}");
+    let step = shown[180][0].0.distance(shown[179][0].0);
+    assert!(step < 0.15, "{step}");
+    for k in 181..211 {
+        assert!(off(k + 1) < off(k));
+    }
+    assert!(off(211) < 0.001, "{}", off(211));
+    // Where their controls take them is where the host has them.
+    for k in 182..=360 {
+        for i in 0..2 {
+            let (at, off) = shown[k - 1][i];
+            assert!((at - off).distance(ran[k - 1][i]) < 1e-4);
+        }
+    }
+}
+
+#[test]
+fn a_joined_pc_moves_its_players_at_once_when_the_host_puts_them_far_off() {
+    // As far as a teleporter would.
+    let (shown, ran) = predicted(270, 9, |k, hg| {
+        if k == 180 {
+            for p in &mut hg.players {
+                p.body.position.x += 2.0;
+            }
+        }
+    });
+    assert_eq!(shown[180][0].1, glam::Vec3::ZERO);
+    let step = shown[180][0].0.distance(shown[179][0].0);
+    assert!(step > 1.9, "{step}");
+    let (at, there) = (shown[269][0].0, ran[269][0]);
+    assert!(at.distance(there) < 1e-4);
+}
+
+#[test]
+fn online_hosts_run_each_ticks_controls_in_turn() {
+    let world = floor();
+    let mut hg = game();
+    let mut cg = game();
+    let who = verified("TESTER", ANY_TEAM);
+    let (mut host, mut client) = online("testmap", &cg, "testmap", &[ANY_TEAM], me(), who);
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, _, cg| {
+        cg.players.len() == 1
+    });
+    let mine = client.players[0];
+    // Each tick's controls aim a little further round, and every seventh
+    // taps melee.
+    let mut sent = 0;
+    let mut send = |client: &mut Client, cg: &mut h2sim::Game, count: u32| {
+        for _ in 0..count {
+            sent += 1;
+            let cmd = Command {
+                yaw: sent as f32 * 0.01,
+                melee: sent % 7 == 0,
+                ..Command::default()
+            };
+            client.tick(cg, &world, &[(mine, cmd)]);
+        }
+        sent
+    };
+    let mut taps = 0;
+    let mut run = |host: &mut Host, hg: &mut h2sim::Game| {
+        host.poll(hg, 16);
+        let cmd = host.command(mine).unwrap();
+        taps += cmd.melee as u32;
+        ((cmd.yaw * 100.0).round() as u32, taps)
+    };
+    // Three at once run one a tick, then the last again until more come.
+    send(&mut client, &mut cg, 3);
+    let ran: Vec<u32> = (0..5).map(|_| run(&mut host, &mut hg).0).collect();
+    assert_eq!(ran, [1, 2, 3, 3, 3]);
+    // Five more than needed, waiting all along, are caught up on in a tick
+    // (after half a second or so), but for one kept in reserve; no tap is
+    // lost on the way.
+    send(&mut client, &mut cg, 5);
+    let mut last = 3;
+    let mut caught_up = 0;
+    for _ in 0..90 {
+        let sent = send(&mut client, &mut cg, 1);
+        let (ran, taps) = run(&mut host, &mut hg);
+        match ran - last {
+            1 => {}
+            5 => caught_up += 1,
+            n => panic!("ran {n} at once"),
+        }
+        assert_eq!(taps, ran / 7);
+        last = ran;
+        if caught_up > 0 {
+            assert_eq!(ran, sent - 1);
+        }
+    }
+    assert_eq!(caught_up, 1);
+}
+
+#[test]
+fn lan_hosts_run_the_latest_controls_with_any_taps() {
+    let world = floor();
+    let mut hg = game();
+    let mut cg = game();
+    let mut host = Host::bind("testmap", 32, "127.0.0.1:0".parse().unwrap(), false).unwrap();
+    let (a, b) = Connection::pair();
+    host.add_connection(a, verified("TESTER", ANY_TEAM));
+    let mut client = Client::over(b, &cg, "testmap", &[ANY_TEAM], me());
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, _, cg| {
+        cg.players.len() == 1
+    });
+    let mine = client.players[0];
+    let aim = |yaw: f32, melee: bool| Command {
+        yaw,
+        melee,
+        ..Command::default()
+    };
+    for cmd in [aim(1.0, true), aim(2.0, false), aim(3.0, false)] {
+        client.tick(&mut cg, &world, &[(mine, cmd)]);
+    }
+    host.poll(&mut hg, 16);
+    assert_eq!(host.command(mine), Some(aim(3.0, true)));
+    assert_eq!(host.command(mine), Some(aim(3.0, false)));
 }
 
 // WebSockets: dialing a server, what a server takes, and the limits.

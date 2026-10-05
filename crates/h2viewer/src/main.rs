@@ -1511,18 +1511,26 @@ impl App {
     /// For testing (H2_NET_PROBE=1): where player one is shown on a joined
     /// PC this frame, and the view (their eyes, without a window).
     fn watch_probe(&mut self) {
-        let seated = matches!(self.net, Net::Joined { seated: true, .. });
         let (Some(probe), Some(l)) = (&mut self.probe, self.locals.first()) else {
             return;
         };
-        if !seated || self.mode != Mode::Playing || l.player >= self.game.players.len() {
+        let Net::Joined {
+            client,
+            seated: true,
+            ..
+        } = &self.net
+        else {
+            return;
+        };
+        if self.mode != Mode::Playing || l.player >= self.game.players.len() {
             return;
         }
         let view = match self.headless {
             true => local::view_point(&self.game, l.player),
             false => l.camera.position,
         };
-        probe.watch(self.game.players[l.player].body.position, view);
+        let shown = self.game.players[l.player].body.position;
+        probe.watch(shown, view, client.shown_off(l.player));
     }
 
     /// Where each view hears from.
