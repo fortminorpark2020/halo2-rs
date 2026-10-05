@@ -8,7 +8,8 @@
 //! <account> <unix time> <level> <playlist key, or custom> <map> <gamertag>
 //! ```
 //!
-//! with the account in hex. Gamertags can hold spaces.
+//! with the account in hex. Gamertags can hold spaces; a map's are kept as
+//! `_` (which its title shows as spaces again).
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -91,9 +92,10 @@ fn parse(text: &str) -> Vec<Recent> {
 fn to_text(list: &[Recent]) -> String {
     list.iter()
         .map(|r| {
+            let map = r.map.replace(' ', "_");
             format!(
-                "{:016x} {} {} {} {} {}\n",
-                r.account, r.when, r.level, r.played, r.map, r.gamertag
+                "{:016x} {} {} {} {map} {}\n",
+                r.account, r.when, r.level, r.played, r.gamertag
             )
         })
         .collect()
@@ -167,6 +169,23 @@ mod tests {
             Some("0000000000000002 300 30 custom midship COBRA")
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn maps_with_spaces_are_kept_whole() {
+        // A custom game on a map file named "my map.map".
+        let custom = Recent {
+            played: CUSTOM.into(),
+            map: "my map".into(),
+            ..recent(2, "BRAVO", 300)
+        };
+        let list = parse(&to_text(&[custom]));
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            (list[0].map.as_str(), list[0].gamertag.as_str()),
+            ("my_map", "BRAVO")
+        );
+        assert_eq!(crate::menu::map_title(&list[0].map), "MY MAP");
     }
 
     #[test]

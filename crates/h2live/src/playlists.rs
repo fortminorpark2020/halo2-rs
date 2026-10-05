@@ -38,9 +38,10 @@
 //!   Territories) and the time limit in seconds (0 for none). Game types are
 //!   `slayer`, `team_slayer`, `ctf`, `king`, `team_king`, `oddball`,
 //!   `team_oddball`, `juggernaut`, `territories` and `assault`; presets are
-//!   `default`, `swat`, `rockets`, `snipers`, `swords`, `shotguns` and
-//!   `hardcore` (battle rifle starts, no motion sensor). At least one, all
-//!   team games or all free-for-all.
+//!   `default`, `swat`, `rockets`, `snipers`, `swords`, `shotguns`,
+//!   `hardcore` (battle rifle starts, no motion sensor) and `team_snipers`
+//!   (snipers with no motion sensor). At least one, all team games or all
+//!   free-for-all.
 //! - `maps <name>...`: map file names without `.map`. At least one and at
 //!   most 64; the line can repeat.
 
@@ -67,9 +68,22 @@ pub const GAME_TYPES: [(GameType, &str); 10] = [
 
 /// The game's built-in variants, as the game's options name them
 /// (h2viewer's `options::presets`).
-pub const PRESETS: [&str; 7] = [
-    "DEFAULT", "SWAT", "ROCKETS", "SNIPERS", "SWORDS", "SHOTGUNS", "HARDCORE",
+pub const PRESETS: [&str; 8] = [
+    "DEFAULT",
+    "SWAT",
+    "ROCKETS",
+    "SNIPERS",
+    "SWORDS",
+    "SHOTGUNS",
+    "HARDCORE",
+    "TEAM SNIPERS",
 ];
+
+/// How a playlists file names a preset: in lowercase, with `_` for
+/// spaces.
+fn preset_word(name: &str) -> String {
+    name.to_lowercase().replace(' ', "_")
+}
 
 /// Most people (and bots) in a game.
 const MAX_PLAYERS: u8 = 16;
@@ -252,10 +266,14 @@ fn setting(p: &mut Playlist, word: &str, args: &[&str]) -> Result<(), String> {
                     names.join(", ")
                 ));
             };
-            let Some(preset) = PRESETS.iter().find(|n| n.eq_ignore_ascii_case(preset)) else {
+            let Some(preset) = PRESETS
+                .iter()
+                .find(|n| preset_word(n).eq_ignore_ascii_case(preset))
+            else {
+                let words: Vec<String> = PRESETS.iter().map(|n| preset_word(n)).collect();
                 return Err(format!(
                     "unknown preset \"{preset}\" (the presets are {})",
-                    PRESETS.join(", ").to_lowercase()
+                    words.join(", ")
                 ));
             };
             p.variants.push(Variant {
@@ -412,7 +430,7 @@ maps warlock
         assert!(snipers
             .variants
             .iter()
-            .all(|v| (v.game_type, v.preset.as_str()) == (GameType::TeamSlayer, "SNIPERS")));
+            .all(|v| (v.game_type, v.preset.as_str()) == (GameType::TeamSlayer, "TEAM SNIPERS")));
         // Team Hardcore: "two teams of four wage war in a variety of ranked
         // gametypes featuring non-default starting weapons. Motion sensor is
         // disabled."
@@ -434,7 +452,7 @@ maps warlock
         assert!(hardcore
             .variants
             .iter()
-            .all(|v| v.preset == "HARDCORE" || v.preset == "SNIPERS"));
+            .all(|v| v.preset == "HARDCORE" || v.preset == "TEAM SNIPERS"));
     }
 
     #[test]
@@ -472,7 +490,7 @@ maps warlock
         assert_eq!(
             error_with("variant team_slayer pistols 25 600"),
             "line 9: unknown preset \"pistols\" (the presets are default, swat, rockets, \
-             snipers, swords, shotguns, hardcore)"
+             snipers, swords, shotguns, hardcore, team_snipers)"
         );
         assert_eq!(
             error_with("variant team_slayer default 25"),

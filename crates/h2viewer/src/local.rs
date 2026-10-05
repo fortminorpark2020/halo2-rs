@@ -921,7 +921,8 @@ impl LocalPlayer {
         let mut drew_tracker = false;
         for widget in &scene.player_hud {
             match widget.name.as_str() {
-                "motion_tracker_background" if !drew_tracker => {
+                // With the motion sensor off (as in SWAT) there's no tracker.
+                "motion_tracker_background" if !drew_tracker && game.rules.options.radar => {
                     drew_tracker = true;
                     hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0);
                     let rect = hb.widget_rect(widget);

@@ -61,11 +61,13 @@ folders, with Halo 2's own picture and description from `mainmenu.map`), score t
 Halo 2's variant settings: the weapons on the map, primary and secondary
 starting weapons, starting grenades, shields, motion sensor, vehicles, respawn
 time, friendly fire and a time limit (none, or 5 to 30 minutes), plus the SWAT,
-Rockets, Snipers, Swords and Shotguns variants and Team Hardcore's (battle
-rifle starts, no motion sensor). The motion sensor shows teammates (yellow) and enemies (red) within
-25 metres who move faster than a crouch-walk or fire. In team games, T
-(or X on a controller) puts you on the red or blue team; bots fill the smaller
-team. System Link lists games other PCs on the network are hosting.
+Rockets, Snipers, Swords and Shotguns variants and those of Team Hardcore
+(battle rifle starts) and Team Snipers, both with no motion sensor. The
+motion sensor shows teammates (yellow) and enemies (red) within 25 metres who
+move faster than a crouch-walk or fire; with it off, the HUD has no tracker.
+In team games, T (or X on a controller) puts you on the red or blue team; bots
+fill the smaller team. System Link lists games other PCs on the network are
+hosting.
 Menus work with the arrow keys or WASD, Enter and Esc, the mouse, or a
 controller (d-pad or stick, A, B).
 

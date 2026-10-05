@@ -2672,12 +2672,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let game_type = env("H2_GAME")
         .and_then(|g| menu::GAME_TYPES.iter().position(|t| t.2 == g))
         .unwrap_or(0);
-    // H2_VARIANT=swat, rockets, snipers, swords, shotguns or hardcore:
-    // those game options (for testing).
+    // H2_VARIANT=swat, rockets, snipers, swords, shotguns, hardcore or
+    // team_snipers: those game options (for testing).
     let mut options = env("H2_VARIANT")
         .and_then(|v| {
             let all = options::presets();
-            all.into_iter().find(|p| p.0.eq_ignore_ascii_case(&v))
+            all.into_iter()
+                .find(|p| p.0.replace(' ', "_").eq_ignore_ascii_case(&v))
         })
         .map(|p| p.1)
         .unwrap_or_default();

@@ -33,7 +33,7 @@ pub use lobby::{Lobby, LobbyPlayer};
 pub use ws::{accept, dial, reply, Request};
 
 /// Bumped whenever the messages change; PCs on different versions can't play.
-pub const PROTOCOL: u32 = 24;
+pub const PROTOCOL: u32 = 25;
 /// A joining player's team when the host is to choose it.
 pub const ANY_TEAM: u8 = u8::MAX;
 /// The host listens here (or the next free port above it).

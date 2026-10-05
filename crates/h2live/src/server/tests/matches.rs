@@ -1171,8 +1171,8 @@ fn team_snipers_and_team_hardcore_matches_say_how_theyre_played() {
     // The built-in playlists, on the two maps every test PC has: four PCs
     // search each, alone.
     for (playlist, ranked, bots, presets) in [
-        (7, false, 4, &["SNIPERS"][..]),
-        (8, true, 0, &["HARDCORE", "SNIPERS"][..]),
+        (7, false, 4, &["TEAM SNIPERS"][..]),
+        (8, true, 0, &["HARDCORE", "TEAM SNIPERS"][..]),
     ] {
         let mut w = World::new(&format!("playlist-{playlist}"));
         for n in 1..=4 {

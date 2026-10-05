@@ -234,11 +234,6 @@ impl App {
             return;
         }
         println!("live: a match on {}", info.map);
-        // Everyone in it is a recent player now.
-        let key = self.online.playlist_key(info.playlist);
-        let players = info.players.iter();
-        let players = players.map(|p| (p.account, p.gamertag.as_str(), p.level));
-        self.online.met(players, &key, &info.map);
         // Whatever was going on here stops for it.
         self.net = Net::Offline;
         if self.mode == Mode::Playing {
@@ -361,6 +356,18 @@ impl App {
         println!("live: the match's game started: {}", setup_text(&self.game));
     }
 
+    /// The match's game started here: everyone in it is a recent player
+    /// now.
+    fn meet_match_players(&mut self) {
+        let Some(info) = self.online.matched.as_ref().map(|m| m.info.clone()) else {
+            return;
+        };
+        let key = self.online.playlist_key(info.playlist);
+        let players = info.players.iter();
+        let players = players.map(|p| (p.account, p.gamertag.as_str(), p.level));
+        self.online.met(players, &key, &info.map);
+    }
+
     /// Keep the match going, every frame: start the game when it's time
     /// (hosting), say how it ended, and go back to the party a while after.
     pub(super) fn update_match(&mut self) {
@@ -368,6 +375,7 @@ impl App {
         let Some(m) = &self.online.matched else {
             return;
         };
+        let started = m.started;
         let all_in = match &self.net {
             Net::Hosting(host) => host.joined() >= m.added,
             _ => false,
@@ -389,6 +397,7 @@ impl App {
             return;
         };
         m.started |= seated;
+        let began = m.started && !started;
         let mut result = None;
         if m.started && m.ended.is_none() && over {
             m.ended = Some(now);
@@ -410,6 +419,9 @@ impl App {
                     host.sent()
                 );
             }
+        }
+        if began {
+            self.meet_match_players();
         }
         if back {
             self.back_to_party();

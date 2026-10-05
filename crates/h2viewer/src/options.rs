@@ -106,10 +106,11 @@ impl Default for GameOptions {
     }
 }
 
-/// Halo 2's built-in variants offered, by name, and the one its Team
-/// Hardcore playlist played: battle rifle starts and no motion sensor.
-/// (h2live's playlists name them the same way.)
-pub fn presets() -> [(&'static str, GameOptions); 7] {
+/// Halo 2's built-in variants offered, by name, and two its later
+/// playlists played: Team Hardcore's battle rifle starts and Team Snipers'
+/// sniper rifles, neither with the motion sensor. (h2live's playlists name
+/// them the same way.)
+pub fn presets() -> [(&'static str, GameOptions); 8] {
     let only = |name: &str, backup: Choice| GameOptions {
         map_weapons: Choice::weapon(name),
         primary: Choice::weapon(name),
@@ -133,14 +134,7 @@ pub fn presets() -> [(&'static str, GameOptions); 7] {
             },
         ),
         ("ROCKETS", only("rocket_launcher", Choice::None)),
-        (
-            // "All weapons are sniper rifles and there's no motion sensor."
-            "SNIPERS",
-            GameOptions {
-                radar: false,
-                ..only("sniper_rifle", Choice::weapon("magnum"))
-            },
-        ),
+        ("SNIPERS", only("sniper_rifle", Choice::weapon("magnum"))),
         ("SWORDS", only("energy_blade", Choice::None)),
         ("SHOTGUNS", only("shotgun", Choice::None)),
         (
@@ -150,6 +144,13 @@ pub fn presets() -> [(&'static str, GameOptions); 7] {
                 secondary: Choice::weapon("smg"),
                 radar: false,
                 ..GameOptions::default()
+            },
+        ),
+        (
+            "TEAM SNIPERS",
+            GameOptions {
+                radar: false,
+                ..only("sniper_rifle", Choice::weapon("magnum"))
             },
         ),
     ]
@@ -259,5 +260,22 @@ mod tests {
             ..swat.clone()
         };
         assert_eq!(timed.preset(), Some(1));
+    }
+
+    #[test]
+    fn team_snipers_is_snipers_without_the_motion_sensor() {
+        let named = |name| presets().into_iter().find(|p| p.0 == name).unwrap().1;
+        // System Link's Snipers stays as it was.
+        let snipers = named("SNIPERS");
+        assert!(snipers.radar);
+        let team = named("TEAM SNIPERS");
+        assert!(!team.radar);
+        assert_eq!(
+            GameOptions {
+                radar: true,
+                ..team
+            },
+            snipers
+        );
     }
 }

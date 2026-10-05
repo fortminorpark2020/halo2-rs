@@ -715,7 +715,7 @@ fn team_snipers_is_unranked_team_slayer_with_sniper_rifles() {
     let m = &formed(&run(&mut mm, 0.0, 30.0))[0].1;
     assert_eq!((m.playlist, m.ranked, m.bots), (TEAM_SNIPERS, false, 5));
     assert_eq!(m.variant.game_type, GameType::TeamSlayer);
-    assert_eq!(m.variant.preset, "SNIPERS");
+    assert_eq!(m.variant.preset, "TEAM SNIPERS");
     assert_ne!(team(m, 1), team(m, 2));
     // Parties of up to four, so teams can always be even.
     let five = party(10, TEAM_SNIPERS, players(10, 5));
@@ -748,7 +748,7 @@ fn team_hardcore_is_ranked_four_against_four_in_its_own_variants() {
     let playlist = &built_in()[usize::from(TEAM_HARDCORE)];
     assert!(playlist.variants.contains(&m.variant));
     assert!(playlist.maps.contains(&m.map));
-    assert!(["HARDCORE", "SNIPERS"].contains(&m.variant.preset.as_str()));
+    assert!(["HARDCORE", "TEAM SNIPERS"].contains(&m.variant.preset.as_str()));
 }
 
 #[test]
