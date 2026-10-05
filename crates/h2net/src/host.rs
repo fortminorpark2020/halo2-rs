@@ -6,7 +6,7 @@
 use crate::conn::Connection;
 use crate::discovery::Beacon;
 use crate::live::ToServer;
-use crate::{kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
+use crate::{after, kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
 use h2sim::game::{guest_name, Event, Look, Reader, Writer};
 use h2sim::{Command, Game};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -19,10 +19,11 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const ONLINE_RATE: u32 = 30;
 /// Online, a PC with more snapshots than this on their way to it (two
 /// thirds of a second's worth) is behind: it misses snapshots (but not
-/// what happened in them) until all it was sent have arrived. It says how
-/// many have, so this counts those held up in buffers along the way too
-/// (the network's, a relay's), not just in ours.
-const IN_FLIGHT: u32 = 20;
+/// what happened in them) until all it was sent have arrived. It says
+/// which it has taken on, so this counts those held up in buffers along
+/// the way too (the network's, a relay's), not just in ours, and those
+/// that came early and wait on one that hasn't.
+const IN_FLIGHT: usize = 20;
 
 /// Things the host's game should show or act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,10 +88,9 @@ struct Remote {
     /// The number of the last snapshot it got, if the next can go as how
     /// it differs from that one.
     has: Option<u32>,
-    /// Snapshots sent to it, and how many it last said had arrived: those
-    /// in between are on their way.
-    sent: u32,
-    arrived: u32,
+    /// The numbers of the snapshots sent to it that it hasn't said it has
+    /// taken on (or one newer): they're on their way.
+    on_the_way: Vec<u32>,
     /// What happened in snapshots it missed being behind, and since when
     /// it has been.
     missed: Vec<Event>,
@@ -118,8 +118,7 @@ impl Remote {
             fresh: false,
             players: Vec::new(),
             has: None,
-            sent: 0,
-            arrived: 0,
+            on_the_way: Vec::new(),
             missed: Vec::new(),
             behind: None,
         }
@@ -524,6 +523,12 @@ impl Host {
         if let Err(why) = leg.receive().and_then(|_| leg.flush()) {
             println!("lan: lost the fan-out leg: {why}");
             self.fanout = None;
+            // What was on its way over it may never come: each PC gets the
+            // whole game next, without waiting for it.
+            for r in &mut self.remotes {
+                r.has = None;
+                r.on_the_way.clear();
+            }
         }
     }
 
@@ -658,6 +663,8 @@ impl Host {
                     r.conn.send(kind::WELCOME, &w.0);
                     r.in_game = true;
                     r.fresh = true;
+                    // Nothing of this game is on its way to it yet.
+                    r.on_the_way.clear();
                     r.players = players.iter().map(|&p| seat(game, p)).collect();
                     println!("lan: {computer} ({}) joined", r.address);
                     events.push(HostEvent::Joined { computer, players });
@@ -715,7 +722,10 @@ impl Host {
                 // Controls still on their way from a game that's over.
                 kind::INPUT | kind::ADD_LOCAL | kind::REMOVE_LOCAL if r.welcomed => {}
                 kind::ALIVE => {}
-                kind::GOT => r.arrived = rd.u32().map_err(|e| e.to_string())?,
+                kind::GOT => {
+                    let got = rd.u32().map_err(|e| e.to_string())?;
+                    r.on_the_way.retain(|&seq| after(seq, got));
+                }
                 _ => return Err(format!("unexpected message {kind}")),
             }
         }
@@ -791,7 +801,7 @@ impl Host {
             }
             // Once behind, it waits until all it was sent have arrived,
             // then gets the whole game.
-            let on_the_way = r.sent.wrapping_sub(r.arrived);
+            let on_the_way = r.on_the_way.len();
             let behind = on_the_way > IN_FLIGHT || (r.behind.is_some() && on_the_way > 0);
             if self.online && behind {
                 r.missed.extend_from_slice(&events);
@@ -816,7 +826,9 @@ impl Host {
                 mine = snapshot(&state, &std::mem::take(&mut r.missed));
                 (kind::SNAPSHOT, &mine, false)
             };
-            r.sent = r.sent.wrapping_add(1);
+            if self.online {
+                r.on_the_way.push(self.seq);
+            }
             r.has = shared.then_some(self.seq);
             r.fresh = false;
             r.behind = None;

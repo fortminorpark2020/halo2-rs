@@ -55,8 +55,9 @@ mod kind {
     pub const REMOVE_LOCAL: u8 = 4;
     /// Still here (after a while with nothing else to say).
     pub const ALIVE: u8 = 5;
-    /// How many snapshots have arrived, said as they do: online, the host
-    /// holds the game back from a PC with too many still on their way.
+    /// The number of the newest snapshot taken on, said as it changes:
+    /// online, the host holds the game back from a PC too far behind what
+    /// it was sent.
     pub const GOT: u8 = 6;
     // Host to joined PC.
     pub const WELCOME: u8 = 101;
@@ -104,6 +105,11 @@ pub fn session_id() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos() as u64);
     t ^ ((std::process::id() as u64) << 32) ^ 0x9E37_79B9_7F4A_7C15
+}
+
+/// Snapshot number `a` comes after `b` (in numbers that wrap around).
+fn after(a: u32, b: u32) -> bool {
+    a.wrapping_sub(b) as i32 > 0
 }
 
 /// Paces something to once every `every` seconds on average, however the

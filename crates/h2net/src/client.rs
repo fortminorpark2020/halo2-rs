@@ -2,15 +2,15 @@
 //! host sends back.
 
 use crate::conn::Connection;
-use crate::{kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
+use crate::{after, kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
 use h2sim::game::{Event, Look, Malformed, Reader, Writer, TICK};
 use h2sim::{Command, Game};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-/// Most snapshots kept that came early: more than a host ever has on their
-/// way to a PC.
+/// Most snapshots kept that came early: more than a host ever sends past the
+/// newest a PC says it has taken on.
 const EARLY: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,15 +58,10 @@ pub struct Client {
     /// at once (see `Host::set_fanout`), and can overtake a whole snapshot
     /// sent to this PC alone.
     early: Vec<(u32, Vec<u8>)>,
-    /// Snapshots that have arrived (taken on or not), and how many of them
-    /// the host was last told of.
-    arrived: u32,
+    /// The number of the newest snapshot taken on, and the last the host
+    /// was told of: what it sent since is on its way, or came early.
+    got: u32,
     told: u32,
-}
-
-/// Snapshot number `a` comes after `b` (in numbers that wrap around).
-fn after(a: u32, b: u32) -> bool {
-    a.wrapping_sub(b) as i32 > 0
 }
 
 /// A command's buttons, without where it aims or moves.
@@ -141,7 +136,7 @@ impl Client {
             input: Pace::new(TICK),
             last: None,
             early: Vec::new(),
-            arrived: 0,
+            got: 0,
             told: 0,
         }
     }
@@ -185,9 +180,6 @@ impl Client {
             }
         };
         for (kind, body) in messages {
-            if matches!(kind, kind::SNAPSHOT | kind::SNAPSHOT_DELTA) {
-                self.arrived = self.arrived.wrapping_add(1);
-            }
             let mut r = Reader::new(&body);
             let result = match kind {
                 kind::WELCOME => (|| {
@@ -245,11 +237,11 @@ impl Client {
             }
         }
         // So the host knows how many are still on their way.
-        if self.arrived != self.told && !self.gone {
+        if self.got != self.told && !self.gone {
             let mut w = Writer::default();
-            w.u32(self.arrived);
+            w.u32(self.got);
             self.conn.send(kind::GOT, &w.0);
-            self.told = self.arrived;
+            self.told = self.got;
         }
         self.keep_alive();
         (out, events)
@@ -281,13 +273,15 @@ impl Client {
             events.push(Event::read(&mut r, p, w, v)?);
         }
         self.last = Some((seq, snapshot));
+        self.got = seq;
         Ok(())
     }
 
     /// Take on a snapshot sent as how it differs from the one before it,
     /// and those that came early and follow it; or keep it, if the one
     /// before hasn't come yet. One no newer than the last taken on is from
-    /// before that (the game before, say), and is dropped.
+    /// before that (the game before, say), and is dropped, as is one more
+    /// than can be kept.
     fn take_delta(
         &mut self,
         game: &mut Game,
@@ -306,7 +300,7 @@ impl Client {
                 self.early.push((seq, message));
                 Ok(())
             }
-            _ => Err(Malformed),
+            _ => Ok(()),
         }
     }
 

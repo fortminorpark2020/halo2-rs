@@ -1389,10 +1389,14 @@ fn a_pc_that_never_catches_up_is_dropped() {
 /// the other (as it can over the internet, on another connection).
 struct Relay {
     links: Vec<RelayLink>,
-    fanout: Connection,
+    /// The relay's end of the fan-out leg, until it's gone.
+    fanout: Option<Connection>,
     /// Those the last fan-out went to.
     to: Vec<u64>,
     lag: usize,
+    /// Passes in which nothing the host sends a PC alone gets there (as
+    /// when those connections stall).
+    held: std::ops::Range<usize>,
     passes: usize,
     /// Bytes passed on to PCs.
     passed: u64,
@@ -1411,26 +1415,30 @@ struct RelayLink {
 impl Relay {
     fn pass(&mut self) {
         self.passes += 1;
-        for (kind, body) in self.fanout.receive().unwrap() {
-            let Ok(live::ToServer::Fanout { to, kind, body }) = live::ToServer::read(kind, &body)
-            else {
-                panic!("not a fan-out: {kind}");
-            };
-            if let Some(to) = to {
-                self.to = to;
-            }
-            for link in &mut self.links {
-                if self.to.contains(&link.account) {
-                    link.pc.send(kind, &body);
-                    self.passed += 1 + body.len() as u64;
+        if let Some(fanout) = &mut self.fanout {
+            for (kind, body) in fanout.receive().unwrap() {
+                let Ok(live::ToServer::Fanout { to, kind, body }) =
+                    live::ToServer::read(kind, &body)
+                else {
+                    panic!("not a fan-out: {kind}");
+                };
+                if let Some(to) = to {
+                    self.to = to;
+                }
+                for link in &mut self.links {
+                    if self.to.contains(&link.account) {
+                        link.pc.send(kind, &body);
+                        self.passed += 1 + body.len() as u64;
+                    }
                 }
             }
         }
+        let held = self.held.contains(&self.passes);
         for link in &mut self.links {
             for (kind, body) in link.host.receive().unwrap() {
                 link.late.push_back((self.passes + self.lag, kind, body));
             }
-            while link.late.front().is_some_and(|m| m.0 <= self.passes) {
+            while !held && link.late.front().is_some_and(|m| m.0 <= self.passes) {
                 let (_, kind, body) = link.late.pop_front().unwrap();
                 self.passed += 1 + body.len() as u64;
                 link.pc.send(kind, &body);
@@ -1444,78 +1452,108 @@ impl Relay {
     }
 }
 
-#[test]
-fn the_host_sends_the_game_once_for_every_pc_through_the_relay() {
-    let world = floor();
-    let points: Vec<glam::Vec3> = (-4..=4)
-        .flat_map(|x| (-4..=4).map(move |y| glam::Vec3::new(x as f32 * 3.0, y as f32 * 3.0, 0.0)))
-        .collect();
-    let nav = h2sim::NavGraph::build(&world, &points);
-    let mut hg = game();
-    hg.rules.score_to_win = 0;
-    for _ in 0..3 {
-        hg.add_player();
-    }
-    let mut host = Host::online("testmap");
-    host.set_rate(0);
-    let (fanout, relayed) = Connection::pair();
-    host.set_fanout(fanout);
-    let mut relay = Relay {
-        links: Vec::new(),
-        fanout: relayed,
-        to: Vec::new(),
-        lag: 3,
-        passes: 0,
-        passed: 0,
-    };
-    let mut pcs = Vec::new();
-    for account in 1..=3 {
-        let (host_side, relay_host) = Connection::pair();
-        let (relay_pc, pc_side) = Connection::pair();
-        let who = Verified {
-            account,
-            gamertag: format!("PC{account}"),
-            level: 1,
-            team: ANY_TEAM,
-        };
-        host.add_connection(host_side, who);
-        relay.links.push(RelayLink {
-            account,
-            host: relay_host,
-            pc: relay_pc,
-            late: VecDeque::new(),
-        });
-        let cg = game();
-        let client = Client::over(pc_side, &cg, "testmap", &[ANY_TEAM], me());
-        pcs.push((client, cg, Vec::new()));
-    }
-    let mut bots: Vec<h2sim::Bot> = Vec::new();
-    let mut made = Vec::new();
-    let mut tick = |host: &mut Host, hg: &mut h2sim::Game| {
-        while bots.len() < hg.players.len() {
-            bots.push(h2sim::Bot::new(bots.len() as u32 * 31 + 5));
-        }
-        let commands: Vec<Command> = (0..hg.players.len())
-            .map(|p| bots[p].think(hg, &world, &nav, p))
+/// Bots playing on the test floor, on a host and the PCs joined to it
+/// through the relay (bots on the host play their players too).
+struct RelayGame {
+    world: h2sim::World,
+    nav: h2sim::NavGraph,
+    hg: h2sim::Game,
+    host: Host,
+    relay: Relay,
+    /// Each PC, its game, and what happened in it.
+    pcs: Vec<(Client, h2sim::Game, Vec<Event>)>,
+    bots: Vec<h2sim::Bot>,
+    /// What happened in the host's game.
+    made: Vec<Event>,
+}
+
+impl RelayGame {
+    /// `pcs` PCs join, through a relay with `lag`.
+    fn new(pcs: u64, lag: usize) -> RelayGame {
+        let world = floor();
+        let points: Vec<glam::Vec3> = (-4..=4)
+            .flat_map(|x| {
+                (-4..=4).map(move |y| glam::Vec3::new(x as f32 * 3.0, y as f32 * 3.0, 0.0))
+            })
             .collect();
-        hg.step(&world, &commands);
-        let events = std::mem::take(&mut hg.events);
-        host.send(hg, &events, true);
-        events
-    };
-    // Welcomes and whole games come late, and what changed overtakes them;
-    // the third PC stops reading for a while, falls behind and catches up.
-    let (mut sent, mut passed) = (0, 0);
-    for step in 0..600 {
-        let he = host.poll(&mut hg, 16);
+        let nav = h2sim::NavGraph::build(&world, &points);
+        let mut hg = game();
+        hg.rules.score_to_win = 0;
+        for _ in 0..3 {
+            hg.add_player();
+        }
+        let mut host = Host::online("testmap");
+        host.set_rate(0);
+        let (fanout, relayed) = Connection::pair();
+        host.set_fanout(fanout);
+        let mut relay = Relay {
+            links: Vec::new(),
+            fanout: Some(relayed),
+            to: Vec::new(),
+            lag,
+            held: 0..0,
+            passes: 0,
+            passed: 0,
+        };
+        let mut joined = Vec::new();
+        for account in 1..=pcs {
+            let (host_side, relay_host) = Connection::pair();
+            let (relay_pc, pc_side) = Connection::pair();
+            let who = Verified {
+                account,
+                gamertag: format!("PC{account}"),
+                level: 1,
+                team: ANY_TEAM,
+            };
+            host.add_connection(host_side, who);
+            relay.links.push(RelayLink {
+                account,
+                host: relay_host,
+                pc: relay_pc,
+                late: VecDeque::new(),
+            });
+            let cg = game();
+            let client = Client::over(pc_side, &cg, "testmap", &[ANY_TEAM], me());
+            joined.push((client, cg, Vec::new()));
+        }
+        RelayGame {
+            world,
+            nav,
+            hg,
+            host,
+            relay,
+            pcs: joined,
+            bots: Vec::new(),
+            made: Vec::new(),
+        }
+    }
+
+    /// The host reads what came, runs a tick and sends it.
+    fn tick(&mut self) {
+        let he = self.host.poll(&mut self.hg, 16);
         assert!(
             he.iter().all(|e| matches!(e, HostEvent::Joined { .. })),
             "{he:?}"
         );
-        made.extend(tick(&mut host, &mut hg));
-        relay.pass();
-        for (k, (client, cg, got)) in pcs.iter_mut().enumerate() {
-            if k == 2 && (200..300).contains(&step) {
+        while self.bots.len() < self.hg.players.len() {
+            self.bots
+                .push(h2sim::Bot::new(self.bots.len() as u32 * 31 + 5));
+        }
+        let commands: Vec<Command> = (0..self.hg.players.len())
+            .map(|p| self.bots[p].think(&self.hg, &self.world, &self.nav, p))
+            .collect();
+        self.hg.step(&self.world, &commands);
+        let events = std::mem::take(&mut self.hg.events);
+        self.host.send(&self.hg, &events, true);
+        self.made.extend(events);
+    }
+
+    /// The relay passes on what was sent, and each PC but those `asleep`
+    /// takes it on.
+    fn pass(&mut self, asleep: &[usize]) {
+        self.relay.pass();
+        for (k, (client, cg, got)) in self.pcs.iter_mut().enumerate() {
+            if asleep.contains(&k) {
                 client.keep_alive();
                 continue;
             }
@@ -1526,28 +1564,54 @@ fn the_host_sends_the_game_once_for_every_pc_through_the_relay() {
             );
             got.extend(events);
         }
+    }
+
+    /// What's left on its way arrives, and each PC has the host's game.
+    fn settle(&mut self) {
+        for _ in 0..2 * self.relay.lag {
+            assert!(self.host.poll(&mut self.hg, 16).is_empty());
+            self.pass(&[]);
+        }
+        for (_, cg, _) in &self.pcs {
+            assert_eq!(state(cg), state(&self.hg));
+        }
+    }
+
+    /// Each PC got everything that happened since it joined.
+    fn check_events(&self) {
+        for (_, _, got) in &self.pcs {
+            assert!(
+                self.made.ends_with(got) && got.len() > 50,
+                "{} of {}",
+                got.len(),
+                self.made.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_host_sends_the_game_once_for_every_pc_through_the_relay() {
+    let mut g = RelayGame::new(3, 3);
+    // Welcomes and whole games come late, and what changed overtakes them;
+    // the third PC stops reading for a while, falls behind and catches up.
+    let (mut sent, mut passed) = (0, 0);
+    for step in 0..600 {
+        g.tick();
+        let asleep: &[usize] = if (200..300).contains(&step) {
+            &[2]
+        } else {
+            &[]
+        };
+        g.pass(asleep);
         if step == 400 {
-            (sent, passed) = (host.sent(), relay.passed);
+            (sent, passed) = (g.host.sent(), g.relay.passed);
         }
     }
-    let (sent, passed) = (host.sent() - sent, relay.passed - passed);
-    // What's left on its way arrives.
-    for _ in 0..2 * relay.lag {
-        assert!(host.poll(&mut hg, 16).is_empty());
-        relay.pass();
-        for (client, cg, got) in &mut pcs {
-            got.extend(client.poll(cg).1);
-        }
-    }
-    // Each has the game, and everything that happened since it joined.
-    for (client, cg, got) in &pcs {
-        assert_eq!(state(cg), state(&hg));
-        assert!(
-            made.ends_with(got) && got.len() > 50,
-            "{} of {}",
-            got.len(),
-            made.len()
-        );
+    let (sent, passed) = (g.host.sent() - sent, g.relay.passed - passed);
+    g.settle();
+    g.check_events();
+    for (client, ..) in &g.pcs {
         assert!(client.snapshots > 450, "{}", client.snapshots);
     }
     // Three PCs got the game, which went once (with who it's for).
@@ -1555,6 +1619,97 @@ fn the_host_sends_the_game_once_for_every_pc_through_the_relay() {
         sent * 5 < passed * 2,
         "{sent} bytes sent for {passed} passed on"
     );
+}
+
+#[test]
+fn pcs_whose_own_links_stall_catch_up_through_the_relay() {
+    // Their welcomes and whole games are held up for three seconds while
+    // what changed since comes on over the fan-out leg; later the second
+    // falls behind, and the whole game it gets then is held up too.
+    let mut g = RelayGame::new(2, 3);
+    g.relay.held = 0..90;
+    let mut took = Vec::new();
+    for step in 0..500 {
+        g.tick();
+        if step == 300 {
+            g.relay.held = 300..400;
+        }
+        let asleep: &[usize] = if (200..300).contains(&step) {
+            &[1]
+        } else {
+            &[]
+        };
+        g.pass(asleep);
+        if step == 450 {
+            took = g.pcs.iter().map(|p| p.0.snapshots).collect();
+        }
+    }
+    // By the end, each takes on every snapshot again.
+    for ((client, ..), took) in g.pcs.iter().zip(took) {
+        assert_eq!(client.snapshots - took, 49);
+    }
+    g.settle();
+    g.check_events();
+}
+
+#[test]
+fn the_game_goes_on_when_the_fan_out_leg_is_lost() {
+    let mut g = RelayGame::new(2, 3);
+    let mut lost = 0;
+    for step in 0..400 {
+        g.tick();
+        // It goes with what the host just sent on it.
+        if step == 100 {
+            g.relay.fanout = None;
+            lost = g.made.len();
+        }
+        g.pass(&[]);
+    }
+    g.settle();
+    // What happened in the snapshot lost with it is gone, but each PC
+    // plays on, getting the game over its own link.
+    assert!(g.made.len() - lost > 10, "{}", g.made.len() - lost);
+    for (client, _, got) in &g.pcs {
+        assert!(got.ends_with(&g.made[lost..]));
+        assert!(client.snapshots > 350, "{}", client.snapshots);
+    }
+}
+
+#[test]
+fn snapshots_that_come_too_early_are_let_go() {
+    // More changes than a host ever has on their way, on top of a game
+    // that never comes: the PC keeps what it can, and takes the next whole
+    // game it gets.
+    let (mut host_side, pc_side) = Connection::pair();
+    let mut hg = game();
+    let p = hg.add_player();
+    let mut cg = game();
+    let mut client = Client::over(pc_side, &cg, "testmap", &[ANY_TEAM], me());
+    let mut w = h2sim::game::Writer::default();
+    w.str("HOST");
+    w.u8(1);
+    w.index(Some(p));
+    host_side.send(kind::WELCOME, &w.0);
+    for seq in 300..400u32 {
+        let mut w = h2sim::game::Writer::default();
+        w.u32(seq);
+        w.u32(100);
+        w.0.extend_from_slice(&[7; 20]);
+        host_side.send(kind::SNAPSHOT_DELTA, &w.0);
+    }
+    host_side.flush().unwrap();
+    let (ce, _) = client.poll(&mut cg);
+    assert!(matches!(ce[..], [ClientEvent::Welcomed { .. }]), "{ce:?}");
+    let mut w = h2sim::game::Writer::default();
+    w.u32(500);
+    hg.write_state(&mut w);
+    w.u16(0);
+    host_side.send(kind::SNAPSHOT, &w.0);
+    host_side.flush().unwrap();
+    let (ce, _) = client.poll(&mut cg);
+    assert!(ce.is_empty(), "{ce:?}");
+    assert_eq!(state(&cg), state(&hg));
+    assert_eq!(client.snapshots, 1);
 }
 
 #[test]
