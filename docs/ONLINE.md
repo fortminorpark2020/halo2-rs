@@ -2,7 +2,7 @@
 
 Online play needs one server that everyone's game signs in to. It keeps
 accounts and levels, finds matches, and passes the games between players.
-There are two ways to run it. Option A is the easy one.
+There are three ways to run it. Option A is the easy one.
 
 ## Option A: a free server on Render (recommended)
 
@@ -76,6 +76,23 @@ internet address.
 Your own game finds a server running on the same PC by itself. Your home's
 internet address can change now and then: if friends suddenly can't sign in,
 check the READY line again and send Claude the new address.
+
+## Option C: a container on a home server (Proxmox)
+
+This is how it runs now: in a Debian container (LXC) on a Proxmox host at
+home, which starts it whenever the host boots. Claude sets it up and updates
+it from your PC.
+
+- `deploy/proxmox/install-h2live.sh`, run as root inside the container next
+  to a Linux build of `h2live`, installs it as the `h2live` service (program
+  in `/opt/h2live`, accounts in `/var/lib/h2live`). Running it again updates
+  the program and keeps every account.
+- `journalctl -u h2live` shows its log, with the READY, FORWARD or CGNAT line
+  described in option B. FORWARD means the router needs a port forward for
+  TCP 47050 to the container's address, and the container's address should
+  be reserved in the router so it doesn't change.
+- On the same network, games reach it at `ws://<container address>:47050`
+  (a `server=` line in `profile.txt`, below).
 
 ## What friends do
 
