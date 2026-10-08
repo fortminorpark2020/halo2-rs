@@ -2,7 +2,7 @@
 //! places, who fight but never respawn, and checkpoints, where a player who
 //! dies comes back.
 
-use super::{Actor, Game, GameType, GrenadeKind, HeldWeapon, Look, Vitality};
+use super::{Actor, Death, Game, GameType, GrenadeKind, HeldWeapon, Look, Vitality};
 use crate::collision::World;
 use crate::weapon::WeaponState;
 use blam_cache::physics::BipedPhysics;
@@ -222,7 +222,7 @@ impl Game {
             .get(i)
             .is_some_and(|p| p.actor.is_some() && p.alive)
         {
-            self.kill(i, None, false);
+            self.kill(i, None, false, Death::Weapon);
         }
     }
 

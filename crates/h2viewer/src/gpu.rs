@@ -65,6 +65,10 @@ pub mod hud_mode {
     pub const METER_BLUE: f32 = 2.0;
     /// Meter whose grey level orders the fill.
     pub const METER_GREY: f32 = 3.0;
+    /// Halo 2's score meter: a black frame (alpha 1), and inside it (a
+    /// faint backing, alpha 0x40) blue orders the fill left to right and
+    /// green shades it top to bottom.
+    pub const SCORE_METER: f32 = 4.0;
 }
 
 #[derive(Clone, Copy)]
@@ -434,6 +438,13 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     if (mode == 3) {
         let on = step(t.r, i.mode.y + 0.002);
         return vec4<f32>(i.color.rgb, t.a * i.color.a * on);
+    }
+    if (mode == 4) {
+        let frame = step(0.5, t.a);
+        let inside = step(0.02, t.a) * (1.0 - frame);
+        let on = step(t.b, i.mode.y + 0.002) * inside;
+        let alpha = max(frame * t.a, max(on, t.a * inside));
+        return vec4<f32>(i.color.rgb * t.g * on, alpha * i.color.a);
     }
     return t * i.color;
 }

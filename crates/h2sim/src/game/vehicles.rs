@@ -2,10 +2,10 @@
 //! gunning, running people over, and blowing up.
 
 use super::projectiles::Homing;
-use super::{Command, Event, Game, SWAP_HOLD};
+use super::{Command, Death, Event, Game, SWAP_HOLD};
 use crate::collision::World;
 use crate::vehicle::{Controls, Drive, SeatRole, TrickKind, Vehicle, VehicleDef};
-use crate::weapon::{WeaponDef, WeaponInput, WeaponState};
+use crate::weapon::{ArmorScale, WeaponDef, WeaponInput, WeaponState};
 use blam_cache::weapon::TriggerInput;
 use glam::{Vec2, Vec3};
 
@@ -247,7 +247,7 @@ impl Game {
             return self.enter(i, v, s);
         };
         if self.vehicle_defs[self.vehicles[v].def].drive == Drive::Tank {
-            self.kill(victim, Some(i), false);
+            self.kill(victim, Some(i), false, Death::Weapon);
         } else {
             self.exit(world, victim);
             // Thrown clear.
@@ -683,7 +683,7 @@ impl Game {
         let riders: Vec<usize> = veh.riders.iter().flatten().copied().collect();
         for r in riders {
             self.leave_seat(r);
-            self.kill(r, attacker.or(Some(r)), false);
+            self.kill(r, attacker.or(Some(r)), false, Death::Weapon);
         }
         self.events.push(Event::VehicleDestroyed {
             vehicle: v,
@@ -797,7 +797,7 @@ impl Game {
                     self.vehicles[v].riders.iter().flatten().copied().collect();
                 for r in riders {
                     self.leave_seat(r);
-                    self.kill(r, None, false);
+                    self.kill(r, None, false, Death::Guardians);
                 }
                 let _ = blame;
                 self.vehicles[v].destroyed = true;
@@ -966,7 +966,8 @@ impl Game {
                         vehicle: v,
                     });
                     let killer = driver.filter(|&d| d != j);
-                    self.damage(j, killer, f32::INFINITY, false);
+                    let how = Death::Splatter;
+                    self.hurt_as(j, killer, f32::INFINITY, false, ArmorScale::default(), how);
                     if self.players[j].alive {
                         // Teammates without friendly fire just get shoved
                         // (off their feet, if it's upward).

@@ -42,6 +42,7 @@ mod local;
 mod mapinfo;
 mod memory;
 mod menu;
+mod messages;
 mod netprobe;
 mod objective;
 mod online;
@@ -72,7 +73,7 @@ use h2sim::{
 use hud::HudBuilder;
 use input::{PadPress, Pads};
 use lan::Net;
-use local::{display_name, kill_message, player_colors, Keyboard, LocalPlayer, Taps};
+use local::{display_name, player_colors, Keyboard, LocalPlayer, Taps};
 use menu::{MapChoice, Menu, Screen, Settings};
 use scene::{BodyKind, EffectLook, Scene};
 use std::collections::{HashMap, HashSet};
@@ -1125,6 +1126,11 @@ struct App {
     menu_time: f32,
     /// Seconds since someone won.
     game_over: Option<f32>,
+    /// The game's clock when it ended (a joined PC's keeps following the
+    /// host's after), for the time everyone was alive.
+    ended_at: Option<f64>,
+    /// The time and score warnings the game has given.
+    warnings: messages::Warnings,
     music: Option<scene::Music>,
     music_loading: Option<Receiver<Option<scene::Music>>>,
     music_voice: Option<u64>,
@@ -1223,7 +1229,8 @@ impl App {
         self.game.set_name(i, bot_name(i));
         self.game.set_look(i, bot_look(i));
         self.bots.push((i, Bot::new(i as u32 * 7919 + 13)));
-        self.announce(&format!("{} JOINED", self.game.name(i)));
+        let line = self.scene.text.joined(self.game.name(i));
+        self.announce(&line);
     }
 
     /// Another person joins in splitscreen.
@@ -1247,7 +1254,8 @@ impl App {
         let mut l = LocalPlayer::new(i, &self.game);
         l.pad = pad;
         self.locals.push(l);
-        self.announce(&format!("{guest} JOINED"));
+        let line = self.scene.text.joined(&guest);
+        self.announce(&line);
     }
 
     fn pad_pressed(&mut self, id: GamepadId, press: PadPress) {
@@ -1418,6 +1426,7 @@ impl App {
             // Everything stands still with the game.
             return;
         }
+        self.tell_players();
         let notice = self.lan_notice();
         for l in &mut self.locals {
             // A guest whose controller went is told how to play on.
@@ -1427,6 +1436,7 @@ impl App {
                 .map(|_| LOST_PAD.to_string());
             l.notice = lost.or_else(|| notice.clone().filter(|_| l.keyboard));
             l.update_camera(&self.game, &self.world, self.pending, dt);
+            l.age_messages(self.scene.message_times, dt);
         }
         self.watch_probe();
         self.animate_bodies(dt);
@@ -1478,6 +1488,50 @@ impl App {
         }
         let listeners = self.listeners();
         self.sound.update(&self.scene, &self.game, &listeners, dt);
+    }
+
+    /// What the HUD tells everyone here as the game goes, in Halo 2's
+    /// words: the game type (and their team) as they start playing, then
+    /// the time running out and a side about to win, which the announcer
+    /// calls too.
+    fn tell_players(&mut self) {
+        for l in self.locals.iter_mut().filter(|l| !l.told_start) {
+            l.told_start = true;
+            for line in self.scene.text.start(&self.game, l.player) {
+                l.message(line);
+            }
+        }
+        let announcer = self.scene.game_sounds.announcer;
+        for w in self.warnings.update(&self.game) {
+            let text = &self.scene.text;
+            match w {
+                messages::Warning::TimeLeft(k) => {
+                    let line = text.time_left(k);
+                    println!("{}", line.to_lowercase());
+                    for l in &mut self.locals {
+                        l.message(line.clone());
+                    }
+                    self.sound.announce(announcer.time_left[k]);
+                }
+                messages::Warning::ToWin(k, side) => {
+                    let (teams, name) = match side {
+                        messages::Side::Team(t) => (true, text.team(t)),
+                        messages::Side::Player(p) => {
+                            (false, local::player_name(&self.game, usize::MAX, p))
+                        }
+                    };
+                    println!("{}", text.to_win(k, teams, Some(&name)).to_lowercase());
+                    for l in &mut self.locals {
+                        let theirs = match side {
+                            messages::Side::Team(t) => self.game.players[l.player].team == t,
+                            messages::Side::Player(p) => l.player == p,
+                        };
+                        l.message(text.to_win(k, teams, (!theirs).then_some(name.as_str())));
+                    }
+                    self.sound.announce(announcer.to_win[k]);
+                }
+            }
+        }
     }
 
     /// For testing (H2_LIVE_BOT): play on without a window, a frame a
@@ -1649,6 +1703,8 @@ impl App {
 
     fn handle_events(&mut self) {
         let listeners = self.listeners();
+        // Grenades picked up together are one message, per player and kind.
+        let mut grenades: Vec<(usize, bool, usize)> = Vec::new();
         for e in std::mem::take(&mut self.game.events) {
             self.sound.event(&self.scene, &self.game, &listeners, &e);
             match e {
@@ -1752,19 +1808,22 @@ impl App {
                         self.effects.splash(position, normal, r.glow);
                     }
                 }
-                Event::Killed { killer, victim, .. } => {
-                    let betrayal =
-                        killer.is_some_and(|k| k != victim && !self.game.is_enemy(k, victim));
-                    println!(
-                        "{}",
-                        kill_message(&self.game, usize::MAX, killer, victim, betrayal)
-                            .to_lowercase()
-                    );
+                Event::Killed {
+                    killer,
+                    victim,
+                    how,
+                    ..
+                } => {
+                    let text = &self.scene.text;
+                    if let Some(line) = text.kill(&self.game, usize::MAX, killer, victim, how) {
+                        println!("{}", line.to_lowercase());
+                    }
                     // The campaign has no kill messages.
                     let campaign = self.game.rules.game_type == GameType::Campaign;
                     for l in &mut self.locals {
-                        if !campaign {
-                            l.message(kill_message(&self.game, l.player, killer, victim, betrayal));
+                        let line = text.kill(&self.game, l.player, killer, victim, how);
+                        if let Some(line) = line.filter(|_| !campaign) {
+                            l.message(line);
                         }
                         if victim == l.player {
                             // The death camera starts behind and above the body.
@@ -1788,6 +1847,29 @@ impl App {
                         l.eyes = (eye, eye);
                     }
                 }
+                Event::PickedUp {
+                    player,
+                    kind: kind @ (ItemKind::FragGrenades | ItemKind::PlasmaGrenades),
+                } => {
+                    let plasma = kind == ItemKind::PlasmaGrenades;
+                    match grenades.iter_mut().find(|g| g.0 == player && g.1 == plasma) {
+                        Some(g) => g.2 += 1,
+                        None => grenades.push((player, plasma, 1)),
+                    }
+                }
+                Event::Medal { player, medal } => {
+                    let line = self.scene.text.medal(medal);
+                    if let Some(l) = self.local_of(player) {
+                        l.message(line);
+                    }
+                }
+                Event::Lead { player, change } => {
+                    let teams = self.game.rules.game_type.teams();
+                    let line = self.scene.text.lead(change, teams);
+                    if let Some(l) = self.local_of(player) {
+                        l.message(line);
+                    }
+                }
                 Event::PickedUp { player, kind } => {
                     let what = match kind {
                         ItemKind::Weapon(w) => self
@@ -1796,8 +1878,7 @@ impl App {
                             .get(w)
                             .map(|a| display_name(&a.def.name))
                             .unwrap_or_default(),
-                        ItemKind::FragGrenades => "FRAG GRENADE".into(),
-                        ItemKind::PlasmaGrenades => "PLASMA GRENADE".into(),
+                        ItemKind::FragGrenades | ItemKind::PlasmaGrenades => String::new(),
                         ItemKind::Powerup(Powerup::Overshield) => "OVERSHIELD".into(),
                         ItemKind::Powerup(Powerup::Camouflage) => "ACTIVE CAMOUFLAGE".into(),
                         ItemKind::Ammo { weapon, .. } => self
@@ -1851,6 +1932,12 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+        }
+        for (player, plasma, count) in grenades {
+            let line = self.scene.text.grenades(plasma, count);
+            if let Some(l) = self.local_of(player) {
+                l.message(line);
             }
         }
     }
@@ -2352,6 +2439,12 @@ impl App {
             });
         }
         let scores = self.score_lines();
+        let headings = self.menu.text.score_headings(self.game.rules.game_type);
+        let game_over = self
+            .menu
+            .text
+            .get("global_multiplayer_messages/mp_game_over");
+        let campaign = self.game.rules.game_type == GameType::Campaign;
         for (k, l) in self.locals.iter().enumerate().filter(|_| in_game) {
             let Some(&viewport) = ports.get(k) else {
                 break;
@@ -2424,15 +2517,23 @@ impl App {
                 hb.text(self.scene.hud_font, at, 9.0 * t, &text, hud::BLUE);
                 hud.extend(hb.finish());
             }
-            // The scoreboard while Tab or Back is held.
+            // The scoreboard while Tab or Back is held, and once the game
+            // is over (until the carnage report), in everyone's view.
             let held = (l.keyboard && self.keys.contains(&KeyCode::Tab))
                 || l.pad
                     .and_then(|id| self.pads.state(id))
                     .is_some_and(|p| p.scores);
-            if held && !menu {
+            let over = self.game.over() && !campaign;
+            if (held || over) && !menu {
                 let mut hb = HudBuilder::new(vw, vh);
                 let (font, white) = (self.scene.hud_font, self.scene.hud_white);
-                menu::draw_scoreboard(&mut hb, font, white, vw, vh, &scores);
+                let how = self.scene.text.game_over(&self.game, l.player);
+                let board = menu::Scoreboard {
+                    lines: &scores,
+                    headings: &headings,
+                    over: over.then_some((game_over.as_str(), how.as_str())),
+                };
+                menu::draw_scoreboard(&mut hb, font, white, vw, vh, &board);
                 hud.extend(hb.finish());
             }
             let magnification = match cutscene_camera {
@@ -2810,6 +2911,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .map(online::LiveText::load)
         .unwrap_or_default();
+    // Halo 2's words for the dialogs, scoreboard and carnage report.
+    let menu_text = path
+        .parent()
+        .map(messages::MenuText::load)
+        .unwrap_or_default();
     // Three computer opponents (H2_BOTS=<n> for another number).
     let bots = env("H2_BOTS")
         .and_then(|v| v.parse().ok())
@@ -2913,6 +3019,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         loading: None,
         menu_time: 0.0,
         game_over: None,
+        ended_at: None,
+        warnings: messages::Warnings::default(),
         music: None,
         music_loading: Some(music),
         music_voice: None,
@@ -2925,6 +3033,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         probe: netprobe::NetProbe::from_env(),
         headless,
     };
+    app.menu.text = menu_text;
     app.level_changed();
     // H2_SPLIT=<n> starts with n people in splitscreen (for testing).
     let split = env("H2_SPLIT")

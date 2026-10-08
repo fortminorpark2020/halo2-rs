@@ -3,6 +3,7 @@
 
 use crate::audio::Clip;
 use crate::body::{BodyRig, Landing};
+use crate::messages::GameText;
 use crate::probe::LevelLight;
 use crate::rig::{FirstPersonRig, Skeleton, SkinnedMesh};
 use blam_cache::animation;
@@ -488,6 +489,10 @@ pub struct Announcer {
     pub gained_lead: Option<usize>,
     pub lost_lead: Option<usize>,
     pub tied_lead: Option<usize>,
+    /// The time left, at `messages::TIME_WARNINGS`.
+    pub time_left: [Option<usize>; 6],
+    /// A side close to winning a timed game, at `messages::TO_WIN`.
+    pub to_win: [Option<usize>; 3],
 }
 
 /// Where the announcer's lines are, under `sound\dialog\multiplayer\`.
@@ -507,6 +512,17 @@ const SPREES: [&str; 5] = [
     "untouchable",
     "un_frikin_believable",
 ];
+/// The time left and close to winning, under `general\countdown\`, as
+/// the multiplayer globals pair them with their messages.
+const TIME_LEFT_LINES: [&str; 6] = [
+    "thirty_mins_remaining",
+    "fifteen_mins_remaining",
+    "five_mins_remaining",
+    "one_min_remaining",
+    "thirty_secs_remaining",
+    "ten_secs_remaining",
+];
+const TO_WIN_LINES: [&str; 3] = ["one_min_to_win", "thirty_sec_to_win", "ten_sec_to_win"];
 
 /// An object placed in the level, drawn with the level's light where it stands.
 pub struct SceneObject {
@@ -672,6 +688,12 @@ pub struct Scene {
     pub level_light: LevelLight,
     /// The player's own HUD (shields, motion tracker, grenades).
     pub player_hud: HudLayouts,
+    /// The scores in the corner: two meters, an emblem and an arrow.
+    pub score_hud: HudLayouts,
+    /// What players are told in the game, in Halo 2's words.
+    pub text: GameText,
+    /// Seconds a message stays up, then fades over (the HUD globals').
+    pub message_times: (f32, f32),
     /// HUD textures for text and solid fills.
     pub hud_font: usize,
     pub hud_white: usize,
@@ -1347,6 +1369,30 @@ impl Loader {
             damage: hurt.upper_bound.0.max(hurt.upper_bound.1),
             deadly: f.maximum_distance,
         })
+    }
+
+    /// How long HUD messages stay up and then take to fade, from the HUD
+    /// globals (`ui\hud\default`, its messaging parameters: up time at
+    /// 0x58 and fade time at 0x5C, as the Assembly editor's hudg layout
+    /// has them; 2 and 2 seconds in Halo 2's maps).
+    fn message_times(&mut self) -> (f32, f32) {
+        let fallback = (2.0, 2.0);
+        let Some(datum) = self.find("hudg", "ui\\hud\\default") else {
+            return fallback;
+        };
+        let Ok((_, _, data)) = self.set.tag_data(datum) else {
+            return fallback;
+        };
+        let at = |o: usize| {
+            data.get(o..o + 4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        match (at(0x58), at(0x5C)) {
+            (Some(up), Some(fade)) if (0.1..30.0).contains(&up) && (0.0..30.0).contains(&fade) => {
+                (up, fade)
+            }
+            _ => fallback,
+        }
     }
 
     fn hud_bitmap(&mut self, name: &str) -> Option<usize> {
@@ -2075,6 +2121,8 @@ impl Scene {
                     gained_lead: line("general\\misc\\gained_the_lead"),
                     lost_lead: line("general\\misc\\lost_the_lead"),
                     tied_lead: line("general\\misc\\tied_the_leader"),
+                    time_left: TIME_LEFT_LINES.map(|n| line(&format!("general\\countdown\\{n}"))),
+                    to_win: TO_WIN_LINES.map(|n| line(&format!("general\\countdown\\{n}"))),
                 }
             },
         };
@@ -2082,6 +2130,13 @@ impl Scene {
             Some(h) => loader.hud_widgets(h),
             None => HudLayouts::default(),
         };
+        let score_hud = match loader.find("nhdt", "ui\\hud\\scoreboard") {
+            Some(h) => loader.hud_widgets(h),
+            None => HudLayouts::default(),
+        };
+        let text = GameText::load(&mut loader.set);
+        println!("game messages: {} of Halo 2's from the map", text.loaded());
+        let message_times = loader.message_times();
         loader.hud_textures.push(crate::font::atlas());
         let hud_font = loader.hud_textures.len() - 1;
         loader.hud_textures.push(Image {
@@ -2134,6 +2189,9 @@ impl Scene {
             camo_time,
             level_light,
             player_hud,
+            score_hud,
+            text,
+            message_times,
             hud_font,
             hud_white,
             sounds: loader.sounds,

@@ -74,7 +74,23 @@ tracker about a sixth of the screen's height). The remake's own HUD text (the
 score and clock, kill feed, prompts, respawn countdown and names) goes at the
 same scale, but never smaller than one pixel to each pixel of its 5x7 font
 (8 pixel lines), with a dark shadow, so it stays readable in a 720p window,
-in splitscreen views and over snow or sky.
+in splitscreen views and over snow or sky. The scores in the corner are on
+Halo 2's score meters (`ui\hud\scoreboard`): yours over the best of the
+others' (your team's over theirs), each filled to its share of the score to
+win, with its number on it, your arrow, and in a free-for-all each player's
+emblem beside their meter (quarter views have Halo 2's numbers alone). The
+kill feed and the HUD's other messages are Halo 2's own lines from the maps
+(`in_game_multiplayer_messages`, `hud_messages`), each worded for whoever
+reads it as Halo 2 worded it (YOU KILLED SARGE for the killer, YOU WERE
+KILLED BY JOHN for Sarge, their teammates each their own way; beat downs,
+splatters, betrayals, YOU FELL TO YOUR DEATH, KILLED BY THE GUARDIANS; and
+another team's suicides and betrayals go unsaid): medals and sprees, the
+lead, the game type and your team as play
+starts, people joining and quitting, the winner, grenades picked up together
+(PICKED UP 2 FRAG GRENADES), and the time left at 30, 15, 5 and 1 minutes,
+30 and 10 seconds; in a game whose points are seconds (the hill, the ball,
+territories) also a side a minute, 30 and 10 seconds short of winning. Each
+stays up 2 seconds and fades over 2 more, as the HUD globals say.
 In team games, T (or X on a controller) puts you on the red or blue team; bots
 fill the smaller team (counting the people on other PCs in the lobby).
 System Link lists games other PCs on the network are
@@ -83,14 +99,23 @@ Menus work with the arrow keys or WASD, Enter and Esc, the mouse, or a
 controller (d-pad or stick, A, B).
 
 In a game, click in the window to look around with the mouse, WASD to move,
-Space to jump, Ctrl or C to crouch, hold Tab for the scoreboard, Esc for the
-pause menu (resume, end the game, quit). The game stops while it's up, its
+Space to jump, Ctrl or C to crouch, hold Tab for the scoreboard (Halo 2's
+PLACE, NAME, SCORE, KILLS, ASSISTS and DEATHS, never shrunk past reading in a
+splitscreen view), Esc for the pause menu (resume, end the game, quit). END
+GAME, LEAVE GAME, QUIT and leaving another PC's System Link lobby ask first,
+in Halo 2's words, with the cursor on the answer that does nothing (Esc or B
+says no too). The game stops while it's up, its
 sounds (engines, the shield alarm, rockets in flight) holding until you resume,
 unless someone on another PC plays in it: then only you stop (as in Halo 2's
 System Link). ` (backquote) switches between walking
 and flying (flying: Space / C up / down, Shift fast). When someone reaches the
-score to win, the game stops and the carnage report shows everyone's kills and
-deaths; Continue goes back to the lobby. With a time limit, a clock above the
+score to win, the game stops, the scoreboard says GAME OVER (and whether you
+won) in every view, and four seconds later the POSTGAME CARNAGE REPORT comes
+up: TEAM STATS (in team games), PLAYER STATS (place, average life, best
+spree, score), KILLS (kills, assists, deaths, suicides) and MEDALS, paged
+with left and right (or the tabs); Continue goes back to the lobby. An assist
+is any enemy who hurt the victim since they last spawned, other than the
+killer. With a time limit, a clock above the
 score counts down, and when it reaches 0:00 the game stops too: the best score
 wins, and a tie for the best is a draw.
 

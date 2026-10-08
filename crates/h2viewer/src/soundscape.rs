@@ -268,7 +268,7 @@ impl Soundscape {
     }
 
     /// Queue an announcer line; lines play one after another.
-    fn announce(&mut self, line: Option<usize>) {
+    pub fn announce(&mut self, line: Option<usize>) {
         if let Some(line) = line {
             if self.announcer.len() >= ANNOUNCER_QUEUE {
                 self.announcer.pop_front();

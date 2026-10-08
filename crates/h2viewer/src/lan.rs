@@ -287,24 +287,28 @@ impl App {
                     // played on for them.
                     self.bots.retain(|(i, _)| !players.contains(i));
                     for p in players {
-                        self.announce(&format!("{} JOINED", self.game.name(p)));
+                        let line = self.scene.text.joined(self.game.name(p));
+                        self.announce(&line);
                     }
                 }
                 HostEvent::Added { player } => {
                     // Back in the game, they take over from their bot.
                     self.bots.retain(|(i, _)| *i != player);
-                    self.announce(&format!("{} JOINED", self.game.name(player)));
+                    let line = self.scene.text.joined(self.game.name(player));
+                    self.announce(&line);
                 }
                 HostEvent::Removed { player } => {
                     // Their Spartan plays on as a bot, as in splitscreen.
                     self.bots.push(bot_for(player));
-                    self.announce(&format!("{} LEFT", self.game.name(player)));
+                    let line = self.scene.text.quit(self.game.name(player));
+                    self.announce(&line);
                 }
                 HostEvent::Left {
                     computer, players, ..
                 } => {
                     for &p in &players {
-                        self.announce(&format!("{} LEFT", self.game.name(p)));
+                        let line = self.scene.text.quit(self.game.name(p));
+                        self.announce(&line);
                     }
                     self.bots.extend(players.into_iter().map(bot_for));
                     self.match_left(&computer);
@@ -630,7 +634,8 @@ impl App {
             l.pad = pad;
             self.locals.push(l);
             let name = crate::local::player_name(&self.game, usize::MAX, player);
-            self.announce(&format!("{name} JOINED"));
+            let line = self.scene.text.joined(&name);
+            self.announce(&line);
         }
     }
 

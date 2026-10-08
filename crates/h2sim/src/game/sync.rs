@@ -3,7 +3,7 @@
 //! joined PCs send their players' controls.
 
 use super::{
-    DroppedWeapon, Event, Flag, FlagEvent, Game, GameType, Grenade, GrenadeKind, HeldWeapon,
+    Death, DroppedWeapon, Event, Flag, FlagEvent, Game, GameType, Grenade, GrenadeKind, HeldWeapon,
     HillControl, HillEvent, ItemKind, LeadChange, Look, Medal, Powerup, Projectile, Spartan,
     StuckRound, DROPPED_WEAPON_LIFETIME, NEUTRAL, TEAMS,
 };
@@ -344,11 +344,13 @@ impl Event {
                 killer,
                 victim,
                 headshot,
+                how,
             } => {
                 w.u8(7);
                 w.index(killer);
                 w.index(Some(victim));
                 w.bool(headshot);
+                w.u8(how as u8);
             }
             Event::Spawned { player, yaw } => {
                 w.u8(8);
@@ -532,6 +534,14 @@ impl Event {
                 killer: opt_player(r)?,
                 victim: r.index_below(players)?,
                 headshot: r.bool()?,
+                how: match r.u8()? {
+                    0 => Death::Weapon,
+                    1 => Death::Melee,
+                    2 => Death::Splatter,
+                    3 => Death::Fall,
+                    4 => Death::Guardians,
+                    _ => return Err(Malformed),
+                },
             },
             8 => Event::Spawned {
                 player: r.index_below(players)?,
@@ -681,6 +691,14 @@ impl Game {
             w.u32(p.kills);
             w.u32(p.deaths);
             w.u32(p.spree);
+            w.u32(p.stats.assists);
+            w.u32(p.stats.suicides);
+            w.u32(p.stats.best_spree);
+            for &n in &p.stats.medals {
+                w.u16(n);
+            }
+            w.f32(p.stats.lived);
+            w.f64(p.spawned_at);
             w.u32(p.multi_kill);
             w.f64(p.last_kill);
             w.f32(p.readying);
@@ -864,6 +882,14 @@ impl Game {
             p.kills = r.u32()?;
             p.deaths = r.u32()?;
             p.spree = r.u32()?;
+            p.stats.assists = r.u32()?;
+            p.stats.suicides = r.u32()?;
+            p.stats.best_spree = r.u32()?;
+            for n in &mut p.stats.medals {
+                *n = r.u16()?;
+            }
+            p.stats.lived = r.f32()?;
+            p.spawned_at = r.f64()?;
             p.multi_kill = r.u32()?;
             p.last_kill = r.f64()?;
             p.readying = r.f32()?;
@@ -1119,6 +1145,18 @@ mod tests {
                 from: Some(0),
             },
             Event::Juggernaut { player: 0 },
+            Event::Killed {
+                killer: Some(1),
+                victim: 0,
+                headshot: false,
+                how: Death::Splatter,
+            },
+            Event::Killed {
+                killer: None,
+                victim: 1,
+                headshot: false,
+                how: Death::Guardians,
+            },
         ];
         let mut w = Writer::default();
         for e in &events {
@@ -1170,6 +1208,11 @@ mod tests {
         let a = host.add_player();
         let b = host.add_player();
         host.players[b].score = -2;
+        host.players[a].stats.assists = 3;
+        host.players[a].stats.medals[4] = 2;
+        host.players[b].stats.lived = 61.5;
+        host.players[b].stats.suicides = 1;
+        host.players[b].stats.best_spree = 7;
         host.set_look(
             b,
             Look {
@@ -1228,6 +1271,8 @@ mod tests {
             assert_eq!(h.health, j.health);
             assert_eq!(h.alive, j.alive);
             assert_eq!((h.team, h.score), (j.team, j.score));
+            assert_eq!(h.stats, j.stats);
+            assert_eq!(h.spawned_at, j.spawned_at);
             assert_eq!(h.name, j.name);
             assert_eq!(h.look, j.look);
             assert_eq!(h.weapons.len(), j.weapons.len());

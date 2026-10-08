@@ -1,11 +1,13 @@
 //! Halo 2 style menus, drawn over the map: the main menu, the campaign's
 //! missions, the multiplayer lobby, the system link browser, the player
 //! profile, the online screens (the party lobby, who's online, the
-//! matchmaking playlists and searching them), the pause menu and the
-//! post-game carnage report. Keyboard, mouse and controllers all work them.
+//! matchmaking playlists and searching them), the pause menu, the dialogs
+//! that ask before quitting or leaving a game, and the post-game carnage
+//! report. Keyboard, mouse and controllers all work them.
 
 use crate::gpu::hud_mode;
 use crate::hud::HudBuilder;
+use crate::messages::MenuText;
 use crate::online::{clock_text, OnlineView};
 use crate::options::{presets, GameOptions, RESPAWN_TIMES, TIME_LIMITS};
 use crate::profile::{color_name, Profile};
@@ -44,6 +46,93 @@ pub enum Screen {
     Matchmaking,
     /// A match's lobby before its game, while everyone's map loads.
     Pregame,
+    /// A question before quitting, or ending or leaving a game
+    /// (`Menu::asking`).
+    Confirm,
+}
+
+/// What a dialog asks before it's done, as Halo 2 asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ask {
+    Quit,
+    EndGame,
+    /// A game joined on another PC, or an online match.
+    LeaveGame,
+    /// Another PC's System Link lobby.
+    LeaveLobby,
+}
+
+impl Ask {
+    /// Its dialog's lines in mainmenu.map (`MenuText`): its title, the
+    /// question, and the answers that do it and that don't.
+    fn lines(self) -> [&'static str; 4] {
+        match self {
+            Ask::Quit => [
+                "errors_other/exit_confirmation",
+                "errors_other/error_confirm_boot_to_dash",
+                "errors_other/exit_halo2",
+                "errors_other/no",
+            ],
+            Ask::EndGame => [
+                "errors_live/are_you_sure",
+                "errors_live/error_confirm_end_game_session",
+                "errors_live/end_game",
+                "errors_live/cancel",
+            ],
+            Ask::LeaveGame => [
+                "errors_live/leave_game",
+                "errors_live/confirm_exit_game_session",
+                "errors_live/yes_leave_game",
+                "errors_live/cancel",
+            ],
+            Ask::LeaveLobby => [
+                "errors_networking/are_you_sure",
+                "errors_networking/error_confirm_leave_system_link_lobby",
+                "errors_networking/leave_lobby",
+                "errors_networking/cancel",
+            ],
+        }
+    }
+}
+
+/// A dialog up: what it asks, and the screen (and row) it was asked from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Asking {
+    ask: Ask,
+    from: Screen,
+    cursor: usize,
+}
+
+/// The carnage report's panes, as Halo 2 named them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pane {
+    Teams,
+    Players,
+    Kills,
+    Medals,
+}
+
+impl Pane {
+    /// Its name, in `MenuText`.
+    fn title(self) -> &'static str {
+        match self {
+            Pane::Teams => "werds/team_stats",
+            Pane::Players => "werds/player_stats",
+            Pane::Kills => "werds/kill_stats",
+            Pane::Medals => "werds/medal_stats",
+        }
+    }
+}
+
+/// The carnage report's panes for a game with these scores: TEAM STATS
+/// first in team games.
+fn panes(scores: &[ScoreLine]) -> Vec<Pane> {
+    let teams = scores.iter().any(|l| l.header);
+    let first = teams.then_some(Pane::Teams);
+    first
+        .into_iter()
+        .chain([Pane::Players, Pane::Kills, Pane::Medals])
+        .collect()
 }
 
 /// A multiplayer map in the maps folder.
@@ -247,7 +336,7 @@ impl Settings {
 
 /// A line of the scoreboard: a player, or a team's totals heading its
 /// players.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ScoreLine {
     pub name: String,
     pub score: i32,
@@ -255,6 +344,14 @@ pub struct ScoreLine {
     pub timed: bool,
     pub kills: u32,
     pub deaths: u32,
+    pub assists: u32,
+    pub suicides: u32,
+    /// The most kills in one life.
+    pub best_spree: u32,
+    /// Seconds alive per life, on average.
+    pub avg_life: f32,
+    /// The medals earned, by name, and how many of each.
+    pub medals: Vec<(String, u16)>,
     pub color: [f32; 3],
     /// A player's emblem (team lines have none).
     pub emblem: Option<Emblem>,
@@ -442,6 +539,9 @@ enum Row {
     Cancel,
     /// How soon a match's game starts.
     Starting,
+    /// A dialog's answers: do it, or don't.
+    Yes,
+    No,
 }
 
 /// The main menu. The campaign is left off: multiplayer only.
@@ -516,6 +616,12 @@ pub struct Menu {
     /// list it was.
     player: u64,
     list: Screen,
+    /// Halo 2's words for the dialogs, scoreboard and carnage report.
+    pub text: MenuText,
+    /// The dialog up (`Screen::Confirm`).
+    asking: Option<Asking>,
+    /// The carnage report's pane shown, in `panes`.
+    pane: usize,
 }
 
 /// Layout, in Halo 2's 640x480 screen units.
@@ -524,6 +630,8 @@ const ROW_Y: f32 = 128.0;
 const ROW_W: f32 = 300.0;
 const ROW_H: f32 = 26.0;
 const ROW_STEP: f32 = 32.0;
+/// A dialog's question's width, over its answers.
+const QUESTION_W: f32 = 540.0;
 /// The lobby's right-hand panels (map, players).
 const PANEL_X: f32 = 372.0;
 const PANEL_W: f32 = 228.0;
@@ -580,6 +688,11 @@ pub fn place(n: usize) -> String {
     format!("{n}{suffix}")
 }
 
+/// The smallest text the menus draw, in window pixels: a pixel to each
+/// of the 5x7 font's (in its 6x8 cell), which smaller windows and
+/// splitscreen views would otherwise shrink past reading.
+const MIN_TEXT: f32 = 8.0;
+
 /// Turns 640x480 screen units into window pixels, centred.
 struct Frame {
     s: f32,
@@ -589,12 +702,39 @@ struct Frame {
 
 impl Frame {
     fn new(w: f32, h: f32) -> Frame {
-        let s = (h / 480.0).min(w / 640.0);
+        Frame::scaled(w, h, (h / 480.0).min(w / 640.0))
+    }
+
+    /// For the scoreboard over a game: never smaller than a 640x480
+    /// screen's own pixels, so a splitscreen view's text stays readable;
+    /// what doesn't fit the view is left off rather than shrunk.
+    fn readable(w: f32, h: f32) -> Frame {
+        Frame::scaled(w, h, (h / 480.0).min(w / 640.0).max(1.0))
+    }
+
+    fn scaled(w: f32, h: f32, s: f32) -> Frame {
         Frame {
             s,
             ox: (w - 640.0 * s) * 0.5,
             oy: (h - 480.0 * s) * 0.5,
         }
+    }
+
+    /// The screen units a `w` x `h` window shows: left, top, right and
+    /// bottom.
+    fn shown(&self, w: f32, h: f32) -> [f32; 4] {
+        [
+            -self.ox / self.s,
+            -self.oy / self.s,
+            (w - self.ox) / self.s,
+            (h - self.oy) / self.s,
+        ]
+    }
+
+    /// Window pixels for text `size` screen units tall, never under
+    /// `MIN_TEXT`.
+    fn text(&self, size: f32) -> f32 {
+        (size * self.s).max(MIN_TEXT)
     }
 
     fn rect(&self, [x0, y0, x1, y1]: [f32; 4]) -> [f32; 4] {
@@ -625,6 +765,9 @@ impl Menu {
             difficulty: 1,
             player: 0,
             list: Screen::Players,
+            text: MenuText::default(),
+            asking: None,
+            pane: 0,
         }
     }
 
@@ -632,6 +775,50 @@ impl Menu {
         self.screen = screen;
         self.cursor = 0;
         self.scroll = 0;
+        self.asking = None;
+        self.pane = 0;
+    }
+
+    /// The pause menu is up, or a dialog asked from it.
+    pub fn pausing(&self) -> bool {
+        self.screen == Screen::Pause || self.asking.is_some_and(|a| a.from == Screen::Pause)
+    }
+
+    /// Ask before doing `ask`: its dialog comes up with the cursor on the
+    /// answer that does nothing.
+    fn ask(&mut self, ask: Ask) -> Action {
+        let asking = Asking {
+            ask,
+            from: self.screen,
+            cursor: self.cursor,
+        };
+        self.show(Screen::Confirm);
+        self.asking = Some(asking);
+        self.cursor = 1;
+        self.sound = Some(Sound::Forward);
+        Action::None
+    }
+
+    /// The dialog answered: back where it was asked, then on with what it
+    /// asked about if the answer was yes.
+    fn answer(&mut self, yes: bool, ctx: &Context) -> Action {
+        let Some(a) = self.asking.take() else {
+            return Action::None;
+        };
+        self.show(a.from);
+        self.cursor = a.cursor;
+        if !yes {
+            self.sound = Some(Sound::Back);
+            return Action::None;
+        }
+        match a.ask {
+            Ask::Quit => Action::Quit,
+            Ask::EndGame | Ask::LeaveGame => self.end_game(ctx),
+            Ask::LeaveLobby => {
+                self.sound = Some(Sound::Back);
+                Action::Leave
+            }
+        }
     }
 
     /// The screen is a list that scrolls when long.
@@ -661,8 +848,13 @@ impl Menu {
         }
     }
 
-    fn title(&self, ctx: &Context) -> &'static str {
-        match self.screen {
+    fn title(&self, ctx: &Context) -> String {
+        let title = match self.screen {
+            Screen::Confirm => {
+                let ask = self.asking.map_or(Ask::Quit, |a| a.ask);
+                return self.text.get(ask.lines()[0]);
+            }
+            Screen::PostGame => return self.text.get("werds/postgame_header"),
             Screen::Main => "HALO 2",
             Screen::Campaign => "CAMPAIGN",
             Screen::Lobby if in_custom(ctx) => "CUSTOM GAME",
@@ -671,7 +863,6 @@ impl Menu {
             Screen::SystemLink => "SYSTEM LINK",
             Screen::Profile => "PLAYER PROFILE",
             Screen::Pause => "PAUSED",
-            Screen::PostGame => "GAME OVER",
             Screen::Live => "ONLINE",
             Screen::Players => "ONLINE PLAYERS",
             Screen::RecentPlayers => "RECENT PLAYERS",
@@ -679,7 +870,8 @@ impl Menu {
             Screen::Playlists => "PLAYLISTS",
             Screen::Matchmaking => "MATCHMAKING",
             Screen::Pregame => "PREGAME LOBBY",
-        }
+        };
+        title.into()
     }
 
     fn rows(&self, ctx: &Context) -> Vec<Row> {
@@ -733,6 +925,7 @@ impl Menu {
             Screen::SystemLink => (0..ctx.lan.len()).map(Row::Join).collect(),
             Screen::Pause => vec![Row::Resume, Row::EndGame, Row::Quit],
             Screen::PostGame => vec![Row::Continue],
+            Screen::Confirm => vec![Row::Yes, Row::No],
             Screen::Live => live_rows(ctx),
             Screen::Players => match ctx.online.map_or(0, |o| o.others().len()) {
                 0 => vec![Row::Nothing],
@@ -955,6 +1148,11 @@ impl Menu {
             Row::MakeLeader => ("MAKE PARTY LEADER".into(), None),
             Row::Remove => ("REMOVE FROM PARTY".into(), None),
             Row::Cancel => ("CANCEL".into(), None),
+            Row::Yes | Row::No => {
+                let lines = self.asking.map_or(Ask::Quit, |a| a.ask).lines();
+                let line = if row == Row::Yes { lines[2] } else { lines[3] };
+                (self.text.get(line), None)
+            }
             Row::OnlinePlayers
             | Row::RecentPlayers
             | Row::Privacy
@@ -1087,12 +1285,13 @@ impl Menu {
             Input::Up | Input::Down => {
                 let selectable = rows.iter().filter(|r| r.selectable(ctx)).count();
                 // The pause menu doesn't wrap round: QUIT is never a nudge
-                // up from RESUME.
+                // up from RESUME (nor is yes from no on a dialog).
                 let end = match input {
                     Input::Up => self.cursor == 0,
                     _ => self.cursor + 1 >= n,
                 };
-                if selectable > 1 && !(self.screen == Screen::Pause && end) {
+                let stops = matches!(self.screen, Screen::Pause | Screen::Confirm);
+                if selectable > 1 && !(stops && end) {
                     loop {
                         self.cursor = if input == Input::Up {
                             (self.cursor + n - 1) % n
@@ -1106,6 +1305,13 @@ impl Menu {
                     self.follow_cursor();
                     self.sound = Some(Sound::Cursor);
                 }
+                Action::None
+            }
+            Input::Left | Input::Right if self.screen == Screen::PostGame => {
+                let n = panes(ctx.scores).len();
+                let step = if input == Input::Left { n - 1 } else { 1 };
+                self.pane = (self.pane + step) % n;
+                self.sound = Some(Sound::Cursor);
                 Action::None
             }
             Input::Left | Input::Right => {
@@ -1222,7 +1428,7 @@ impl Menu {
             Row::Multiplayer => forward(self, Screen::Lobby),
             Row::SystemLink => forward(self, Screen::SystemLink),
             Row::Profile => forward(self, Screen::Profile),
-            Row::Quit => Action::Quit,
+            Row::Quit => self.ask(Ask::Quit),
             Row::Name => {
                 self.editing = true;
                 self.sound = Some(Sound::Forward);
@@ -1289,7 +1495,11 @@ impl Menu {
                 self.sound = Some(Sound::Back);
                 Action::Resume
             }
-            Row::EndGame | Row::Continue => self.end_game(ctx),
+            Row::EndGame if ctx.joined || in_match(ctx) => self.ask(Ask::LeaveGame),
+            Row::EndGame => self.ask(Ask::EndGame),
+            Row::Continue => self.end_game(ctx),
+            Row::Yes => self.answer(true, ctx),
+            Row::No => self.answer(false, ctx),
             Row::Online | Row::SignIn => {
                 self.show(Screen::Live);
                 self.sound = Some(Sound::Forward);
@@ -1512,10 +1722,8 @@ impl Menu {
                 self.back_to(Screen::Live, Row::CustomGame, ctx);
                 Action::Leave
             }
-            Screen::Lobby if ctx.joined => {
-                self.sound = Some(Sound::Back);
-                Action::Leave
-            }
+            Screen::Lobby if ctx.joined => self.ask(Ask::LeaveLobby),
+            Screen::Confirm => self.answer(false, ctx),
             Screen::Main => Action::None,
             Screen::Profile => {
                 self.back_to_main(Row::Profile);
@@ -1599,12 +1807,13 @@ impl Menu {
         [ROW_X, y, ROW_X + w, y + ROW_H]
     }
 
-    /// The carnage report pushes its rows below the scoreboard.
+    /// The carnage report pushes its rows below its stats, and a dialog
+    /// below its question.
     fn rows_offset(&self) -> f32 {
-        if self.screen == Screen::PostGame {
-            280.0
-        } else {
-            0.0
+        match self.screen {
+            Screen::PostGame => REPORT_BOTTOM - ROW_Y,
+            Screen::Confirm => 64.0,
+            _ => 0.0,
         }
     }
 
@@ -1633,6 +1842,22 @@ impl Menu {
     /// A click at `pos`: settings step down on their left part and up
     /// elsewhere; other rows are chosen.
     pub fn click(&mut self, pos: [f32; 2], w: f32, h: f32, ctx: &Context) -> Action {
+        if self.screen == Screen::PostGame {
+            // The carnage report's tabs show their panes.
+            let f = Frame::new(w, h);
+            let [x, y] = pos;
+            let hit = self.tabs(ctx, &f).iter().position(|(_, r)| {
+                let [x0, y0, x1, y1] = f.rect(*r);
+                x >= x0 && x < x1 && y >= y0 && y < y1
+            });
+            if let Some(k) = hit {
+                if k != self.pane {
+                    self.pane = k;
+                    self.sound = Some(Sound::Cursor);
+                }
+                return Action::None;
+            }
+        }
         let Some((k, along)) = self.row_at(pos, w, h, ctx) else {
             return Action::None;
         };
@@ -1709,7 +1934,7 @@ impl Menu {
                     0.0,
                 );
             }
-            Screen::PostGame => {
+            Screen::PostGame | Screen::Confirm => {
                 hb.quad(
                     white,
                     [0.0, 0.0, w, h],
@@ -1720,17 +1945,28 @@ impl Menu {
                 );
             }
         }
-        hb.text_left(font, f.at(ROW_X, 48.0), 26.0 * s, self.title(ctx), BRIGHT);
+        hb.text_left(font, f.at(ROW_X, 48.0), 26.0 * s, &self.title(ctx), BRIGHT);
         let rule = f.rect([ROW_X, 84.0, ROW_X + 300.0, 86.0]);
         hb.quad(white, rule, [0.0; 4], HIGHLIGHT, hud_mode::PLAIN, 0.0);
 
         if self.screen == Screen::PostGame {
-            if let Some(outcome) = ctx.outcome {
-                let width = outcome.chars().count() as f32 * 14.0 * crate::font::ASPECT;
-                let at = f.at(ROW_X + 490.0 - width, 60.0);
-                hb.text_left(font, at, 14.0 * s, outcome, TEXT);
+            self.draw_report(hb, font, white, &f, ctx);
+        }
+        if let Some(a) = self.asking.filter(|_| self.screen == Screen::Confirm) {
+            // The question, over its answers.
+            // Wide, so it takes three lines at most in the smallest view.
+            let question = self.text.get(a.ask.lines()[1]);
+            let size = f.text(10.0) / s;
+            let per_line = ((QUESTION_W - 20.0) / (size * crate::font::ASPECT)) as usize;
+            let lines = wrap(&question, per_line.max(1));
+            let (top, step) = (ROW_Y - 26.0, size + 4.0);
+            let bottom = top + step * lines.len() as f32 + 4.0;
+            let back = f.rect([ROW_X, top - 8.0, ROW_X + QUESTION_W, bottom]);
+            hb.quad(white, back, [0.0; 4], PANEL, hud_mode::PLAIN, 0.0);
+            for (k, line) in lines.iter().enumerate() {
+                let at = f.at(ROW_X + 10.0, top + step * k as f32);
+                hb.text_left(font, at, size * s, line, TEXT);
             }
-            draw_scores(hb, font, white, &f, 104.0, ctx.scores);
         }
         let rows = self.rows(ctx);
         let cursor = self.settled(&rows, ctx);
@@ -1739,7 +1975,7 @@ impl Menu {
             // Where in a long list the rows shown are.
             let at = f.at(ROW_X + 10.0, self.row_rect(shown.len())[1] + 1.0);
             let place = format!("{}-{} OF {}", shown.start + 1, shown.end, rows.len());
-            hb.text_left(font, at, 8.0 * s, &place, DIM);
+            hb.text_left(font, at, f.text(8.0), &place, DIM);
         }
         let first = shown.start;
         for (k, &row) in rows.iter().enumerate().take(shown.end).skip(first) {
@@ -1774,14 +2010,17 @@ impl Menu {
                 ([0.0; 4], DIM)
             };
             hb.quad(white, f.rect(rect), [0.0; 4], bg, hud_mode::PLAIN, 0.0);
-            let text_y = rect[1] + (ROW_H - 11.0) * 0.5;
+            // Text centred on the row, however small the window.
+            let middle = |size: f32| f.at(0.0, rect[1] + ROW_H * 0.5)[1] - size * 0.5;
             // Players have icons on the left; playlists, on the right.
             let (left, right) = match row {
                 Row::Player(_) | Row::RecentPlayer(_) => (30.0, 10.0),
                 Row::Playlist(_) => (10.0, 30.0),
                 _ => (10.0, 10.0),
             };
-            hb.text_left(font, f.at(rect[0] + left, text_y), 11.0 * s, &label, fg);
+            let size = f.text(11.0);
+            let at = [f.at(rect[0] + left, 0.0)[0], middle(size)];
+            hb.text_left(font, at, size, &label, fg);
             if let Some(v) = value {
                 let steps = !matches!(
                     row,
@@ -1800,10 +2039,10 @@ impl Menu {
                     v
                 };
                 // What players are doing is long: smaller.
-                let size = if left + right > 20.0 { 9.0 } else { 11.0 };
+                let size = f.text(if left + right > 20.0 { 9.0 } else { 11.0 });
                 let width = v.chars().count() as f32 * size * crate::font::ASPECT;
-                let at = f.at(rect[2] - right - width, rect[1] + (ROW_H - size) * 0.5);
-                hb.text_left(font, at, size * s, &v, fg);
+                let at = [f.at(rect[2] - right, 0.0)[0] - width, middle(size)];
+                hb.text_left(font, at, size, &v, fg);
             }
             if let Some(o) = ctx.online {
                 draw_icons(hb, &f, row, rect, &label, o);
@@ -1837,21 +2076,28 @@ impl Menu {
             } else {
                 TEXT
             };
-            hb.text_left(font, f.at(ROW_X, ROW_Y - 22.0), 9.0 * s, &header, color);
+            hb.text_left(font, f.at(ROW_X, ROW_Y - 22.0), f.text(9.0), &header, color);
         }
+        // Under the carnage report's CONTINUE.
+        let notice_y = if self.screen == Screen::PostGame {
+            REPORT_BOTTOM + ROW_H + 8.0
+        } else {
+            400.0
+        };
         if let Some(n) = &self.notice {
-            hb.text_left(font, f.at(ROW_X, 400.0), 10.0 * s, n, WARNING);
+            hb.text_left(font, f.at(ROW_X, notice_y), f.text(10.0), n, WARNING);
         } else if let Some(note) = self.note(ctx) {
-            let per_line = (540.0 / (9.0 * crate::font::ASPECT)) as usize;
-            for (k, line) in wrap(&note, per_line).iter().take(3).enumerate() {
+            let size = f.text(9.0);
+            let per_line = (540.0 * s / (size * crate::font::ASPECT)) as usize;
+            for (k, line) in wrap(&note, per_line.max(1)).iter().take(3).enumerate() {
                 let at = f.at(ROW_X, 400.0 + 12.0 * k as f32);
-                hb.text_left(font, at, 9.0 * s, line, TEXT);
+                hb.text_left(font, at, size, line, TEXT);
             }
         }
         let hint = match self.screen {
             _ if self.editing => "TYPE A GAMERTAG, THEN PRESS ENTER",
             Screen::Main => "ENTER OR A: SELECT",
-            Screen::PostGame => "ENTER OR A: CONTINUE",
+            Screen::PostGame => "ENTER OR A: CONTINUE   LEFT OR RIGHT: MORE STATS",
             Screen::Pregame => "",
             Screen::Live if ctx.online.is_some_and(|o| o.live.is_some()) => {
                 "ENTER OR A: SELECT   ESC OR B: SIGN OUT"
@@ -1859,7 +2105,143 @@ impl Menu {
             Screen::Lobby if in_custom(ctx) => "ENTER OR A: SELECT   ESC OR B: BACK TO THE PARTY",
             _ => "ENTER OR A: SELECT   ESC OR B: BACK",
         };
-        hb.text_left(font, f.at(ROW_X, 440.0), 8.0 * s, hint, DIM);
+        hb.text_left(font, f.at(ROW_X, 440.0), f.text(8.0), hint, DIM);
+    }
+
+    /// The carnage report's tabs, left to right: each pane's name and
+    /// where it is (screen units), as wide as its name is drawn in frame
+    /// `f` (wider in a small window, whose text keeps to `MIN_TEXT`).
+    fn tabs(&self, ctx: &Context, f: &Frame) -> Vec<(String, [f32; 4])> {
+        let size = f.text(9.0) / f.s;
+        let mut x = REPORT_X;
+        panes(ctx.scores)
+            .into_iter()
+            .map(|p| {
+                let name = self.text.get(p.title());
+                let width = name.chars().count() as f32 * size * crate::font::ASPECT + 12.0;
+                let rect = [x, REPORT_TABS, x + width, REPORT_TABS + 16.0];
+                x += width + 4.0;
+                (name, rect)
+            })
+            .collect()
+    }
+
+    /// The carnage report: how the game ended, the panes' tabs (the one
+    /// shown lit), and its pane of stats for each team or player, best
+    /// first. Its columns are where Halo 2's carnage report screen puts
+    /// them (`REPORT_COLUMNS`).
+    fn draw_report(
+        &self,
+        hb: &mut HudBuilder,
+        font: usize,
+        white: usize,
+        f: &Frame,
+        ctx: &Context,
+    ) {
+        let s = f.s;
+        let panes = panes(ctx.scores);
+        let pane = panes[self.pane.min(panes.len() - 1)];
+        for (k, (name, rect)) in self.tabs(ctx, f).iter().enumerate() {
+            let (bg, fg) = if panes[k] == pane {
+                (HIGHLIGHT, BRIGHT)
+            } else {
+                (PANEL, DIM)
+            };
+            hb.quad(white, f.rect(*rect), [0.0; 4], bg, hud_mode::PLAIN, 0.0);
+            let size = f.text(9.0);
+            let middle = f.at(0.0, (rect[1] + rect[3]) * 0.5)[1] - size * 0.5;
+            hb.text_left(font, [f.at(rect[0] + 6.0, 0.0)[0], middle], size, name, fg);
+        }
+        if let Some(outcome) = ctx.outcome {
+            let size = f.text(10.0);
+            let width = outcome.chars().count() as f32 * size * crate::font::ASPECT;
+            let at = [
+                f.at(REPORT_RIGHT, 0.0)[0] - width,
+                f.at(0.0, REPORT_TABS + 3.0)[1],
+            ];
+            hb.text_left(font, at, size, outcome, TEXT);
+        }
+        let header = f.text(8.0);
+        let columns = report_columns(pane);
+        let name = match pane {
+            Pane::Teams => "werds/team",
+            _ => "werds/player",
+        };
+        let at = f.at(REPORT_COLUMNS[0], REPORT_HEADER);
+        hb.text_left(font, at, header, &self.text.get(name), DIM);
+        for (heading, left) in self.report_headings(pane, f) {
+            hb.text_left(font, f.at(left, REPORT_HEADER), header, &heading, DIM);
+        }
+        // Teams on their own pane, players on the rest; places by score.
+        let teams = pane == Pane::Teams;
+        let lines: Vec<&ScoreLine> = ctx.scores.iter().filter(|l| l.header == teams).collect();
+        let size = f.text(9.0);
+        let rows = ((REPORT_BOTTOM - REPORT_ROWS) / REPORT_STEP) as usize;
+        for (k, line) in lines.iter().take(rows).enumerate() {
+            let y = REPORT_ROWS + REPORT_STEP * k as f32;
+            let color = line.color;
+            let bg = if line.header {
+                [color[0] * 0.6, color[1] * 0.6, color[2] * 0.6, 0.85]
+            } else if line.local {
+                [0.15, 0.3, 0.55, 0.75]
+            } else {
+                PANEL
+            };
+            let back = f.rect([REPORT_X, y, REPORT_RIGHT, y + REPORT_STEP - 2.0]);
+            hb.quad(white, back, [0.0; 4], bg, hud_mode::PLAIN, 0.0);
+            let middle = f.at(0.0, y + (REPORT_STEP - 2.0) * 0.5)[1] - size * 0.5;
+            let mut name_x = REPORT_COLUMNS[0];
+            if !line.header {
+                // Their emblem (or colour) before their name.
+                let badge = f.rect([name_x, y + 1.0, name_x + 11.0, y + 12.0]);
+                hb.quad(
+                    white,
+                    badge,
+                    [0.0; 4],
+                    gamma_color(color),
+                    hud_mode::PLAIN,
+                    0.0,
+                );
+                if let Some(e) = line.emblem {
+                    crate::emblem::draw(hb, badge, e);
+                }
+                name_x += 15.0;
+            }
+            let fg = if line.local || line.header {
+                BRIGHT
+            } else {
+                TEXT
+            };
+            let room = (columns[0].1 - name_x - 4.0) * s;
+            let at = [f.at(name_x, 0.0)[0], middle];
+            hb.text_left(font, at, size, &fit(&line.name, room, size), fg);
+            let place = 1 + lines.iter().filter(|o| o.score > line.score).count();
+            for (k, (stat, x)) in columns.iter().enumerate() {
+                let text = stat.value(line, place);
+                let right = columns.get(k + 1).map_or(REPORT_RIGHT, |c| c.1);
+                let text = fit(&text, (right - x - 6.0) * s, size);
+                hb.text_left(font, [f.at(x + 4.0, 0.0)[0], middle], size, &text, fg);
+            }
+        }
+    }
+
+    /// The headings of a carnage report pane's stats and where each starts
+    /// (screen units): indented like the values, unless (in a small window,
+    /// whose text keeps to `MIN_TEXT`) that would run it into the next.
+    fn report_headings(&self, pane: Pane, f: &Frame) -> Vec<(String, f32)> {
+        let columns = report_columns(pane);
+        let size = f.text(8.0) / f.s;
+        columns
+            .iter()
+            .enumerate()
+            .map(|(k, (stat, x))| {
+                let heading = self.text.get(stat.heading());
+                let width = heading.chars().count() as f32 * size * crate::font::ASPECT;
+                let right = columns.get(k + 1).map_or(REPORT_RIGHT, |c| c.1);
+                let left = (right - width - 1.0).clamp(*x, x + 4.0);
+                (heading, left)
+            })
+            .collect()
     }
 
     /// A line over the rows saying what they are.
@@ -2413,46 +2795,95 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 /// Most lines the scoreboard shows: 16 players and two team totals.
 const MAX_SCORE_LINES: usize = 18;
+/// The scoreboard's widest (screen units), as it was drawn in a full
+/// window.
+const BOARD_W: f32 = 514.0;
 
-/// The scoreboard, best first, its top at `top` (screen units). Places go
-/// to teams when there are team totals, otherwise to players. Levels show
+/// What the scoreboard over a game shows.
+pub struct Scoreboard<'a> {
+    pub lines: &'a [ScoreLine],
+    /// Its columns' headings (`MenuText::score_headings`).
+    pub headings: &'a [String; 6],
+    /// Once the game is over: GAME OVER, and how it went for the player
+    /// whose view it's in ("YOU WIN!").
+    pub over: Option<(&'a str, &'a str)>,
+}
+
+/// The scoreboard over a game (held Tab or Back, and as the game ends) in
+/// a view `w` by `h` pixels, best first: Halo 2's columns (place, name,
+/// score, kills, assists, deaths). Its text is never under `MIN_TEXT`
+/// pixels, so in a small splitscreen view long names are cut and the
+/// rows that don't fit are left off rather than shrunk. Places go to
+/// teams when there are team totals, otherwise to players; levels show
 /// when there are any.
-fn draw_scores(
+pub fn draw_scoreboard(
     hb: &mut HudBuilder,
     font: usize,
     white: usize,
-    f: &Frame,
-    top: f32,
-    scores: &[ScoreLine],
+    w: f32,
+    h: f32,
+    board: &Scoreboard,
 ) {
+    let f = Frame::readable(w, h);
     let s = f.s;
-    let cols = [
-        ROW_X + 10.0,
-        ROW_X + 70.0,
-        ROW_X + 290.0,
-        ROW_X + 360.0,
-        ROW_X + 430.0,
-    ];
-    // Rank icons centred under LEVEL, between the names and scores (on a
-    // whole pixel at 720p, like the other columns).
-    let level_x = ROW_X + 236.0;
-    let levels = scores.iter().any(|l| l.level.is_some());
-    let mut y = top;
-    for (x, h) in cols
-        .iter()
-        .zip(["PLACE", "PLAYER", "SCORE", "KILLS", "DEATHS"])
-    {
-        hb.text_left(font, f.at(*x, y), 8.0 * s, h, DIM);
+    let [left, top, right, bottom] = f.shown(w, h);
+    let width = (right - left - 8.0).min(BOARD_W);
+    let x0 = 320.0 - width * 0.5;
+    let x1 = x0 + width;
+    let title = if board.over.is_some() { 22.0 } else { 0.0 };
+    // Rows close up to fit the view, then the last are left off.
+    let n = board.lines.len().min(MAX_SCORE_LINES);
+    let room = bottom - top - 8.0 - (12.0 + title + 16.0 + 4.0);
+    let step = (room / n.max(1) as f32).clamp(11.0, 16.0);
+    let n = n.min((room / step).max(0.0) as usize);
+    let height = 12.0 + title + 16.0 + step * n as f32 + 4.0;
+    // Below the HUD's top row where there's room (the view's top 70 units),
+    // otherwise as high as it fits.
+    let y0 = (top + 4.0).max((240.0 - height * 0.5).min(top + 70.0));
+    let back = f.rect([x0 - 8.0, y0, x1 + 8.0, y0 + height]);
+    hb.quad(
+        white,
+        back,
+        [0.0; 4],
+        [0.0, 0.0, 0.02, 0.7],
+        hud_mode::PLAIN,
+        0.0,
+    );
+    let mut y = y0 + 12.0;
+    if let Some((over, how)) = board.over {
+        hb.text_left(font, f.at(x0, y), f.text(14.0), over, BRIGHT);
+        let size = f.text(10.0);
+        let width = how.chars().count() as f32 * size * crate::font::ASPECT;
+        let at = [f.at(x1, 0.0)[0] - width, f.at(0.0, y + 2.0)[1]];
+        hb.text_left(font, at, size, how, TEXT);
+        y += title;
+    }
+    // The columns: place, emblem and name, level, then from the right
+    // deaths, assists, kills and score.
+    let place_x = x0 + 4.0;
+    let badge_x = x0 + 36.0;
+    let name_x = x0 + 54.0;
+    let stats = [x1 - 172.0, x1 - 128.0, x1 - 88.0, x1 - 40.0];
+    let levels = board.lines.iter().any(|l| l.level.is_some());
+    let level_x = stats[0] - 34.0;
+    let header = f.text(8.0);
+    let h = &board.headings;
+    hb.text_left(font, f.at(place_x, y), header, &h[0], DIM);
+    hb.text_left(font, f.at(name_x, y), header, &h[1], DIM);
+    for (x, heading) in stats.iter().zip(&h[2..]) {
+        hb.text_left(font, f.at(*x, y), header, heading, DIM);
     }
     if levels {
-        hb.text_left(font, f.at(level_x, y), 8.0 * s, "LEVEL", DIM);
+        hb.text_left(font, f.at(level_x, y), header, "LEVEL", DIM);
     }
     y += 16.0;
-    let teams = scores.iter().any(|l| l.header);
-    let ranked: Vec<&ScoreLine> = scores.iter().filter(|l| l.header == teams).collect();
+    let teams = board.lines.iter().any(|l| l.header);
+    let ranked: Vec<&ScoreLine> = board.lines.iter().filter(|l| l.header == teams).collect();
     let rank_of =
         |line: &ScoreLine| -> usize { 1 + ranked.iter().filter(|o| o.score > line.score).count() };
-    for line in scores.iter().take(MAX_SCORE_LINES) {
+    let size = f.text(9.0);
+    let name_room = (if levels { level_x } else { stats[0] } - name_x - 6.0) * s;
+    for line in board.lines.iter().take(n) {
         let c = line.color;
         let bg = if line.header {
             [c[0] * 0.6, c[1] * 0.6, c[2] * 0.6, 0.85]
@@ -2461,17 +2892,12 @@ fn draw_scores(
         } else {
             PANEL
         };
-        hb.quad(
-            white,
-            f.rect([ROW_X, y - 2.0, ROW_X + 490.0, y + 13.0]),
-            [0.0; 4],
-            bg,
-            hud_mode::PLAIN,
-            0.0,
-        );
+        let row = f.rect([x0 - 4.0, y - 2.0, x1 + 4.0, y + step - 3.0]);
+        hb.quad(white, row, [0.0; 4], bg, hud_mode::PLAIN, 0.0);
+        let middle = f.at(0.0, y + (step - 5.0) * 0.5)[1] - size * 0.5;
         if !line.header {
             // Their emblem, or (without the emblem pictures) their colour.
-            let badge = f.rect([cols[1] - 18.0, y - 1.0, cols[1] - 6.0, y + 11.0]);
+            let badge = f.rect([badge_x, y - 1.0, badge_x + 12.0, y + 11.0]);
             hb.quad(white, badge, [0.0; 4], gamma_color(c), hud_mode::PLAIN, 0.0);
             if let Some(e) = line.emblem {
                 crate::emblem::draw(hb, badge, e);
@@ -2487,46 +2913,142 @@ fn draw_scores(
             TEXT
         };
         if line.header == teams {
-            hb.text_left(font, f.at(cols[0], y), 9.0 * s, &place(rank_of(line)), fg);
+            let at = [f.at(place_x, 0.0)[0], middle];
+            hb.text_left(font, at, size, &place(rank_of(line)), fg);
         }
+        let name = fit(&line.name, name_room, size);
+        hb.text_left(font, [f.at(name_x, 0.0)[0], middle], size, &name, fg);
         let values = [
-            line.name.clone(),
             crate::local::score_text(line.score, line.timed),
             line.kills.to_string(),
+            line.assists.to_string(),
             line.deaths.to_string(),
         ];
-        for (x, v) in cols[1..].iter().zip(&values) {
-            hb.text_left(font, f.at(*x, y), 9.0 * s, v, fg);
+        for (x, v) in stats.iter().zip(&values) {
+            hb.text_left(font, [f.at(*x, 0.0)[0], middle], size, v, fg);
         }
-        y += 16.0;
+        y += step;
     }
 }
 
-/// The scoreboard on its own, over the game (held Tab / Back).
-pub fn draw_scoreboard(
-    hb: &mut HudBuilder,
-    font: usize,
-    white: usize,
-    w: f32,
-    h: f32,
-    scores: &[ScoreLine],
-) {
-    let f = Frame::new(w, h);
-    let rect = f.rect([
-        ROW_X - 12.0,
-        70.0,
-        ROW_X + 502.0,
-        120.0 + 16.0 * scores.len().min(MAX_SCORE_LINES) as f32,
-    ]);
-    hb.quad(
-        white,
-        rect,
-        [0.0; 4],
-        [0.0, 0.0, 0.02, 0.7],
-        hud_mode::PLAIN,
-        0.0,
-    );
-    draw_scores(hb, font, white, &f, 90.0, scores);
+/// `text` cut to fit `room` window pixels in text `size` pixels tall,
+/// marked ".." where it was cut.
+fn fit(text: &str, room: f32, size: f32) -> String {
+    let fits = (room / (size * crate::font::ASPECT)).max(0.0) as usize;
+    if text.chars().count() <= fits {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(fits.saturating_sub(2)).collect();
+    format!("{}..", kept.trim_end())
+}
+
+/// The carnage report's layout (screen units): its left and right edges,
+/// its tabs, its column headings, its first row and the step between
+/// rows, and where its rows end (CONTINUE goes there).
+const REPORT_X: f32 = 64.0;
+const REPORT_RIGHT: f32 = 577.0;
+const REPORT_TABS: f32 = 92.0;
+const REPORT_HEADER: f32 = 116.0;
+const REPORT_ROWS: f32 = 130.0;
+const REPORT_STEP: f32 = 15.0;
+const REPORT_BOTTOM: f32 = 376.0;
+/// The carnage report's columns' left edges: the name, then four stats.
+/// They are its screen's header bounds in mainmenu.map, halved to
+/// 640x480 (-500, -135, 31, 193 and 355 from the middle of 1280, which
+/// end at 514).
+const REPORT_COLUMNS: [f32; 5] = [70.0, 252.5, 335.5, 416.5, 497.5];
+/// TEAM STATS' place and score, and MEDALS' medals earned (its total
+/// takes the first stat column and the next).
+const REPORT_TEAM_COLUMNS: [f32; 2] = [302.5, 442.5];
+const REPORT_MEDALS: f32 = 416.5;
+
+/// A carnage report column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stat {
+    Place,
+    Score,
+    AvgLife,
+    BestSpree,
+    Kills,
+    Assists,
+    Deaths,
+    Suicides,
+    TotalMedals,
+    MedalsEarned,
+}
+
+impl Stat {
+    /// Its heading, in `MenuText`.
+    fn heading(self) -> &'static str {
+        match self {
+            Stat::Place => "werds/place",
+            Stat::Score => "werds/score",
+            Stat::AvgLife => "werds/avg_life",
+            Stat::BestSpree => "werds/best_spree",
+            Stat::Kills => "werds/kills",
+            Stat::Assists => "werds/assists",
+            Stat::Deaths => "werds/deaths",
+            Stat::Suicides => "werds/suicides",
+            Stat::TotalMedals => "werds/total_medals",
+            Stat::MedalsEarned => "werds/medals_earned",
+        }
+    }
+
+    /// What it says for a line in `place` (1 for first).
+    fn value(self, l: &ScoreLine, place: usize) -> String {
+        match self {
+            Stat::Place => self::place(place),
+            Stat::Score => crate::local::score_text(l.score, l.timed),
+            // Minutes and seconds, as Halo 2's "%d:%02d".
+            Stat::AvgLife => crate::local::score_text(l.avg_life.round() as i32, true),
+            Stat::BestSpree => l.best_spree.to_string(),
+            Stat::Kills => l.kills.to_string(),
+            Stat::Assists => l.assists.to_string(),
+            Stat::Deaths => l.deaths.to_string(),
+            Stat::Suicides => l.suicides.to_string(),
+            Stat::TotalMedals => l.medals.iter().map(|m| m.1 as u32).sum::<u32>().to_string(),
+            // By name: the medals' pictures are a font the maps don't have.
+            Stat::MedalsEarned => {
+                let names: Vec<String> = l
+                    .medals
+                    .iter()
+                    .map(|(name, n)| match n {
+                        1 => name.clone(),
+                        n => format!("{name} x{n}"),
+                    })
+                    .collect();
+                names.join(", ")
+            }
+        }
+    }
+}
+
+/// A carnage report pane's columns after the name: what each shows, and
+/// its left edge.
+fn report_columns(pane: Pane) -> Vec<(Stat, f32)> {
+    let c = REPORT_COLUMNS;
+    match pane {
+        Pane::Teams => vec![
+            (Stat::Place, REPORT_TEAM_COLUMNS[0]),
+            (Stat::Score, REPORT_TEAM_COLUMNS[1]),
+        ],
+        Pane::Players => vec![
+            (Stat::Place, c[1]),
+            (Stat::AvgLife, c[2]),
+            (Stat::BestSpree, c[3]),
+            (Stat::Score, c[4]),
+        ],
+        Pane::Kills => vec![
+            (Stat::Kills, c[1]),
+            (Stat::Assists, c[2]),
+            (Stat::Deaths, c[3]),
+            (Stat::Suicides, c[4]),
+        ],
+        Pane::Medals => vec![
+            (Stat::TotalMedals, c[1]),
+            (Stat::MedalsEarned, REPORT_MEDALS),
+        ],
+    }
 }
 
 #[cfg(test)]
@@ -2648,7 +3170,269 @@ mod tests {
         m.input(Input::Up, &c);
         assert_eq!(m.rows(&c)[m.cursor], Row::Online);
         m.input(Input::Up, &c);
+        // QUIT asks first.
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.screen, Screen::Confirm);
+        m.input(Input::Up, &c);
         assert_eq!(m.input(Input::Select, &c), Action::Quit);
+    }
+
+    #[test]
+    fn quitting_ending_and_leaving_a_game_ask_first() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        // QUIT on the main menu: the dialog starts on its answer that
+        // does nothing, which takes it back where it was.
+        m.cursor = MAIN_ROWS.len() - 1;
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.screen, Screen::Confirm);
+        assert_eq!(m.title(&c), "EXIT HALO 2 ?");
+        assert_eq!(m.label(Row::Yes, &c).0, "EXIT HALO 2");
+        assert_eq!(m.rows(&c)[m.cursor], Row::No);
+        assert_eq!(m.label(Row::No, &c).0, "NO");
+        assert_eq!(m.input(Input::Down, &c), Action::None);
+        assert_eq!(m.rows(&c)[m.cursor], Row::No, "no wrapping round to yes");
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.screen, Screen::Main);
+        assert_eq!(m.rows(&c)[m.cursor], Row::Quit);
+        assert_eq!(m.sound, Some(Sound::Back));
+        // Esc (or B) says no too.
+        m.input(Input::Select, &c);
+        assert_eq!(m.input(Input::Back, &c), Action::None);
+        assert_eq!(m.screen, Screen::Main);
+
+        // END GAME on the pause menu.
+        m.show(Screen::Pause);
+        m.input(Input::Down, &c);
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.title(&c), "ARE YOU SURE ?");
+        assert_eq!(m.label(Row::Yes, &c).0, "END GAME");
+        assert_eq!(m.label(Row::No, &c).0, "CANCEL");
+        assert!(m.pausing(), "the game stays paused while it asks");
+        assert_eq!(m.input(Input::Back, &c), Action::None);
+        assert_eq!(m.screen, Screen::Pause);
+        assert_eq!(m.rows(&c)[m.cursor], Row::EndGame);
+        m.input(Input::Select, &c);
+        m.input(Input::Up, &c);
+        assert_eq!(m.input(Input::Select, &c), Action::EndGame);
+        // QUIT from the pause menu.
+        m.show(Screen::Pause);
+        m.input(Input::Down, &c);
+        m.input(Input::Down, &c);
+        m.input(Input::Select, &c);
+        assert_eq!(m.title(&c), "EXIT HALO 2 ?");
+        m.input(Input::Up, &c);
+        assert_eq!(m.input(Input::Select, &c), Action::Quit);
+
+        // Joined to another PC's game: LEAVE GAME.
+        let joined = Context {
+            joined: true,
+            ..ctx(&maps, &[])
+        };
+        m.show(Screen::Pause);
+        m.input(Input::Down, &joined);
+        assert_eq!(m.label(Row::EndGame, &joined).0, "LEAVE GAME");
+        m.input(Input::Select, &joined);
+        assert_eq!(m.title(&joined), "LEAVE GAME ?");
+        assert_eq!(m.label(Row::Yes, &joined).0, "LEAVE GAME");
+        m.input(Input::Up, &joined);
+        assert_eq!(m.input(Input::Select, &joined), Action::Leave);
+        // A dialog's text is readable over a small splitscreen view.
+        m.show(Screen::Pause);
+        m.input(Input::Down, &c);
+        m.input(Input::Select, &c);
+        assert_eq!(smallest_text(|hb| m.draw(hb, 0, 1, 320.0, 180.0, &c)), 8.0);
+    }
+
+    /// The smallest text (glyphs' height, in pixels) `draw` draws with
+    /// the font texture 0.
+    fn smallest_text(draw: impl FnOnce(&mut HudBuilder)) -> f32 {
+        let mut hb = HudBuilder::new(1280.0, 720.0);
+        draw(&mut hb);
+        hb.finish()
+            .iter()
+            .filter(|b| b.texture == 0)
+            .flat_map(|b| b.vertices.chunks(6))
+            .map(|q| {
+                let ys = q.iter().map(|v| v.position[1]);
+                let (lo, hi) = ys.fold((f32::MAX, f32::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)));
+                hi - lo
+            })
+            .fold(f32::MAX, f32::min)
+    }
+
+    fn report_lines() -> Vec<ScoreLine> {
+        let player = |name: &str, score, local| ScoreLine {
+            name: name.into(),
+            score,
+            kills: score as u32,
+            deaths: 2,
+            assists: 1,
+            suicides: 1,
+            best_spree: 3,
+            avg_life: 75.4,
+            medals: vec![("DOUBLE KILL".into(), 2), ("KILLING SPREE".into(), 1)],
+            local,
+            ..ScoreLine::default()
+        };
+        let team = |name: &str, score| ScoreLine {
+            name: name.into(),
+            score,
+            header: true,
+            ..ScoreLine::default()
+        };
+        vec![
+            team("RED TEAM", 7),
+            player("JOHN", 5, true),
+            player("A VERY LONG GAMERTAG", 2, false),
+            team("BLUE TEAM", 4),
+            player("SARGE", 4, false),
+        ]
+    }
+
+    #[test]
+    fn the_carnage_report_pages_through_its_stats() {
+        let maps = maps();
+        let lines = report_lines();
+        let c = Context {
+            scores: &lines,
+            ..ctx(&maps, &[])
+        };
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::PostGame);
+        assert_eq!(m.title(&c), "POSTGAME CARNAGE REPORT");
+        let f = Frame::new(1280.0, 720.0);
+        let names: Vec<String> = m.tabs(&c, &f).into_iter().map(|t| t.0).collect();
+        assert_eq!(names, ["TEAM STATS", "PLAYER STATS", "KILLS", "MEDALS"]);
+        // In a small window the names keep to 8 pixels, and the tabs
+        // widen to fit them without running into each other.
+        let small = Frame::new(640.0, 360.0);
+        let tabs = m.tabs(&c, &small);
+        for (k, (name, r)) in tabs.iter().enumerate() {
+            let text = name.chars().count() as f32 * MIN_TEXT * crate::font::ASPECT;
+            assert!(6.0 * small.s + text <= (r[2] - r[0]) * small.s, "{name}");
+            if let Some(next) = tabs.get(k + 1) {
+                assert!(r[2] < next.1[0], "{name}");
+            }
+        }
+        // Nor do the stats' headings (BEST SPREE before SCORE).
+        for pane in [Pane::Teams, Pane::Players, Pane::Kills, Pane::Medals] {
+            let headings = m.report_headings(pane, &small);
+            for (k, (name, left)) in headings.iter().enumerate() {
+                let width = name.chars().count() as f32 * MIN_TEXT * crate::font::ASPECT;
+                let right = headings.get(k + 1).map_or(REPORT_RIGHT, |h| h.1);
+                assert!(left + width / small.s < right, "{name}");
+            }
+        }
+        m.input(Input::Right, &c);
+        assert_eq!(m.pane, 1);
+        m.input(Input::Left, &c);
+        m.input(Input::Left, &c);
+        assert_eq!(m.pane, 3, "round to MEDALS");
+        // A click on a tab shows it.
+        let [x0, y0, x1, y1] = f.rect(m.tabs(&c, &f)[2].1);
+        m.click([(x0 + x1) * 0.5, (y0 + y1) * 0.5], 1280.0, 720.0, &c);
+        assert_eq!(m.pane, 2);
+        // Each pane draws, its text readable even in a small window.
+        for pane in 0..4 {
+            m.pane = pane;
+            assert!(smallest_text(|hb| m.draw(hb, 0, 1, 1280.0, 720.0, &c)) >= 8.0);
+            assert!(smallest_text(|hb| m.draw(hb, 0, 1, 640.0, 360.0, &c)) >= 8.0);
+        }
+        // The stats, as the report words them.
+        let john = &lines[1];
+        assert_eq!(Stat::AvgLife.value(john, 1), "1:15");
+        assert_eq!(Stat::Place.value(john, 2), "2ND");
+        assert_eq!(Stat::TotalMedals.value(john, 1), "3");
+        assert_eq!(
+            Stat::MedalsEarned.value(john, 1),
+            "DOUBLE KILL x2, KILLING SPREE"
+        );
+        assert_eq!(report_columns(Pane::Kills)[3], (Stat::Suicides, 497.5));
+        // CONTINUE is still under it all, and a free-for-all has no team
+        // pane.
+        assert_eq!(m.input(Input::Select, &c), Action::EndGame);
+        assert_eq!(
+            panes(&lines[1..3]),
+            [Pane::Players, Pane::Kills, Pane::Medals]
+        );
+        // Ten characters fit: eight, and the mark.
+        assert_eq!(fit("A VERY LONG GAMERTAG", 60.0, 8.0), "A VERY L..");
+        assert_eq!(fit("JOHN", 60.0, 8.0), "JOHN");
+    }
+
+    #[test]
+    fn the_scoreboard_is_readable_in_every_splitscreen_view() {
+        // A full window's scoreboard is as before; splitscreen views (half
+        // of 720p, and the quarters of a 1280x720 window, or of a 640x360
+        // one) no longer shrink it.
+        assert_eq!(Frame::readable(1280.0, 720.0).s, 1.5);
+        assert_eq!(Frame::readable(1280.0, 360.0).s, 1.0);
+        assert_eq!(Frame::readable(640.0, 360.0).s, 1.0);
+        assert!(Frame::new(640.0, 360.0).s < 1.0);
+        let mut lines = report_lines();
+        while lines.len() < MAX_SCORE_LINES {
+            lines.push(lines[4].clone());
+        }
+        let headings = MenuText::default().score_headings(GameType::TeamSlayer);
+        for over in [None, Some(("GAME OVER", "YOU WIN!"))] {
+            let board = Scoreboard {
+                lines: &lines,
+                headings: &headings,
+                over,
+            };
+            for (w, h) in [
+                (1280.0, 720.0),
+                (1280.0, 360.0),
+                (640.0, 360.0),
+                (640.0, 180.0),
+                (320.0, 180.0),
+            ] {
+                let mut hb = HudBuilder::new(w, h);
+                draw_scoreboard(&mut hb, 0, 1, w, h, &board);
+                let batches = hb.finish();
+                let glyphs: Vec<&[crate::gpu::HudVertex]> = batches
+                    .iter()
+                    .filter(|b| b.texture == 0)
+                    .flat_map(|b| b.vertices.chunks(6))
+                    .collect();
+                assert!(!glyphs.is_empty());
+                for q in glyphs {
+                    let xs = q.iter().map(|v| v.position[0]);
+                    let ys: Vec<f32> = q.iter().map(|v| v.position[1]).collect();
+                    let height = ys.iter().cloned().fold(f32::MIN, f32::max)
+                        - ys.iter().cloned().fold(f32::MAX, f32::min);
+                    assert!(height >= 8.0, "{w}x{h}: text {height} pixels tall");
+                    for x in xs {
+                        assert!((0.0..=w).contains(&x), "{w}x{h}: text off the view at {x}");
+                    }
+                    for y in ys {
+                        assert!((0.0..=h).contains(&y), "{w}x{h}: text off the view at {y}");
+                    }
+                }
+            }
+        }
+        // Ten lines (four on four with the teams) in a quarter of a 720p
+        // window start under the HUD's top row (its grenades and ammo),
+        // not over it.
+        let mut lines = report_lines();
+        lines.truncate(4);
+        let player = lines[1].clone();
+        lines.extend(std::iter::repeat_n(player, 6));
+        let board = Scoreboard {
+            lines: &lines,
+            headings: &headings,
+            over: Some(("GAME OVER", "YOU WIN!")),
+        };
+        let mut hb = HudBuilder::new(640.0, 360.0);
+        draw_scoreboard(&mut hb, 0, 1, 640.0, 360.0, &board);
+        let top = hb
+            .finish()
+            .iter()
+            .flat_map(|b| b.vertices.iter().map(|v| v.position[1]))
+            .fold(f32::MAX, f32::min);
+        assert!((60.0..=80.0).contains(&top), "the board's top at {top}");
     }
 
     #[test]
@@ -2809,7 +3593,15 @@ mod tests {
         assert_eq!(m.input(Input::Right, &c), Action::None);
         assert_eq!(m.input(Input::Select, &c), Action::None);
         assert_eq!(m.settings.bots, 0);
-        assert_eq!(m.input(Input::Back, &c), Action::Leave);
+        // Leaving asks first, as Halo 2's System Link lobby did.
+        assert_eq!(m.input(Input::Back, &c), Action::None);
+        assert_eq!(m.title(&c), "ARE YOU SURE ?");
+        assert_eq!(m.label(Row::Yes, &c).0, "LEAVE LOBBY");
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.screen, Screen::Lobby);
+        m.input(Input::Back, &c);
+        m.input(Input::Up, &c);
+        assert_eq!(m.input(Input::Select, &c), Action::Leave);
         // Joined, the carnage report waits for the host.
         m.show(Screen::PostGame);
         assert_eq!(m.input(Input::Select, &c), Action::None);
@@ -2829,18 +3621,21 @@ mod tests {
         let line = |level| ScoreLine {
             name: "JOHN".into(),
             score: 3,
-            timed: false,
             kills: 3,
             deaths: 1,
             color: [1.0; 3],
-            emblem: None,
             level,
-            local: false,
-            header: false,
+            ..ScoreLine::default()
         };
-        let scoreboard = |scores: &[ScoreLine]| {
+        let headings = MenuText::default().score_headings(GameType::Slayer);
+        let scoreboard = |lines: &[ScoreLine]| {
             let mut hb = HudBuilder::new(1280.0, 720.0);
-            draw_scoreboard(&mut hb, 0, 1, 1280.0, 720.0, scores);
+            let board = Scoreboard {
+                lines,
+                headings: &headings,
+                over: None,
+            };
+            draw_scoreboard(&mut hb, 0, 1, 1280.0, 720.0, &board);
             icons(hb)
         };
         assert_eq!(scoreboard(&[line(None), line(None)]), 0);

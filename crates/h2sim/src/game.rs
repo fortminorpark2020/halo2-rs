@@ -625,6 +625,13 @@ pub struct Spartan {
     pub deaths: u32,
     /// Kills since last spawning.
     pub spree: u32,
+    /// The rest of what they did this game, for the carnage report.
+    pub stats: Stats,
+    /// When (game time) this life began.
+    pub spawned_at: f64,
+    /// Enemies who've hurt them since they spawned, who share in their
+    /// killer's kill (an assist).
+    hurt_by: Vec<usize>,
     /// Kills in the current multi-kill chain, and when the last one was.
     pub multi_kill: u32,
     pub last_kill: f64,
@@ -781,6 +788,8 @@ pub enum Event {
         killer: Option<usize>,
         victim: usize,
         headshot: bool,
+        /// How they died, for the kill feed.
+        how: Death,
     },
     Spawned {
         player: usize,
@@ -873,6 +882,74 @@ pub enum Medal {
     MultiKill(u8),
     /// Kills without dying: 5, 10, 15, 20 and 25.
     Spree(u8),
+}
+
+impl Medal {
+    /// How many kinds of medal there are: the multi-kills from Double Kill
+    /// to Killimanjaro, then the five sprees.
+    pub const KINDS: usize = 11;
+
+    /// Every kind, in `index` order.
+    pub const ALL: [Medal; Medal::KINDS] = [
+        Medal::MultiKill(2),
+        Medal::MultiKill(3),
+        Medal::MultiKill(4),
+        Medal::MultiKill(5),
+        Medal::MultiKill(6),
+        Medal::MultiKill(7),
+        Medal::Spree(5),
+        Medal::Spree(10),
+        Medal::Spree(15),
+        Medal::Spree(20),
+        Medal::Spree(25),
+    ];
+
+    /// Which kind of medal this is, in `ALL` (longer multi-kills count as
+    /// Killimanjaros).
+    pub fn index(self) -> usize {
+        match self {
+            Medal::MultiKill(n) => n.clamp(2, 7) as usize - 2,
+            Medal::Spree(n) => 5 + (n / 5).clamp(1, 5) as usize,
+        }
+    }
+}
+
+/// How someone died, as Halo 2's kill messages tell it apart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Death {
+    /// Shot, blown up, or anything else a weapon did.
+    #[default]
+    Weapon,
+    /// Beaten down.
+    Melee,
+    /// Run over by a vehicle.
+    Splatter,
+    /// A fall that hurt too much.
+    Fall,
+    /// The level: fell out of it, or into a pit or the sea.
+    Guardians,
+}
+
+/// What a player did over a game, for the carnage report (beside the
+/// score, kills and deaths).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Stats {
+    /// Enemies they hurt that someone else finished off.
+    pub assists: u32,
+    /// Deaths by their own hand or the level's (falls and pits too).
+    pub suicides: u32,
+    /// The most kills in one life.
+    pub best_spree: u32,
+    /// Medals earned, of each kind (`Medal::index`).
+    pub medals: [u16; Medal::KINDS],
+    /// Seconds alive in lives that have ended.
+    pub lived: f32,
+}
+
+impl Stats {
+    pub fn total_medals(&self) -> u32 {
+        self.medals.iter().map(|&n| n as u32).sum()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1166,6 +1243,9 @@ impl Game {
             kills: 0,
             deaths: 0,
             spree: 0,
+            stats: Stats::default(),
+            spawned_at: self.time,
+            hurt_by: Vec::new(),
             multi_kill: 0,
             last_kill: f64::NEG_INFINITY,
             readying: 0.0,
@@ -1230,6 +1310,7 @@ impl Game {
         let (pos, yaw) = self.checkpoint_spawn().unwrap_or(best.1);
         let old = &mut self.players[player];
         let (team, score, kills, deaths) = (old.team, old.score, old.kills, old.deaths);
+        let stats = old.stats;
         let name = std::mem::take(&mut old.name);
         let look = old.look;
         let mut s = self.fresh_spartan(pos + Vec3::Z * 0.05, yaw);
@@ -1239,6 +1320,7 @@ impl Game {
         s.score = score;
         s.kills = kills;
         s.deaths = deaths;
+        s.stats = stats;
         self.players[player] = s;
         self.events.push(Event::Spawned { player, yaw });
     }
@@ -1323,7 +1405,7 @@ impl Game {
         // Fell out of the level or into a pit; landed hard.
         let feet = self.players[i].body.position;
         if feet.z < world.min.z - 1.0 || self.kill_zones.iter().any(|z| z.kills(feet)) {
-            self.kill(i, None, false);
+            self.kill(i, None, false, Death::Guardians);
             return;
         }
         let mut fell = std::mem::take(&mut self.players[i].body.fell);
@@ -1332,7 +1414,7 @@ impl Game {
         }
         let hurt = self.rules.falling.damage_for(fell);
         if hurt > 0.0 {
-            self.damage(i, None, hurt, false);
+            self.hurt_as(i, None, hurt, false, ArmorScale::default(), Death::Fall);
             if !self.players[i].alive {
                 return;
             }
@@ -1618,7 +1700,14 @@ impl Game {
                     .and_then(|d| d.melee_damage)
                     .unwrap_or(self.rules.melee_damage)
             };
-            self.damage(j, Some(i), damage, false);
+            self.hurt_as(
+                j,
+                Some(i),
+                damage,
+                false,
+                ArmorScale::default(),
+                Death::Melee,
+            );
         }
         self.events.push(Event::Melee {
             player: i,
@@ -1754,6 +1843,19 @@ impl Game {
         headshot: bool,
         armor: ArmorScale,
     ) {
+        self.hurt_as(victim, attacker, amount, headshot, armor, Death::Weapon);
+    }
+
+    /// `hurt`, by something that kills a particular way (`how`).
+    fn hurt_as(
+        &mut self,
+        victim: usize,
+        attacker: Option<usize>,
+        amount: f32,
+        headshot: bool,
+        armor: ArmorScale,
+        how: Death,
+    ) {
         let teammate = attacker.is_some_and(|a| a != victim && !self.is_enemy(a, victim));
         // Actors never hurt their own side.
         let actor = attacker.is_some_and(|a| self.players[a].actor.is_some());
@@ -1761,9 +1863,13 @@ impl Game {
             return;
         }
         let amount = self.juggernaut_damage(victim, amount);
+        let enemy = attacker.filter(|&a| self.is_enemy(a, victim));
         let p = &mut self.players[victim];
         if !p.alive || amount <= 0.0 {
             return;
+        }
+        if let Some(a) = enemy.filter(|a| !p.hurt_by.contains(a)) {
+            p.hurt_by.push(a);
         }
         p.since_damage = 0.0;
         p.reveal = p.reveal.max(powerups::HURT_REVEAL);
@@ -1797,11 +1903,11 @@ impl Game {
             amount,
         });
         if p.health <= 0.0 {
-            self.kill(victim, attacker, killing_headshot);
+            self.kill(victim, attacker, killing_headshot, how);
         }
     }
 
-    fn kill(&mut self, victim: usize, killer: Option<usize>, headshot: bool) {
+    fn kill(&mut self, victim: usize, killer: Option<usize>, headshot: bool, how: Death) {
         let respawn = if self.players[victim].actor.is_some() {
             self.corpse_time()
         } else {
@@ -1823,6 +1929,8 @@ impl Game {
         p.deaths += 1;
         p.spree = 0;
         p.multi_kill = 0;
+        p.stats.lived += (self.time - p.spawned_at).max(0.0) as f32;
+        let hurt_by = std::mem::take(&mut p.hurt_by);
         // Drop the weapon in hand.
         let drop = p.weapons.get(p.current).cloned();
         let (pos, yaw) = (p.body.position + Vec3::Z * 0.1, p.yaw);
@@ -1841,6 +1949,7 @@ impl Game {
             killer,
             victim,
             headshot,
+            how,
         });
         // The campaign keeps no score.
         if self.rules.game_type == GameType::Campaign {
@@ -1855,33 +1964,48 @@ impl Game {
         let point = i32::from(kills_score);
         match killer {
             // Killed themselves, or by the level: a point off.
-            None => self.players[victim].score -= point,
-            Some(k) if k == victim => self.players[victim].score -= point,
+            Some(k) if k != victim => {}
+            _ => {
+                let p = &mut self.players[victim];
+                p.score -= point;
+                p.stats.suicides += 1;
+            }
+        }
+        match killer {
+            Some(k) if k == victim => {}
             // Betrayed a teammate: a point off.
             Some(k) if !self.is_enemy(k, victim) => self.players[k].score -= point,
             Some(k) => {
+                // Enemies who hurt them share in the kill.
+                for a in hurt_by.into_iter().filter(|&a| a != k) {
+                    if let Some(p) = self.players.get_mut(a) {
+                        p.stats.assists += 1;
+                    }
+                }
                 let time = self.time;
                 let p = &mut self.players[k];
                 p.kills += 1;
                 p.score += point;
                 p.spree += 1;
+                p.stats.best_spree = p.stats.best_spree.max(p.spree);
                 let chained = p.multi_kill > 0 && time - p.last_kill <= MULTI_KILL_WINDOW;
                 p.multi_kill = if chained { p.multi_kill + 1 } else { 1 };
                 p.last_kill = time;
                 let (multi, spree) = (p.multi_kill, p.spree);
+                let mut medals = Vec::new();
                 if multi >= 2 {
-                    self.events.push(Event::Medal {
-                        player: k,
-                        medal: Medal::MultiKill(multi.min(u8::MAX as u32) as u8),
-                    });
+                    medals.push(Medal::MultiKill(multi.min(u8::MAX as u32) as u8));
                 }
                 if spree % SPREE_STEP == 0 && spree <= SPREE_MAX {
-                    self.events.push(Event::Medal {
-                        player: k,
-                        medal: Medal::Spree(spree as u8),
-                    });
+                    medals.push(Medal::Spree(spree as u8));
+                }
+                for medal in medals {
+                    let n = &mut self.players[k].stats.medals[medal.index()];
+                    *n = n.saturating_add(1);
+                    self.events.push(Event::Medal { player: k, medal });
                 }
             }
+            None => {}
         }
         if self.rules.game_type == GameType::Juggernaut {
             self.juggernaut_kill(victim, killer);
@@ -2362,6 +2486,109 @@ pub(crate) mod tests {
         // Dying ends the spree.
         g.damage(0, Some(1), 500.0, false);
         assert_eq!(g.players[0].spree, 0);
+        // The carnage report counts them, and the best spree stays.
+        let stats = g.players[0].stats;
+        assert_eq!(stats.best_spree, 5);
+        assert_eq!(stats.medals[Medal::MultiKill(2).index()], 2);
+        assert_eq!(stats.medals[Medal::MultiKill(3).index()], 1);
+        assert_eq!(stats.medals[Medal::Spree(5).index()], 1);
+        assert_eq!(stats.total_medals(), 4);
+        assert_eq!(Medal::ALL.map(Medal::index), std::array::from_fn(|i| i));
+        assert_eq!(Medal::MultiKill(9).index(), Medal::MultiKill(7).index());
+    }
+
+    #[test]
+    fn those_who_hurt_the_victim_get_assists() {
+        let mut g = game();
+        for _ in 0..4 {
+            g.add_player();
+        }
+        // Player 0 hurts 3, 1 finishes them off: 0 assisted.
+        g.damage(3, Some(0), 30.0, false);
+        g.damage(3, Some(1), 500.0, false);
+        let stats = |g: &Game, i: usize| g.players[i].stats;
+        assert_eq!(stats(&g, 0).assists, 1);
+        assert_eq!(stats(&g, 1).assists, 0);
+        assert_eq!(g.players[1].kills, 1);
+        // Hurt in an earlier life doesn't count.
+        g.respawn(3);
+        g.damage(3, Some(2), 500.0, false);
+        assert_eq!(stats(&g, 0).assists, 1);
+        // Nor does a teammate's damage (in team games).
+        let mut t = game();
+        t.rules.game_type = GameType::TeamSlayer;
+        t.rules.friendly_fire = true;
+        let (a, b, v) = (t.add_player_on(0), t.add_player_on(1), t.add_player_on(1));
+        t.damage(v, Some(b), 30.0, false);
+        t.damage(v, Some(a), 500.0, false);
+        assert_eq!(stats(&t, b).assists, 0);
+        assert_eq!(stats(&t, a).assists, 0);
+    }
+
+    #[test]
+    fn falls_pits_and_own_grenades_are_suicides() {
+        let world = floor();
+        let mut g = game();
+        duel(&mut g);
+        let how = |g: &mut Game| {
+            g.events.drain(..).find_map(|e| match e {
+                Event::Killed { how, .. } => Some(how),
+                _ => None,
+            })
+        };
+        g.damage(1, Some(1), 500.0, false);
+        assert_eq!(how(&mut g), Some(Death::Weapon));
+        g.respawn(1);
+        // A long fall.
+        g.players[1].body.fell = 100.0;
+        g.step(&world, &[Command::default(); 2]);
+        assert!(!g.players[1].alive);
+        assert_eq!(how(&mut g), Some(Death::Fall));
+        g.respawn(1);
+        // Out of the level.
+        g.players[1].body.position.z = world.min.z - 5.0;
+        g.step(&world, &[Command::default(); 2]);
+        assert_eq!(how(&mut g), Some(Death::Guardians));
+        assert_eq!(g.players[1].stats.suicides, 3);
+        assert_eq!(g.players[1].score, -3);
+        assert_eq!(g.players[0].stats.suicides, 0);
+    }
+
+    #[test]
+    fn beat_downs_are_melee_kills() {
+        let world = floor();
+        let mut g = game();
+        duel(&mut g);
+        g.players[1].body.position = Vec3::new(0.8, 0.0, 0.0);
+        g.players[1].shield = 0.0;
+        g.players[1].health = 1.0;
+        for _ in 0..5 {
+            g.step(&world, &[Command::default(); 2]);
+        }
+        g.events.clear();
+        let mut punch = aim_at(&g, 0, 1, 0.6);
+        punch.melee = true;
+        g.step(&world, &[punch, Command::default()]);
+        let how = g.events.iter().find_map(|e| match e {
+            Event::Killed { how, .. } => Some(*how),
+            _ => None,
+        });
+        assert_eq!(how, Some(Death::Melee));
+    }
+
+    #[test]
+    fn a_life_is_timed_from_spawn_to_death() {
+        let mut g = game();
+        duel(&mut g);
+        g.time = 12.5;
+        g.damage(1, Some(0), 500.0, false);
+        assert_eq!(g.players[1].stats.lived, 12.5);
+        g.time = 20.0;
+        g.respawn(1);
+        assert_eq!(g.players[1].spawned_at, 20.0);
+        g.time = 21.0;
+        g.damage(1, Some(0), 500.0, false);
+        assert_eq!(g.players[1].stats.lived, 13.5);
     }
 
     #[test]

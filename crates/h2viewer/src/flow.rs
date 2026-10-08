@@ -13,7 +13,7 @@ use crate::{
 use gilrs::GamepadId;
 use h2net::LanGame;
 use h2sim::bot::{bot_look, bot_name};
-use h2sim::game::guest_name;
+use h2sim::game::{guest_name, Medal};
 use h2sim::{game::TEAMS, Bot, Game};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, TryRecvError};
@@ -137,7 +137,7 @@ impl App {
             }
             Net::Joined { .. } => false,
         };
-        let pause = self.menu_open && self.menu.screen == Screen::Pause;
+        let pause = self.menu_open && self.menu.pausing();
         self.mode == Mode::Playing && pause && alone
     }
 
@@ -300,7 +300,7 @@ impl App {
                 }
                 self.sound.play_ui(&self.scene, menu::Sound::Forward);
             }
-            Press::Join if self.menu.screen == Screen::Pause => self.menu_input(Input::Back),
+            Press::Join if self.menu.pausing() => self.menu_input(Input::Back),
             Press::Join => self.menu_input(Input::Select),
             Press::Leave if lobby => match seated {
                 Some(0) => self.seats[0].pad = None,
@@ -382,14 +382,36 @@ impl App {
     /// heads its players.
     pub(crate) fn score_lines(&self) -> Vec<ScoreLine> {
         let game = &self.game;
+        let text = &self.scene.text;
+        // Lives still going were cut short when the game ended.
+        let now = self.ended_at.unwrap_or(game.time);
         let line = |i: usize| {
             let p = &game.players[i];
+            let s = &p.stats;
+            // Time alive over lives: those lost, and the one still going.
+            let living = if p.alive {
+                (now - p.spawned_at).max(0.0)
+            } else {
+                0.0
+            };
+            let lives = p.deaths + p.alive as u32;
+            let medals = Medal::ALL
+                .iter()
+                .zip(s.medals)
+                .filter(|m| m.1 > 0)
+                .map(|(&m, n)| (text.medal_name(m), n))
+                .collect();
             ScoreLine {
                 name: crate::local::player_name(game, usize::MAX, i),
                 score: p.score,
                 timed: game.rules.game_type.timed(),
                 kills: p.kills,
                 deaths: p.deaths,
+                assists: s.assists,
+                suicides: s.suicides,
+                best_spree: s.best_spree,
+                avg_life: (s.lived as f64 + living) as f32 / lives.max(1) as f32,
+                medals,
                 color: player_colors(game, i)[0],
                 emblem: Some(p.look.emblem),
                 level: self
@@ -414,16 +436,16 @@ impl App {
         for t in teams {
             let members = || game.players.iter().filter(|p| p.team == t);
             lines.push(ScoreLine {
-                name: format!("{} TEAM", TEAM_NAMES[t as usize]),
+                name: text.team(t),
                 score: game.team_score(t),
                 timed: game.rules.game_type.timed(),
                 kills: members().map(|p| p.kills).sum(),
                 deaths: members().map(|p| p.deaths).sum(),
+                assists: members().map(|p| p.stats.assists).sum(),
+                suicides: members().map(|p| p.stats.suicides).sum(),
                 color: TEAM_COLORS[t as usize],
-                emblem: None,
-                level: None,
-                local: false,
                 header: true,
+                ..ScoreLine::default()
             });
             let mut mine: Vec<ScoreLine> = (0..game.players.len())
                 .filter(|&i| game.players[i].team == t)
@@ -678,6 +700,7 @@ impl App {
         self.welcome = None;
         self.pending = 0.0;
         self.game_over = None;
+        self.ended_at = None;
         self.sound.reset();
         self.music_voice = None;
         // A new game is new ground for the autopilot (testing).
@@ -963,6 +986,12 @@ impl App {
         }
         if !self.game.over() {
             return;
+        }
+        if self.game_over.is_none() {
+            self.ended_at = Some(self.game.time);
+            // Who won, in the kill feed.
+            let line = self.scene.text.winner(&self.game);
+            self.announce(&line);
         }
         let t = self.game_over.get_or_insert(0.0);
         *t += dt;

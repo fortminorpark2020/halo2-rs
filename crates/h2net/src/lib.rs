@@ -34,7 +34,7 @@ pub use lobby::{Lobby, LobbyPlayer};
 pub use ws::{accept, dial, reply, Request};
 
 /// Bumped whenever the messages change; PCs on different versions can't play.
-pub const PROTOCOL: u32 = 26;
+pub const PROTOCOL: u32 = 27;
 /// A joining player's team when the host is to choose it.
 pub const ANY_TEAM: u8 = u8::MAX;
 /// How a host turns away a PC that isn't on its game's map (the map's name

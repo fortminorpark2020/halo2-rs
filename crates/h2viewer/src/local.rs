@@ -177,6 +177,26 @@ const SENSOR_FILL: f32 = 0.82;
 const SENSOR_ALLY: [f32; 4] = [1.0, 0.85, 0.25, 0.95];
 const SENSOR_PULSE: f32 = 1.0;
 
+/// The numbers on the score meters.
+const SCORE_TEXT: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
+
+/// How full a score meter is for `score`: its share of the score to win,
+/// or without one (0) of the higher of the two scores shown, `most`.
+fn meter_fill(score: i32, most: i32, to_win: u32) -> f32 {
+    let whole = if to_win > 0 {
+        to_win as f32
+    } else {
+        most.max(1) as f32
+    };
+    (score.max(0) as f32 / whole).min(1.0)
+}
+
+/// Where an emblem goes in its placeholder's place (`player_emblem`'s
+/// rectangle): its top left quarter, as tall as a meter.
+fn emblem_spot(r: [f32; 4]) -> [f32; 4] {
+    [r[0], r[1], (r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5]
+}
+
 /// Red and blue team armour (the game's multiplayer globals).
 pub const TEAM_COLORS: [[f32; 3]; 2] = [[0.757, 0.243, 0.243], [0.212, 0.224, 0.788]];
 pub const TEAM_NAMES: [&str; 2] = ["RED", "BLUE"];
@@ -236,6 +256,15 @@ pub fn score_text(score: i32, timed: bool) -> String {
     }
 }
 
+/// How solid a message `age` seconds old is: whole for its `up` seconds,
+/// then fading out over `fade` more.
+pub fn message_alpha(age: f32, up: f32, fade: f32) -> f32 {
+    if fade <= 0.0 {
+        return if age < up { 1.0 } else { 0.0 };
+    }
+    ((up + fade - age) / fade).clamp(0.0, 1.0)
+}
+
 /// "battle_rifle" -> "BATTLE RIFLE".
 pub fn display_name(name: &str) -> String {
     name.replace('_', " ").to_uppercase()
@@ -247,25 +276,6 @@ pub fn player_name(game: &Game, me: usize, i: usize) -> String {
         _ if i == me => "YOU".into(),
         "" => format!("PLAYER {}", i + 1),
         name => name.into(),
-    }
-}
-
-/// A kill feed line, as Halo 2 words it. A betrayal is a teammate's kill.
-pub fn kill_message(
-    game: &Game,
-    me: usize,
-    killer: Option<usize>,
-    victim: usize,
-    betrayal: bool,
-) -> String {
-    let name = |i| player_name(game, me, i);
-    let v = name(victim);
-    match killer {
-        Some(k) if k == victim && k == me => "YOU KILLED YOURSELF".into(),
-        Some(k) if k == victim => format!("{v} COMMITTED SUICIDE"),
-        Some(k) if betrayal => format!("{} BETRAYED {v}", name(k)),
-        Some(k) => format!("{} KILLED {v}", name(k)),
-        None => format!("{v} DIED"),
     }
 }
 
@@ -362,8 +372,11 @@ pub struct LocalPlayer {
     pub shown_left: Option<usize>,
     pub left_shots: usize,
     pub shown_dual: bool,
-    /// Kill feed and pickups, newest last, with seconds left on screen.
+    /// Kill feed and pickups, newest last, with the seconds each has been
+    /// up.
     pub messages: Vec<(String, f32)>,
+    /// They've been told the game type (and their team) as play began.
+    pub told_start: bool,
     /// A standing line at the top of the view (LAN games to join).
     pub notice: Option<String>,
     pub view: ViewEvents,
@@ -401,6 +414,7 @@ impl LocalPlayer {
             left_shots: 0,
             shown_dual: false,
             messages: Vec::new(),
+            told_start: false,
             notice: None,
             view: ViewEvents::default(),
             tagged: None,
@@ -457,6 +471,102 @@ impl LocalPlayer {
             .unwrap_or(1.0)
     }
 
+    /// Your score (your team's in team games) and the best of the others'
+    /// under it, in the corner where Halo 2's scoreboard widgets are
+    /// anchored: on its score meters (`ui\hud\scoreboard`), each filled
+    /// to its share of the score to win (or of the higher of the two in a
+    /// game without one) and its number on it; in a free-for-all, each
+    /// player's emblem beside their meter; and the arrow at yours. Its tag
+    /// has no meters in a quarter view, so there it's the numbers alone.
+    /// The time left goes over them. The campaign keeps no score.
+    fn draw_scores(&self, hb: &mut HudBuilder, scene: &Scene, game: &Game) {
+        let font = scene.hud_font;
+        let t = hb.text_scale();
+        let me = self.me(game);
+        let teams = game.rules.game_type.teams();
+        let timed = game.rules.game_type.timed();
+        let other = (0..game.players.len())
+            .filter(|&i| i != self.player)
+            .max_by_key(|&i| game.players[i].score);
+        let (mine, theirs, colors) = if teams {
+            let enemy = 1 - me.team.min(1);
+            (
+                game.team_score(me.team),
+                Some(game.team_score(enemy)),
+                [team_hud_color(me.team), team_hud_color(enemy)],
+            )
+        } else {
+            // Each in their armour's main colour (the tags don't say;
+            // it's our guess at Halo 2's).
+            let armour = |i: usize| {
+                let c = armor_colors(game.players[i].look)[0].map(|v| v.powf(2.2));
+                [c[0], c[1], c[2], 0.9]
+            };
+            let theirs = other.map(|i| game.players[i].score);
+            let colors = [armour(self.player), other.map_or(hud::DIM_BLUE, armour)];
+            (me.score, theirs, colors)
+        };
+        let layout = &scene.score_hud[hb.split() as usize];
+        let widget = |name: &str| layout.iter().find(|w| w.name == name);
+        let meters = [widget("player_score"), widget("other_player_score")];
+        let [x, y] = hb.anchor(Anchor::Scoreboard);
+        let x = x - 16.0 * t;
+        let mut time_y = y - 50.0 * t;
+        if game.rules.game_type != GameType::Campaign {
+            let most = mine.max(theirs.unwrap_or(0));
+            // Without meters, the numbers where they were: big over small.
+            let rows = [(Some(mine), 14.0, -32.0), (theirs, 10.0, -14.0)];
+            for (k, (score, size, at)) in rows.into_iter().enumerate() {
+                let Some(score) = score else {
+                    continue;
+                };
+                let text = score_text(score, timed);
+                let Some(meter) = meters[k] else {
+                    hb.text(font, [x, y + at * t], size * t, &text, colors[k]);
+                    continue;
+                };
+                let fill = meter_fill(score, most, game.rules.score_to_win);
+                hb.widget(meter, colors[k], hud_mode::SCORE_METER, fill);
+                // The number on the meter's right, clear of its cut corner.
+                let r = hb.widget_rect(meter);
+                let height = ((r[3] - r[1]) * 0.55).max(8.0);
+                let width = text.chars().count() as f32 * height * crate::font::ASPECT;
+                let right = r[2] - (r[2] - r[0]) * 0.08;
+                let at = [right - width * 0.5, (r[1] + r[3] - height) * 0.5];
+                hb.text(font, at, height, &text, SCORE_TEXT);
+                if k == 0 {
+                    time_y = time_y.min(r[1] - 12.0 * t);
+                }
+            }
+            if meters[0].is_some() {
+                if let Some(arrow) = widget("player_arrow") {
+                    hb.widget(arrow, hud::BLUE, hud_mode::PLAIN, 0.0);
+                }
+                // The emblem placeholders are 64 pixels square at the
+                // meters' left, two meters tall, and the tag puts both
+                // free-for-all ones at the top: an emblem as tall as its
+                // meter fits beside each, the other's where the team
+                // layout's second goes (our reading of the tag).
+                let spots = [
+                    (widget("player_emblem"), Some(self.player)),
+                    (widget("player_emblem_teams"), other),
+                ];
+                for (spot, who) in spots.into_iter().filter(|_| !teams) {
+                    if let (Some(spot), Some(i)) = (spot, who) {
+                        let rect = emblem_spot(hb.widget_rect(spot));
+                        crate::emblem::draw(hb, rect, game.players[i].look.emblem);
+                    }
+                }
+            }
+        }
+        // The time left over the scores, down to 0:00 if time runs out
+        // (gone once someone reaches the score).
+        if let Some(left) = game.time_left().filter(|&l| l == 0.0 || !game.over()) {
+            let text = score_text(left.ceil() as i32, true);
+            hb.text(font, [x, time_y], 10.0 * t, &text, hud::BLUE);
+        }
+    }
+
     /// Prompts name the controller's buttons (X, Y) rather than keys (E,
     /// Q): for players two to four, and player one once a controller's A
     /// took them over.
@@ -465,10 +575,19 @@ impl LocalPlayer {
     }
 
     pub fn message(&mut self, text: String) {
-        self.messages.push((text, 5.0));
+        self.messages.push((text, 0.0));
         if self.messages.len() > 4 {
             self.messages.remove(0);
         }
+    }
+
+    /// Messages age; each goes once it has been up for `up` seconds and
+    /// faded out over `fade` more (the HUD globals' times).
+    pub fn age_messages(&mut self, (up, fade): (f32, f32), dt: f32) {
+        for m in &mut self.messages {
+            m.1 += dt;
+        }
+        self.messages.retain(|m| m.1 < up + fade);
     }
 
     /// This tick's controls in `game`, from the keyboard and mouse and/or a
@@ -563,10 +682,6 @@ impl LocalPlayer {
                 .map_or(2.5, |t| (t - 0.2).max(0.2));
             self.camera.position = centre + back * dist;
         }
-        for m in &mut self.messages {
-            m.1 -= dt;
-        }
-        self.messages.retain(|m| m.1 > 0.0);
         self.tag(game, world, dt);
     }
 
@@ -1019,9 +1134,10 @@ impl LocalPlayer {
         // Kill feed above the shield meter and motion tracker; score
         // bottom right.
         let line = 11.0 * t;
-        for (i, (text, left)) in self.messages.iter().rev().enumerate() {
+        let (up, fade) = scene.message_times;
+        for (i, (text, age)) in self.messages.iter().rev().enumerate() {
             let mut color = hud::BLUE;
-            color[3] *= left.min(1.0);
+            color[3] *= message_alpha(*age, up, fade);
             hb.text_left(
                 font,
                 [24.0 * s, tracker_top - (i + 1) as f32 * line],
@@ -1033,57 +1149,7 @@ impl LocalPlayer {
         if let Some(notice) = &self.notice {
             hb.text(font, [w * 0.5, 64.0 * t], 8.0 * t, notice, hud::BLUE);
         }
-        // Your score (your team's in team games), and the best of the
-        // others under it. The campaign keeps no score.
-        let campaign = game.rules.game_type == GameType::Campaign;
-        let teams = game.rules.game_type.teams();
-        let (mine, best_other, colors) = if teams {
-            let enemy = 1 - me.team.min(1);
-            (
-                game.team_score(me.team),
-                Some(game.team_score(enemy)),
-                [team_hud_color(me.team), team_hud_color(enemy)],
-            )
-        } else {
-            let best = (0..game.players.len())
-                .filter(|&i| i != self.player)
-                .map(|i| game.players[i].score)
-                .max();
-            (me.score, best, [hud::BLUE, hud::DIM_BLUE])
-        };
-        let timed = game.rules.game_type.timed();
-        // In the corner, where Halo 2's scoreboard widgets are anchored.
-        let [x, y] = hb.anchor(Anchor::Scoreboard);
-        let x = x - 16.0 * t;
-        if !campaign {
-            hb.text(
-                font,
-                [x, y - 32.0 * t],
-                14.0 * t,
-                &score_text(mine, timed),
-                colors[0],
-            );
-        }
-        if let Some(k) = best_other.filter(|_| !campaign) {
-            hb.text(
-                font,
-                [x, y - 14.0 * t],
-                10.0 * t,
-                &score_text(k, timed),
-                colors[1],
-            );
-        }
-        // The time left over the scores, down to 0:00 if time runs out
-        // (gone once someone reaches the score).
-        if let Some(left) = game.time_left().filter(|&l| l == 0.0 || !game.over()) {
-            hb.text(
-                font,
-                [x, y - 50.0 * t],
-                10.0 * t,
-                &score_text(left.ceil() as i32, true),
-                hud::BLUE,
-            );
-        }
+        self.draw_scores(&mut hb, scene, game);
         self.name_tags(&mut hb, scene, game, (w, h));
         self.objective_waypoints(&mut hb, scene, game, (w, h));
         if let Some(text) = self.objective_prompt(game) {
@@ -1094,16 +1160,6 @@ impl LocalPlayer {
                 &text,
                 hud::BLUE,
             );
-        }
-        if game.over() {
-            let text = match (game.winning_team, game.winner) {
-                (Some(t), _) if t == me.team => "YOUR TEAM WINS".to_string(),
-                (Some(t), _) => format!("{} TEAM WINS", TEAM_NAMES[t.min(1) as usize]),
-                (None, Some(w)) if w == self.player => "YOU WIN".to_string(),
-                (None, Some(w)) => format!("{} WINS", player_name(game, self.player, w)),
-                (None, None) => "DRAW".to_string(),
-            };
-            hb.text(font, [w * 0.5, h * 0.3], 20.0 * t, &text, hud::BLUE);
         }
         if !me.alive {
             let text = format!("RESPAWN IN {}", me.respawn_in.ceil().max(1.0));
@@ -1343,20 +1399,74 @@ mod tests {
     }
 
     #[test]
-    fn kill_feed_wording() {
-        let mut g = h2sim::testing::game();
-        for _ in 0..3 {
-            g.add_player();
+    fn score_meters_fill_and_emblems_sit_beside_them() {
+        assert_eq!(meter_fill(25, 25, 50), 0.5);
+        assert_eq!(meter_fill(60, 60, 50), 1.0);
+        assert_eq!(meter_fill(-2, 3, 50), 0.0);
+        // No score to win: the leader's meter is full.
+        assert_eq!(meter_fill(6, 12, 0), 0.5);
+        assert_eq!(meter_fill(12, 12, 0), 1.0);
+        assert_eq!(meter_fill(0, 0, 0), 0.0);
+        // ui\hud\scoreboard's widgets (lockout.map): the meters are 156
+        // by 32 at (-165, -68) and (-165, -32) from the corner, the emblem
+        // placeholders 64 square at (-202, -68) and (-202, -32); in the
+        // half screen layout, (-84, -34), (-84, -16), (-101, -34) and
+        // (-101, -16).
+        let widget = |offset: [f32; 2], size: [f32; 2]| crate::scene::HudWidget {
+            name: String::new(),
+            texture: 0,
+            anchor: Anchor::Scoreboard,
+            flags: 0,
+            offset,
+            registration: [0.0; 2],
+            size,
+        };
+        let layouts = [
+            (
+                ScreenSplit::Full,
+                1280.0,
+                720.0,
+                [-165.0, -202.0],
+                [-68.0, -32.0],
+            ),
+            (
+                ScreenSplit::Half,
+                1280.0,
+                360.0,
+                [-84.0, -101.0],
+                [-34.0, -16.0],
+            ),
+        ];
+        for (split, w, h, [meter_x, emblem_x], rows) in layouts {
+            let hb = HudBuilder::for_view(w, h, split);
+            for row in rows {
+                let meter = hb.widget_rect(&widget([meter_x, row], [156.0, 32.0]));
+                let spot = hb.widget_rect(&widget([emblem_x, row], [64.0, 64.0]));
+                let emblem = emblem_spot(spot);
+                assert!(emblem[2] <= meter[0] + 0.01, "{split:?}: beside it");
+                assert!(meter[0] - emblem[2] < 5.0, "{split:?}: close by");
+                assert!((emblem[1] - meter[1]).abs() < 0.01);
+                assert!((emblem[3] - meter[3]).abs() < 0.01, "{split:?}: as tall");
+            }
         }
-        g.set_name(2, "Sarge");
-        let kill = |me, killer, victim, betrayal| kill_message(&g, me, killer, victim, betrayal);
-        assert_eq!(kill(0, Some(0), 1, false), "YOU KILLED PLAYER 2");
-        assert_eq!(kill(0, Some(1), 0, false), "PLAYER 2 KILLED YOU");
-        assert_eq!(kill(0, Some(0), 0, false), "YOU KILLED YOURSELF");
-        assert_eq!(kill(0, None, 2, false), "SARGE DIED");
-        assert_eq!(kill(0, Some(0), 2, true), "YOU BETRAYED SARGE");
-        assert_eq!(kill(0, Some(1), 0, true), "PLAYER 2 BETRAYED YOU");
-        assert_eq!(kill(1, Some(2), 2, false), "SARGE COMMITTED SUICIDE");
+    }
+
+    #[test]
+    fn messages_stay_up_then_fade() {
+        // Halo 2's HUD globals: up 2 seconds, then 2 more fading.
+        assert_eq!(message_alpha(0.0, 2.0, 2.0), 1.0);
+        assert_eq!(message_alpha(2.0, 2.0, 2.0), 1.0);
+        assert_eq!(message_alpha(3.0, 2.0, 2.0), 0.5);
+        assert_eq!(message_alpha(4.0, 2.0, 2.0), 0.0);
+        assert_eq!(message_alpha(1.0, 2.0, 0.0), 1.0);
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let mut l = LocalPlayer::new(i, &game);
+        l.message("YOU KILLED SARGE".into());
+        l.age_messages((2.0, 2.0), 3.9);
+        assert_eq!(l.messages.len(), 1);
+        l.age_messages((2.0, 2.0), 0.2);
+        assert!(l.messages.is_empty());
     }
 
     #[test]
