@@ -79,6 +79,7 @@ impl Game {
         let p = &mut self.players[i];
         if let Some(h) = p.weapons.get_mut(p.current) {
             h.state.zoom = 0;
+            h.state.let_go();
         }
         p.left = Some(HeldWeapon { weapon: w, state });
         p.readying = ready_time(&self.weapons, p);
@@ -92,9 +93,10 @@ impl Game {
     /// Put the left hand's weapon down where the player stands.
     pub(super) fn drop_left(&mut self, i: usize) {
         let p = &mut self.players[i];
-        let Some(h) = p.left.take() else {
+        let Some(mut h) = p.left.take() else {
             return;
         };
+        h.state.put_away();
         let (position, yaw) = (p.body.position + Vec3::Z * 0.1, p.yaw);
         self.dropped.push(DroppedWeapon {
             weapon: h.weapon,

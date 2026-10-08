@@ -142,6 +142,9 @@ pub struct Barrel {
 }
 
 impl Barrel {
+    /// "Use error when unzoomed": rounds spread only unzoomed (set on the
+    /// Sniper Rifle and the Beam Rifle alone).
+    pub const ERROR_ONLY_UNZOOMED: u32 = 1 << 5;
     /// "Don't clear fire bit after recovering": a trigger still held when
     /// the barrel recovers fires it again (set on the Battle Rifle, Magnum,
     /// Plasma Pistol, Carbine, Shotgun and both sniper rifles; not on the
@@ -282,10 +285,17 @@ pub struct Weapon {
 }
 
 impl Weapon {
+    /// Autoaim (and magnetism) only work zoomed in: the Sniper Rifle and
+    /// the Beam Rifle.
+    pub const AIM_ASSISTS_ONLY_WHEN_ZOOMED: u32 = 1 << 5;
     pub const CAN_BE_DUAL_WIELDED: u32 = 1 << 22;
 
     pub fn can_be_dual_wielded(&self) -> bool {
         self.flags & Self::CAN_BE_DUAL_WIELDED != 0
+    }
+
+    pub fn aim_assists_only_when_zoomed(&self) -> bool {
+        self.flags & Self::AIM_ASSISTS_ONLY_WHEN_ZOOMED != 0
     }
 }
 

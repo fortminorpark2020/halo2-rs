@@ -97,8 +97,8 @@ Names: you play under your gamertag (at first your Windows user name; set
 and bots under callsigns.
 Names show in the lobby, scoreboard, kill feed and announcements, over
 teammates in sight, and over whoever is under your crosshair, which turns red
-on an enemy in your weapon's range as in Halo 2. `H2_LIST_WEAPONS=1` lists each
-weapon's crosshair range and HUD pieces as a map loads.
+on an enemy within your weapon's autoaim as in Halo 2. `H2_LIST_WEAPONS=1`
+lists each weapon's autoaim and HUD pieces as a map loads.
 
 Capture the Flag: walk onto the enemy flag and press E (X on a controller) to
 take it, then carry it to your own flag's stand while yours is home to score; Q
@@ -123,14 +123,22 @@ mouse wheel switches weapon, G throws a grenade, X switches grenade type, E pick
 up (hold to swap weapons), 1-9 pick one directly. B adds a bot. All 15 multiplayer weapons are
 loaded with their real first person models, HUD, crosshairs, scopes and firing
 stats, held by Master Chief's arms with the game's own first person animations
-(ready, idle, fire, reload, melee). Holding the trigger keeps the Battle Rifle
-firing bursts, and the Magnum, Carbine, Shotgun and sniper rifles shots, as
-fast as each recovers (their tags say so; the Rocket Launcher, Brute Shot and
-Fuel Rod need a fresh pull); a pull late in the Carbine's recovery is held over
-until it can fire. Spread grows over a burst or sustained fire as the tags
-give it. Each weapon's autoaim angle and range from its tags steer bullets
-fired close to an enemy into them (zoomed, it reaches farther through a
-narrower cone), and the crosshair turns red while it would. Getting hurt knocks
+(ready, idle, fire, reload, melee). Guns whose tags give no rate of fire
+(the Magnum, Carbine, Shotgun, sniper rifles, Rocket Launcher and others) fire
+as fast as their recovery time allows: the Magnum every 0.1 s, the Sniper
+Rifle every 0.5 s. Holding the trigger keeps the Battle Rifle firing bursts,
+and the Magnum, Carbine, Shotgun and sniper rifles shots, as fast as each
+recovers. That is our reading of the barrel flag "don't clear fire bit after
+recovering", which those weapons have and the Rocket Launcher, Brute Shot and
+Fuel Rod (which need a fresh pull) don't. A pull late in the Carbine's recovery
+is held over until it can fire. Spread grows over a burst or sustained fire as
+the tags give it; the Sniper Rifle and Beam Rifle have none zoomed in (their
+barrels' "use error when unzoomed" flag). Each weapon's autoaim angle and
+range from its tags steer bullets fired at or close to an enemy towards the
+middle of them (zoomed, it reaches farther through a narrower cone; the Sniper
+Rifle and Beam Rifle, whose tags say aim assists work only zoomed, get none
+unzoomed), and the crosshair turns red while an enemy is in reach. Rounds that
+fly (plasma, needles, rockets, grenades) aren't steered. Getting hurt knocks
 you out of zoom. Bullets hit at once; plasma bolts, needles,
 rockets, Brute Shot grenades and Fuel Rod shots fly at their tag speeds (rockets
 speed up, Brute Shot rounds arc), needles and the Fuel Rod home in, rockets lock

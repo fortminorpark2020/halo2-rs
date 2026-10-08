@@ -49,6 +49,8 @@ pub struct WeaponDef {
     /// Radians, at the start and after sustained fire.
     pub error_angle: (f32, f32),
     pub minimum_error: f32,
+    /// No spread at all zoomed in (the snipers).
+    pub error_only_unzoomed: bool,
     pub error_acceleration_time: f32,
     pub error_deceleration_time: f32,
     /// Radians: projectiles of one shot spread over this fan (shotgun).
@@ -60,6 +62,9 @@ pub struct WeaponDef {
     /// `Game::autoaim`).
     pub autoaim_angle: f32,
     pub autoaim_range: f32,
+    /// Autoaim only while zoomed in (the snipers' tags say so): no-scoped
+    /// rounds go exactly where the crosshair is.
+    pub autoaim_zoomed_only: bool,
     pub range: f32,
     /// World units per second (very fast bullets are treated as instant).
     pub velocity: f32,
@@ -353,6 +358,9 @@ impl WeaponDef {
             projectiles_per_shot: barrel.projectiles_per_shot.max(1) as u32,
             error_angle: barrel.error_angle,
             minimum_error: barrel.minimum_error,
+            // The flag's name says "use error when unzoomed"; only the two
+            // sniper rifles have it.
+            error_only_unzoomed: barrel.flags & Barrel::ERROR_ONLY_UNZOOMED != 0,
             error_acceleration_time: barrel.error_acceleration_time,
             error_deceleration_time: barrel.error_deceleration_time,
             distribution_angle: barrel.distribution_angle,
@@ -360,6 +368,7 @@ impl WeaponDef {
             zoom_range: w.zoom_range,
             autoaim_angle: w.autoaim_angle.max(0.0),
             autoaim_range: w.autoaim_range.max(0.0),
+            autoaim_zoomed_only: w.aim_assists_only_when_zoomed(),
             range,
             velocity,
             damage: upper.unwrap_or(0.0),
@@ -507,12 +516,19 @@ impl WeaponState {
         }
     }
 
-    /// Put away for another weapon: out of zoom, the reload abandoned and
-    /// no pull held over.
+    /// Put away for another weapon, or dropped: out of zoom, the reload
+    /// abandoned and the trigger let go.
     pub fn put_away(&mut self) {
         self.zoom = 0;
         self.reloading = None;
+        self.let_go();
+    }
+
+    /// The trigger let go of for a while (boarding a vehicle, taking a
+    /// second gun): no pull held over, and no rest of a burst to come.
+    pub fn let_go(&mut self) {
         self.queued = false;
+        self.burst_left = 0;
     }
 
     /// Advance by `dt` seconds; returns the projectiles fired.
@@ -592,8 +608,12 @@ impl WeaponState {
             if self.burst_left == 0 && def.shots_per_fire > 0 {
                 self.cooldown += def.fire_recovery_time;
             }
-            let error = (def.error_angle.0 + (def.error_angle.1 - def.error_angle.0) * self.heat)
-                .max(def.minimum_error);
+            let error = if def.error_only_unzoomed && self.zoom > 0 {
+                0.0
+            } else {
+                (def.error_angle.0 + (def.error_angle.1 - def.error_angle.0) * self.heat)
+                    .max(def.minimum_error)
+            };
             let n = def.projectiles_per_shot.max(1);
             for i in 0..n {
                 // Fan weapons spread evenly across the distribution angle.
@@ -673,6 +693,7 @@ mod tests {
             projectiles_per_shot: 1,
             error_angle: (0.005_235_988, 0.010_471_975),
             minimum_error: 0.0,
+            error_only_unzoomed: false,
             error_acceleration_time: 0.1,
             error_deceleration_time: 0.1,
             distribution_angle: 0.0,
@@ -680,6 +701,7 @@ mod tests {
             zoom_range: (2.0, 2.0),
             autoaim_angle: 0.052_359_88,
             autoaim_range: 17.0,
+            autoaim_zoomed_only: false,
             range: 40.0,
             velocity: 400.0,
             damage: 6.0,
@@ -795,6 +817,28 @@ mod tests {
     }
 
     #[test]
+    fn putting_a_gun_away_lets_go_of_its_trigger() {
+        let idle = WeaponInput::default();
+        // A pull held over through the recovery...
+        let def = WeaponDef {
+            soft_recovery: 0.8,
+            ..battle_rifle()
+        };
+        let mut w = WeaponState::new(&def);
+        let last = 2.0 / 15.0;
+        assert_eq!(clicks(&def, &mut w, &[0.0, last + 0.15], 0.3).len(), 3);
+        w.put_away();
+        assert!(run(&def, &mut w, idle, 1.0).is_empty());
+        // ...and the rest of a burst cut short don't fire once it's back.
+        let mut w = WeaponState::new(&def);
+        assert_eq!(clicks(&def, &mut w, &[0.0], 0.05).len(), 1);
+        w.zoom = 1;
+        w.put_away();
+        assert!(run(&def, &mut w, idle, 1.0).is_empty());
+        assert_eq!((w.zoom, w.loaded), (0, 35));
+    }
+
+    #[test]
     fn recovery_alone_paces_guns_with_no_rate_of_fire() {
         // The Magnum's tags: no rounds per second, 0.1 s of recovery.
         let def = WeaponDef {
@@ -845,6 +889,35 @@ mod tests {
         assert!(widest(0) <= def.error_angle.0 + 1e-6, "{}", widest(0));
         assert!(widest(2) > def.error_angle.0 * 1.3, "{}", widest(2));
         assert!(widest(2) <= def.error_angle.1 + 1e-6);
+    }
+
+    #[test]
+    fn snipers_are_dead_on_zoomed_in() {
+        // The Sniper Rifle's tags: half a degree of spread, used unzoomed only.
+        let def = WeaponDef {
+            behavior: TriggerBehavior::Latch,
+            rounds_per_second: (0.0, 0.0),
+            shots_per_fire: 1,
+            fire_recovery_time: 0.5,
+            error_angle: (0.5f32.to_radians(), 0.5f32.to_radians()),
+            error_only_unzoomed: true,
+            zoom_levels: 2,
+            zoom_range: (3.5, 9.5),
+            ..battle_rifle()
+        };
+        let at: Vec<f32> = (0..4).map(|k| k as f32 * 0.6).collect();
+        let off = |s: &Shot| s.yaw.hypot(s.pitch);
+        let mut w = WeaponState::new(&def);
+        let shots = clicks(&def, &mut w, &at, 2.5);
+        assert_eq!(shots.len(), 4);
+        assert!(shots.iter().any(|(_, s)| off(s) > 0.0));
+        for zoom in [1, 2] {
+            let mut w = WeaponState::new(&def);
+            w.zoom = zoom;
+            let shots = clicks(&def, &mut w, &at, 2.5);
+            assert_eq!(shots.len(), 4);
+            assert!(shots.iter().all(|(_, s)| off(s) == 0.0));
+        }
     }
 
     #[test]

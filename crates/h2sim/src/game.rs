@@ -1441,8 +1441,10 @@ impl Game {
                 empty,
             });
         }
-        // Rounds that hit at once go where autoaim steers them (players
-        // only: actors aim for themselves). Spread is added after.
+        // Rounds that hit at once go where autoaim steers them. Everyone
+        // gets it but the campaign's actors, who aim for themselves:
+        // multiplayer bots play by the rules people do. Spread is added
+        // after.
         let assisted = self.players[i].actor.is_none();
         for (shot, def, w, left, zoom) in shots {
             let aim = assisted && def.flight.is_none();
@@ -1813,7 +1815,8 @@ impl Game {
         // Drop the weapon in hand.
         let drop = p.weapons.get(p.current).cloned();
         let (pos, yaw) = (p.body.position + Vec3::Z * 0.1, p.yaw);
-        if let Some(h) = drop {
+        if let Some(mut h) = drop {
+            h.state.put_away();
             self.dropped.push(DroppedWeapon {
                 weapon: h.weapon,
                 state: h.state,
@@ -2091,6 +2094,9 @@ impl Game {
         }
         let state = state.clone();
         if p.weapons.len() < 2 {
+            if let Some(h) = p.weapons.get_mut(p.current) {
+                h.state.put_away();
+            }
             p.weapons.push(HeldWeapon { weapon: w, state });
             p.current = p.weapons.len() - 1;
             p.readying = ready_time(&self.weapons, p);
@@ -2099,7 +2105,9 @@ impl Game {
         }
         if action && p.action_held >= SWAP_HOLD {
             p.action_held = f32::MIN;
-            let old = std::mem::replace(&mut p.weapons[p.current], HeldWeapon { weapon: w, state });
+            let mut old =
+                std::mem::replace(&mut p.weapons[p.current], HeldWeapon { weapon: w, state });
+            old.state.put_away();
             p.readying = ready_time(&self.weapons, p);
             if def.dual.is_none() {
                 self.drop_left(i);
