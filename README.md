@@ -73,7 +73,8 @@ screen, so at 1080p they are drawn at 1.125 times their size (the motion
 tracker about a sixth of the screen's height). The remake's own HUD text (the
 score and clock, kill feed, prompts, respawn countdown and names) goes at the
 same scale, but never smaller than one pixel to each pixel of its 5x7 font
-(8 pixel lines), so it stays readable in a 720p window and splitscreen views.
+(8 pixel lines), with a dark shadow, so it stays readable in a 720p window,
+in splitscreen views and over snow or sky.
 In team games, T (or X on a controller) puts you on the red or blue team; bots
 fill the smaller team (counting the people on other PCs in the lobby).
 System Link lists games other PCs on the network are
@@ -222,8 +223,9 @@ the HUD tags' own half or quarter screen layout (quarter views have no ammo
 meter). A player who pauses gets the pause menu in their own view, and only
 their controller (or the keyboard, for Esc) works it. If a controller is
 unplugged or its battery runs out, its player stands still until it comes
-back or A on another controller takes over (player one plays on at the
-keyboard, and Start on a new controller still drops a new player in). A
+back or A on another controller takes over (a guest before player one,
+who plays on at the keyboard). Start on a new controller also takes over a
+guest whose controller went, and otherwise drops a new player in. A
 guest's pause menu goes with their controller: player one gets it while the
 game stands still, and over a System Link game that plays on it closes.
 

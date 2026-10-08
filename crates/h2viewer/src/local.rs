@@ -1267,9 +1267,12 @@ fn weapon_hud(
 pub fn new_pad_for(locals: &[LocalPlayer], press: PadPress) -> Option<usize> {
     let lost = |l: &LocalPlayer| l.lost_pad.is_some();
     match press {
+        // A guest whose controller went first: their view asks for A, and
+        // player one can play on at the keyboard meanwhile.
         PadPress::Claim => locals
             .iter()
-            .position(lost)
+            .position(|l| lost(l) && !l.keyboard)
+            .or_else(|| locals.iter().position(lost))
             .or_else(|| locals.iter().position(|l| l.keyboard && l.pad.is_none())),
         PadPress::Join => locals.iter().position(|l| lost(l) && !l.keyboard),
         _ => None,
@@ -1397,6 +1400,7 @@ mod tests {
         locals[1].pad = None;
         locals[1].lost_pad = Some(pad(1));
         assert_eq!(new_pad_for(&locals, PadPress::Join), Some(1));
+        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(1));
         locals[0].lost_pad = None;
         assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(1));
         // No one lost theirs: A takes player one at the keyboard, unless

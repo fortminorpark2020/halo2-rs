@@ -36,13 +36,19 @@ pub struct HudBuilder {
     bitmap_scale: f32,
     /// Window pixels per unit of a HUD widget's offset.
     offset_scale: f32,
+    /// Text gets a dark shadow, so small HUD lines read over bright snow,
+    /// sky or walls (menus have their own dark backing).
+    shadow: bool,
     batches: Vec<HudBatch>,
 }
 
 impl HudBuilder {
     /// A HUD (or menu) filling a `w` x `h` window.
     pub fn new(w: f32, h: f32) -> Self {
-        Self::for_view(w, h, ScreenSplit::Full)
+        HudBuilder {
+            shadow: false,
+            ..Self::for_view(w, h, ScreenSplit::Full)
+        }
     }
 
     /// The HUD of a `w` x `h` view, which draws the widgets' `split` layout.
@@ -74,6 +80,7 @@ impl HudBuilder {
             split,
             bitmap_scale,
             offset_scale,
+            shadow: true,
             batches: Vec::new(),
         }
     }
@@ -205,6 +212,23 @@ impl HudBuilder {
 
     /// Text centred on `x` with its top at `y`, `height` window pixels tall.
     pub fn text(
+        &mut self,
+        font_texture: usize,
+        [x, y]: [f32; 2],
+        height: f32,
+        text: &str,
+        color: [f32; 4],
+    ) {
+        if self.shadow {
+            // One font pixel down and right, at least one window pixel.
+            let d = (height / 8.0).max(1.0);
+            let dark = [0.0, 0.0, 0.0, color[3] * 0.6];
+            self.glyphs(font_texture, [x + d, y + d], height, text, dark);
+        }
+        self.glyphs(font_texture, [x, y], height, text, color);
+    }
+
+    fn glyphs(
         &mut self,
         font_texture: usize,
         [x, y]: [f32; 2],
