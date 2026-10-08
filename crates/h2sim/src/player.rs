@@ -13,6 +13,16 @@ pub const STEP_HZ: f32 = 120.0;
 const PUSH_ITERATIONS: usize = 4;
 /// How far down we look for ground to stick to when walking off small drops.
 const GROUND_SNAP: f32 = 0.06;
+/// How far past the edge of a step, and how far off its height, its top is
+/// looked for.
+const EDGE: f32 = 0.01;
+/// How deep in the level a walking step may leave the body (pushes out of
+/// several surfaces at once don't always quite settle) and still count as
+/// clear of it.
+const SNUG: f32 = 1e-3;
+/// The steepest slope (radians) that bounds how fast the body follows the
+/// ground down or up in a step, whatever a tag says its steepest floor is.
+const STEEPEST: f32 = 1.4;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Input {
@@ -44,6 +54,9 @@ pub struct Player {
     pub gravity: f32,
     /// Jump was held at the last step (another jump takes letting go).
     pub jump_held: bool,
+    /// Stood on the level's own ground at the end of the last step (not
+    /// just held up by something else, a vehicle's hull say).
+    pub on_level: bool,
     accumulator: f32,
     contacts: Vec<Contact>,
 }
@@ -60,6 +73,7 @@ impl Player {
             fell: 0.0,
             gravity: 1.0,
             jump_held: false,
+            on_level: false,
             accumulator: 0.0,
             contacts: Vec::new(),
         }
@@ -160,13 +174,19 @@ impl Player {
             self.grounded = false;
         }
         self.jump_held = input.jump;
+        // On the level's own ground (and not jumping off it).
+        if self.grounded && self.on_level {
+            self.walk(world, dt);
+            self.on_level = self.grounded;
+            return;
+        }
 
         let gravity = GRAVITY * m.gravity_scale * self.gravity;
         self.velocity.z -= gravity * dt;
         let was_grounded = self.grounded;
         let falling = (-self.velocity.z).max(0.0);
         self.position += self.velocity * dt;
-        self.grounded = self.resolve(world);
+        self.grounded = self.resolve(world, None);
         if self.grounded && !was_grounded {
             // How far a fall would have to be to land this fast.
             self.fell = self.fell.max(falling * falling / (2.0 * gravity));
@@ -176,12 +196,130 @@ impl Player {
         if was_grounded && !self.grounded && self.velocity.z <= 0.0 {
             let saved = (self.position, self.velocity);
             self.position.z -= GROUND_SNAP;
-            if self.resolve(world) {
+            if self.resolve(world, None) {
                 self.grounded = true;
             } else {
                 (self.position, self.velocity) = saved;
             }
         }
+        self.on_level = self.grounded;
+    }
+
+    /// A step on the ground. The body moves level: floors lift it, the
+    /// edges of steps and kerbs it walks into lift it onto them, walls stop
+    /// it, and none of them throws it upward, so it doesn't take off over
+    /// the top of a ramp or a step. It follows the ground down no faster
+    /// than down the steepest floor, or a little more for a small step
+    /// (`GROUND_SNAP`); where the ground drops away faster, off a ledge or
+    /// over the brink of a step, it leaves the ground and falls. A move
+    /// that would leave it stuck in the level (squeezed between a slope
+    /// and something low overhead, say) or lift it more than a step isn't
+    /// made: it stays where it was and stops going that way.
+    fn walk(&mut self, world: &World, dt: f32) {
+        let start = self.position;
+        self.velocity.z = 0.0;
+        // The way it's going, for what counts as a step up ahead of it
+        // (walls it runs into take away its speed as it goes).
+        let heading = self.velocity.truncate();
+        let moved = heading * dt;
+        let slope = moved.length() * self.biped.max_slope.clamp(0.0, STEEPEST).tan();
+        self.position += moved.extend(0.0);
+        let mut grounded = self.resolve(world, Some(heading));
+        if !grounded {
+            // Down to the ground a little at a time, so as to come down
+            // onto a step's edge rather than past it; coming down onto
+            // the brink of the edge it's going over (which pushes it up
+            // and out) instead, it goes over and falls.
+            let saved = (self.position, self.velocity);
+            let reach = slope + GROUND_SNAP;
+            let drops = (reach / (self.biped.radius / 4.0)).ceil().max(1.0);
+            for _ in 0..drops as usize {
+                self.position.z -= reach / drops;
+                let at = self.position.z;
+                grounded = self.resolve(world, Some(heading));
+                if grounded || self.position.z > at {
+                    break;
+                }
+            }
+            if !grounded {
+                (self.position, self.velocity) = saved;
+            }
+        }
+        // No higher than a step (an edge as high as the bottom of the body
+        // can touch: its radius) on top of the slope it walks up.
+        let climb = self.biped.radius + slope + EDGE;
+        let stuck = self.overlap(world, self.position);
+        if stuck > SNUG || self.position.z - start.z > climb {
+            // Unless it was already stuck (put there from outside) and
+            // this gets it out.
+            let was = self.overlap(world, start);
+            if was <= SNUG || stuck > was {
+                self.stop_against(world, start + moved.extend(0.0), moved);
+                self.position = start;
+                grounded = true;
+            }
+        }
+        self.grounded = grounded;
+    }
+
+    /// How deep the body standing at `pos` is in the level: its deepest
+    /// contact.
+    fn overlap(&mut self, world: &World, pos: Vec3) -> f32 {
+        let (p0, p1) = self.capsule(pos);
+        let mut contacts = std::mem::take(&mut self.contacts);
+        world.capsule_contacts(p0, p1, self.biped.radius, &mut contacts);
+        let deepest = contacts.iter().fold(0.0f32, |d, c| d.max(c.depth));
+        self.contacts = contacts;
+        deepest
+    }
+
+    /// The body couldn't make the move `moved` to `to`: take away the part
+    /// of its speed going into what it ran into there, or, if nothing it
+    /// ran into faces against the move (a floor rising under something
+    /// overhead), all of it.
+    fn stop_against(&mut self, world: &World, to: Vec3, moved: Vec2) {
+        let (p0, p1) = self.capsule(to);
+        let mut contacts = std::mem::take(&mut self.contacts);
+        world.capsule_contacts(p0, p1, self.biped.radius, &mut contacts);
+        let mut v = self.velocity.truncate();
+        for c in &contacts {
+            let flat = c.normal.truncate().normalize_or_zero();
+            let into = v.dot(flat);
+            if into < 0.0 {
+                v -= flat * into;
+            }
+        }
+        self.contacts = contacts;
+        if v.dot(moved) > 0.0 && v == self.velocity.truncate() {
+            v = Vec2::ZERO;
+        }
+        self.velocity = v.extend(0.0);
+    }
+
+    /// Walking into the edge of something low (a step, a kerb) with the
+    /// bottom of the body (`c`, a contact facing up): how far to lift it to
+    /// stand on the edge, if there's floor on top. Only an edge ahead of
+    /// it, the way it's `heading`: one behind or beside it is the brink of
+    /// where it's going down from, which doesn't hold it up.
+    fn step_onto(&self, world: &World, c: &Contact, floor_cos: f32, heading: Vec2) -> Option<f32> {
+        let r = self.biped.radius;
+        let centre = self.position + Vec3::Z * r;
+        let touch = centre - c.normal * (r - c.depth);
+        if (touch - centre).truncate().dot(heading) <= 0.0 {
+            return None;
+        }
+        // Just past the edge, looking down from the height of the body's
+        // bottom.
+        let into = (-c.normal.truncate()).normalize_or_zero();
+        let above = (touch.truncate() + into * EDGE).extend(centre.z + EDGE);
+        let reach = centre.z - touch.z + 2.0 * EDGE;
+        let (down, n) = world.raycast_hit(above, Vec3::NEG_Z, reach)?;
+        let top = above.z - down;
+        if n.z < floor_cos || (top - touch.z).abs() > 2.0 * EDGE {
+            return None;
+        }
+        let aside = (centre - touch).truncate().length().min(r);
+        Some(touch.z + (r * r - aside * aside).sqrt() - centre.z).filter(|&lift| lift > 0.0)
     }
 
     /// A flier speeds up toward the way it's steered, up or down too, and
@@ -200,12 +338,16 @@ impl Player {
         };
         self.velocity += (desired - self.velocity).clamp_length_max(rate.max(0.5) * dt);
         self.position += self.velocity * dt;
-        self.resolve(world);
+        self.resolve(world, None);
         self.grounded = false;
+        self.on_level = false;
     }
 
-    /// Push the capsule out of the world; returns whether it stands on walkable ground.
-    fn resolve(&mut self, world: &World) -> bool {
+    /// Push the capsule out of the world; returns whether it stands on
+    /// walkable ground. Walking (`heading` the way it's going), only walls
+    /// change the velocity, and only the part going into them sideways.
+    fn resolve(&mut self, world: &World, heading: Option<Vec2>) -> bool {
+        let walking = heading.is_some();
         let floor_cos = self.biped.max_slope.cos();
         let mut grounded = false;
         for _ in 0..PUSH_ITERATIONS {
@@ -223,6 +365,14 @@ impl Player {
                 .unwrap();
             self.contacts = contacts;
             let walkable = c.normal.z >= floor_cos;
+            if let Some(heading) = heading.filter(|_| !walkable && c.normal.z > 0.0) {
+                // The edge of a step: up onto it.
+                if let Some(lift) = self.step_onto(world, &c, floor_cos, heading) {
+                    self.position.z += lift + 1e-4;
+                    grounded = true;
+                    continue;
+                }
+            }
             // Floors push straight up so we don't slide down gentle slopes.
             let push = if walkable {
                 Vec3::Z * (c.depth / c.normal.z)
@@ -230,6 +380,15 @@ impl Player {
                 c.normal * c.depth
             };
             self.position += push + c.normal * 1e-4;
+            if walking {
+                let flat = c.normal.truncate().normalize_or_zero().extend(0.0);
+                let into = self.velocity.dot(flat);
+                if !walkable && into < 0.0 {
+                    self.velocity -= flat * into;
+                }
+                grounded |= walkable;
+                continue;
+            }
             let into = self.velocity.dot(c.normal);
             if into < 0.0 {
                 self.velocity -= c.normal * into;
@@ -423,5 +582,237 @@ mod tests {
             "peak {peak} expected {expected}"
         );
         assert!(p.grounded);
+    }
+
+    /// A strip 4 wide along +x of floor sections at the given heights
+    /// (each `[x0, z0, x1, z1]`), with upright faces joining them where
+    /// they don't meet.
+    fn strip(sections: &[[f32; 4]]) -> World {
+        let (mut p, mut i) = (Vec::new(), Vec::new());
+        let w = 2.0;
+        for (k, &[x0, z0, x1, z1]) in sections.iter().enumerate() {
+            quad(
+                &mut p,
+                &mut i,
+                [[x0, -w, z0], [x1, -w, z1], [x1, w, z1], [x0, w, z0]],
+            );
+            if let Some(&[nx, nz, ..]) = sections.get(k + 1) {
+                if (nz - z1).abs() > 1e-4 {
+                    quad(
+                        &mut p,
+                        &mut i,
+                        [[nx, -w, z1], [nx, -w, nz], [nx, w, nz], [nx, w, z1]],
+                    );
+                }
+            }
+        }
+        World::new(&p, &i)
+    }
+
+    /// Run along +x for `seconds`; how far it got, and the longest it was
+    /// off the ground at a stretch (seconds) before reaching `until` x.
+    fn run_along(w: &World, start: Vec3, seconds: f32, until: f32) -> (Player, f32) {
+        let mut p = Player::new(start, PlayerMovement::default(), BipedPhysics::default());
+        p.update(w, Input::default(), 0.1);
+        let input = Input {
+            movement: Vec2::new(0.0, 1.0),
+            ..Default::default()
+        };
+        let (mut off, mut longest) = (0.0f32, 0.0f32);
+        let dt = 1.0 / 60.0;
+        for _ in 0..(seconds / dt) as usize {
+            p.update(w, input, dt);
+            if p.position.x < until {
+                off = if p.grounded { 0.0 } else { off + dt };
+                longest = longest.max(off);
+            }
+        }
+        (p, longest)
+    }
+
+    #[test]
+    fn running_over_the_top_of_a_ramp_keeps_to_the_ground() {
+        // Up 30 degrees, level, then down 30 degrees.
+        let rise = 2.0 * 30f32.to_radians().tan();
+        let w = strip(&[
+            [-4.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, rise],
+            [2.0, rise, 3.0, rise],
+            [3.0, rise, 5.0, 0.0],
+            [5.0, 0.0, 12.0, 0.0],
+        ]);
+        let (p, longest) = run_along(&w, Vec3::new(-2.0, 0.0, 0.0), 5.0, 7.0);
+        assert!(p.position.x > 7.0, "got to x = {}", p.position.x);
+        assert!(longest == 0.0, "off the ground for {longest} s");
+    }
+
+    #[test]
+    fn running_up_stairs_keeps_to_the_ground() {
+        // Steps 0.15 up every 0.3, to 0.9 up.
+        let mut steps = vec![[-4.0, 0.0, 0.0, 0.0]];
+        for k in 0..6 {
+            let (x, z) = (k as f32 * 0.3, (k + 1) as f32 * 0.15);
+            steps.push([x, z, x + 0.3, z]);
+        }
+        steps.push([1.8, 0.9, 8.0, 0.9]);
+        let w = strip(&steps);
+        let (p, longest) = run_along(&w, Vec3::new(-2.0, 0.0, 0.0), 3.0, 4.0);
+        assert!(
+            p.position.x > 4.0 && (p.position.z - 0.9).abs() < 0.01,
+            "got to {}",
+            p.position
+        );
+        assert!(longest == 0.0, "off the ground for {longest} s");
+        // Coming back down them too (over the edge of each, as off a
+        // ledge).
+        let back = Player {
+            velocity: Vec3::ZERO,
+            ..p
+        };
+        let mut p = back;
+        let input = Input {
+            movement: Vec2::new(0.0, -1.0),
+            ..Default::default()
+        };
+        for _ in 0..200 {
+            p.update(&w, input, 1.0 / 60.0);
+        }
+        assert!(
+            p.grounded && p.position.x < -1.0 && p.position.z.abs() < 0.01,
+            "got back to {}",
+            p.position
+        );
+    }
+
+    #[test]
+    fn running_off_a_ledge_falls() {
+        let b = BipedPhysics::default();
+        let m = PlayerMovement::default();
+        let dt = 1.0 / 60.0;
+        for h in [0.1f32, 0.15, 0.2, 0.25, 0.3, 0.5] {
+            let w = strip(&[[-4.0, h, 0.0, h], [0.0, 0.0, 8.0, 0.0]]);
+            let mut p = Player::new(Vec3::new(-2.0, 0.0, h), m, b);
+            p.update(&w, Input::default(), 0.1);
+            let input = Input {
+                movement: Vec2::new(0.0, 1.0),
+                ..Default::default()
+            };
+            let (mut t, mut left, mut down) = (0.0, None, None);
+            let (mut air, mut fastest) = (0.0, 0.0f32);
+            for _ in 0..180 {
+                let z = p.position.z;
+                p.update(&w, input, dt);
+                t += dt;
+                fastest = fastest.max(z - p.position.z);
+                if p.position.z < h - 1e-3 && left.is_none() {
+                    left = Some(t - dt);
+                }
+                if p.position.z < 1e-3 && down.is_none() {
+                    down = Some(t);
+                }
+                if !p.grounded {
+                    air += dt;
+                }
+            }
+            assert!(p.grounded && p.position.x > 4.0, "{h}: at {}", p.position);
+            // It goes down no faster than it would fall that far, and
+            // never drops faster in a frame than running down the
+            // steepest floor or landing from that high.
+            let fall = (2.0 * h / GRAVITY).sqrt();
+            let took = down.unwrap() - left.unwrap();
+            assert!(took >= fall, "{h}: down in {took} s, a fall takes {fall}");
+            assert!(air > 0.1, "{h}: off the ground for {air} s");
+            let steepest = (m.run_forward * b.max_slope.tan()).max((2.0 * GRAVITY * h).sqrt());
+            assert!(
+                fastest < steepest * dt + 0.005,
+                "{h}: dropped {fastest} in a frame"
+            );
+        }
+        // A wall too high to step up still stops it.
+        let w = strip(&[[-4.0, 0.0, 0.0, 0.0], [0.0, 0.5, 8.0, 0.5]]);
+        let (p, _) = run_along(&w, Vec3::new(-2.0, 0.0, 0.0), 3.0, 8.0);
+        assert!(p.position.x < 0.0 && p.grounded, "at {}", p.position);
+    }
+
+    /// Floor at 0 up to y = 0.5, then a 45 degree slope rising along +y,
+    /// all under a 0.2 thick slab whose underside is `under` up.
+    fn slope_under_slab(under: f32) -> World {
+        let (mut p, mut i) = (Vec::new(), Vec::new());
+        let (w, top) = (6.0, under + 0.2);
+        quad(
+            &mut p,
+            &mut i,
+            [[-w, -w, 0.0], [w, -w, 0.0], [w, 0.5, 0.0], [-w, 0.5, 0.0]],
+        );
+        quad(
+            &mut p,
+            &mut i,
+            [[-w, 0.5, 0.0], [w, 0.5, 0.0], [w, 3.5, 3.0], [-w, 3.5, 3.0]],
+        );
+        quad(
+            &mut p,
+            &mut i,
+            [
+                [-w, -1.0, top],
+                [w, -1.0, top],
+                [w, 3.5, top],
+                [-w, 3.5, top],
+            ],
+        );
+        quad(
+            &mut p,
+            &mut i,
+            [
+                [-w, -1.0, under],
+                [-w, 3.5, under],
+                [w, 3.5, under],
+                [w, -1.0, under],
+            ],
+        );
+        quad(
+            &mut p,
+            &mut i,
+            [
+                [-w, -1.0, under],
+                [-w, -1.0, top],
+                [w, -1.0, top],
+                [w, -1.0, under],
+            ],
+        );
+        World::new(&p, &i)
+    }
+
+    #[test]
+    fn walking_up_a_slope_under_something_low_stops_under_it() {
+        for under in [0.8f32, 0.85, 0.9, 1.0, 1.2] {
+            let w = slope_under_slab(under);
+            for dir in [
+                Vec2::new(0.87, 0.48),
+                Vec2::new(0.5, 0.86),
+                Vec2::new(0.0, 1.0),
+            ] {
+                let mut p = player_at(0.0);
+                p.position.y = -0.5;
+                p.update(&w, Input::default(), 0.1);
+                let input = Input {
+                    movement: Vec2::new(0.0, 1.0),
+                    yaw: dir.y.atan2(dir.x),
+                    ..Default::default()
+                };
+                for _ in 0..240 {
+                    p.update(&w, input, 1.0 / 60.0);
+                    assert!(
+                        p.position.z + p.height() < under + 2.0 * SNUG,
+                        "{under} high, going {dir}: in the slab at {}",
+                        p.position
+                    );
+                }
+                assert!(p.grounded, "{under} high, going {dir}: at {}", p.position);
+                if dir.x > 0.8 {
+                    // Not stuck where it meets it: it slides along.
+                    assert!(p.position.x > 1.5, "{under} high: at {}", p.position);
+                }
+            }
+        }
     }
 }

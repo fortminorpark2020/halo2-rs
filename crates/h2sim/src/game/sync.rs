@@ -652,6 +652,7 @@ impl Game {
             w.vec3(p.body.position);
             w.vec3(p.body.velocity);
             w.bool(p.body.grounded);
+            w.bool(p.body.on_level);
             w.f32(p.body.crouch);
             w.f32(p.yaw);
             w.f32(p.pitch);
@@ -814,6 +815,7 @@ impl Game {
             p.body.position = r.vec3()?;
             p.body.velocity = r.vec3()?;
             p.body.grounded = r.bool()?;
+            p.body.on_level = r.bool()?;
             p.body.crouch = r.f32()?.clamp(0.0, 1.0);
             p.yaw = r.f32()?;
             p.pitch = r.f32()?;

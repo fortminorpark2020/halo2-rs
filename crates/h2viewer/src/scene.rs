@@ -2,7 +2,7 @@
 //! the gameplay data read from the map's tags.
 
 use crate::audio::Clip;
-use crate::body::BodyRig;
+use crate::body::{BodyRig, Landing};
 use crate::probe::LevelLight;
 use crate::rig::{FirstPersonRig, Skeleton, SkinnedMesh};
 use blam_cache::animation;
@@ -1573,9 +1573,14 @@ impl Loader {
             .locate(tag)
             .map(|(_, t)| t.name)
             .unwrap_or_default();
+        // With the animations its graph inherits: the multiplayer Elite's
+        // runs and jumps are in the Elite graph its own builds on.
         let loaded = model::read_object_render_model(&mut self.set, tag).and_then(|m| {
             let jmad = model::object_animations(&mut self.set, tag)?;
-            Ok((m, animation::read_animation_graph(&mut self.set, jmad)?))
+            Ok((
+                m,
+                animation::read_inherited_animation_graph(&mut self.set, jmad)?,
+            ))
         });
         let (m, graph) = match loaded {
             Ok(x) => x,
@@ -1598,8 +1603,18 @@ impl Loader {
                     .and_then(|g| g.markers.first().copied())
             })
         };
+        let biped = physics::biped_physics_of(&mut self.set, tag)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         Some(Body {
-            rig: BodyRig::new(graph, Skeleton::new(&m.nodes), skin, hands.map(hand)),
+            rig: BodyRig::new(
+                graph,
+                Skeleton::new(&m.nodes),
+                skin,
+                hands.map(hand),
+                Landing::of(&biped),
+            ),
             meshes: (first..first + copies).collect(),
             preview: first + copies,
         })

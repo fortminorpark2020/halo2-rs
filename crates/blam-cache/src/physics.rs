@@ -41,6 +41,14 @@ pub struct BipedPhysics {
     pub fly_sidestep: f32,
     pub fly_acceleration: f32,
     pub fly_deceleration: f32,
+    /// Landing from a fall: coming down at least `soft_landing_speed`
+    /// (world units a second) is a soft landing, at least
+    /// `hard_landing_speed` a hard one; each lasts at most its time in
+    /// seconds (0 for no limit).
+    pub soft_landing_speed: f32,
+    pub hard_landing_speed: f32,
+    pub soft_landing_time: f32,
+    pub hard_landing_time: f32,
 }
 
 impl Default for PlayerMovement {
@@ -79,6 +87,11 @@ impl Default for BipedPhysics {
             fly_sidestep: 0.0,
             fly_acceleration: 0.0,
             fly_deceleration: 0.0,
+            // As the multiplayer Spartan's biped tag has them.
+            soft_landing_speed: 1.5,
+            hard_landing_speed: 7.0,
+            soft_landing_time: 0.6,
+            hard_landing_time: 0.0,
         }
     }
 }
@@ -212,5 +225,9 @@ pub fn biped_physics_of(set: &mut MapSet, datum: DatumIndex) -> Result<Option<Bi
         fly_sidestep: f32_at(&d, 0x2E0),
         fly_acceleration: f32_at(&d, 0x2E4),
         fly_deceleration: f32_at(&d, 0x2E8),
+        soft_landing_time: f32_at(&d, 0x1FC),
+        hard_landing_time: f32_at(&d, 0x200),
+        soft_landing_speed: f32_at(&d, 0x204),
+        hard_landing_speed: f32_at(&d, 0x208),
     }))
 }

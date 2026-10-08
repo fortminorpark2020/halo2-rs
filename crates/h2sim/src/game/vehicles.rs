@@ -968,8 +968,13 @@ impl Game {
                     let killer = driver.filter(|&d| d != j);
                     self.damage(j, killer, f32::INFINITY, false);
                     if self.players[j].alive {
-                        // Teammates without friendly fire just get shoved.
-                        self.players[j].body.velocity += n * closing;
+                        // Teammates without friendly fire just get shoved
+                        // (off their feet, if it's upward).
+                        let body = &mut self.players[j].body;
+                        body.velocity += n * closing;
+                        if body.velocity.z > 0.0 {
+                            body.grounded = false;
+                        }
                     }
                     break;
                 }

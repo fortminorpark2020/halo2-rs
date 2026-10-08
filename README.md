@@ -15,7 +15,10 @@ install. No game files are included in this repository.
   hulls), and sounds (Xbox ADPCM and WMA).
 - `h2tool`: command-line inspector.
 - `h2sim`: game simulation (no rendering): level collision, Spartan movement
-  using the speeds, jump velocity and size from the game's own globals and biped tags,
+  using the speeds, jump velocity and size from the game's own globals and biped tags
+  (running keeps to the ground up steps and over the tops of ramps, follows it
+  down slopes and drops of up to about 0.06 world units, and falls off anything
+  deeper; it won't squeeze under anything lower than the body),
   vehicles (wheels with suspension, hovering, flight, seats, turrets, splatters
   and wrecks),
   weapons (fire rate, bursts, spread, magazines, reloads, zoom, autoaim) from the weapon tags,
@@ -88,7 +91,11 @@ the lobby and on the scoreboard, Elites wear it on their back, and a team's
 Capture the Flag flag carries its first player's emblem. It's saved in `%APPDATA%\halo2-rs\profile.txt` and
 sent to the other PCs in a System Link game. In team games armour takes the
 team's colour. Splitscreen guests play the same model in other colours; bots
-each have their own look, about a third of them Elites. Elites hold weapons
+each have their own look, about a third of them Elites. Spartans and Elites
+run, walk, strafe and crouch with the game's own animations played at the pace
+they move, keep their stride changing direction, go into the airborne pose
+only once really off the ground, and land soft or hard by how fast they came
+down (from the biped tag). Elites hold weapons
 with their own first person animations and make their own sounds getting
 into vehicles.
 
@@ -243,6 +250,7 @@ h2tool weapon lockout.map battle_rifle  # firing stats
 h2tool vehicle zanzibar.map warthog     # seats, speeds, model variants and physics hull
 h2tool hud    lockout.map battle_rifle [dir]  # HUD widgets
 h2tool jmad   lockout.map fp_battle_rifle  # animation graph: skeleton and animations
+                                        # (and how fast each moves; H2_INHERIT=1 adds the graph's parent's)
 h2tool jmadscan lockout.map             # decode every animation (reports failures)
 h2tool shader lockout.map fp_arms       # shader template and bitmaps
 h2tool sound  lockout.map frag_expl out.wav  # decode a sound to WAV

@@ -10,8 +10,9 @@
 //! `combat:pistol:hp:reload_1`, `combat:pistol:reload_1` and so on.
 
 use crate::rig::{tag_quat, world_matrices, NodePose, Skeleton, SkinnedMesh};
-use blam_cache::animation::{AnimationGraph, AnimationKind, FRAME_RATE};
+use blam_cache::animation::{Animation, AnimationGraph, AnimationKind, FrameEvent, FRAME_RATE};
 use blam_cache::model::Marker;
+use blam_cache::physics::BipedPhysics;
 use glam::{Mat4, Quat, Vec2, Vec3};
 use std::collections::HashMap;
 
@@ -19,8 +20,19 @@ use std::collections::HashMap;
 const BASE_BLEND: f32 = 0.2;
 /// Seconds to fade actions in and out.
 const ACTION_FADE: f32 = 0.1;
-/// Run speed at which movement animations play at their own pace.
+/// Run speed at which movement animations that don't say how fast they go
+/// play at their own pace (the globals' forward run speed).
 const RUN_SPEED: f32 = 2.25;
+/// Slower than this (world units a second) a body stands still.
+const STILL: f32 = 0.15;
+/// Seconds off the ground before a body shows it's in the air, so a step
+/// down a stair or over a bump doesn't flick it into the jumping pose.
+/// (Our choice: about three of Halo's 30 a second ticks.)
+const AIRBORNE_AFTER: f32 = 0.1;
+/// The slowest and fastest a walking or running animation is played, as
+/// a share of its own pace (a limit for odd data: with the tags' own
+/// paces it stays within about 0.3 to 2.5).
+const MOVE_RATES: (f32, f32) = (0.25, 2.5);
 
 /// The model, its animations and where the weapon goes.
 pub struct BodyRig {
@@ -35,6 +47,31 @@ pub struct BodyRig {
     names: HashMap<String, usize>,
     /// Where the weapons go in each hand.
     hands: [Option<Marker>; 2],
+    /// When landing from a fall shows.
+    landing: Landing,
+}
+
+/// When a body shows landing from a fall: values from its biped tag.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Landing {
+    /// Coming down at least this fast (world units a second) is a soft
+    /// landing, at least `hard_speed` a hard one.
+    pub soft_speed: f32,
+    pub hard_speed: f32,
+    /// The longest each lasts, in seconds (0: as long as its animation).
+    pub soft_time: f32,
+    pub hard_time: f32,
+}
+
+impl Landing {
+    pub fn of(biped: &BipedPhysics) -> Landing {
+        Landing {
+            soft_speed: biped.soft_landing_speed,
+            hard_speed: biped.hard_landing_speed,
+            soft_time: biped.soft_landing_time,
+            hard_time: biped.hard_landing_time,
+        }
+    }
 }
 
 /// How a weapon is held: its animation class and short code.
@@ -67,6 +104,7 @@ impl BodyRig {
         skeleton: Skeleton,
         skin: SkinnedMesh,
         hands: [Option<Marker>; 2],
+        landing: Landing,
     ) -> BodyRig {
         let defaults = graph
             .nodes
@@ -98,6 +136,7 @@ impl BodyRig {
             nodes,
             names,
             hands,
+            landing,
         }
     }
 
@@ -130,6 +169,34 @@ impl BodyRig {
             .animations
             .get(anim)
             .map_or(0.0, |a| a.duration())
+    }
+
+    /// How fast and which way (x forward, y left) an animation carries the
+    /// body at its own pace; zero when its tag doesn't say.
+    fn speed(&self, anim: usize) -> Vec2 {
+        self.graph
+            .animations
+            .get(anim)
+            .map_or(Vec2::ZERO, |a| Vec2::from(a.speed()))
+    }
+
+    /// Where in `to` the legs are as they are `time` seconds into `from`:
+    /// as far round its stride from the left foot coming down. (Turning
+    /// from running forward to running sideways keeps the stride going.)
+    fn same_stride(&self, from: usize, time: f32, to: usize) -> f32 {
+        let (Some(a), Some(b)) = (
+            self.graph.animations.get(from),
+            self.graph.animations.get(to),
+        ) else {
+            return 0.0;
+        };
+        let stride = |x: &Animation| x.frame_count.saturating_sub(1).max(1) as f32 / FRAME_RATE;
+        let foot = |x: &Animation| {
+            x.event_frame(FrameEvent::LeftFoot)
+                .map_or(0.0, |f| f as f32 / FRAME_RATE)
+        };
+        let share = ((time - foot(a)) / stride(a)).rem_euclid(1.0);
+        foot(b) + share * stride(b)
     }
 
     /// Lay `anim` at `time` seconds over `pose`, `weight` of the way. A base
@@ -213,6 +280,8 @@ impl BodyRig {
 pub struct BodyInput {
     /// Velocity in the body's frame: x forward, y left.
     pub velocity: Vec2,
+    /// How fast it goes up (down when negative), world units a second.
+    pub climb: f32,
     pub grounded: bool,
     pub crouching: bool,
     pub alive: bool,
@@ -229,10 +298,17 @@ pub struct BodyInput {
 pub struct BodyAnimator {
     base: Option<usize>,
     base_time: f32,
+    /// The base is a walking or running stride.
+    striding: bool,
     previous: Option<(usize, f32)>,
     blend: f32,
     action: Option<usize>,
     action_time: f32,
+    /// Seconds off the ground, and the fastest it has come down meanwhile.
+    airborne_for: f32,
+    falling: f32,
+    /// Landing from a fall: the animation, and seconds of it left.
+    landing: Option<(usize, f32)>,
 }
 
 impl BodyAnimator {
@@ -258,41 +334,32 @@ impl BodyAnimator {
 
     /// Advance by `dt` and pose the body.
     pub fn update(&mut self, rig: &BodyRig, input: &BodyInput, dt: f32) -> Vec<NodePose> {
-        let (want, rate) = if !input.alive {
-            (rig.by_name("combat:landing_dead"), 1.0)
+        let (want, rate, striding) = if !input.alive {
+            // A fall it died in doesn't land it when it's back.
+            self.landing = None;
+            self.airborne_for = 0.0;
+            self.falling = 0.0;
+            (rig.by_name("combat:landing_dead"), 1.0, false)
         } else {
-            let speed = input.velocity.length();
-            let state = if !input.grounded {
-                "airborne"
-            } else if speed < 0.15 {
-                "idle"
-            } else if input.velocity.x.abs() >= input.velocity.y.abs() {
-                if input.velocity.x > 0.0 {
-                    "move_front"
-                } else {
-                    "move_back"
-                }
-            } else if input.velocity.y > 0.0 {
-                "move_left"
-            } else {
-                "move_right"
-            };
-            let rate = if state.starts_with("move") {
-                (speed / RUN_SPEED).clamp(0.5, 1.5)
-            } else {
-                1.0
-            };
-            (rig.find(stance(input), input.style, state), rate)
+            self.watch_landing(rig, input, dt);
+            self.movement(rig, input)
         };
         if want != self.base {
+            let time = match (self.base, want) {
+                (Some(from), Some(to)) if self.striding && striding => {
+                    rig.same_stride(from, self.base_time, to)
+                }
+                _ => 0.0,
+            };
             self.previous = self.base.map(|b| (b, self.base_time));
             self.base = want;
-            self.base_time = 0.0;
+            self.base_time = time;
             self.blend = 0.0;
             if !input.alive {
                 self.action = None;
             }
         }
+        self.striding = striding;
         self.base_time += dt * rate;
         self.blend += dt;
         if let Some((_, t)) = &mut self.previous {
@@ -337,6 +404,106 @@ impl BodyAnimator {
     }
 }
 
+impl BodyAnimator {
+    /// Keep track of time in the air, and on coming down fast enough
+    /// start a soft or hard landing (which moving off cuts short).
+    fn watch_landing(&mut self, rig: &BodyRig, input: &BodyInput, dt: f32) {
+        if let Some((_, left)) = &mut self.landing {
+            *left -= dt;
+        }
+        if input.seat.is_some() {
+            // Getting into a seat isn't landing.
+            self.landing = None;
+            self.airborne_for = 0.0;
+            self.falling = 0.0;
+            return;
+        }
+        if !input.grounded {
+            self.airborne_for += dt;
+            self.falling = self.falling.max(-input.climb);
+            self.landing = None;
+            return;
+        }
+        if self.airborne_for > 0.0 {
+            let l = rig.landing;
+            let landed = if self.falling >= l.hard_speed {
+                Some(("land_hard", l.hard_time))
+            } else if self.falling >= l.soft_speed {
+                Some(("land_soft", l.soft_time))
+            } else {
+                None
+            };
+            self.landing = landed.and_then(|(what, most)| {
+                let a = rig.find(stance(input), input.style, what)?;
+                let length = rig.duration(a);
+                Some((a, if most > 0.0 { length.min(most) } else { length }))
+            });
+            self.airborne_for = 0.0;
+            self.falling = 0.0;
+        }
+        let moving = input.velocity.length() >= STILL;
+        if moving || self.landing.is_some_and(|(_, left)| left <= 0.0) {
+            self.landing = None;
+        }
+    }
+
+    /// The base animation for how the body moves, how fast to play it, and
+    /// whether it's a walking or running stride. A stride plays at the pace
+    /// that carries the body as fast as it goes that way (from how far
+    /// each of its frames moves it): walking where that's nearer its own
+    /// pace than running's.
+    fn movement(&self, rig: &BodyRig, input: &BodyInput) -> (Option<usize>, f32, bool) {
+        let find = |what: &str| rig.find(stance(input), input.style, what);
+        if let Some((landing, _)) = self.landing {
+            return (Some(landing), 1.0, false);
+        }
+        if !input.grounded && self.airborne_for >= AIRBORNE_AFTER {
+            return (find("airborne"), 1.0, false);
+        }
+        let v = input.velocity;
+        let speed = v.length();
+        if speed < STILL {
+            return (find("idle"), 1.0, false);
+        }
+        let way = if v.x.abs() >= v.y.abs() {
+            if v.x > 0.0 {
+                "front"
+            } else {
+                "back"
+            }
+        } else if v.y > 0.0 {
+            "left"
+        } else {
+            "right"
+        };
+        // How fast the body goes the animation's way, and the animation's
+        // own pace.
+        let paces = |a: usize| {
+            let own = rig.speed(a);
+            let pace = own.length();
+            (pace > 0.05).then(|| (v.dot(own / pace), pace))
+        };
+        let run = find(&format!("move_{way}"));
+        let walk = find(&format!("walk_{way}"));
+        let picked = match (run.and_then(|r| Some((r, paces(r)?))), walk) {
+            (Some((r, (along, pace))), Some(w)) => match paces(w) {
+                // Nearer walking's pace than running's (in proportion).
+                Some((_, walk_pace)) if along * along < pace * walk_pace => {
+                    Some((w, along / walk_pace))
+                }
+                _ => Some((r, along / pace)),
+            },
+            (Some((r, (along, pace))), None) => Some((r, along / pace)),
+            // Not saying how fast it goes: played at its pace at a run.
+            (None, _) => run.map(|r| (r, (speed / RUN_SPEED).clamp(0.5, 1.5))),
+        };
+        match picked {
+            Some((a, rate)) => (Some(a), rate.clamp(MOVE_RATES.0, MOVE_RATES.1), true),
+            None => (None, 1.0, false),
+        }
+    }
+}
+
 fn stance(input: &BodyInput) -> &'static str {
     if let Some(seat) = input.seat {
         seat
@@ -353,15 +520,8 @@ mod tests {
     use blam_cache::animation::{Animation, GraphNode, Track};
     use blam_cache::model::Node;
 
-    fn rig() -> BodyRig {
-        let node = |name: &str, parent: i16| Node {
-            name: name.into(),
-            parent,
-            translation: [0.0, 0.0, 0.5],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-        };
-        let skeleton = Skeleton::new(&[node("pelvis", -1), node("head", 0)]);
-        let anim = |name: &str, kind: AnimationKind, z: f32| Animation {
+    fn anim(name: &str, kind: AnimationKind, z: f32) -> Animation {
+        Animation {
             name: name.into(),
             kind,
             frame_count: 2,
@@ -377,7 +537,29 @@ mod tests {
             scales: vec![None, None],
             sound_events: Vec::new(),
             frame_events: Vec::new(),
+            movement: Vec::new(),
+        }
+    }
+
+    /// A stride `frames` long whose frames each carry the body `step`
+    /// (forward, left), its left foot down at frame `foot`.
+    fn stride(name: &str, frames: u16, step: [f32; 2], foot: u16) -> Animation {
+        Animation {
+            frame_count: frames,
+            movement: vec![[step[0], step[1], 0.0]; frames as usize],
+            frame_events: vec![(foot, FrameEvent::LeftFoot)],
+            ..anim(name, AnimationKind::Base, 0.38)
+        }
+    }
+
+    fn rig() -> BodyRig {
+        let node = |name: &str, parent: i16| Node {
+            name: name.into(),
+            parent,
+            translation: [0.0, 0.0, 0.5],
+            rotation: [0.0, 0.0, 0.0, 1.0],
         };
+        let skeleton = Skeleton::new(&[node("pelvis", -1), node("head", 0)]);
         let graph = AnimationGraph {
             parent: None,
             sounds: Vec::new(),
@@ -399,9 +581,32 @@ mod tests {
                     0.3,
                 ),
                 anim("crouch:rifle:idle", AnimationKind::Base, 0.2),
+                // The Spartan's: 2.26 and 1.91 a second running, 0.36 walking.
+                stride("combat:rifle:move_front", 20, [0.0754, 0.0], 1),
+                stride("combat:rifle:move_left", 20, [0.0, 0.0636], 10),
+                stride("combat:rifle:walk_front", 40, [0.012, 0.0], 1),
+                anim("combat:rifle:airborne", AnimationKind::Base, 0.5),
+                Animation {
+                    frame_count: 29,
+                    ..anim("combat:rifle:land_soft", AnimationKind::Base, 0.3)
+                },
             ],
         };
-        BodyRig::new(graph, skeleton, SkinnedMesh::default(), [None; 2])
+        let landing = Landing::of(&BipedPhysics::default());
+        BodyRig::new(graph, skeleton, SkinnedMesh::default(), [None; 2], landing)
+    }
+
+    fn standing() -> BodyInput {
+        BodyInput {
+            velocity: Vec2::ZERO,
+            climb: 0.0,
+            grounded: true,
+            crouching: false,
+            alive: true,
+            style: ("rifle", "br"),
+            seat: None,
+            pitch: 0.0,
+        }
     }
 
     #[test]
@@ -419,15 +624,7 @@ mod tests {
     fn standing_still_plays_idle() {
         let r = rig();
         let mut a = BodyAnimator::default();
-        let input = BodyInput {
-            velocity: Vec2::ZERO,
-            grounded: true,
-            crouching: false,
-            alive: true,
-            style: ("rifle", "br"),
-            seat: None,
-            pitch: 0.0,
-        };
+        let input = standing();
         let pose = a.update(&r, &input, 0.016);
         assert!((pose[0].translation.z - 0.4).abs() < 1e-5);
         // Looking up tips the head back.
@@ -451,5 +648,134 @@ mod tests {
         }
         let pose = a.update(&r, &crouched, 0.016);
         assert!((pose[0].translation.z - 0.2).abs() < 1e-5);
+    }
+
+    /// Strides play at the pace their own movement says, so the feet
+    /// keep up with the ground: strafing at 2.0 plays the 1.91 a second
+    /// `move_left` a little fast, and creeping along at 0.4 walks.
+    #[test]
+    fn strides_play_at_the_pace_the_body_moves() {
+        let r = rig();
+        let a = BodyAnimator::default();
+        let moving = |x: f32, y: f32| BodyInput {
+            velocity: Vec2::new(x, y),
+            ..standing()
+        };
+        let (anim, rate, striding) = a.movement(&r, &moving(2.25, 0.0));
+        assert_eq!((anim, striding), (Some(3), true));
+        assert!((rate - 2.25 / 2.262).abs() < 0.01, "{rate}");
+        let (anim, rate, _) = a.movement(&r, &moving(0.0, 2.0));
+        assert_eq!(anim, Some(4));
+        assert!((rate - 2.0 / 1.908).abs() < 0.01, "{rate}");
+        let (anim, rate, _) = a.movement(&r, &moving(0.4, 0.0));
+        assert_eq!(anim, Some(5), "walks");
+        assert!((rate - 0.4 / 0.36).abs() < 0.01, "{rate}");
+        // Diagonally: the way it goes most, at the pace it goes that way.
+        let (anim, rate, _) = a.movement(&r, &moving(1.6, 1.4));
+        assert_eq!(anim, Some(3));
+        assert!((rate - 1.6 / 2.262).abs() < 0.01, "{rate}");
+    }
+
+    /// Turning from running forward to sideways carries on the stride
+    /// from the same foot instead of starting it again.
+    #[test]
+    fn changing_direction_keeps_the_stride() {
+        let r = rig();
+        // A quarter of the way round from the left foot (frame 1).
+        let time = (1.0 + 19.0 * 0.25) / FRAME_RATE;
+        let carried = r.same_stride(3, time, 4);
+        let expected = (10.0 + 19.0 * 0.25) / FRAME_RATE;
+        assert!((carried - expected).abs() < 1e-4, "{carried} {expected}");
+        let mut a = BodyAnimator::default();
+        let forward = BodyInput {
+            velocity: Vec2::new(2.25, 0.0),
+            ..standing()
+        };
+        for _ in 0..10 {
+            a.update(&r, &forward, 1.0 / 60.0);
+        }
+        let before = a.base_time;
+        a.update(
+            &r,
+            &BodyInput {
+                velocity: Vec2::new(0.0, 2.0),
+                ..forward
+            },
+            1.0 / 60.0,
+        );
+        assert_eq!(a.base, Some(4));
+        assert!(a.base_time > before, "{} after {before}", a.base_time);
+    }
+
+    /// A bump doesn't show as being in the air; a jump does, and coming
+    /// down from it bends the knees.
+    #[test]
+    fn jumps_land_softly_and_bumps_dont_show() {
+        let r = rig();
+        let mut a = BodyAnimator::default();
+        let dt = 1.0 / 60.0;
+        let air = BodyInput {
+            grounded: false,
+            climb: -0.3,
+            ..standing()
+        };
+        for _ in 0..3 {
+            a.update(&r, &air, dt);
+        }
+        assert_eq!(a.base, Some(0), "still standing after three ticks");
+        a.update(&r, &standing(), dt);
+        assert_eq!(a.base, Some(0), "too slow for a landing");
+        for k in 0..60 {
+            let climb = 3.0 - 6.0 * k as f32 / 59.0;
+            a.update(&r, &BodyInput { climb, ..air }, dt);
+        }
+        assert_eq!(a.base, Some(6), "in the air");
+        a.update(&r, &standing(), dt);
+        assert_eq!(a.base, Some(7), "lands softly");
+        // For no longer than the tag's longest soft landing.
+        for _ in 0..40 {
+            a.update(&r, &standing(), dt);
+        }
+        assert_eq!(a.base, Some(0));
+        // Running on landing goes straight on running.
+        for _ in 0..60 {
+            a.update(&r, &BodyInput { climb: -3.0, ..air }, dt);
+        }
+        let running = BodyInput {
+            velocity: Vec2::new(2.25, 0.0),
+            ..standing()
+        };
+        a.update(&r, &running, dt);
+        assert_eq!(a.base, Some(3));
+    }
+
+    /// Killed on the way down, or getting into a seat, the body doesn't
+    /// land from that fall afterwards.
+    #[test]
+    fn no_landing_after_dying_or_sitting_down() {
+        let r = rig();
+        let dt = 1.0 / 60.0;
+        let falling = BodyInput {
+            grounded: false,
+            climb: -3.0,
+            ..standing()
+        };
+        let dead = BodyInput {
+            alive: false,
+            ..standing()
+        };
+        let seated = BodyInput {
+            seat: Some("warthog_p"),
+            ..standing()
+        };
+        for then in [dead, seated] {
+            let mut a = BodyAnimator::default();
+            for _ in 0..60 {
+                a.update(&r, &falling, dt);
+            }
+            a.update(&r, &then, dt);
+            a.update(&r, &standing(), dt);
+            assert_eq!(a.base, Some(0), "stands after {then:?}");
+        }
     }
 }
