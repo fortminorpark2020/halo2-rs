@@ -10,9 +10,13 @@
 //! - 4 / 6: keyframes with byte frame indices (6 stores the nodes in reverse)
 //!
 //! Codec 8 (blend screens, used for aiming) is not decoded yet.
+//!
+//! After the flags comes the animation's movement ("frame info"): how far
+//! each frame carries the body, which is how fast its legs were made to go.
 
 use crate::mapset::MapSet;
 use crate::{f32_at, i16_at, u32_at, DatumIndex, Error, Result};
+use std::collections::HashSet;
 
 const JMAD_PARENT: usize = 0x0;
 const JMAD_NODES: usize = 0xC;
@@ -146,6 +150,9 @@ pub struct Animation {
     pub sound_events: Vec<(u16, usize)>,
     /// Footfalls and other moments: (frame, event).
     pub frame_events: Vec<(u16, FrameEvent)>,
+    /// How far each frame carries the body: forward and left (world units)
+    /// and turning left (radians). Empty when it doesn't move the body.
+    pub movement: Vec<[f32; 3]>,
 }
 
 /// Moments marked in an animation.
@@ -175,6 +182,30 @@ impl Animation {
     pub fn duration(&self) -> f32 {
         self.frame_count.saturating_sub(1) as f32 / FRAME_RATE
     }
+
+    /// How fast the animation carries the body when played at its own pace,
+    /// in world units a second: forward and left (`move_front` runs at
+    /// about 2.26). Zero when it doesn't move it.
+    pub fn speed(&self) -> [f32; 2] {
+        if self.movement.is_empty() {
+            return [0.0; 2];
+        }
+        let per_second = FRAME_RATE / self.movement.len() as f32;
+        let (x, y) = self
+            .movement
+            .iter()
+            .fold((0.0, 0.0), |(x, y), m| (x + m[0], y + m[1]));
+        [x * per_second, y * per_second]
+    }
+
+    /// The first frame marked with `event` (a footfall), if any.
+    pub fn event_frame(&self, event: FrameEvent) -> Option<u16> {
+        self.frame_events
+            .iter()
+            .filter(|(_, e)| *e == event)
+            .map(|(f, _)| *f)
+            .min()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -195,6 +226,72 @@ impl AnimationGraph {
     pub fn node(&self, name: &str) -> Option<usize> {
         self.nodes.iter().position(|n| n.name == name)
     }
+
+    /// Take in the animations of the graph this one inherits from that it
+    /// doesn't have itself, their tracks moved onto this graph's nodes by
+    /// name. (The multiplayer Elite's own graph has only a few of its
+    /// animations; it runs and jumps with the ones it inherits.)
+    pub fn inherit(&mut self, parent: &AnimationGraph) {
+        let to_parent: Vec<Option<usize>> =
+            self.nodes.iter().map(|n| parent.node(&n.name)).collect();
+        let own: HashSet<String> = self.animations.iter().map(|a| a.name.clone()).collect();
+        // Their sound events count from the parent's sounds, put after ours.
+        let sounds = self.sounds.len();
+        self.sounds.extend_from_slice(&parent.sounds);
+        for a in &parent.animations {
+            if own.contains(&a.name) {
+                continue;
+            }
+            self.animations.push(Animation {
+                name: a.name.clone(),
+                kind: a.kind,
+                frame_count: a.frame_count,
+                decoded: a.decoded,
+                rotations: on_nodes(&a.rotations, &to_parent),
+                translations: on_nodes(&a.translations, &to_parent),
+                scales: on_nodes(&a.scales, &to_parent),
+                sound_events: a
+                    .sound_events
+                    .iter()
+                    .map(|&(frame, s)| (frame, s + sounds))
+                    .collect(),
+                frame_events: a.frame_events.clone(),
+                movement: a.movement.clone(),
+            });
+        }
+    }
+}
+
+/// Per node tracks moved to other nodes: `from[n]` is where node `n`'s
+/// come from.
+fn on_nodes<T: Clone>(tracks: &[Option<T>], from: &[Option<usize>]) -> Vec<Option<T>> {
+    from.iter()
+        .map(|k| k.and_then(|k| tracks.get(k).cloned().flatten()))
+        .collect()
+}
+
+/// The deepest chain of graphs inheriting from one another that's followed.
+const MAX_INHERITANCE: usize = 8;
+
+/// A graph with everything it inherits (see [`AnimationGraph::inherit`]):
+/// its own animations first, then its parent's, its grandparent's and so on
+/// (as far as they can be read).
+pub fn read_inherited_animation_graph(
+    set: &mut MapSet,
+    jmad: DatumIndex,
+) -> Result<AnimationGraph> {
+    let mut graph = read_animation_graph(set, jmad)?;
+    let mut seen = vec![jmad];
+    let mut next = graph.parent;
+    while let Some(p) = next.filter(|p| !seen.contains(p) && seen.len() <= MAX_INHERITANCE) {
+        seen.push(p);
+        let Ok(parent) = read_animation_graph(set, p) else {
+            break;
+        };
+        graph.inherit(&parent);
+        next = parent.parent;
+    }
+    Ok(graph)
 }
 
 pub fn read_animation_graph(set: &mut MapSet, jmad: DatumIndex) -> Result<AnimationGraph> {
@@ -253,6 +350,7 @@ pub fn read_animation_graph(set: &mut MapSet, jmad: DatumIndex) -> Result<Animat
             scales: vec![None; nodes.len()],
             sound_events,
             frame_events,
+            movement: read_movement(&blob, &sizes),
         };
         if decode_animation(&mut anim, &blob, &sizes).is_ok() {
             anim.decoded = true;
@@ -286,6 +384,10 @@ struct DataSizes {
     default: usize,
     uncompressed: usize,
     compressed: usize,
+    /// The frame info: what each frame's movement holds (0 nothing, 1
+    /// dx dy, 2 dx dy dyaw, 3 dx dy dz dyaw), and its size in bytes.
+    frame_info: u8,
+    movement: usize,
 }
 
 impl DataSizes {
@@ -296,8 +398,37 @@ impl DataSizes {
             default: u16::from_le_bytes([a[0x36], a[0x37]]) as usize,
             uncompressed: u32_at(a, 0x38) as usize,
             compressed: u32_at(a, 0x3C) as usize,
+            frame_info: a[0x11],
+            movement: u16::from_le_bytes([a[0x32], a[0x33]]) as usize,
         }
     }
+}
+
+/// Each frame's movement (forward, left, turn), which follows the node flags.
+fn read_movement(blob: &[u8], sizes: &DataSizes) -> Vec<[f32; 3]> {
+    let (stride, turn) = match sizes.frame_info {
+        1 => (8, None),
+        2 => (12, Some(8)),
+        3 => (16, Some(12)),
+        _ => return Vec::new(),
+    };
+    let start = sizes.default
+        + sizes.uncompressed
+        + sizes.compressed
+        + sizes.static_flags
+        + sizes.animated_flags;
+    let Some(data) = blob.get(start..start + sizes.movement) else {
+        return Vec::new();
+    };
+    data.chunks_exact(stride)
+        .map(|f| {
+            [
+                f32_at(f, 0),
+                f32_at(f, 4),
+                turn.map_or(0.0, |o| f32_at(f, o)),
+            ]
+        })
+        .collect()
 }
 
 /// Decoded codec data, in the codec's own node order.
@@ -588,5 +719,89 @@ mod tests {
     #[test]
     fn flags_list_nodes_in_order() {
         assert_eq!(flagged_nodes(&[0b1000_0010, 0x01]), vec![1, 7, 8]);
+    }
+
+    fn animation(name: &str, nodes: usize) -> Animation {
+        Animation {
+            name: name.into(),
+            kind: AnimationKind::Base,
+            frame_count: 2,
+            decoded: true,
+            rotations: vec![None; nodes],
+            translations: vec![None; nodes],
+            scales: vec![None; nodes],
+            sound_events: Vec::new(),
+            frame_events: Vec::new(),
+            movement: Vec::new(),
+        }
+    }
+
+    fn graph(nodes: &[&str], animations: Vec<Animation>) -> AnimationGraph {
+        AnimationGraph {
+            parent: None,
+            nodes: nodes
+                .iter()
+                .map(|&name| GraphNode {
+                    name: name.into(),
+                    parent: -1,
+                })
+                .collect(),
+            animations,
+            sounds: vec![None],
+        }
+    }
+
+    #[test]
+    fn inherited_animations_move_onto_the_graphs_own_nodes() {
+        let mine = animation("combat:sword:melee", 2);
+        let mut child = graph(&["pelvis", "head"], vec![mine.clone()]);
+        // The parent lists the nodes in another order and has one more.
+        let mut idle = animation("combat:rifle:idle", 3);
+        idle.rotations[0] = Some(Track::constant([1.0, 0.0, 0.0, 0.0]));
+        idle.translations[1] = Some(Track::constant([0.0, 0.0, 0.4]));
+        idle.translations[2] = Some(Track::constant([9.0, 9.0, 9.0]));
+        idle.sound_events = vec![(3, 0)];
+        let mut theirs = animation("combat:sword:melee", 3);
+        theirs.frame_count = 99;
+        let parent = graph(&["head", "pelvis", "tail"], vec![idle, theirs]);
+        child.inherit(&parent);
+        assert_eq!(child.animations.len(), 2);
+        assert_eq!(child.animations[0], mine, "the graph's own one wins");
+        let idle = child.find("combat:rifle:idle").unwrap();
+        assert_eq!(idle.rotations[0], None);
+        assert_eq!(
+            idle.rotations[1],
+            Some(Track::constant([1.0, 0.0, 0.0, 0.0]))
+        );
+        assert_eq!(idle.translations[0], Some(Track::constant([0.0, 0.0, 0.4])));
+        assert_eq!(idle.translations.len(), 2, "nothing for the parent's tail");
+        assert_eq!(idle.sound_events, vec![(3, 1)], "the parent's sound");
+    }
+
+    /// Two frames of a run, each 0.075 forward: 2.25 a second.
+    #[test]
+    fn reads_how_far_frames_carry_the_body() {
+        let sizes = DataSizes {
+            static_flags: 3,
+            animated_flags: 3,
+            default: 4,
+            uncompressed: 0,
+            compressed: 2,
+            frame_info: 2,
+            movement: 24,
+        };
+        let mut blob = vec![0u8; 12];
+        for _ in 0..2 {
+            blob.extend(0.075f32.to_le_bytes());
+            blob.extend(0.0f32.to_le_bytes());
+            blob.extend(0.1f32.to_le_bytes());
+        }
+        let mut a = animation("combat:rifle:move_front", 1);
+        a.movement = read_movement(&blob, &sizes);
+        assert_eq!(a.movement, vec![[0.075, 0.0, 0.1]; 2]);
+        let [x, y] = a.speed();
+        assert!((x - 2.25).abs() < 1e-5 && y == 0.0, "{x} {y}");
+        // Movement data that runs past the blob is left out.
+        assert!(read_movement(&blob[..30], &sizes).is_empty());
     }
 }

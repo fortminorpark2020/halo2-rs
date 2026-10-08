@@ -9,6 +9,7 @@ use crate::hud::{self, HudBuilder};
 use crate::input::PadState;
 use crate::rig;
 use crate::scene::{Scene, Vertex, WeaponAssets};
+use blam_cache::hud::ScreenSplit;
 use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use h2sim::game::{GrenadeKind, Look, Spartan, VehicleAction, TICK};
@@ -372,6 +373,8 @@ pub struct LocalPlayer {
     pub friends_seen: Vec<usize>,
     /// The player under the crosshair right now, and how far.
     pub aimed_at: Option<(usize, f32)>,
+    /// The enemy the gun's autoaim is on, if any: the crosshair is red.
+    pub autoaimed: Option<usize>,
     /// Where the mission's waypoints point.
     pub nav_points: Vec<Vec3>,
 }
@@ -403,6 +406,7 @@ impl LocalPlayer {
             tagged: None,
             friends_seen: Vec::new(),
             aimed_at: None,
+            autoaimed: None,
             nav_points: Vec::new(),
         }
     }
@@ -571,6 +575,7 @@ impl LocalPlayer {
     fn tag(&mut self, game: &Game, world: &World, dt: f32) {
         self.friends_seen.clear();
         self.aimed_at = None;
+        self.autoaimed = None;
         let me = self.me(game);
         if !me.alive {
             self.tagged = None;
@@ -592,6 +597,16 @@ impl LocalPlayer {
             }
         }
         let dir = self.camera.forward();
+        // The gun the crosshair belongs to: the seat's, or the one in hand.
+        let gun = match me.seat.and_then(|(v, s)| game.seat_weapon(v, s)) {
+            Some(def) => Some((def, 0)),
+            None => me
+                .held()
+                .and_then(|h| Some((game.weapons.get(h.weapon)?, h.state.zoom))),
+        };
+        self.autoaimed = gun
+            .and_then(|(def, zoom)| game.autoaim(world, self.player, eye, dir, def, zoom))
+            .map(|(j, _)| j);
         self.aimed_at = game.player_along(world, self.player, eye, dir, NAME_RANGE);
         match self.aimed_at {
             Some((j, _)) => self.tagged = Some((j, NAME_LINGER)),
@@ -606,12 +621,12 @@ impl LocalPlayer {
             .filter(|&(j, left)| left > 0.0 && game.players.get(j).is_some_and(|p| p.alive));
     }
 
-    /// The crosshair's colour: red with an enemy under it in the weapon's
-    /// range, as in Halo 2.
-    fn reticle_color(&self, game: &Game, weapon: &WeaponAssets) -> [f32; 4] {
-        match self.aimed_at {
-            Some((j, d)) if d <= weapon.autoaim_range && game.is_enemy(self.player, j) => hud::RED,
-            _ => hud::BLUE,
+    /// The crosshair's colour: red while the gun's autoaim is on an enemy
+    /// (one under it or close to it, in the weapon's range), as in Halo 2.
+    fn reticle_color(&self) -> [f32; 4] {
+        match self.autoaimed {
+            Some(_) => hud::RED,
+            None => hud::BLUE,
         }
     }
 
@@ -929,8 +944,16 @@ impl LocalPlayer {
         }
     }
 
-    pub fn build_hud(&self, scene: &Scene, game: &Game, w: f32, h: f32) -> Vec<gpu::HudBatch> {
-        let mut hb = HudBuilder::new(w, h);
+    /// The HUD of this player's `w` x `h` view, in the tags' `split` layout.
+    pub fn build_hud(
+        &self,
+        scene: &Scene,
+        game: &Game,
+        w: f32,
+        h: f32,
+        split: ScreenSplit,
+    ) -> Vec<gpu::HudBatch> {
+        let mut hb = HudBuilder::for_view(w, h, split);
         let font = scene.hud_font;
         let me = self.me(game);
         let s = hb.scale();
@@ -938,25 +961,21 @@ impl LocalPlayer {
         // The shield meter flashes red while the shields are down.
         let flash = shield < 0.25 && me.alive && (game.time * 4.0).fract() < 0.5;
         let mut drew_tracker = false;
-        // The kill feed's foot: above the shield meter and motion tracker.
-        let mut feed = h - 140.0 * s;
-        let mut under_feed = |rect: [f32; 4]| {
-            if rect[1] > h * 0.5 {
-                feed = feed.min(rect[1]);
-            }
-        };
-        for widget in &scene.player_hud {
+        // The kill feed sits above this, and above the shield meter and
+        // motion tracker where they reach higher (as in a splitscreen view).
+        let mut tracker_top = h - 120.0 * s;
+        for widget in &scene.player_hud[split as usize] {
             match widget.name.as_str() {
                 // With the motion sensor off (as in SWAT) there's no tracker.
                 "motion_tracker_background" if !drew_tracker && game.rules.options.radar => {
                     drew_tracker = true;
                     hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0);
                     let rect = hb.widget_rect(widget);
-                    under_feed(rect);
+                    tracker_top = tracker_top.min(rect[1]);
                     self.sensor_blips(&mut hb, scene, game, rect);
                 }
                 "shield_meter" => {
-                    under_feed(hb.widget_rect(widget));
+                    tracker_top = tracker_top.min(hb.widget_rect(widget)[1]);
                     let color = if flash { hud::RED } else { hud::BLUE };
                     hb.widget(widget, color, hud_mode::METER_GREY, shield.min(1.0));
                     // An overshield fills the meter again, once green and
@@ -996,15 +1015,15 @@ impl LocalPlayer {
                 _ => {}
             }
         }
-        // Kill feed above the shield meter and motion tracker, newest
-        // lowest; score bottom right.
+        // Kill feed above the shield meter and motion tracker; score
+        // bottom right.
         let line = 11.0 * s;
         for (i, (text, left)) in self.messages.iter().rev().enumerate() {
             let mut color = hud::BLUE;
             color[3] *= left.min(1.0);
             hb.text_left(
                 font,
-                [24.0 * s, feed - 12.0 * s - i as f32 * line],
+                [24.0 * s, tracker_top - (i + 1) as f32 * line],
                 8.0 * s,
                 text,
                 color,
@@ -1107,7 +1126,7 @@ impl LocalPlayer {
             if let Some((weapon, state)) = gun {
                 // A vehicle gun's HUD is its reticle (and one for aiming
                 // at friends).
-                let reticle = self.reticle_color(game, weapon);
+                let reticle = self.reticle_color();
                 weapon_hud(&mut hb, scene, weapon, state, reticle, |name, _| {
                     if name.contains("friend") {
                         HudRole::Hidden
@@ -1131,7 +1150,7 @@ impl LocalPlayer {
             return hb.finish();
         };
         let def = &weapon.def;
-        let reticle = self.reticle_color(game, weapon);
+        let reticle = self.reticle_color();
         weapon_hud(&mut hb, scene, weapon, state, reticle, hud_role);
         let left = me.left.as_ref();
         if let Some((lw, ls)) = left.and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state))) {
@@ -1199,7 +1218,7 @@ fn weapon_hud(
     } else {
         1.0
     };
-    for widget in &weapon.hud {
+    for widget in &weapon.hud[hb.split() as usize] {
         match role(&widget.name, magnification) {
             HudRole::Scope if zoomed => {
                 hb.scope(widget, scene.hud_white, [0.0, 0.0, 0.0, 132.0 / 255.0]);
@@ -1243,9 +1262,9 @@ pub fn dual_wielding(game: &Game, i: usize) -> bool {
 }
 
 /// Where each of `n` splitscreen views goes in a `w` x `h` window: one fills
-/// it, two split it top and bottom, three put player one across the top
-/// and the others in the bottom quarters (as Halo 2 does), and four take a
-/// quarter each.
+/// it, two split it top and bottom, three give the first player the top
+/// half and the others a bottom quarter each (as Halo 2 does: its HUD gives
+/// the first of three a half screen layout), four take a quarter each.
 pub fn viewports(n: usize, w: u32, h: u32) -> Vec<[u32; 4]> {
     let (hw, hh) = (w / 2, h / 2);
     match n {
@@ -1259,6 +1278,19 @@ pub fn viewports(n: usize, w: u32, h: u32) -> Vec<[u32; 4]> {
             [hw, hh, w - hw, h - hh],
         ][..n.min(4)]
             .to_vec(),
+    }
+}
+
+/// Which of the HUD tags' layouts view `k` of `n` draws, as Halo 2 picks
+/// it: full screen alone, half for two players and the first of three,
+/// quarter for the rest (Project Cartographer's rebuild of
+/// `new_hud_get_screen_split_type`). It matches `viewports`.
+pub fn screen_split(k: usize, n: usize) -> ScreenSplit {
+    match n {
+        0 | 1 => ScreenSplit::Full,
+        2 => ScreenSplit::Half,
+        3 if k == 0 => ScreenSplit::Half,
+        _ => ScreenSplit::Quarter,
     }
 }
 
@@ -1327,6 +1359,25 @@ mod tests {
             assert_eq!(viewports(n, 1280, 721).len(), n);
         }
         assert_eq!(viewports(2, 1280, 720)[1], [0, 360, 1280, 360]);
-        assert_eq!(viewports(3, 1280, 720)[0], [0, 0, 1280, 360]);
+        assert_eq!(
+            viewports(3, 1920, 1080),
+            [[0, 0, 1920, 540], [0, 540, 960, 540], [960, 540, 960, 540]]
+        );
+    }
+
+    #[test]
+    fn hud_layouts_follow_the_views() {
+        // A full width view is full or half screen; a half width one is
+        // a quarter.
+        for n in 1..=4 {
+            for (k, v) in viewports(n, 1920, 1080).iter().enumerate() {
+                let expected = match (v[2], v[3]) {
+                    (1920, 1080) => ScreenSplit::Full,
+                    (1920, _) => ScreenSplit::Half,
+                    _ => ScreenSplit::Quarter,
+                };
+                assert_eq!(screen_split(k, n), expected, "view {k} of {n}");
+            }
+        }
     }
 }

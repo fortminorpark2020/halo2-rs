@@ -333,11 +333,18 @@ fn load_level(path: &Path) -> Result<Level, String> {
     // H2_LIST_WEAPONS=1: each weapon's crosshair range and HUD pieces.
     if std::env::var_os("H2_LIST_WEAPONS").is_some() {
         for w in &scene.weapons {
-            let hud: Vec<&str> = w.hud.iter().map(|h| h.name.as_str()).collect();
+            let full = &w.hud[blam_cache::hud::ScreenSplit::Full as usize];
+            let hud: Vec<&str> = full.iter().map(|h| h.name.as_str()).collect();
             println!(
-                "weapon {} autoaim {:.1} range {:.1} damage {:.0} over {:?} vs shield/body {}/{} blast {:?} flight sound {:?} hud {hud:?}",
+                "weapon {} autoaim {:.1} deg to {:.1}{} range {:.1} damage {:.0} over {:?} vs shield/body {}/{} blast {:?} flight sound {:?} hud {hud:?}",
                 w.def.name,
-                w.autoaim_range,
+                w.def.autoaim_angle.to_degrees(),
+                w.def.autoaim_range,
+                if w.def.autoaim_zoomed_only {
+                    " zoomed only"
+                } else {
+                    ""
+                },
                 w.def.range,
                 w.def.damage,
                 w.def.damage_range,
@@ -1897,6 +1904,7 @@ impl App {
             let v = p.body.velocity.truncate();
             let mut input = BodyInput {
                 velocity: glam::vec2(v.x * c + v.y * s, v.y * c - v.x * s),
+                climb: p.body.velocity.z,
                 grounded: p.body.grounded,
                 crouching: p.body.crouch > 0.5,
                 alive: p.alive,
@@ -1978,6 +1986,7 @@ impl App {
         let rig = &body.rig;
         let input = BodyInput {
             velocity: glam::Vec2::ZERO,
+            climb: 0.0,
             grounded: true,
             crouching: false,
             alive: true,
@@ -2384,7 +2393,8 @@ impl App {
             let mut hud = if menu || cutscene_camera.is_some() {
                 Vec::new()
             } else {
-                l.build_hud(&self.scene, &self.game, vw, vh)
+                let split = local::screen_split(k, self.locals.len());
+                l.build_hud(&self.scene, &self.game, vw, vh, split)
             };
             if let Some(m) = self.mission.as_ref().filter(|_| !menu) {
                 mission_screen(

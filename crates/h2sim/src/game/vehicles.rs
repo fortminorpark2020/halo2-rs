@@ -361,6 +361,7 @@ impl Game {
         p.body.crouch = 1.0;
         if let Some(h) = p.weapons.get_mut(p.current) {
             h.state.zoom = 0;
+            h.state.let_go();
         }
         let veh = &mut self.vehicles[v];
         veh.riders[s] = Some(i);
@@ -572,8 +573,6 @@ impl Game {
             Some((dir, muzzle)) if def.flight.is_some() => (dir, muzzle),
             _ => (at_target, eye),
         };
-        let right = dir.cross(Vec3::Z).normalize_or(Vec3::X);
-        let up = right.cross(dir);
         let states = if alt {
             &mut self.vehicles[v].alt_weapons
         } else {
@@ -593,6 +592,17 @@ impl Game {
         if def.uses_ammo() {
             state.reserve = def.maximum_rounds.max(state.reserve);
         }
+        if shots.is_empty() {
+            return;
+        }
+        // Bullets go where autoaim steers them, as from a gun in hand.
+        let assisted = def.flight.is_none() && self.players[i].actor.is_none();
+        let dir = match assisted.then(|| self.autoaim(world, i, origin, dir, &def, 0)) {
+            Some(Some((_, Some(point)))) => (point - origin).normalize_or(dir),
+            _ => dir,
+        };
+        let right = dir.cross(Vec3::Z).normalize_or(Vec3::X);
+        let up = right.cross(dir);
         for shot in shots {
             self.fire(
                 world,
@@ -958,8 +968,13 @@ impl Game {
                     let killer = driver.filter(|&d| d != j);
                     self.damage(j, killer, f32::INFINITY, false);
                     if self.players[j].alive {
-                        // Teammates without friendly fire just get shoved.
-                        self.players[j].body.velocity += n * closing;
+                        // Teammates without friendly fire just get shoved
+                        // (off their feet, if it's upward).
+                        let body = &mut self.players[j].body;
+                        body.velocity += n * closing;
+                        if body.velocity.z > 0.0 {
+                            body.grounded = false;
+                        }
                     }
                     break;
                 }

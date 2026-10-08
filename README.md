@@ -15,10 +15,13 @@ install. No game files are included in this repository.
   hulls), and sounds (Xbox ADPCM and WMA).
 - `h2tool`: command-line inspector.
 - `h2sim`: game simulation (no rendering): level collision, Spartan movement
-  using the speeds, jump velocity and size from the game's own globals and biped tags,
+  using the speeds, jump velocity and size from the game's own globals and biped tags
+  (running keeps to the ground up steps and over the tops of ramps, follows it
+  down slopes and drops of up to about 0.06 world units, and falls off anything
+  deeper; it won't squeeze under anything lower than the body),
   vehicles (wheels with suspension, hovering, flight, seats, turrets, splatters
   and wrecks),
-  weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
+  weapons (fire rate, bursts, spread, magazines, reloads, zoom, autoaim) from the weapon tags,
   with Halo 2's damage table (sniper rounds twice as hard on shields, plasma
   1.5 times on shields but a third on bodies, explosions half on shields),
   the maps' power-ups (the overshield charges shields to three times and
@@ -65,6 +68,9 @@ Rockets, Snipers, Swords and Shotguns variants and those of Team Hardcore
 (battle rifle starts) and Team Snipers, both with no motion sensor. The
 motion sensor shows teammates (yellow) and enemies (red) within 25 metres who
 move faster than a crouch-walk or fire; with it off, the HUD has no tracker.
+The HUD is drawn at Halo 2's own size: its bitmaps are made for a 1280x960
+screen, so at 1080p they are drawn at 1.125 times their size (the motion
+tracker about a sixth of the screen's height).
 In team games, T (or X on a controller) puts you on the red or blue team; bots
 fill the smaller team (counting the people on other PCs in the lobby).
 System Link lists games other PCs on the network are
@@ -91,7 +97,11 @@ the lobby and on the scoreboard, Elites wear it on their back, and a team's
 Capture the Flag flag carries its first player's emblem. It's saved in `%APPDATA%\halo2-rs\profile.txt` and
 sent to the other PCs in a System Link game. In team games armour takes the
 team's colour. Splitscreen guests play the same model in other colours; bots
-each have their own look, about a third of them Elites. Elites hold weapons
+each have their own look, about a third of them Elites. Spartans and Elites
+run, walk, strafe and crouch with the game's own animations played at the pace
+they move, keep their stride changing direction, go into the airborne pose
+only once really off the ground, and land soft or hard by how fast they came
+down (from the biped tag). Elites hold weapons
 with their own first person animations and make their own sounds getting
 into vehicles.
 
@@ -100,8 +110,8 @@ Names: you play under your gamertag (at first your Windows user name; set
 and bots under callsigns.
 Names show in the lobby, scoreboard, kill feed and announcements, over
 teammates in sight, and over whoever is under your crosshair, which turns red
-on an enemy in your weapon's range as in Halo 2. `H2_LIST_WEAPONS=1` lists each
-weapon's crosshair range and HUD pieces as a map loads.
+on an enemy within your weapon's autoaim as in Halo 2. `H2_LIST_WEAPONS=1`
+lists each weapon's autoaim and HUD pieces as a map loads.
 
 Capture the Flag: walk onto the enemy flag and press E (X on a controller) to
 take it, then carry it to your own flag's stand while yours is home to score; Q
@@ -126,7 +136,23 @@ mouse wheel switches weapon, G throws a grenade, X switches grenade type, E pick
 up (hold to swap weapons), 1-9 pick one directly. B adds a bot. All 15 multiplayer weapons are
 loaded with their real first person models, HUD, crosshairs, scopes and firing
 stats, held by Master Chief's arms with the game's own first person animations
-(ready, idle, fire, reload, melee). Bullets hit at once; plasma bolts, needles,
+(ready, idle, fire, reload, melee). Guns whose tags give no rate of fire
+(the Magnum, Carbine, Shotgun, sniper rifles, Rocket Launcher and others) fire
+as fast as their recovery time allows: the Magnum every 0.1 s, the Sniper
+Rifle every 0.5 s. Holding the trigger keeps the Battle Rifle firing bursts,
+and the Magnum, Carbine, Shotgun and sniper rifles shots, as fast as each
+recovers. That is our reading of the barrel flag "don't clear fire bit after
+recovering", which those weapons have and the Rocket Launcher, Brute Shot and
+Fuel Rod (which need a fresh pull) don't. A pull late in the Carbine's recovery
+is held over until it can fire. Spread grows over a burst or sustained fire as
+the tags give it; the Sniper Rifle and Beam Rifle have none zoomed in (their
+barrels' "use error when unzoomed" flag). Each weapon's autoaim angle and
+range from its tags steer bullets fired at or close to an enemy towards the
+middle of them (zoomed, it reaches farther through a narrower cone; the Sniper
+Rifle and Beam Rifle, whose tags say aim assists work only zoomed, get none
+unzoomed), and the crosshair turns red while an enemy is in reach. Rounds that
+fly (plasma, needles, rockets, grenades) aren't steered. Getting hurt knocks
+you out of zoom. Bullets hit at once; plasma bolts, needles,
 rockets, Brute Shot grenades and Fuel Rod shots fly at their tag speeds (rockets
 speed up, Brute Shot rounds arc), needles and the Fuel Rod home in, rockets lock
 on to enemy vehicles, and explosive rounds go off in a blast that hurts and
@@ -185,13 +211,14 @@ sticks to crouch and zoom, Start pauses, hold Back for the scoreboard). A on a
 new controller takes over player one (the keyboard and mouse still work for
 them too); in the lobby, Start on another controller adds a splitscreen
 player (up to four) and Back or B takes them out again. Start on a new
-controller during a game drops them straight in. Splitscreen splits the
-window top and bottom for two, gives player one the top half and the others
-the bottom quarters for three, and a quarter each for four. A player who
-pauses gets the pause menu in their own view, and only their controller (or
-the keyboard, for Esc) works it. If a controller is unplugged or its battery
-runs out, its player stands still until it comes back or A on another
-controller takes over.
+controller during a game drops them straight in. As in Halo 2, two players
+split the screen top and bottom, three give the first player the top half
+and the others a quarter each, and four take a quarter each; each view uses
+the HUD tags' own half or quarter screen layout (quarter views have no ammo
+meter). A player who pauses gets the pause menu in their own view, and only
+their controller (or the keyboard, for Esc) works it. If a controller is
+unplugged or its battery runs out, its player stands still until it comes
+back or A on another controller takes over.
 
 LAN: every lobby and game is open to other PCs on the same network (allow
 h2viewer through Windows Firewall when asked); System Link lists them and joins
@@ -244,8 +271,9 @@ h2tool sim    lockout.map               # drop a Spartan at every spawn and walk
 h2tool model  lockout.map battle_rifle  # render model nodes and markers
 h2tool weapon lockout.map battle_rifle  # firing stats
 h2tool vehicle zanzibar.map warthog     # seats, speeds, model variants and physics hull
-h2tool hud    lockout.map battle_rifle [dir]  # HUD widgets
+h2tool hud    lockout.map battle_rifle [dir]  # HUD widgets in each screen layout
 h2tool jmad   lockout.map fp_battle_rifle  # animation graph: skeleton and animations
+                                        # (and how fast each moves; H2_INHERIT=1 adds the graph's parent's)
 h2tool jmadscan lockout.map             # decode every animation (reports failures)
 h2tool shader lockout.map fp_arms       # shader template and bitmaps
 h2tool sound  lockout.map frag_expl out.wav  # decode a sound to WAV

@@ -325,8 +325,7 @@ impl Game {
         self.drop_left(i);
         let p = &mut self.players[i];
         if let Some(h) = p.weapons.get_mut(p.current) {
-            h.state.zoom = 0;
-            h.state.reloading = None;
+            h.state.put_away();
         }
         p.objective = Some(held);
         p.readying = ready;
