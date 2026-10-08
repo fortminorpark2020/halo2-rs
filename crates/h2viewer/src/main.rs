@@ -309,6 +309,20 @@ fn load_level(path: &Path) -> Result<Level, String> {
         scene.netgame_flags.len(),
         scene.kill_volumes.len(),
     );
+    let control = &scene.player_control;
+    println!(
+        "view: {:.1} degrees across 4:3, crosshair {:.3} below the middle; stick look {:.0}/{:.0} degrees a second, pegged past {:.2} for x{:.1} over {:.1} s, curve {:?}; aim assist friction {:.2}, adhesion {:.2}",
+        scene.biped.camera_field_of_view.to_degrees(),
+        control.crosshair[1],
+        control.look_yaw_rate.to_degrees(),
+        control.look_pitch_rate.to_degrees(),
+        control.look_peg_threshold,
+        control.yaw_acceleration.1,
+        control.yaw_acceleration.0,
+        control.look_function,
+        control.magnetism_friction,
+        control.magnetism_adhesion,
+    );
     if !scene.ai.squads.is_empty() {
         println!(
             "{} squads, {} characters, {} actor bodies, {} scripts, {} doors, {} lifts, {} switches",
@@ -336,10 +350,12 @@ fn load_level(path: &Path) -> Result<Level, String> {
             let full = &w.hud[blam_cache::hud::ScreenSplit::Full as usize];
             let hud: Vec<&str> = full.iter().map(|h| h.name.as_str()).collect();
             println!(
-                "weapon {} autoaim {:.1} deg to {:.1}{} range {:.1} damage {:.0} over {:?} vs shield/body {}/{} blast {:?} flight sound {:?} hud {hud:?}",
+                "weapon {} autoaim {:.1} deg to {:.1}, magnetism {:.1} deg to {:.1}{} range {:.1} damage {:.0} over {:?} vs shield/body {}/{} blast {:?} flight sound {:?} hud {hud:?}",
                 w.def.name,
                 w.def.autoaim_angle.to_degrees(),
                 w.def.autoaim_range,
+                w.def.magnetism_angle.to_degrees(),
+                w.def.magnetism_range,
                 if w.def.autoaim_zoomed_only {
                     " zoomed only"
                 } else {
@@ -1390,12 +1406,22 @@ impl App {
             .map(|k| paused || self.menu_for(k))
             .collect();
         for (l, frozen) in self.locals.iter_mut().zip(frozen) {
+            let pad = l.pad.and_then(|id| self.pads.state(id));
+            match pad.filter(|_| !frozen) {
+                Some(state) => {
+                    // Player one's profile has their look settings;
+                    // guests play with Halo 2's.
+                    let controls = if l.keyboard {
+                        self.menu.profile.controls
+                    } else {
+                        camera::Controls::default()
+                    };
+                    l.look_with_stick(&self.scene, &self.game, &self.world, &state, controls, dt);
+                }
+                None => l.stop_stick(),
+            }
             if frozen {
                 continue;
-            }
-            if let Some(state) = l.pad.and_then(|id| self.pads.state(id)) {
-                let scale = 1.0 / l.magnification(&self.scene, &self.game);
-                l.camera.look_stick(state.right, dt, scale);
             }
             if l.flying {
                 l.camera.update(&self.keys, dt);
@@ -2034,7 +2060,7 @@ impl App {
         let px = (w - 640.0 * s) * 0.5 + SPOT[0] * s;
         let py = (h - 480.0 * s) * 0.5 + SPOT[1] * s;
         let aspect = w / h.max(1.0);
-        let half = camera::half_height(aspect) * DISTANCE;
+        let half = self.scene.lens().centred().half_height(aspect) * DISTANCE;
         let x = (px / (w * 0.5) - 1.0) * half * aspect;
         let y = (1.0 - py / (h * 0.5)) * half;
         let (f, r, u) = camera.basis();
@@ -2318,6 +2344,7 @@ impl App {
             viewport: [u32; 4],
             aspect: f32,
             magnification: f32,
+            lens: camera::Lens,
             camera: FlyCamera,
             world: Vec<DrawCall>,
             sprites: Vec<gpu::SpriteVertex>,
@@ -2339,6 +2366,7 @@ impl App {
                 viewport,
                 aspect: viewport[2] as f32 / viewport[3].max(1) as f32,
                 magnification: 1.0,
+                lens: self.scene.lens().centred(),
                 camera,
                 world,
                 sprites: self.effects.sprites(r, u),
@@ -2435,9 +2463,14 @@ impl App {
                 menu::draw_scoreboard(&mut hb, font, white, vw, vh, &scores);
                 hud.extend(hb.finish());
             }
+            // A cutscene's camera looks through the middle.
+            let lens = match cutscene_camera {
+                Some(_) => self.scene.lens().centred(),
+                None => self.scene.lens(),
+            };
             let magnification = match cutscene_camera {
                 Some((_, _, fov)) => {
-                    let half_x = (camera::half_height(aspect) * aspect).atan();
+                    let half_x = (lens.half_height(aspect) * aspect).atan();
                     half_x.tan() / (fov.to_radians() * 0.5).tan().max(1e-3)
                 }
                 None => l.magnification(&self.scene, &self.game),
@@ -2446,6 +2479,7 @@ impl App {
                 viewport,
                 aspect,
                 magnification,
+                lens,
                 camera,
                 world,
                 sprites: {
@@ -2455,7 +2489,7 @@ impl App {
                 },
                 draws,
                 hud,
-                view_model_proj: l.view_model_proj(aspect),
+                view_model_proj: l.view_model_proj(&lens, aspect),
             });
         }
         let mut frames: Vec<Frame> = views
@@ -2474,9 +2508,8 @@ impl App {
                         emblem: None,
                         fx: Fx::default(),
                     }),
-                    sky_proj: camera::projection(v.aspect, v.magnification, 1.0, 10000.0)
-                        * sky_view,
-                    view_proj: v.camera.view_proj(v.aspect, v.magnification),
+                    sky_proj: v.lens.projection(v.aspect, v.magnification, 1.0, 10000.0) * sky_view,
+                    view_proj: v.camera.view_proj(&v.lens, v.aspect, v.magnification),
                     camera: v.camera.position,
                     world: &v.world,
                     sprites: &v.sprites,
@@ -2639,10 +2672,15 @@ impl ApplicationHandler for App {
             let Some(k) = self.locals.iter().position(|l| l.keyboard) else {
                 return;
             };
-            let scale = 1.0 / self.locals[k].magnification(&self.scene, &self.game);
-            self.locals[k]
-                .camera
-                .look(delta.0 as f32, delta.1 as f32, scale);
+            // The mouse is player one's, with their profile's settings.
+            let controls = self.menu.profile.controls;
+            let scale =
+                controls.mouse_scale() / self.locals[k].magnification(&self.scene, &self.game);
+            self.locals[k].camera.look(
+                delta.0 as f32,
+                delta.1 as f32 * controls.pitch_sign(),
+                scale,
+            );
         }
     }
 

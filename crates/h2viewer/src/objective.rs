@@ -516,9 +516,11 @@ impl LocalPlayer {
                 icon: None,
             });
         }
-        let view_proj = self
-            .camera
-            .view_proj(w / h.max(1.0), self.magnification(scene, game));
+        let view_proj = self.camera.view_proj(
+            &scene.lens(),
+            w / h.max(1.0),
+            self.magnification(scene, game),
+        );
         let s = hb.scale();
         for m in marks {
             let clip = view_proj * m.at.extend(1.0);

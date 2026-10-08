@@ -99,8 +99,13 @@ your primary and secondary armour colours from Halo 2's 18, and build your
 emblem (one of Halo 2's 64 pictures in two colours over one of its 32
 backgrounds), with your model turning beside the menu. Your emblem shows in
 the lobby and on the scoreboard, Elites wear it on their back, and a team's
-Capture the Flag flag carries its first player's emblem. It's saved in `%APPDATA%\halo2-rs\profile.txt` and
-sent to the other PCs in a System Link game. In team games armour takes the
+Capture the Flag flag carries its first player's emblem. LOOK SENSITIVITY
+(the controller's right stick) and MOUSE SENSITIVITY run from 1 to 10, 3 by
+default as in Halo 2, and INVERT LOOK turns looking up and down around for
+both. It's saved in `%APPDATA%\halo2-rs\profile.txt` (the look settings as
+`look_sensitivity=`, `mouse_sensitivity=` and `invert_look=yes`/`no`) and
+sent to the other PCs in a System Link game (the look settings stay on your
+PC; splitscreen guests look at the defaults). In team games armour takes the
 team's colour. Splitscreen guests play the same model in other colours; bots
 each have their own look, about a third of them Elites. Spartans and Elites
 run, walk, strafe and crouch with the game's own animations played at the pace
@@ -115,8 +120,9 @@ Names: you play under your gamertag (at first your Windows user name; set
 and bots under callsigns.
 Names show in the lobby, scoreboard, kill feed and announcements, over
 teammates in sight, and over whoever is under your crosshair, which turns red
-on an enemy within your weapon's autoaim as in Halo 2. `H2_LIST_WEAPONS=1`
-lists each weapon's autoaim and HUD pieces as a map loads.
+on an enemy and green on a teammate within your weapon's autoaim as in Halo 2
+(the colours of the game's HUD shaders). `H2_LIST_WEAPONS=1` lists each
+weapon's autoaim, aim assist and HUD pieces as a map loads.
 
 Capture the Flag: walk onto the enemy flag and press E (X on a controller) to
 take it, then carry it to your own flag's stand while yours is home to score; Q
@@ -138,7 +144,11 @@ it. Timed scores read as minutes and seconds.
 
 Weapons: left mouse fires, right mouse or Z zooms, R reloads, F melees, Q or the
 mouse wheel switches weapon, G throws a grenade, X switches grenade type, E picks
-up (hold to swap weapons), 1-9 pick one directly. B adds a bot. All 15 multiplayer weapons are
+up (hold to swap weapons), 1-9 pick one directly. B adds a bot. The view is
+Halo 2's: 70 degrees across a 4:3 screen (the biped tag's field of view;
+wider screens see more to the sides, up to 100 degrees), with the crosshair
+below the middle of the screen where the game's player control puts it, so
+you aim at what's under it while the menus stay centred. All 15 multiplayer weapons are
 loaded with their real first person models, HUD, crosshairs, scopes and firing
 stats, held by Master Chief's arms with the game's own first person animations
 (ready, idle, fire, reload, melee). Guns whose tags give no rate of fire
@@ -157,7 +167,7 @@ middle of them (zoomed, it reaches farther through a narrower cone; the Sniper
 Rifle and Beam Rifle, whose tags say aim assists work only zoomed, get none
 unzoomed), and the crosshair turns red while an enemy is in reach. Rounds that
 fly (plasma, needles, rockets, grenades) aren't steered. Getting hurt knocks
-you out of zoom. Bullets hit at once; plasma bolts, needles,
+you out of zoom. The HUD shows each piece in the states its tag gives it, so the Sniper Rifle scope reads 5x or 10x by zoom level. Bullets hit at once; plasma bolts, needles,
 rockets, Brute Shot grenades and Fuel Rod shots fly at their tag speeds (rockets
 speed up, Brute Shot rounds arc), needles and the Fuel Rod home in, rockets lock
 on to enemy vehicles, and explosive rounds go off in a blast that hurts and
@@ -212,7 +222,15 @@ and `H2_LIST_VEHICLES=1` lists them as a map loads.
 
 Controllers use Halo 2's layout (left stick move, right stick look, RT fire,
 LT grenade, A jump, B melee, X reload / hold to pick up, Y switch weapon, click
-sticks to crouch and zoom, Start pauses, hold Back for the scoreboard). A on a
+sticks to crouch and zoom, Start pauses, hold Back for the scoreboard). The
+right stick turns as the game's player control tag sets it: its look curve
+and turn rates (120 degrees a second across and 60 up and down at the default
+sensitivity, slower zoomed), speeding up to two and a half times that over
+0.8 s while the stick is pushed nearly all the way. Controllers also get
+Halo 2's aim assist, from each weapon's magnetism angle and range (narrower
+and farther zoomed, none for the sniper rifles unzoomed): the stick turns
+slower with the crosshair on an enemy (friction), and while either stick moves
+the view follows an enemy it's on (adhesion). The mouse gets none. A on a
 new controller takes over player one (the keyboard and mouse still work for
 them too); in the lobby, Start on another controller adds a splitscreen
 player (up to four) and Back or B takes them out again. Start on a new

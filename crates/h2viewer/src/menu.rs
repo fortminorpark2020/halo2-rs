@@ -4,6 +4,7 @@
 //! matchmaking playlists and searching them), the pause menu and the
 //! post-game carnage report. Keyboard, mouse and controllers all work them.
 
+use crate::camera::Controls;
 use crate::gpu::hud_mode;
 use crate::hud::HudBuilder;
 use crate::online::{clock_text, OnlineView};
@@ -388,6 +389,9 @@ enum Row {
     EmblemPrimary,
     EmblemSecondary,
     EmblemBackColor,
+    LookSensitivity,
+    MouseSensitivity,
+    InvertLook,
     GameType,
     Map,
     Score,
@@ -494,6 +498,9 @@ impl Row {
                 | Row::EmblemPrimary
                 | Row::EmblemSecondary
                 | Row::EmblemBackColor
+                | Row::LookSensitivity
+                | Row::MouseSensitivity
+                | Row::InvertLook
         )
     }
 }
@@ -699,6 +706,9 @@ impl Menu {
                 Row::EmblemPrimary,
                 Row::EmblemSecondary,
                 Row::EmblemBackColor,
+                Row::LookSensitivity,
+                Row::MouseSensitivity,
+                Row::InvertLook,
             ],
             Screen::Lobby if ctx.host_lobby.is_some() => vec![
                 Row::GameType,
@@ -866,6 +876,18 @@ impl Menu {
             Row::EmblemBackColor => (
                 "EMBLEM BACK COLOR".into(),
                 Some(color_name(self.profile.look.emblem.colors[2]).into()),
+            ),
+            Row::LookSensitivity => (
+                "LOOK SENSITIVITY".into(),
+                Some(self.profile.controls.look_sensitivity.to_string()),
+            ),
+            Row::MouseSensitivity => (
+                "MOUSE SENSITIVITY".into(),
+                Some(self.profile.controls.mouse_sensitivity.to_string()),
+            ),
+            Row::InvertLook => (
+                "INVERT LOOK".into(),
+                Some(on_off(self.profile.controls.invert_look)),
             ),
             Row::GameType => (
                 "GAME TYPE".into(),
@@ -1195,6 +1217,20 @@ impl Menu {
                 let c = &mut self.profile.look.emblem.colors[k];
                 *c = cycle(*c as usize, PROFILE_COLORS as usize) as u8;
             }
+            // Sensitivity runs from 1 to 10.
+            Row::LookSensitivity | Row::MouseSensitivity => {
+                let c = &mut self.profile.controls;
+                let n = if row == Row::LookSensitivity {
+                    &mut c.look_sensitivity
+                } else {
+                    &mut c.mouse_sensitivity
+                };
+                *n = 1 + cycle(
+                    n.saturating_sub(1) as usize,
+                    Controls::MAX_SENSITIVITY as usize,
+                ) as u8;
+            }
+            Row::InvertLook => self.profile.controls.invert_look ^= true,
             _ => return false,
         }
         true
@@ -1256,7 +1292,10 @@ impl Menu {
             | Row::EmblemBackground
             | Row::EmblemPrimary
             | Row::EmblemSecondary
-            | Row::EmblemBackColor => {
+            | Row::EmblemBackColor
+            | Row::LookSensitivity
+            | Row::MouseSensitivity
+            | Row::InvertLook => {
                 if self.adjust(row, 1, ctx) {
                     self.sound = Some(Sound::Cursor);
                 }
@@ -2747,6 +2786,37 @@ mod tests {
         m.input(Input::Back, &c);
         assert_eq!(m.screen, Screen::Main);
         assert_eq!(m.rows(&c)[m.cursor], Row::Profile);
+    }
+
+    #[test]
+    fn the_profile_sets_look_sensitivity_and_inversion() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Profile);
+        let to = |m: &mut Menu, row: Row| {
+            while m.rows(&c)[m.cursor] != row {
+                m.input(Input::Down, &c);
+            }
+        };
+        // Halo 2's look sensitivity of 3 to start, from 1 to 10.
+        to(&mut m, Row::LookSensitivity);
+        assert_eq!(m.profile.controls.look_sensitivity, 3);
+        assert_eq!(m.input(Input::Right, &c), Action::SaveProfile);
+        assert_eq!(m.profile.controls.look_sensitivity, 4);
+        for _ in 0..3 {
+            m.input(Input::Left, &c);
+        }
+        assert_eq!(m.profile.controls.look_sensitivity, 1);
+        m.input(Input::Left, &c);
+        assert_eq!(m.profile.controls.look_sensitivity, 10);
+        assert_eq!(m.label(Row::LookSensitivity, &c).1.as_deref(), Some("10"));
+        to(&mut m, Row::MouseSensitivity);
+        m.input(Input::Right, &c);
+        assert_eq!(m.profile.controls.mouse_sensitivity, 4);
+        to(&mut m, Row::InvertLook);
+        assert_eq!(m.input(Input::Select, &c), Action::SaveProfile);
+        assert!(m.profile.controls.invert_look);
     }
 
     #[test]

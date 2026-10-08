@@ -43,6 +43,8 @@ fn rifle() -> WeaponDef {
         zoom_range: (1.0, 1.0),
         autoaim_angle: 0.0,
         autoaim_range: 0.0,
+        magnetism_angle: 0.0,
+        magnetism_range: 0.0,
         autoaim_zoomed_only: false,
         range: 100.0,
         velocity: 0.0,

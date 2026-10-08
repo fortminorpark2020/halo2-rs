@@ -25,6 +25,7 @@ mod teleporters;
 mod vehicles;
 mod zones;
 use autoaim::aim_basis;
+pub use autoaim::Magnet;
 pub use campaign::{ActorSpawn, CharacterDef, Mind, Side};
 pub use ctf::{Flag, FlagEvent, NEUTRAL};
 pub use options::{MapWeapons, Options};

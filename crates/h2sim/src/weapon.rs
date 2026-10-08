@@ -62,8 +62,13 @@ pub struct WeaponDef {
     /// `Game::autoaim`).
     pub autoaim_angle: f32,
     pub autoaim_range: f32,
-    /// Autoaim only while zoomed in (the snipers' tags say so): no-scoped
-    /// rounds go exactly where the crosshair is.
+    /// Magnetism: a controller's aim slows on and follows an enemy within
+    /// this angle (radians) of the crosshair and no farther away than the
+    /// range (see `Game::magnetism`).
+    pub magnetism_angle: f32,
+    pub magnetism_range: f32,
+    /// Autoaim and magnetism only while zoomed in (the snipers' tags say
+    /// so): no-scoped rounds go exactly where the crosshair is.
     pub autoaim_zoomed_only: bool,
     pub range: f32,
     /// World units per second (very fast bullets are treated as instant).
@@ -368,6 +373,8 @@ impl WeaponDef {
             zoom_range: w.zoom_range,
             autoaim_angle: w.autoaim_angle.max(0.0),
             autoaim_range: w.autoaim_range.max(0.0),
+            magnetism_angle: w.magnetism_angle.max(0.0),
+            magnetism_range: w.magnetism_range.max(0.0),
             autoaim_zoomed_only: w.aim_assists_only_when_zoomed(),
             range,
             velocity,
@@ -701,6 +708,8 @@ mod tests {
             zoom_range: (2.0, 2.0),
             autoaim_angle: 0.052_359_88,
             autoaim_range: 17.0,
+            magnetism_angle: 0.104_719_76,
+            magnetism_range: 21.0,
             autoaim_zoomed_only: false,
             range: 40.0,
             velocity: 400.0,

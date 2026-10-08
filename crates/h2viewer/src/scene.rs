@@ -8,11 +8,11 @@ use crate::rig::{FirstPersonRig, Skeleton, SkinnedMesh};
 use blam_cache::animation;
 use blam_cache::bitmap::{self, Image};
 use blam_cache::geometry::Mesh;
-use blam_cache::hud::{self, Anchor};
+use blam_cache::hud::{self, Anchor, WidgetState};
 use blam_cache::lightmap::{self, InstanceLighting};
 use blam_cache::model::{self, RenderModel};
 use blam_cache::pathfinding;
-use blam_cache::physics::{self, BipedPhysics, PlayerMovement};
+use blam_cache::physics::{self, BipedPhysics, PlayerControl, PlayerMovement};
 use blam_cache::render::{LevelGeometry, Section, SectionOwner};
 use blam_cache::scenario::PlacedKind;
 use blam_cache::shader::{self, Blend};
@@ -235,6 +235,8 @@ pub struct HudWidget {
     pub texture: usize,
     pub anchor: Anchor,
     pub flags: u16,
+    /// When it shows (the zoom level, a friend under the crosshair).
+    pub state: WidgetState,
     pub offset: [f32; 2],
     pub registration: [f32; 2],
     pub size: [f32; 2],
@@ -644,6 +646,8 @@ pub struct Scene {
     pub nav_mesh: NavMesh,
     pub movement: PlayerMovement,
     pub biped: BipedPhysics,
+    /// Where the crosshair sits, and how a controller looks and aims.
+    pub player_control: PlayerControl,
     /// Weapons the player can switch between; the Battle Rifle first.
     pub weapons: Vec<WeaponAssets>,
     pub arms: Option<Arms>,
@@ -1127,6 +1131,7 @@ impl Loader {
                     texture,
                     anchor: w.anchor,
                     flags: w.flags,
+                    state: w.state,
                     offset: [offset[0] as f32, offset[1] as f32],
                     registration: w.registration[split],
                     size: [img.width as f32, img.height as f32],
@@ -1662,6 +1667,15 @@ impl WeaponAssets {
 }
 
 impl Scene {
+    /// How a player sees the world: the biped's field of view, with the
+    /// crosshair where the globals put it.
+    pub fn lens(&self) -> crate::camera::Lens {
+        crate::camera::Lens::new(
+            self.biped.camera_field_of_view,
+            self.player_control.crosshair[1],
+        )
+    }
+
     /// Which body someone shows: an actor its character's, a player the
     /// Spartan or the Elite.
     pub fn body_kind(&self, p: &h2sim::game::Spartan) -> BodyKind {
@@ -1713,6 +1727,7 @@ impl Scene {
         let spawns = set.map.player_spawns().unwrap_or_default();
         let movement = physics::player_movement(&mut set).unwrap_or_default();
         let biped = physics::player_biped(&mut set).unwrap_or_default();
+        let player_control = physics::player_control(&mut set).unwrap_or_default();
 
         let mut loader = Loader {
             set,
@@ -2117,6 +2132,7 @@ impl Scene {
             nav_mesh,
             movement,
             biped,
+            player_control,
             weapons,
             arms,
             elite_arms,

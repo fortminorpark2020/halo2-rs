@@ -2,19 +2,20 @@
 //! controls. Splitscreen is several of these, each drawn in its own part of
 //! the window.
 
-use crate::camera::{self, FlyCamera};
+use crate::camera::{self, FlyCamera, StickLook};
 use crate::effects;
 use crate::gpu::{self, hud_mode, DrawCall, Fx, SpriteVertex};
 use crate::hud::{self, HudBuilder};
 use crate::input::{PadPress, PadState};
 use crate::rig;
-use crate::scene::{Scene, Vertex, WeaponAssets};
-use blam_cache::hud::{Anchor, ScreenSplit};
+use crate::scene::{HudWidget, Scene, Vertex, WeaponAssets};
+use blam_cache::hud::{self as tags, Anchor, ScreenSplit};
+use blam_cache::physics::PlayerControl;
 use gilrs::GamepadId;
-use glam::{Mat4, Vec3};
-use h2sim::game::{GrenadeKind, Look, Spartan, VehicleAction, TICK};
+use glam::{Mat4, Vec2, Vec3};
+use h2sim::game::{GrenadeKind, Look, Magnet, Spartan, VehicleAction, TICK};
 use h2sim::vehicle::{SeatDef, SeatRole};
-use h2sim::{Command, Game, GameType, WeaponState, World};
+use h2sim::{Command, Game, GameType, WeaponDef, WeaponState, World};
 use std::collections::HashSet;
 use winit::keyboard::KeyCode;
 
@@ -32,37 +33,68 @@ enum HudRole {
     Static,
     /// The crosshair: red over an enemy in range.
     Reticle,
+    /// The crosshair over a teammate: green.
+    FriendlyReticle,
     Scope,
-    /// Only while zoomed (scope ticks, magnification label).
+    /// Only while zoomed (scope ticks, magnification labels).
     Zoomed,
     Hidden,
 }
 
 /// The role of a widget of the left hand's gun (dual wielding): only its
 /// own background and ammo meter, top left.
-fn left_hud_role(name: &str) -> HudRole {
-    match name {
+fn left_hud_role(w: &HudWidget) -> HudRole {
+    match w.name.as_str() {
         "weapon_background_left" => HudRole::Background,
         "ammo_meter_left" => HudRole::AmmoMeter,
         _ => HudRole::Hidden,
     }
 }
 
-fn hud_role(name: &str, magnification: f32) -> HudRole {
-    match name {
-        "weapon_background_single" | "weapon_background_right" => HudRole::Background,
+/// The role of a widget of the gun in hand. When it shows is up to its
+/// state flags (`weapon_hud`).
+fn hud_role(w: &HudWidget) -> HudRole {
+    match w.name.as_str() {
+        "weapon_background_single" | "weapon_background_right" | "weapon_background_zoomed" => {
+            HudRole::Background
+        }
         "ammo_meter_single" | "ammo_meter_right" => HudRole::AmmoMeter,
         "ammo_meter_zoomed" => HudRole::ZoomedAmmoMeter,
         "crosshair" => HudRole::Reticle,
-        "heat_background" | "heat_background_right" | "battery_meter" => HudRole::Static,
+        "crosshair_friendly" | "crosshair_friend" => HudRole::FriendlyReticle,
+        "heat_background"
+        | "heat_background_right"
+        | "battery_meter"
+        | "heat_background_zoomed"
+        | "heat_border_zoomed"
+        | "battery_background_zoomed"
+        | "battery_border_zoomed" => HudRole::Static,
         n if n.contains("scope_mask") => HudRole::Scope,
         "left_crosshair" | "right_crosshair" | "top_crosshair" | "bottom_crosshair"
         | "distance_meter" | "covenant_2xa" | "covenant_2xb" => HudRole::Zoomed,
-        n => match n.strip_suffix('x').and_then(|m| m.parse::<f32>().ok()) {
-            Some(m) if (m - magnification).abs() < 0.5 => HudRole::Zoomed,
-            _ => HudRole::Hidden,
-        },
+        // The magnification labels ("2x", the sniper rifle's "5x" and
+        // "10x"), each at the zoom level its state flags name.
+        _ if w.state.yes_unit & (tags::UNIT_ZOOM_LEVEL_1 | tags::UNIT_ZOOM_LEVEL_2) != 0 => {
+            HudRole::Zoomed
+        }
+        _ => HudRole::Hidden,
     }
+}
+
+/// The unit state flags Halo 2's HUD widgets show by: one gun or two,
+/// and the zoom level.
+fn unit_flags(dual: bool, zoom: u32) -> u16 {
+    let wield = if dual {
+        tags::UNIT_DUAL_WIELDING
+    } else {
+        tags::UNIT_SINGLE_WIELDING
+    };
+    let zoom = match zoom {
+        0 => tags::UNIT_UNZOOMED,
+        1 => tags::UNIT_ZOOM_LEVEL_1,
+        _ => tags::UNIT_ZOOM_LEVEL_2,
+    };
+    tags::UNIT_DEFAULT | wield | zoom
 }
 
 /// Alternate between a weapon's melee swings.
@@ -373,10 +405,16 @@ pub struct LocalPlayer {
     pub friends_seen: Vec<usize>,
     /// The player under the crosshair right now, and how far.
     pub aimed_at: Option<(usize, f32)>,
-    /// The enemy the gun's autoaim is on, if any: the crosshair is red.
-    pub autoaimed: Option<usize>,
+    /// Who the gun's autoaim is on, if anyone, and whether they're a
+    /// teammate: the crosshair is red over an enemy, green over a friend.
+    pub autoaimed: Option<(usize, bool)>,
     /// Where the mission's waypoints point.
     pub nav_points: Vec<Vec3>,
+    /// The controller's look, sped up while the stick is held pegged.
+    pub stick: StickLook,
+    /// The enemy a controller's aim followed last frame, and which way
+    /// they were (yaw, pitch).
+    pub adhesion: Option<(usize, Vec2)>,
 }
 
 impl LocalPlayer {
@@ -408,6 +446,8 @@ impl LocalPlayer {
             aimed_at: None,
             autoaimed: None,
             nav_points: Vec::new(),
+            stick: StickLook::default(),
+            adhesion: None,
         }
     }
 
@@ -597,16 +637,9 @@ impl LocalPlayer {
             }
         }
         let dir = self.camera.forward();
-        // The gun the crosshair belongs to: the seat's, or the one in hand.
-        let gun = match me.seat.and_then(|(v, s)| game.seat_weapon(v, s)) {
-            Some(def) => Some((def, 0)),
-            None => me
-                .held()
-                .and_then(|h| Some((game.weapons.get(h.weapon)?, h.state.zoom))),
-        };
-        self.autoaimed = gun
-            .and_then(|(def, zoom)| game.autoaim(world, self.player, eye, dir, def, zoom))
-            .map(|(j, _)| j);
+        self.autoaimed = self
+            .gun(game)
+            .and_then(|(def, zoom)| game.autoaim_target(world, self.player, eye, dir, def, zoom));
         self.aimed_at = game.player_along(world, self.player, eye, dir, NAME_RANGE);
         match self.aimed_at {
             Some((j, _)) => self.tagged = Some((j, NAME_LINGER)),
@@ -621,12 +654,103 @@ impl LocalPlayer {
             .filter(|&(j, left)| left > 0.0 && game.players.get(j).is_some_and(|p| p.alive));
     }
 
+    /// The gun the crosshair belongs to, and how far it's zoomed: the
+    /// seat's, or the one in hand.
+    fn gun<'a>(&self, game: &'a Game) -> Option<(&'a WeaponDef, u32)> {
+        let me = self.me(game);
+        match me.seat.and_then(|(v, s)| game.seat_weapon(v, s)) {
+            Some(def) => Some((def, 0)),
+            None => me
+                .held()
+                .and_then(|h| Some((game.weapons.get(h.weapon)?, h.state.zoom))),
+        }
+    }
+
+    /// Look around with a controller's right stick, as Halo 2 does: the
+    /// globals' look rates, look function and speed-up when pegged,
+    /// scaled by the look sensitivity in `controls` (and slower zoomed
+    /// in). Its aim assist (the mouse has none, as in Halo 2 Vista) slows
+    /// the look near an enemy in the gun's magnetism (friction), and has
+    /// the crosshair follow the one it's on as they move across the view
+    /// while either stick is moved (adhesion). How strongly comes from
+    /// the globals; how adhesion follows (that share of the turn toward
+    /// them since the last frame) is the remake's reading of it.
+    pub fn look_with_stick(
+        &mut self,
+        scene: &Scene,
+        game: &Game,
+        world: &World,
+        pad: &PadState,
+        controls: camera::Controls,
+        dt: f32,
+    ) {
+        let magnet = self.magnet(game, world);
+        let magnification = self.magnification(scene, game);
+        let look = (controls, magnification);
+        self.turn_with_stick(&scene.player_control, pad, look, magnet, dt);
+    }
+
+    /// `look_with_stick`, with the `(controls, magnification)` to look
+    /// with and the enemy the aim is drawn to.
+    fn turn_with_stick(
+        &mut self,
+        control: &PlayerControl,
+        pad: &PadState,
+        (controls, magnification): (camera::Controls, f32),
+        magnet: Option<Magnet>,
+        dt: f32,
+    ) {
+        let scale = controls.stick_scale() / magnification.max(1.0);
+        let mut turn = self.stick.turn(control, pad.right, scale, dt);
+        turn.y *= controls.pitch_sign();
+        if let Some(m) = magnet {
+            turn *= camera::friction(m.off, m.angle, control.magnetism_friction);
+        }
+        let toward = magnet.map(|m| (m.player, camera::angles_to(self.camera.position, m.centre)));
+        let moving = pad.left != Vec2::ZERO || pad.right != Vec2::ZERO;
+        if let (Some((j, now)), Some((was_on, was)), true) = (toward, self.adhesion, moving) {
+            if j == was_on {
+                let adhesion = control.magnetism_adhesion.clamp(0.0, 1.0);
+                turn += camera::angle_change(was, now) * adhesion;
+            }
+        }
+        self.adhesion = toward;
+        self.camera.turn(turn);
+    }
+
+    /// No controller look this frame (none, or a menu is up): its
+    /// speed-up and adhesion start over.
+    pub fn stop_stick(&mut self) {
+        self.stick = StickLook::default();
+        self.adhesion = None;
+    }
+
+    /// The enemy a controller's aim is drawn to (`Game::magnetism`).
+    fn magnet(&self, game: &Game, world: &World) -> Option<Magnet> {
+        if self.flying || !self.me(game).alive {
+            return None;
+        }
+        let (def, zoom) = self.gun(game)?;
+        let (eye, dir) = (self.camera.position, self.camera.forward());
+        game.magnetism(world, self.player, eye, dir, def, zoom)
+    }
+
     /// The crosshair's colour: red while the gun's autoaim is on an enemy
     /// (one under it or close to it, in the weapon's range), as in Halo 2.
+    /// Its red is the tag's (the crosshair's "flash red" HUD shader).
     fn reticle_color(&self) -> [f32; 4] {
         match self.autoaimed {
-            Some(_) => hud::RED,
-            None => hud::BLUE,
+            Some((_, false)) => hud::RETICLE_RED,
+            _ => hud::BLUE,
+        }
+    }
+
+    /// The extra state flags the HUD's widgets show by: an autoaim on a
+    /// teammate shows the green crosshair in place of the usual one.
+    fn extra_flags(&self) -> u16 {
+        match self.autoaimed {
+            Some((_, true)) => tags::EXTRA_AUTOAIM_FRIENDLY,
+            _ => 0,
         }
     }
 
@@ -637,9 +761,11 @@ impl LocalPlayer {
         if !me.alive {
             return;
         }
-        let view_proj = self
-            .camera
-            .view_proj(w / h.max(1.0), self.magnification(scene, game));
+        let view_proj = self.camera.view_proj(
+            &scene.lens(),
+            w / h.max(1.0),
+            self.magnification(scene, game),
+        );
         let t = hb.text_scale();
         let tagged = self
             .tagged
@@ -909,9 +1035,10 @@ impl LocalPlayer {
         (world, muzzle)
     }
 
-    /// Projection for the first person weapon, which ignores zoom.
-    pub fn view_model_proj(&self, aspect: f32) -> Mat4 {
-        camera::projection(aspect, 1.0, 0.005, 10.0) * self.camera.view()
+    /// Projection for the first person weapon, which ignores zoom (and
+    /// takes the world's field of view, as Halo 2 does).
+    pub fn view_model_proj(&self, lens: &camera::Lens, aspect: f32) -> Mat4 {
+        lens.projection(aspect, 1.0, 0.005, 10.0) * self.camera.view()
     }
 
     /// Dots on the motion sensor in `rect` (window pixels), forward up.
@@ -953,7 +1080,7 @@ impl LocalPlayer {
         h: f32,
         split: ScreenSplit,
     ) -> Vec<gpu::HudBatch> {
-        let mut hb = HudBuilder::for_view(w, h, split);
+        let mut hb = HudBuilder::for_view(w, h, split).with_crosshair(scene.lens().crosshair);
         let font = scene.hud_font;
         let me = self.me(game);
         // The corner margins' scale, and the remake's own text's.
@@ -1131,9 +1258,10 @@ impl LocalPlayer {
                 // A vehicle gun's HUD is its reticle (and one for aiming
                 // at friends).
                 let reticle = self.reticle_color();
-                weapon_hud(&mut hb, scene, weapon, state, reticle, |name, _| {
-                    if name.contains("friend") {
-                        HudRole::Hidden
+                let flags = (tags::UNIT_DEFAULT | tags::UNIT_UNZOOMED, self.extra_flags());
+                weapon_hud(&mut hb, scene, weapon, state, reticle, flags, |w| {
+                    if w.name.contains("friend") {
+                        HudRole::FriendlyReticle
                     } else {
                         HudRole::Reticle
                     }
@@ -1155,12 +1283,12 @@ impl LocalPlayer {
         };
         let def = &weapon.def;
         let reticle = self.reticle_color();
-        weapon_hud(&mut hb, scene, weapon, state, reticle, hud_role);
         let left = me.left.as_ref();
+        let flags = (unit_flags(left.is_some(), state.zoom), self.extra_flags());
+        weapon_hud(&mut hb, scene, weapon, state, reticle, flags, hud_role);
         if let Some((lw, ls)) = left.and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state))) {
-            weapon_hud(&mut hb, scene, lw, ls, reticle, |name, _| {
-                left_hud_role(name)
-            });
+            let flags = (unit_flags(true, ls.zoom), flags.1);
+            weapon_hud(&mut hb, scene, lw, ls, reticle, flags, left_hud_role);
         }
         if def.uses_ammo() && state.loaded == 0 && state.reloading.is_none() {
             let msg = if state.reserve == 0 {
@@ -1204,26 +1332,32 @@ fn vehicle_prompt(scene: &Scene, game: &Game, i: usize, keyboard: bool) -> Optio
 }
 
 /// A weapon's HUD widgets: background with spare ammo, ammo meter,
-/// crosshair, scope. `role` says which widgets are this hand's.
+/// crosshair, scope. `role` says which widgets are this hand's; each
+/// shows while the `(unit, extra)` state flags hold what its own state
+/// asks for, as in Halo 2 (the sniper rifle's "10x" only at its second
+/// zoom level, the green crosshair only over a friend).
 fn weapon_hud(
     hb: &mut HudBuilder,
     scene: &Scene,
     weapon: &WeaponAssets,
     state: &WeaponState,
     reticle: [f32; 4],
-    role: impl Fn(&str, f32) -> HudRole,
+    (unit, extra): (u16, u16),
+    role: impl Fn(&HudWidget) -> HudRole,
 ) {
     let font = scene.hud_font;
     let zoomed = state.zoom > 0;
     let def = &weapon.def;
-    let magnification = def.magnification(state.zoom);
     let ammo_fill = if def.uses_ammo() {
         state.loaded as f32 / def.magazine_size.max(1) as f32
     } else {
         1.0
     };
     for widget in &weapon.hud[hb.split() as usize] {
-        match role(&widget.name, magnification) {
+        if !widget.state.shows(unit, extra) {
+            continue;
+        }
+        match role(widget) {
             HudRole::Scope if zoomed => {
                 hb.scope(widget, scene.hud_white, [0.0, 0.0, 0.0, 132.0 / 255.0]);
             }
@@ -1247,6 +1381,9 @@ fn weapon_hud(
             }
             HudRole::Static => hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0),
             HudRole::Reticle => hb.widget(widget, reticle, hud_mode::CHANNELS, 0.0),
+            HudRole::FriendlyReticle => {
+                hb.widget(widget, hud::RETICLE_GREEN, hud_mode::CHANNELS, 0.0)
+            }
             HudRole::Zoomed if zoomed => {
                 let color = if widget.name.ends_with("_crosshair") {
                     reticle
@@ -1321,18 +1458,129 @@ pub fn screen_split(k: usize, n: usize) -> ScreenSplit {
 mod tests {
     use super::*;
 
+    /// A HUD widget named `name` that says yes to the `yes_unit` flags.
+    fn widget(name: &str, yes_unit: u16) -> HudWidget {
+        HudWidget {
+            name: name.into(),
+            texture: 0,
+            anchor: Anchor::Crosshair,
+            flags: 0,
+            state: tags::WidgetState {
+                yes_unit,
+                ..Default::default()
+            },
+            offset: [0.0; 2],
+            registration: [0.0; 2],
+            size: [1.0; 2],
+        }
+    }
+
     #[test]
-    fn hud_roles_follow_widget_names() {
+    fn hud_roles_follow_widget_names_and_states() {
+        let role = |name| hud_role(&widget(name, 0));
+        assert_eq!(role("weapon_background_right"), HudRole::Background);
+        assert_eq!(role("weapon_background_left"), HudRole::Hidden);
         assert_eq!(
-            hud_role("weapon_background_right", 1.0),
+            left_hud_role(&widget("weapon_background_left", 0)),
             HudRole::Background
         );
-        assert_eq!(hud_role("weapon_background_left", 1.0), HudRole::Hidden);
-        assert_eq!(hud_role("ammo_meter_single", 1.0), HudRole::AmmoMeter);
-        assert_eq!(hud_role("scope_mask", 2.0), HudRole::Scope);
-        assert_eq!(hud_role("5x", 5.0), HudRole::Zoomed);
-        assert_eq!(hud_role("10x", 5.0), HudRole::Hidden);
-        assert_eq!(hud_role("crosshair_friendly", 1.0), HudRole::Hidden);
+        assert_eq!(role("ammo_meter_single"), HudRole::AmmoMeter);
+        assert_eq!(role("scope_mask"), HudRole::Scope);
+        assert_eq!(role("crosshair_friendly"), HudRole::FriendlyReticle);
+        assert_eq!(role("backpack"), HudRole::Hidden);
+        // The sniper rifle's magnification labels, by their state flags
+        // (its zoom levels are 3.5 and 9.5 times, its labels 5x and 10x).
+        assert_eq!(hud_role(&widget("5x", 0x90)), HudRole::Zoomed);
+        assert_eq!(hud_role(&widget("10x", 0x110)), HudRole::Zoomed);
+    }
+
+    /// The enemy a controller's aim is drawn to, at `centre`, `off`
+    /// radians from the crosshair in the battle rifle's 6 degree cone.
+    fn magnet_at(centre: Vec3, off: f32) -> Magnet {
+        Magnet {
+            player: 1,
+            off,
+            angle: 6f32.to_radians(),
+            centre,
+        }
+    }
+
+    #[test]
+    fn friction_slows_the_stick_on_an_enemy() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let control = PlayerControl::default();
+        let pad = PadState {
+            right: Vec2::new(0.6, 0.0),
+            ..PadState::default()
+        };
+        let look = (camera::Controls::default(), 1.0);
+        let turned = |magnet| {
+            let mut l = LocalPlayer::new(i, &game);
+            let yaw = l.camera.yaw;
+            l.turn_with_stick(&control, &pad, look, magnet, 0.1);
+            l.camera.yaw - yaw
+        };
+        // 0.6 of the stick to the right: Halo 2's 30 degrees a second.
+        let free = turned(None);
+        assert!((free.to_degrees() + 3.0).abs() < 1e-3, "{free}");
+        let ahead = Vec3::new(10.0, 0.0, 0.0);
+        let on = turned(Some(magnet_at(ahead, 0.0)));
+        assert!((on / free - 0.4).abs() < 1e-4, "{on}");
+        let half = turned(Some(magnet_at(ahead, 3f32.to_radians())));
+        assert!((half / free - 0.7).abs() < 1e-4, "{half}");
+        let edge = turned(Some(magnet_at(ahead, 6f32.to_radians())));
+        assert!((edge / free - 1.0).abs() < 1e-4, "{edge}");
+    }
+
+    #[test]
+    fn adhesion_follows_an_enemy_only_while_a_stick_moves() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let control = PlayerControl::default();
+        let look = (camera::Controls::default(), 1.0);
+        let dt = 1.0 / 60.0;
+        // An enemy 10 units ahead strafing right at a unit a second, for
+        // a second.
+        let follow = |pad: PadState| {
+            let mut l = LocalPlayer::new(i, &game);
+            let (f, r, _) = l.camera.basis();
+            let (eye, yaw) = (l.camera.position, l.camera.yaw);
+            for k in 0..=60 {
+                let at = eye + f * 10.0 + r * (k as f32 * dt);
+                l.turn_with_stick(&control, &pad, look, Some(magnet_at(at, 0.0)), dt);
+            }
+            l.camera.yaw - yaw
+        };
+        let strafing = PadState {
+            left: Vec2::X,
+            ..PadState::default()
+        };
+        let followed = follow(strafing);
+        let across = 0.1f32.atan();
+        assert!((followed + 0.7 * across).abs() < 1e-4, "{followed}");
+        // Hands off the controller: no help.
+        assert_eq!(follow(PadState::default()), 0.0);
+    }
+
+    #[test]
+    fn hud_state_follows_the_hands_and_the_zoom() {
+        let five = tags::WidgetState {
+            yes_unit: 0x90,
+            no_unit: 0x140,
+            ..Default::default()
+        };
+        assert!(!five.shows(unit_flags(false, 0), 0));
+        assert!(five.shows(unit_flags(false, 1), 0));
+        assert!(!five.shows(unit_flags(false, 2), 0));
+        // The SMG's lone right hand display hides dual wielding.
+        let single = tags::WidgetState {
+            yes_unit: 0x10,
+            no_unit: 0x20,
+            ..Default::default()
+        };
+        assert!(single.shows(unit_flags(false, 0), 0));
+        assert!(!single.shows(unit_flags(true, 0), 0));
     }
 
     #[test]

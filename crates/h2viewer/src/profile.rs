@@ -1,7 +1,8 @@
-//! The player's profile: their gamertag, Spartan or Elite, and armour
-//! colours, and the online server they sign in to if not the usual one.
-//! It's kept in a small text file so it lasts between games.
+//! The player's profile: their gamertag, Spartan or Elite, armour colours
+//! and look settings, and the online server they sign in to if not the
+//! usual one. It's kept in a small text file so it lasts between games.
 
+use crate::camera::Controls;
 use h2sim::game::{clean_name, Look, EMBLEM_BACKGROUNDS, EMBLEM_FOREGROUNDS, PROFILE_COLORS};
 use std::path::PathBuf;
 
@@ -43,6 +44,8 @@ pub struct Profile {
     /// Their gamertag.
     pub name: String,
     pub look: Look,
+    /// Look sensitivity, and whether looking up and down is inverted.
+    pub controls: Controls,
     /// The online server to sign in to, from a `server=` line players add
     /// themselves; empty for the usual one.
     pub server: String,
@@ -53,6 +56,7 @@ impl Default for Profile {
         Profile {
             name: h2net::player_name(),
             look: Look::default_for(0),
+            controls: Controls::default(),
             server: String::new(),
         }
     }
@@ -96,6 +100,12 @@ impl Profile {
                 continue;
             };
             let value = value.trim();
+            let sensitivity = || {
+                value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|n| (1..=Controls::MAX_SENSITIVITY).contains(n))
+            };
             let color = || {
                 COLORS
                     .iter()
@@ -112,6 +122,15 @@ impl Profile {
                 }
                 "model" => p.look.elite = value.eq_ignore_ascii_case("elite"),
                 "server" => p.server = value.to_string(),
+                "look_sensitivity" => {
+                    let c = &mut p.controls.look_sensitivity;
+                    *c = sensitivity().unwrap_or(*c);
+                }
+                "mouse_sensitivity" => {
+                    let c = &mut p.controls.mouse_sensitivity;
+                    *c = sensitivity().unwrap_or(*c);
+                }
+                "invert_look" => p.controls.invert_look = value.eq_ignore_ascii_case("yes"),
                 "primary" => p.look.colors[0] = color().unwrap_or(p.look.colors[0]),
                 "secondary" => p.look.colors[1] = color().unwrap_or(p.look.colors[1]),
                 "emblem" => {
@@ -145,7 +164,8 @@ impl Profile {
         let mut text = format!(
             "name={}\nmodel={}\nprimary={}\nsecondary={}\n\
              emblem={}\nemblem_background={}\n\
-             emblem_primary={}\nemblem_secondary={}\nemblem_background_color={}\n",
+             emblem_primary={}\nemblem_secondary={}\nemblem_background_color={}\n\
+             look_sensitivity={}\nmouse_sensitivity={}\ninvert_look={}\n",
             self.name,
             if self.look.elite { "elite" } else { "spartan" },
             color(self.look.colors[0]),
@@ -155,6 +175,13 @@ impl Profile {
             color(e.colors[0]),
             color(e.colors[1]),
             color(e.colors[2]),
+            self.controls.look_sensitivity,
+            self.controls.mouse_sensitivity,
+            if self.controls.invert_look {
+                "yes"
+            } else {
+                "no"
+            },
         );
         if !self.server.is_empty() {
             text += &format!("server={}\n", self.server);
@@ -199,9 +226,16 @@ mod tests {
                     colors: [0, 17, 9],
                 },
             },
+            controls: Controls {
+                look_sensitivity: 7,
+                mouse_sensitivity: 1,
+                invert_look: true,
+            },
             server: "https://h2live.example.com".into(),
         };
         assert!(p.to_text().contains("primary=crimson"));
+        assert!(p.to_text().contains("look_sensitivity=7\n"));
+        assert!(p.to_text().contains("invert_look=yes\n"));
         assert_eq!(Profile::parse(&p.to_text()), p);
         // No server line for the usual server.
         let usual = Profile {
@@ -215,5 +249,12 @@ mod tests {
         assert_eq!(q.name, "ARBITER");
         assert!(q.look.elite);
         assert_eq!(q.look.colors, [3, Look::default_for(0).colors[1]]);
+        // An older profile has Halo 2's look settings; ones out of range
+        // are skipped.
+        assert_eq!(q.controls, Controls::default());
+        let r = Profile::parse("look_sensitivity=11\nmouse_sensitivity=0\ninvert_look=YES");
+        assert_eq!(r.controls.look_sensitivity, 3);
+        assert_eq!(r.controls.mouse_sensitivity, 3);
+        assert!(r.controls.invert_look);
     }
 }
