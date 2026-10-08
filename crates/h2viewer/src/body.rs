@@ -335,7 +335,10 @@ impl BodyAnimator {
     /// Advance by `dt` and pose the body.
     pub fn update(&mut self, rig: &BodyRig, input: &BodyInput, dt: f32) -> Vec<NodePose> {
         let (want, rate, striding) = if !input.alive {
+            // A fall it died in doesn't land it when it's back.
             self.landing = None;
+            self.airborne_for = 0.0;
+            self.falling = 0.0;
             (rig.by_name("combat:landing_dead"), 1.0, false)
         } else {
             self.watch_landing(rig, input, dt);
@@ -407,6 +410,13 @@ impl BodyAnimator {
     fn watch_landing(&mut self, rig: &BodyRig, input: &BodyInput, dt: f32) {
         if let Some((_, left)) = &mut self.landing {
             *left -= dt;
+        }
+        if input.seat.is_some() {
+            // Getting into a seat isn't landing.
+            self.landing = None;
+            self.airborne_for = 0.0;
+            self.falling = 0.0;
+            return;
         }
         if !input.grounded {
             self.airborne_for += dt;
@@ -737,5 +747,35 @@ mod tests {
         };
         a.update(&r, &running, dt);
         assert_eq!(a.base, Some(3));
+    }
+
+    /// Killed on the way down, or getting into a seat, the body doesn't
+    /// land from that fall afterwards.
+    #[test]
+    fn no_landing_after_dying_or_sitting_down() {
+        let r = rig();
+        let dt = 1.0 / 60.0;
+        let falling = BodyInput {
+            grounded: false,
+            climb: -3.0,
+            ..standing()
+        };
+        let dead = BodyInput {
+            alive: false,
+            ..standing()
+        };
+        let seated = BodyInput {
+            seat: Some("warthog_p"),
+            ..standing()
+        };
+        for then in [dead, seated] {
+            let mut a = BodyAnimator::default();
+            for _ in 0..60 {
+                a.update(&r, &falling, dt);
+            }
+            a.update(&r, &then, dt);
+            a.update(&r, &standing(), dt);
+            assert_eq!(a.base, Some(0), "stands after {then:?}");
+        }
     }
 }

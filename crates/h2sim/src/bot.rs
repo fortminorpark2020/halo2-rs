@@ -719,6 +719,11 @@ impl Bot {
         if target.is_none() && !boarding && self.actor.is_none() {
             self.pick_up(game, me, &mut cmd);
         }
+        if !on_route {
+            // Stuck off a route (in a fight, say), the route point it last
+            // made for isn't to blame.
+            self.watching = None;
+        }
         if flies {
             self.steer_flight(game, me, fly_to.or(walk_to), &mut cmd);
         } else if !on_route {

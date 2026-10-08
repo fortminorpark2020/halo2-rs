@@ -16,8 +16,9 @@ install. No game files are included in this repository.
 - `h2tool`: command-line inspector.
 - `h2sim`: game simulation (no rendering): level collision, Spartan movement
   using the speeds, jump velocity and size from the game's own globals and biped tags
-  (running keeps to the ground over the tops of ramps and up and down steps,
-  and only leaves it off a ledge or jumping),
+  (running keeps to the ground up steps and over the tops of ramps, follows it
+  down slopes and drops of up to about 0.06 world units, and falls off anything
+  deeper; it won't squeeze under anything lower than the body),
   vehicles (wheels with suspension, hovering, flight, seats, turrets, splatters
   and wrecks),
   weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
