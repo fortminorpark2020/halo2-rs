@@ -631,9 +631,14 @@ impl Host {
         if !r.welcomed && r.since.elapsed() > HELLO_TIMEOUT {
             return Err("never said hello".into());
         }
-        for (kind, body) in r.conn.receive()? {
+        let messages = r.conn.receive()?;
+        // Hellos that came together (sent while we read nothing, loading
+        // the game's map, say): the last says what that PC wants now.
+        let last_hello = messages.iter().rposition(|m| m.0 == kind::HELLO);
+        for (n, (kind, body)) in messages.into_iter().enumerate() {
             let mut rd = Reader::new(&body);
             match kind {
+                kind::HELLO if !r.in_game && Some(n) != last_hello => {}
                 kind::HELLO if !r.in_game => {
                     // The lobby takes any map; a game, only its own.
                     let checked = read_hello(&mut rd).and_then(|h| {

@@ -6,10 +6,10 @@ use crate::camera::{self, FlyCamera};
 use crate::effects;
 use crate::gpu::{self, hud_mode, DrawCall, Fx, SpriteVertex};
 use crate::hud::{self, HudBuilder};
-use crate::input::PadState;
+use crate::input::{PadPress, PadState};
 use crate::rig;
 use crate::scene::{Scene, Vertex, WeaponAssets};
-use blam_cache::hud::ScreenSplit;
+use blam_cache::hud::{Anchor, ScreenSplit};
 use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use h2sim::game::{GrenadeKind, Look, Spartan, VehicleAction, TICK};
@@ -640,7 +640,7 @@ impl LocalPlayer {
         let view_proj = self
             .camera
             .view_proj(w / h.max(1.0), self.magnification(scene, game));
-        let s = hb.scale();
+        let t = hb.text_scale();
         let tagged = self
             .tagged
             .map(|t| t.0)
@@ -664,7 +664,7 @@ impl LocalPlayer {
             } else {
                 hud::BLUE
             };
-            let size = 8.0 * s;
+            let size = 8.0 * t;
             hb.text(scene.hud_font, [x, y - size], size, &q.name, color);
         }
     }
@@ -956,7 +956,8 @@ impl LocalPlayer {
         let mut hb = HudBuilder::for_view(w, h, split);
         let font = scene.hud_font;
         let me = self.me(game);
-        let s = hb.scale();
+        // The corner margins' scale, and the remake's own text's.
+        let (s, t) = (hb.scale(), hb.text_scale());
         let shield = me.shield / game.rules.shield.max(1.0);
         // The shield meter flashes red while the shields are down.
         let flash = shield < 0.25 && me.alive && (game.time * 4.0).fract() < 0.5;
@@ -1017,20 +1018,20 @@ impl LocalPlayer {
         }
         // Kill feed above the shield meter and motion tracker; score
         // bottom right.
-        let line = 11.0 * s;
+        let line = 11.0 * t;
         for (i, (text, left)) in self.messages.iter().rev().enumerate() {
             let mut color = hud::BLUE;
             color[3] *= left.min(1.0);
             hb.text_left(
                 font,
                 [24.0 * s, tracker_top - (i + 1) as f32 * line],
-                8.0 * s,
+                8.0 * t,
                 text,
                 color,
             );
         }
         if let Some(notice) = &self.notice {
-            hb.text(font, [w * 0.5, 64.0 * s], 8.0 * s, notice, hud::BLUE);
+            hb.text(font, [w * 0.5, 64.0 * t], 8.0 * t, notice, hud::BLUE);
         }
         // Your score (your team's in team games), and the best of the
         // others under it. The campaign keeps no score.
@@ -1051,11 +1052,14 @@ impl LocalPlayer {
             (me.score, best, [hud::BLUE, hud::DIM_BLUE])
         };
         let timed = game.rules.game_type.timed();
+        // In the corner, where Halo 2's scoreboard widgets are anchored.
+        let [x, y] = hb.anchor(Anchor::Scoreboard);
+        let x = x - 16.0 * t;
         if !campaign {
             hb.text(
                 font,
-                [w - 40.0 * s, h - 52.0 * s],
-                14.0 * s,
+                [x, y - 32.0 * t],
+                14.0 * t,
                 &score_text(mine, timed),
                 colors[0],
             );
@@ -1063,19 +1067,19 @@ impl LocalPlayer {
         if let Some(k) = best_other.filter(|_| !campaign) {
             hb.text(
                 font,
-                [w - 40.0 * s, h - 34.0 * s],
-                10.0 * s,
+                [x, y - 14.0 * t],
+                10.0 * t,
                 &score_text(k, timed),
                 colors[1],
             );
         }
         // The time left over the scores, down to 0:00 if time runs out
         // (gone once someone reaches the score).
-        if let Some(left) = game.time_left().filter(|&t| t == 0.0 || !game.over()) {
+        if let Some(left) = game.time_left().filter(|&l| l == 0.0 || !game.over()) {
             hb.text(
                 font,
-                [w - 40.0 * s, h - 70.0 * s],
-                10.0 * s,
+                [x, y - 50.0 * t],
+                10.0 * t,
                 &score_text(left.ceil() as i32, true),
                 hud::BLUE,
             );
@@ -1085,8 +1089,8 @@ impl LocalPlayer {
         if let Some(text) = self.objective_prompt(game) {
             hb.text(
                 font,
-                [w * 0.5, h * 0.5 + 64.0 * s],
-                9.0 * s,
+                [w * 0.5, h * 0.5 + 64.0 * t],
+                9.0 * t,
                 &text,
                 hud::BLUE,
             );
@@ -1099,14 +1103,14 @@ impl LocalPlayer {
                 (None, Some(w)) => format!("{} WINS", player_name(game, self.player, w)),
                 (None, None) => "DRAW".to_string(),
             };
-            hb.text(font, [w * 0.5, h * 0.3], 20.0 * s, &text, hud::BLUE);
+            hb.text(font, [w * 0.5, h * 0.3], 20.0 * t, &text, hud::BLUE);
         }
         if !me.alive {
             let text = format!("RESPAWN IN {}", me.respawn_in.ceil().max(1.0));
             hb.text(
                 font,
-                [w * 0.5, h * 0.5 - 6.0 * s],
-                12.0 * s,
+                [w * 0.5, h * 0.5 - 6.0 * t],
+                12.0 * t,
                 &text,
                 hud::BLUE,
             );
@@ -1117,10 +1121,10 @@ impl LocalPlayer {
             (game.swap_prompt(self.player), ["E", "X"], "PICK UP"),
             (game.dual_prompt(self.player), ["Q", "Y"], "DUAL WIELD"),
         ];
-        let mut y = h * 0.5 + 64.0 * s;
+        let mut y = h * 0.5 + 64.0 * t;
         if let Some(text) = vehicle_prompt(scene, game, self.player, !self.pad_prompts()) {
-            hb.text(font, [w * 0.5, y], 9.0 * s, &text, hud::BLUE);
-            y += 12.0 * s;
+            hb.text(font, [w * 0.5, y], 9.0 * t, &text, hud::BLUE);
+            y += 12.0 * t;
         }
         if let Some(gun) = self.seat_gun(scene, game) {
             if let Some((weapon, state)) = gun {
@@ -1142,8 +1146,8 @@ impl LocalPlayer {
                 let button = buttons[self.pad_prompts() as usize];
                 let name = display_name(&a.def.name);
                 let text = format!("HOLD {button} TO {what} {name}");
-                hb.text(font, [w * 0.5, y], 9.0 * s, &text, hud::BLUE);
-                y += 12.0 * s;
+                hb.text(font, [w * 0.5, y], 9.0 * t, &text, hud::BLUE);
+                y += 12.0 * t;
             }
         }
         let Some((weapon, state)) = self.current(scene, game) else {
@@ -1164,12 +1168,12 @@ impl LocalPlayer {
             } else {
                 "RELOAD"
             };
-            hb.text(font, [w * 0.5, h * 0.5 + 48.0 * s], 12.0 * s, msg, hud::RED);
+            hb.text(font, [w * 0.5, h * 0.5 + 48.0 * t], 12.0 * t, msg, hud::RED);
         } else if me.readying > 0.0 {
             hb.text(
                 font,
-                [w * 0.5, h * 0.5 + 48.0 * s],
-                10.0 * s,
+                [w * 0.5, h * 0.5 + 48.0 * t],
+                10.0 * t,
                 &display_name(&def.name),
                 hud::BLUE,
             );
@@ -1253,6 +1257,22 @@ fn weapon_hud(
             }
             _ => {}
         }
+    }
+}
+
+/// The local player a press on a controller no one here plays with is for.
+/// A: someone whose controller went, else player one at the keyboard.
+/// Start: only a guest whose controller went (player one at the keyboard
+/// plays on without theirs), else no one, and Start brings in a new player.
+pub fn new_pad_for(locals: &[LocalPlayer], press: PadPress) -> Option<usize> {
+    let lost = |l: &LocalPlayer| l.lost_pad.is_some();
+    match press {
+        PadPress::Claim => locals
+            .iter()
+            .position(lost)
+            .or_else(|| locals.iter().position(|l| l.keyboard && l.pad.is_none())),
+        PadPress::Join => locals.iter().position(|l| lost(l) && !l.keyboard),
+        _ => None,
     }
 }
 
@@ -1349,6 +1369,44 @@ mod tests {
         // Zoom fires the left gun, so the click doesn't count.
         game.players[i].left = game.players[i].weapons.first().cloned();
         assert!(!l.command(&game, None, Some(pad)).zoom);
+    }
+
+    /// A controller's id, which gilrs hands out only for controllers it
+    /// finds.
+    fn pad(n: usize) -> GamepadId {
+        // It is a usize inside (transmute checks that the sizes match).
+        unsafe { std::mem::transmute::<usize, GamepadId>(n) }
+    }
+
+    #[test]
+    fn start_on_a_new_controller_brings_in_a_player_while_player_one_lost_theirs() {
+        let mut game = h2sim::testing::game();
+        let mut locals: Vec<LocalPlayer> = (0..2)
+            .map(|_| {
+                let i = game.add_player();
+                LocalPlayer::new(i, &game)
+            })
+            .collect();
+        locals[0].keyboard = true;
+        locals[1].pad = Some(pad(1));
+        // Player one's controller went: they play on at the keyboard.
+        locals[0].lost_pad = Some(pad(0));
+        assert_eq!(new_pad_for(&locals, PadPress::Join), None);
+        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(0));
+        // A guest whose controller went is the one Start (or A) is for.
+        locals[1].pad = None;
+        locals[1].lost_pad = Some(pad(1));
+        assert_eq!(new_pad_for(&locals, PadPress::Join), Some(1));
+        locals[0].lost_pad = None;
+        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(1));
+        // No one lost theirs: A takes player one at the keyboard, unless
+        // a controller already has them.
+        locals[1].lost_pad = None;
+        locals[1].pad = Some(pad(1));
+        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(0));
+        assert_eq!(new_pad_for(&locals, PadPress::Join), None);
+        locals[0].pad = Some(pad(2));
+        assert_eq!(new_pad_for(&locals, PadPress::Claim), None);
     }
 
     #[test]

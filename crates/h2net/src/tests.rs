@@ -2989,3 +2989,58 @@ fn a_team_change_read_after_the_start_lets_the_pc_in() {
     let mine = mine.expect("welcomed");
     assert_eq!(hg.players[mine].team, 1);
 }
+
+#[test]
+fn the_last_of_several_team_changes_read_after_the_start_counts() {
+    let mut hg = game();
+    hg.rules.game_type = h2sim::GameType::TeamSlayer;
+    hg.add_player();
+    let mut host = Host::new("lockout", 13).unwrap();
+    host.set_lobby(Lobby {
+        map: "lockout".into(),
+        game_type: "TEAM SLAYER".into(),
+        score: "50".into(),
+        options: "DEFAULT".into(),
+        teams: true,
+        players: Vec::new(),
+        bots: 0,
+    });
+    let mut cg = game();
+    let mut client = Client::connect(address(&host), &cg, "lockout", &[ANY_TEAM], me()).unwrap();
+    let mut in_lobby = false;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        in_lobby |= ce.iter().any(|e| matches!(e, ClientEvent::Lobby(_)));
+        in_lobby
+    });
+    // Someone there picks blue, then red again, while the host loads the
+    // game's map: both hellos wait for it, and the last is their choice.
+    client.rejoin(&cg, "lockout", &[1]);
+    client.rejoin(&cg, "lockout", &[0]);
+    std::thread::sleep(Duration::from_millis(50));
+    host.start("lockout");
+    let start = Instant::now();
+    let (mut left, mut lost, mut mine) = (Vec::new(), None, None);
+    while start.elapsed() < Duration::from_secs(2) {
+        for e in host.poll(&mut hg, 16) {
+            if let HostEvent::Left { reason, .. } = e {
+                left.push(reason);
+            }
+        }
+        host.send(&hg, &[], false);
+        let (ce, _) = client.poll(&mut cg);
+        for e in ce {
+            match e {
+                ClientEvent::Start(map) => client.rejoin(&cg, &map, &[0]),
+                ClientEvent::Welcomed { players, .. } => mine = Some(players[0]),
+                ClientEvent::Lost(why) => lost = Some(why),
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(left, Vec::<String>::new());
+    assert_eq!(lost, None);
+    assert_eq!(host.joined(), 1);
+    let mine = mine.expect("welcomed");
+    assert_eq!(hg.players[mine].team, 0);
+}

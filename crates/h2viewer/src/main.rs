@@ -1269,20 +1269,13 @@ impl App {
             return;
         }
         let owner = self.locals.iter().position(|l| l.pad == Some(id));
-        // Someone whose controller went is first for a new one; then, for
-        // A, player one at the keyboard.
-        let lost = self.locals.iter().position(|l| l.lost_pad.is_some());
-        let keyboard = self
-            .locals
-            .iter()
-            .position(|l| l.keyboard && l.pad.is_none());
         match (owner, press) {
             (None, PadPress::Claim) => {
-                if let Some(k) = lost.or(keyboard) {
+                if let Some(k) = local::new_pad_for(&self.locals, press) {
                     self.take_pad(k, id);
                 }
             }
-            (None, PadPress::Join) => match lost {
+            (None, PadPress::Join) => match local::new_pad_for(&self.locals, press) {
                 Some(k) => self.take_pad(k, id),
                 None => self.add_local(Some(id)),
             },
@@ -1317,7 +1310,9 @@ impl App {
 
     /// A controller went: whoever played with it stands still until it
     /// comes back or A on another takes over; a guest's place in the lobby
-    /// goes with it.
+    /// goes with it, and so does a guest's pause menu, which only that
+    /// controller worked: to the keyboard while the game stands still for
+    /// it (to resume or end it there), or away over a game that plays on.
     fn pad_lost(&mut self, id: GamepadId) {
         match self.seats.iter().position(|s| s.pad == Some(id)) {
             Some(0) => self.seats[0].pad = None,
@@ -1330,6 +1325,16 @@ impl App {
             l.pad = None;
             l.lost_pad = Some(id);
             l.message("CONTROLLER DISCONNECTED".into());
+        }
+        let owner = self.menu_owner.filter(|_| self.menu_open);
+        let guest_menu = owner
+            .and_then(|k| self.locals.get(k))
+            .is_some_and(|l| l.lost_pad == Some(id) && !l.keyboard);
+        if guest_menu {
+            match self.locals.iter().position(|l| l.keyboard) {
+                Some(k) if self.paused() => self.open_menu(Screen::Pause, Some(k)),
+                _ => self.menu_open = false,
+            }
         }
     }
 
@@ -1348,6 +1353,8 @@ impl App {
         for (id, press) in self.pads.presses() {
             self.pad_pressed(id, press);
         }
+        // The game's sounds hold while it's paused, as in Halo 2.
+        self.sound.audio.pause_game(self.paused());
         let games = self.browser.poll().to_vec();
         // What System Link said about a game is old news once a game shows
         // up or changes map.
@@ -2390,10 +2397,10 @@ impl App {
             let (vw, vh) = (viewport[2] as f32, viewport[3] as f32);
             // Their menu replaces the HUD while it's up.
             let menu = self.menu_for(k);
+            let split = local::screen_split(k, self.locals.len());
             let mut hud = if menu || cutscene_camera.is_some() {
                 Vec::new()
             } else {
-                let split = local::screen_split(k, self.locals.len());
                 l.build_hud(&self.scene, &self.game, vw, vh, split)
             };
             if let Some(m) = self.mission.as_ref().filter(|_| !menu) {
@@ -2411,10 +2418,10 @@ impl App {
                 .as_ref()
                 .and_then(|m| m.switch_prompt(&self.scene, &self.game, l.player, !l.pad_prompts()));
             if let Some(text) = prompt.filter(|_| !menu) {
-                let mut hb = HudBuilder::new(vw, vh);
-                let s = hb.scale();
-                let at = [vw * 0.5, vh * 0.5 + 76.0 * s];
-                hb.text(self.scene.hud_font, at, 9.0 * s, &text, hud::BLUE);
+                let mut hb = HudBuilder::for_view(vw, vh, split);
+                let t = hb.text_scale();
+                let at = [vw * 0.5, vh * 0.5 + 76.0 * t];
+                hb.text(self.scene.hud_font, at, 9.0 * t, &text, hud::BLUE);
                 hud.extend(hb.finish());
             }
             // The scoreboard while Tab or Back is held.

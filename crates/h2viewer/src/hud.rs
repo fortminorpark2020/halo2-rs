@@ -15,13 +15,21 @@ pub const DIM_BLUE: [f32; 4] = [0.30, 0.62, 1.0, 0.4];
 /// Distance of the corner anchors from the screen edge, in pixels of a
 /// 640x480 screen.
 const MARGIN: [f32; 2] = [24.0, 20.0];
+/// The remake's own HUD text is never smaller than this, in window pixels
+/// per pixel of a 1280x960 screen: a window pixel to each pixel of its 5x7
+/// font in the smallest lines (the kill feed's, 8 pixels tall), which a
+/// 720p window or a splitscreen view would otherwise draw too small to read.
+const MIN_TEXT_SCALE: f32 = 1.0;
 
 pub struct HudBuilder {
     w: f32,
     h: f32,
     /// Window pixels per pixel of a 640x480 screen: the size of the
-    /// corner margins and of the remake's own text.
+    /// corner margins.
     s: f32,
+    /// Window pixels per pixel of a 1280x960 screen for the remake's own
+    /// text (and how far from where it's placed it sits).
+    text_scale: f32,
     /// Which of the HUD tags' layouts this view draws.
     split: ScreenSplit,
     /// Window pixels per pixel of a HUD widget's bitmap.
@@ -59,6 +67,10 @@ impl HudBuilder {
             w,
             h,
             s: h / 480.0,
+            // Halo 2's tags don't say how big its HUD text is (each text
+            // widget names a font, which isn't in the maps), so the remake's
+            // own text goes at the art's scale.
+            text_scale: bitmap_scale.max(MIN_TEXT_SCALE),
             split,
             bitmap_scale,
             offset_scale,
@@ -68,6 +80,12 @@ impl HudBuilder {
 
     pub fn scale(&self) -> f32 {
         self.s
+    }
+
+    /// Window pixels per pixel of a 1280x960 screen for the remake's own
+    /// HUD text: the HUD art's scale, but never less than `MIN_TEXT_SCALE`.
+    pub fn text_scale(&self) -> f32 {
+        self.text_scale
     }
 
     /// Which of the HUD tags' layouts this view draws.

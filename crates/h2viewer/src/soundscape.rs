@@ -239,7 +239,7 @@ impl Soundscape {
         }
     }
 
-    /// A menu sound.
+    /// A menu sound (heard while the game is paused, unlike its own).
     pub fn play_ui(&mut self, scene: &Scene, sound: crate::menu::Sound) {
         use crate::menu::Sound;
         let ui = scene.game_sounds.ui;
@@ -249,10 +249,14 @@ impl Soundscape {
             Sound::Back => ui.back,
             Sound::Advance => ui.advance,
         };
-        self.play_flat(scene, s, UI_VOLUME);
+        let Some(asset) = s.and_then(|s| scene.sounds.get(s)) else {
+            return;
+        };
+        let clip = asset.clips[self.pick(asset.clips.len())].clone();
+        self.audio.play_ui(&clip, asset.gain * UI_VOLUME);
     }
 
-    /// A sound with no place in the world (interface, announcer).
+    /// A sound of the game with no place in the world (the announcer, say).
     fn play_flat(&mut self, scene: &Scene, sound: Option<usize>, volume: f32) -> f32 {
         let Some(asset) = sound.and_then(|s| scene.sounds.get(s)) else {
             return 0.0;

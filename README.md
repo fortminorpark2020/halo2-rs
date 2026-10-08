@@ -70,7 +70,10 @@ motion sensor shows teammates (yellow) and enemies (red) within 25 metres who
 move faster than a crouch-walk or fire; with it off, the HUD has no tracker.
 The HUD is drawn at Halo 2's own size: its bitmaps are made for a 1280x960
 screen, so at 1080p they are drawn at 1.125 times their size (the motion
-tracker about a sixth of the screen's height).
+tracker about a sixth of the screen's height). The remake's own HUD text (the
+score and clock, kill feed, prompts, respawn countdown and names) goes at the
+same scale, but never smaller than one pixel to each pixel of its 5x7 font
+(8 pixel lines), so it stays readable in a 720p window and splitscreen views.
 In team games, T (or X on a controller) puts you on the red or blue team; bots
 fill the smaller team (counting the people on other PCs in the lobby).
 System Link lists games other PCs on the network are
@@ -80,9 +83,10 @@ controller (d-pad or stick, A, B).
 
 In a game, click in the window to look around with the mouse, WASD to move,
 Space to jump, Ctrl or C to crouch, hold Tab for the scoreboard, Esc for the
-pause menu (resume, end the game, quit). The game stops while it's up, unless
-someone on another PC plays in it: then only you stop (as in Halo 2's System
-Link). ` (backquote) switches between walking
+pause menu (resume, end the game, quit). The game stops while it's up, its
+sounds (engines, the shield alarm, rockets in flight) holding until you resume,
+unless someone on another PC plays in it: then only you stop (as in Halo 2's
+System Link). ` (backquote) switches between walking
 and flying (flying: Space / C up / down, Shift fast). When someone reaches the
 score to win, the game stops and the carnage report shows everyone's kills and
 deaths; Continue goes back to the lobby. With a time limit, a clock above the
@@ -218,7 +222,10 @@ the HUD tags' own half or quarter screen layout (quarter views have no ammo
 meter). A player who pauses gets the pause menu in their own view, and only
 their controller (or the keyboard, for Esc) works it. If a controller is
 unplugged or its battery runs out, its player stands still until it comes
-back or A on another controller takes over.
+back or A on another controller takes over (player one plays on at the
+keyboard, and Start on a new controller still drops a new player in). A
+guest's pause menu goes with their controller: player one gets it while the
+game stands still, and over a System Link game that plays on it closes.
 
 LAN: every lobby and game is open to other PCs on the same network (allow
 h2viewer through Windows Firewall when asked); System Link lists them and joins

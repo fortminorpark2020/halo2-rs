@@ -48,6 +48,9 @@ struct Voice {
     next: Vec<Arc<Clip>>,
     /// Gain change per output frame; fading out ends the voice.
     fade: f32,
+    /// A sound of the game (not a menu sound or music): it holds while the
+    /// game is paused.
+    game: bool,
 }
 
 #[derive(Default)]
@@ -55,6 +58,8 @@ struct Mixer {
     voices: Vec<Voice>,
     rate: u32,
     rng: u32,
+    /// The game is paused: its sounds hold where they are, silent.
+    paused: bool,
 }
 
 impl Mixer {
@@ -63,7 +68,11 @@ impl Mixer {
         out.fill(0.0);
         let frames = out.len() / channels.max(1);
         let rng = &mut self.rng;
+        let paused = self.paused;
         self.voices.retain_mut(|v| {
+            if paused && v.game {
+                return true;
+            }
             for f in 0..frames {
                 let mut total = v.clip.frames();
                 if total < 2 {
@@ -113,6 +122,8 @@ pub struct Audio {
     /// Where the mix goes: an audio device, a WAV recording, or nowhere.
     output: Output,
     next_id: u64,
+    /// The game's sounds are held (see `pause_game`).
+    paused: bool,
 }
 
 enum Output {
@@ -264,6 +275,7 @@ impl Audio {
             mixer,
             output,
             next_id: 1,
+            paused: false,
         }
     }
 
@@ -273,12 +285,30 @@ impl Audio {
             self.next_id += 1;
             return self.next_id - 1;
         }
-        self.start(clip, gain, pitch, looping)
+        self.start(clip, gain, pitch, looping, true)
     }
 
     /// Loop a clip, however quiet for now (see `adjust`).
     pub fn play_loop(&mut self, clip: &Arc<Clip>, gain: [f32; 2], pitch: f32) -> u64 {
-        self.start(clip, gain, pitch, true)
+        self.start(clip, gain, pitch, true, true)
+    }
+
+    /// A menu sound: it plays while the game is paused.
+    pub fn play_ui(&mut self, clip: &Arc<Clip>, gain: f32) -> u64 {
+        self.start(clip, [gain, gain], 1.0, false, false)
+    }
+
+    /// While the game is paused its sounds (loops too) hold where they
+    /// are, silent, and go on from there once it's back; menu sounds and
+    /// music play on.
+    pub fn pause_game(&mut self, paused: bool) {
+        if paused == self.paused {
+            return;
+        }
+        self.paused = paused;
+        if let Ok(mut m) = self.mixer.lock() {
+            m.paused = paused;
+        }
     }
 
     /// Change a playing voice's gains and pitch.
@@ -292,7 +322,14 @@ impl Audio {
         }
     }
 
-    fn start(&mut self, clip: &Arc<Clip>, gain: [f32; 2], pitch: f32, looping: bool) -> u64 {
+    fn start(
+        &mut self,
+        clip: &Arc<Clip>,
+        gain: [f32; 2],
+        pitch: f32,
+        looping: bool,
+        game: bool,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         if matches!(self.output, Output::None) {
@@ -319,6 +356,7 @@ impl Audio {
             looping,
             next: Vec::new(),
             fade: 0.0,
+            game,
         });
         id
     }
@@ -330,6 +368,7 @@ impl Audio {
         if let Ok(mut m) = self.mixer.lock() {
             if let Some(v) = m.voices.iter_mut().find(|v| v.id == id) {
                 v.next = then.to_vec();
+                v.game = false;
             }
         }
         id
@@ -374,6 +413,7 @@ mod tests {
             voices: Vec::new(),
             rate: 44100,
             rng: 1,
+            paused: false,
         };
         let clip = Arc::new(Clip {
             samples: vec![16384; 100],
@@ -389,6 +429,7 @@ mod tests {
             looping: false,
             next: Vec::new(),
             fade: 0.0,
+            game: true,
         });
         let mut out = vec![0.0; 2 * 150];
         m.mix(&mut out, 2);
@@ -406,6 +447,7 @@ mod tests {
             voices: Vec::new(),
             rate: 100,
             rng: 1,
+            paused: false,
         };
         let clip = |v: i16| {
             Arc::new(Clip {
@@ -423,6 +465,7 @@ mod tests {
             looping: false,
             next: vec![clip(16384)],
             fade: 0.0,
+            game: false,
         });
         let mut out = vec![0.0; 2 * 30];
         m.mix(&mut out, 2);
@@ -434,5 +477,44 @@ mod tests {
         m.mix(&mut out, 2);
         assert!(m.voices.is_empty());
         assert_eq!(out[2 * 29], 0.0);
+    }
+
+    #[test]
+    fn the_games_sounds_hold_while_it_is_paused() {
+        let mut m = Mixer {
+            voices: Vec::new(),
+            rate: 100,
+            rng: 1,
+            paused: true,
+        };
+        let clip = Arc::new(Clip {
+            samples: vec![8192; 10],
+            channels: 1,
+            rate: 100,
+        });
+        let voice = |id, game| Voice {
+            id,
+            clip: clip.clone(),
+            position: 0.0,
+            step: 1.0,
+            gain: [1.0, 1.0],
+            looping: true,
+            next: Vec::new(),
+            fade: 0.0,
+            game,
+        };
+        // A vehicle's engine loop, and a menu sound.
+        m.voices.push(voice(1, true));
+        m.voices.push(voice(2, false));
+        let mut out = vec![0.0; 2 * 5];
+        m.mix(&mut out, 2);
+        // Only the menu sound is heard; the engine waits where it was.
+        assert!((out[0] - 0.25 * MASTER).abs() < 1e-4);
+        assert_eq!(m.voices[0].position, 0.0);
+        assert_eq!(m.voices[1].position, 5.0);
+        m.paused = false;
+        m.mix(&mut out, 2);
+        assert!((out[0] - 0.5 * MASTER).abs() < 1e-4);
+        assert_eq!(m.voices[0].position, 5.0);
     }
 }
