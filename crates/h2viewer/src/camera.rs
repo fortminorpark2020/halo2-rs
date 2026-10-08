@@ -24,6 +24,9 @@ const MAX_FOV_X: f32 = 100.0;
 /// Controller look speed at full stick, radians per second.
 const STICK_YAW: f32 = 3.2;
 const STICK_PITCH: f32 = 2.2;
+/// How far up or down a view can look, radians (short of straight up,
+/// where the picture would turn over).
+pub const MAX_PITCH: f32 = 1.55;
 
 impl FlyCamera {
     pub fn looking_at(position: Vec3, target: Vec3) -> Self {
@@ -53,7 +56,7 @@ impl FlyCamera {
     /// Mouse look; `scale` slows it down while zoomed.
     pub fn look(&mut self, dx: f32, dy: f32, scale: f32) {
         self.yaw -= dx * SENSITIVITY * scale;
-        self.pitch = (self.pitch - dy * SENSITIVITY * scale).clamp(-1.55, 1.55);
+        self.pitch = (self.pitch - dy * SENSITIVITY * scale).clamp(-MAX_PITCH, MAX_PITCH);
     }
 
     /// Controller look: `stick` is the right stick (x right, y up); the
@@ -61,7 +64,8 @@ impl FlyCamera {
     pub fn look_stick(&mut self, stick: glam::Vec2, dt: f32, scale: f32) {
         let curve = |v: f32| v * v.abs();
         self.yaw -= curve(stick.x) * STICK_YAW * dt * scale;
-        self.pitch = (self.pitch + curve(stick.y) * STICK_PITCH * dt * scale).clamp(-1.55, 1.55);
+        self.pitch =
+            (self.pitch + curve(stick.y) * STICK_PITCH * dt * scale).clamp(-MAX_PITCH, MAX_PITCH);
     }
 
     pub fn update(&mut self, keys: &HashSet<KeyCode>, dt: f32) {

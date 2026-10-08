@@ -58,6 +58,22 @@ fn rifle() -> WeaponDef {
     }
 }
 
+/// A gun that loads and fires like Halo 2's Shotgun (Halo 2 PC's tags): 12
+/// shells, one put in every 0.4 s, and a second's recovery after each
+/// shot, none of it soft.
+pub fn shotgun() -> WeaponDef {
+    WeaponDef {
+        name: "shotgun".into(),
+        rounds_per_second: (0.0, 0.0),
+        fire_recovery_time: 1.0,
+        maximum_rounds: 48,
+        reload_time: 0.4,
+        rounds_reloaded: 1,
+        projectiles_per_shot: 10,
+        ..rifle()
+    }
+}
+
 pub fn game() -> Game {
     let rules = Rules {
         starting_weapons: vec![0],

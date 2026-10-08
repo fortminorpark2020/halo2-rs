@@ -1060,6 +1060,10 @@ impl ShotTally {
     /// Count a round fired at game time `time`; true when it starts a new
     /// firing effect: every shot, or every burst for guns that fire in
     /// bursts. Rounds at the same moment (a Shotgun's pellets) are one shot.
+    /// One a burst because the Battle Rifle's firing effect carries its
+    /// `fire_burst` sound, a whole burst's: played for each round it would
+    /// sound three bursts. Its firing kick (the effect's `jpt!`) goes with
+    /// it, once a burst.
     fn fire(&mut self, time: f64, burst: bool) -> bool {
         let fresh = time != self.last && (!burst || time - self.last > soundscape::BURST_GAP);
         self.effects += fresh as usize;
@@ -1518,7 +1522,7 @@ impl App {
             let speed = p.velocity.length();
             for c in &w.contrails {
                 let from = p.position - p.velocity * dt;
-                self.effects.ribbon(from, p.position, speed, dt, c);
+                self.effects.trail(from, p.position, speed, dt, c);
             }
         }
         // Needles stuck in people glow until they pop.
@@ -2051,12 +2055,12 @@ impl App {
             .locals
             .iter()
             .find(|l| l.player == player)
-            .and_then(|l| l.muzzle_point(&self.scene, &self.game, left))
+            .and_then(|l| l.tracer_point(&self.scene, &self.game, left))
             .or_else(|| self.world_muzzle(player, left, w.world_muzzle(effect)))
             .unwrap_or(origin);
         let end = hit.map_or(origin + direction * w.def.range, |(p, _)| p);
         for c in &w.contrails {
-            self.effects.ribbon(start, end, w.def.velocity, 0.0, c);
+            self.effects.ribbon(start, end, w.def.velocity, c);
         }
     }
 
@@ -2624,11 +2628,13 @@ impl App {
                 camera.pitch += pitch;
             }
             // Kicks and shakes move the picture (not the aim, nor the gun
-            // in hand), kept out of walls.
+            // in hand), kept out of walls, and never past straight up or
+            // down (where the picture would turn over).
             if cutscene_camera.is_none() {
                 let o = l.feedback.offset();
                 camera.yaw += o.yaw;
-                camera.pitch += o.pitch;
+                camera.pitch =
+                    (camera.pitch + o.pitch).clamp(-camera::MAX_PITCH, camera::MAX_PITCH);
                 let far = o.position.length();
                 if far > 1e-5 {
                     let dir = o.position / far;

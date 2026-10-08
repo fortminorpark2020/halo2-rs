@@ -179,17 +179,27 @@ impl ViewFeedback {
         }
     }
 
-    /// How far the picture is moved now.
+    /// How far the picture is moved now. Kicks overlapping (an SMG's hits,
+    /// fifteen a second) add up, but never past the strongest of them at
+    /// full strength: the tags give each kick's size, not how Halo 2
+    /// combines them, and summed freely a stream of hits carried the view
+    /// a metre or two. The cap is an estimate.
     pub fn offset(&self) -> ViewOffset {
         let mut out = ViewOffset::default();
         let (dir, [nyaw, npitch]) = self.noise;
+        let (mut turn, mut moved) = (glam::Vec2::ZERO, Vec3::ZERO);
+        let (mut most_turn, mut most_moved) = (0.0f32, 0.0f32);
         for k in &self.kicks {
             let i = &k.impulse;
             let left = i.fade.remaining(k.age / i.duration) * k.scale;
-            out.yaw += k.turn[0] * i.rotation * left;
-            out.pitch += k.turn[1] * i.rotation * left;
-            out.position += (k.push * i.pushback + dir * k.jitter) * left;
+            turn += glam::Vec2::from(k.turn) * i.rotation * left;
+            moved += (k.push * i.pushback + dir * k.jitter) * left;
+            most_turn = most_turn.max(i.rotation * k.scale);
+            most_moved = most_moved.max((i.pushback + k.jitter) * k.scale);
         }
+        let turn = turn.clamp_length_max(most_turn);
+        (out.yaw, out.pitch) = (turn.x, turn.y);
+        out.position = moved.clamp_length_max(most_moved);
         for s in &self.shakes {
             let sh = &s.shake;
             let left = sh.falloff.remaining(s.age / sh.duration) * s.scale;
@@ -356,6 +366,29 @@ mod tests {
         v.hit(&hit, -Vec3::X, basis, false, 1.0);
         let [r, g, b, a] = v.flash().unwrap();
         assert!(r > 0.0 && g == 0.0 && b == 0.0 && (a - 0.125).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_stream_of_hits_moves_the_view_no_more_than_one() {
+        let hit = DamageFeedback {
+            impulse: Some(CameraImpulse {
+                jitter: (0.01, 0.025),
+                ..rifle_kick().impulse.unwrap()
+            }),
+            ..Default::default()
+        };
+        let mut v = ViewFeedback::default();
+        let basis = (Vec3::X, -Vec3::Y, Vec3::Z);
+        // Two SMGs' worth from in front: thirty hits a second for a second.
+        for _ in 0..30 {
+            v.hit(&hit, -Vec3::X, basis, true, 1.0);
+            v.update(1.0 / 30.0);
+            let o = v.offset();
+            assert!(o.yaw.hypot(o.pitch) <= 0.5f32.to_radians() + 1e-6, "{o:?}");
+            assert!(o.position.length() <= 0.03 + 0.025 + 1e-6, "{o:?}");
+        }
+        // Though it still moves.
+        assert!(v.offset().pitch > 0.0);
     }
 
     #[test]

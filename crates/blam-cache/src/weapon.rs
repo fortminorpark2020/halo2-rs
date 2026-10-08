@@ -623,7 +623,10 @@ pub fn read_damage(set: &mut MapSet, jpt: DatumIndex) -> Result<Damage> {
 }
 
 /// How a value fades over an effect's duration: Halo 2's transition
-/// functions, named for when the fading happens.
+/// functions, named for when the fading happens. The order of the values is
+/// the one the community's tag plugins (Assembly's) give; it isn't checked
+/// against the game. Were Halo 2's order different, the Battle Rifle's kick
+/// (4) would fade very late rather than very early.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Fade {
     #[default]

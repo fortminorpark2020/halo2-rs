@@ -1393,7 +1393,10 @@ impl Gpu {
                 list.push((d.mesh, o));
             }
             let glow = d.fx.overshield * (1.0 - d.fx.camo);
-            let flare = d.fx.shield * (1.0 - d.fx.camo);
+            // Shields hit flare on a camouflaged player too: in Halo 2 a
+            // hit shows them up (from playing it, not the tags; fairly
+            // sure).
+            let flare = d.fx.shield;
             if glow > 0.01 || flare > 0.01 {
                 let fx = [0.0, glow, now, flare];
                 if let Some(o) = self.slot(proj, d.model, cam, [fog, shading], Some(d), fx) {

@@ -8,10 +8,16 @@ use std::collections::VecDeque;
 
 const MAX_DECALS: usize = 128;
 const DECAL_LIFE: f32 = 30.0;
-/// Most trails alive at once; the oldest go first.
+/// Most tracers alive at once; the oldest go first.
 const MAX_RIBBONS: usize = 256;
-/// Pieces each trail is drawn in, so its colour and width can change
-/// along it.
+/// Most stretches of flying rounds' trails alive at once. A stretch is laid
+/// every frame for every round, so how many are alive grows with the frame
+/// rate (a Needler's stream at 144 frames a second keeps about 1100); they
+/// are kept apart from the tracers so they never push those out, and this
+/// is only a bound on memory.
+const MAX_TRAIL_STRETCHES: usize = 8192;
+/// Pieces each tracer is drawn in, so its colour and width can change
+/// along it. A trail's stretch, one frame's flight, is one piece.
 const RIBBON_PIECES: usize = 8;
 
 /// A tag's colour (gamma-encoded, as Halo 2 stores them) in the linear
@@ -42,6 +48,8 @@ struct Ribbon {
     speed: f32,
     states: Vec<RibbonState>,
     age: f32,
+    /// Pieces it's drawn in.
+    pieces: usize,
 }
 
 impl Ribbon {
@@ -103,6 +111,8 @@ pub struct Effects {
     decals: VecDeque<Decal>,
     particles: Vec<Particle>,
     ribbons: VecDeque<Ribbon>,
+    /// Flying rounds' trails, a stretch a frame.
+    trails: VecDeque<Ribbon>,
     rng: u32,
 }
 
@@ -387,11 +397,40 @@ impl Effects {
         }
     }
 
+    /// A tracer: a contrail laid from `from` to `to`, its head moving at
+    /// `speed` world units a second (0: there at once).
+    pub fn ribbon(&mut self, from: Vec3, to: Vec3, speed: f32, contrail: &Contrail) {
+        if let Some(r) = self.new_ribbon(from, to, speed, 0.0, contrail, RIBBON_PIECES) {
+            if self.ribbons.len() >= MAX_RIBBONS {
+                self.ribbons.pop_front();
+            }
+            self.ribbons.push_back(r);
+        }
+    }
+
+    /// A stretch of a flying round's trail: the `age` seconds it flew from
+    /// `from` to `to` at `speed`, laid as it went.
+    pub fn trail(&mut self, from: Vec3, to: Vec3, speed: f32, age: f32, contrail: &Contrail) {
+        if let Some(r) = self.new_ribbon(from, to, speed, age, contrail, 1) {
+            if self.trails.len() >= MAX_TRAIL_STRETCHES {
+                self.trails.pop_front();
+            }
+            self.trails.push_back(r);
+        }
+    }
+
     /// A contrail laid from `from` to `to`, its head moving at `speed`
     /// world units a second (0: there at once) and already `age` seconds
-    /// along: a tracer, or a stretch of a flying round's trail. Each trail
-    /// picks its times and colour in the tag's ranges.
-    pub fn ribbon(&mut self, from: Vec3, to: Vec3, speed: f32, age: f32, contrail: &Contrail) {
+    /// along. Each picks its times and colour in the tag's ranges.
+    fn new_ribbon(
+        &mut self,
+        from: Vec3,
+        to: Vec3,
+        speed: f32,
+        age: f32,
+        contrail: &Contrail,
+        pieces: usize,
+    ) -> Option<Ribbon> {
         let mut states: Vec<RibbonState> = Vec::with_capacity(contrail.states.len() + 1);
         for s in &contrail.states {
             let pick = |(lo, hi): (f32, f32), k: f32| lo + (hi - lo) * k;
@@ -413,19 +452,14 @@ impl Effects {
                 ..only
             });
         }
-        if states.len() < 2 {
-            return;
-        }
-        if self.ribbons.len() >= MAX_RIBBONS {
-            self.ribbons.pop_front();
-        }
-        self.ribbons.push_back(Ribbon {
+        (states.len() >= 2).then_some(Ribbon {
             from,
             to,
             speed,
             states,
             age,
-        });
+            pieces,
+        })
     }
 
     pub fn update(&mut self, dt: f32) {
@@ -442,17 +476,19 @@ impl Effects {
             p.position += p.velocity * dt;
         }
         self.particles.retain(|p| p.age < p.life);
-        for r in &mut self.ribbons {
-            r.age += dt;
+        for list in [&mut self.ribbons, &mut self.trails] {
+            for r in list.iter_mut() {
+                r.age += dt;
+            }
+            list.retain(|r| r.age < r.travel() + r.life());
         }
-        self.ribbons.retain(|r| r.age < r.travel() + r.life());
     }
 
     /// Triangles for the trails, facing a camera at `eye`: each a strip
     /// whose width and colour follow the age of its points.
     pub fn ribbons(&self, eye: Vec3) -> Vec<SpriteVertex> {
         let mut out = Vec::new();
-        for r in &self.ribbons {
+        for r in self.ribbons.iter().chain(&self.trails) {
             let length = r.from.distance(r.to);
             let dir = (r.to - r.from).normalize_or_zero();
             // The head, and the oldest point still showing.
@@ -467,7 +503,7 @@ impl Effects {
                 continue;
             }
             let point = |k: usize| {
-                let s = tail + (head - tail) * k as f32 / RIBBON_PIECES as f32;
+                let s = tail + (head - tail) * k as f32 / r.pieces as f32;
                 let age = match r.speed > 0.0 {
                     true => r.age - s / r.speed,
                     false => r.age,
@@ -483,7 +519,7 @@ impl Effects {
                 color,
             };
             let mut last = point(0);
-            for k in 1..=RIBBON_PIECES {
+            for k in 1..=r.pieces {
                 let next = point(k);
                 let (a0, w0, c0) = last;
                 let (a1, w1, c1) = next;
@@ -586,7 +622,7 @@ mod tests {
     #[test]
     fn tracers_run_from_the_muzzle_and_fade() {
         let mut e = Effects::new();
-        e.ribbon(Vec3::ZERO, Vec3::X * 40.0, 400.0, 0.0, &tracer());
+        e.ribbon(Vec3::ZERO, Vec3::X * 40.0, 400.0, &tracer());
         let eye = Vec3::new(0.0, 0.0, 1.0);
         // Nothing yet: the head hasn't left the muzzle.
         assert!(e.ribbons(eye).is_empty());
@@ -605,6 +641,22 @@ mod tests {
         assert!(!e.ribbons(eye).is_empty());
         e.update(0.07);
         assert!(e.ribbons(eye).is_empty() && e.ribbons.is_empty());
+    }
+
+    #[test]
+    fn flying_rounds_trails_leave_the_tracers_be() {
+        let mut e = Effects::new();
+        e.ribbon(Vec3::ZERO, Vec3::X * 40.0, 0.0, &tracer());
+        // A Needler's stream at a high frame rate: far more stretches
+        // than tracers are kept.
+        for k in 0..2000 {
+            let at = Vec3::new(0.0, 1.0, k as f32 * 0.01);
+            e.trail(at, at + Vec3::Z * 0.01, 1.0, 0.01, &tracer());
+        }
+        assert_eq!((e.ribbons.len(), e.trails.len()), (1, 2000));
+        // Each stretch is one piece.
+        let eye = Vec3::new(0.0, -5.0, 0.0);
+        assert_eq!(e.ribbons(eye).len(), (RIBBON_PIECES + 2000) * 6);
     }
 
     #[test]

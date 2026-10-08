@@ -166,14 +166,17 @@ throws everyone in reach, the shooter included. Needles stick in whoever they
 hit and pop a moment later; seven in one target at once set off a supercombine
 that kills. Other Spartans bend at the waist to aim up and down.
 `H2_START_WEAPONS=needler,smg` changes what everyone spawns with, for testing.
-The Shotgun reloads a shell at a time (as its magazine tag says), with its
-own first person animations, and pulling the trigger mid-reload stops it to
-fire what's in.
+The Shotgun reloads a shell at a time (as its magazine tag says), each shell
+going in with its own first person animation and sound. Pulling the trigger
+mid-reload with a shell in stops the reload and fires, as soon as the gun has
+recovered from its last shot (a pull during the pump isn't lost: shells keep
+going in until the shot leaves).
 
 What you feel: firing kicks your view, being hit knocks it and flashes the
 screen (blue while your shields hold, red after), and explosions nearby shake
 it, by the sizes, lengths and colours in the weapons' damage tags; it moves
-only the picture, never where you aim. Shots leave the tracers and trails
+only the picture, never where you aim (kicks overlapping move it no further
+than the strongest of them, our estimate). Shots leave the tracers and trails
 their rounds' contrail tags give (the Battle Rifle a tracer every third
 round, the Sniper Rifle a smoke trail), drawn from the muzzle. Muzzle flashes
 come from the firing effects' own markers, in each gun's colour, on other

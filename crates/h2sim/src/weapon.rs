@@ -414,7 +414,8 @@ impl WeaponDef {
 
     /// Reloads a few rounds at a time (the Shotgun, shell by shell): each
     /// `reload_time` puts in `rounds_reloaded`, and a pull of the trigger
-    /// stops the reload to fire what's in.
+    /// with a round in stops the reload to fire it once the barrel has
+    /// recovered.
     pub fn loads_singly(&self) -> bool {
         self.rounds_reloaded > 0 && self.rounds_reloaded < self.magazine_size
     }
@@ -554,6 +555,7 @@ impl WeaponState {
         }
         self.zoom_held = input.zoom;
 
+        let mut interrupted = false;
         if let Some(t) = self.reloading.as_mut() {
             *t -= dt;
             if *t <= 0.0 {
@@ -572,16 +574,23 @@ impl WeaponState {
                 let more = self.loaded < def.magazine_size && self.reserve > 0 && take > 0;
                 self.reloading = (def.loads_singly() && more).then_some(def.reload_time + left);
             }
-            // A pull of the trigger stops a shell-by-shell reload and fires
-            // what's in.
-            let interrupted = pressed && def.loads_singly() && self.has_round(def);
-            if !interrupted || self.reloading.is_none() {
+            // A pull of the trigger with a round in stops a shell-by-shell
+            // reload to fire it, as soon as the barrel has recovered from
+            // the last shot (the pull is kept till then, and shells keep
+            // going in meanwhile). A pull with nothing in does nothing.
+            if pressed && def.loads_singly() && self.has_round(def) {
+                self.queued = true;
+            }
+            if !(self.queued && def.loads_singly() && self.cooldown <= READY) {
+                // The barrel recovers while the gun reloads.
+                self.cooldown = (self.cooldown - dt).max(0.0);
                 self.cool(def, dt);
                 return shots;
             }
             self.reloading = None;
+            interrupted = true;
         }
-        if input.reload {
+        if input.reload && !interrupted {
             self.start_reload(def);
             return shots;
         }
@@ -1039,6 +1048,59 @@ mod tests {
         run(&def, &mut w, reload, 1.0 / 120.0);
         assert!(clicks(&def, &mut w, &[0.1], 0.2).is_empty());
         assert!(w.reloading.is_some());
+    }
+
+    /// Press the trigger for one step at `pull` (seconds), then run on
+    /// with it let go until `seconds`; the shots and when they left.
+    fn pull_and_wait(def: &WeaponDef, w: &mut WeaponState, pull: f32, seconds: f32) -> Vec<f32> {
+        clicks(def, w, &[pull], seconds)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    #[test]
+    fn a_pull_during_the_pump_fires_once_the_shotgun_recovers() {
+        // The usual way: shoot, reload at once, and pull the trigger
+        // after a shell is in, while the gun is still recovering from the
+        // shot (a second, with nothing of it soft).
+        let (def, mut w) = shotgun();
+        (w.loaded, w.reserve) = (5, 20);
+        let reload = WeaponInput {
+            reload: true,
+            ..Default::default()
+        };
+        assert_eq!(clicks(&def, &mut w, &[0.0], 1.0 / 120.0).len(), 1);
+        run(&def, &mut w, reload, 1.0 / 120.0);
+        run(&def, &mut w, WeaponInput::default(), 0.5);
+        assert_eq!((w.loaded, w.reserve), (5, 19));
+        // The one pull is kept: the shot leaves the moment the barrel has
+        // recovered, a second after the last, and the reload stops there.
+        // Another shell went in while it waited.
+        let shots = pull_and_wait(&def, &mut w, 0.0, 1.0);
+        assert_eq!(shots.len(), 1);
+        let at = shots[0] + 0.5 + 2.0 / 120.0;
+        assert!((at - def.fire_recovery_time).abs() < 0.02, "fired at {at}");
+        assert_eq!((w.loaded, w.reserve), (5, 18));
+        assert!(w.reloading.is_none());
+    }
+
+    #[test]
+    fn the_shotgun_is_ready_when_its_reload_ends() {
+        // The last shell fired, then a full reload: the barrel recovered
+        // during it, so a pull right as the twelfth shell goes in fires.
+        let (def, mut w) = shotgun();
+        (w.loaded, w.reserve) = (1, 12);
+        assert_eq!(clicks(&def, &mut w, &[0.0], 1.0 / 120.0).len(), 1);
+        let reload = WeaponInput {
+            reload: true,
+            ..Default::default()
+        };
+        run(&def, &mut w, reload, 1.0 / 120.0);
+        run(&def, &mut w, WeaponInput::default(), 12.0 * 0.4 + 0.05);
+        assert_eq!((w.loaded, w.reserve), (12, 0));
+        assert!(w.reloading.is_none());
+        assert_eq!(pull_and_wait(&def, &mut w, 0.0, 0.1), vec![0.0]);
     }
 
     #[test]

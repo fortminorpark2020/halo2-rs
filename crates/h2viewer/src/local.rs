@@ -129,13 +129,15 @@ fn muzzle_light(
 }
 
 /// Where a reload one shell at a time (the Shotgun's) has got to in the
-/// first person animations: going in, then a shell after another.
+/// first person animations, following the gun: `reload_enter`, then one
+/// pass of `reload_continue_empty` (a shell going in, with its sound) each
+/// time the simulation puts a shell in, then `reload_exit`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum ShellReload {
     #[default]
     Off,
-    Enter,
-    Shells,
+    /// Reloading, the gun's loaded rounds when last looked at.
+    On { loaded: u32 },
 }
 
 /// What one hand's first person animation should react to.
@@ -147,6 +149,8 @@ struct HandCues {
     reload: Option<bool>,
     /// The gun is reloading now.
     reloading: bool,
+    /// Rounds loaded in the gun now.
+    loaded: u32,
 }
 
 fn animate_hand(
@@ -161,20 +165,24 @@ fn animate_hand(
         animator.play(hand_animation(rig, dual, "ready", *shots), false);
         *shells = ShellReload::Off;
     }
-    // A reload a shell at a time: going in, a shell after another while
-    // the gun reloads, and out again once it's done (or stopped to fire).
-    match *shells {
-        ShellReload::Enter | ShellReload::Shells if !cues.reloading => {
+    // A reload a shell at a time: a shell goes in each time the gun has
+    // one more loaded (the first cutting reload_enter short), and the
+    // arms come out again once the reload is over and the last shell's
+    // in (unless stopped to fire).
+    if let ShellReload::On { loaded } = *shells {
+        let shell = rig.find("first_person:reload_continue_empty", 0);
+        if cues.loaded > loaded && shell.is_some() {
+            animator.play(shell, false);
+        }
+        *shells = ShellReload::On {
+            loaded: cues.loaded,
+        };
+        if !cues.reloading && animator.finished(rig) {
             *shells = ShellReload::Off;
             if !cues.fired {
                 animator.play(rig.find("first_person:reload_exit", 0), false);
             }
         }
-        ShellReload::Enter if animator.finished(rig) => {
-            *shells = ShellReload::Shells;
-            animator.play(rig.find("first_person:reload_continue_empty", 0), true);
-        }
-        _ => {}
     }
     if cues.fired {
         *shots += 1;
@@ -203,7 +211,9 @@ fn animate_hand(
     let enter = rig.find("first_person:reload_enter", 0);
     if let (Some(_), Some(enter)) = (cues.reload, enter) {
         animator.play(Some(enter), false);
-        *shells = ShellReload::Enter;
+        *shells = ShellReload::On {
+            loaded: cues.loaded,
+        };
     } else if let Some(empty) = cues.reload {
         let name = if empty && !dual {
             "reload_empty"
@@ -214,7 +224,8 @@ fn animate_hand(
             hand_animation(rig, dual, name, 0).or_else(|| rig.find("first_person:reload_full", 0));
         animator.play(anim, false);
     }
-    if animator.finished(rig) {
+    // Between shells the arms hold where the last one left them.
+    if animator.finished(rig) && *shells == ShellReload::Off {
         animator.play(hand_animation(rig, dual, "idle", *shots), true);
     }
     animator.update(rig, dt);
@@ -762,8 +773,9 @@ impl LocalPlayer {
                 .and_then(|w| w.rig_for(elite))
         };
         let right = me.held().map(|h| h.weapon);
-        let reloading =
-            [me.held(), me.left.as_ref()].map(|h| h.is_some_and(|h| h.state.reloading.is_some()));
+        let hands = [me.held(), me.left.as_ref()];
+        let reloading = hands.map(|h| h.is_some_and(|h| h.state.reloading.is_some()));
+        let loaded = hands.map(|h| h.map_or(0, |h| h.state.loaded));
         if let Some(rig) = rig_of(right) {
             let hand = HandCues {
                 ready: switched || right != self.shown_weapon,
@@ -772,6 +784,7 @@ impl LocalPlayer {
                 thrown: view.thrown,
                 reload: view.reload,
                 reloading: reloading[0],
+                loaded: loaded[0],
             };
             animate_hand(
                 &mut self.animator,
@@ -791,6 +804,7 @@ impl LocalPlayer {
                 thrown: false,
                 reload: view.reload_left,
                 reloading: reloading[1],
+                loaded: loaded[1],
             };
             animate_hand(
                 &mut self.left_animator,
@@ -961,9 +975,23 @@ impl LocalPlayer {
     }
 
     /// Where the first person gun in a hand (`left`, else the right) flashes
-    /// now, for its last shot's firing effect: in the world, for tracers to
-    /// start from. None unless seen in first person, unzoomed.
+    /// now, for its last shot's firing effect, in the world. None unless
+    /// seen in first person, unzoomed.
     pub fn muzzle_point(&self, scene: &Scene, game: &Game, left: bool) -> Option<Vec3> {
+        self.gun_muzzle(scene, game, left, false)
+    }
+
+    /// Where a tracer from the first person gun in a hand starts: its
+    /// muzzle, zoomed in too, where the gun would be were it shown, off
+    /// below the scope's view, so a zoomed Sniper Rifle's trail rises into
+    /// it rather than running straight out of the eye, edge on and unseen.
+    /// (That Halo 2 shows it rising from below the scope is from playing
+    /// the game, not the tags: fairly sure.) None unless in first person.
+    pub fn tracer_point(&self, scene: &Scene, game: &Game, left: bool) -> Option<Vec3> {
+        self.gun_muzzle(scene, game, left, true)
+    }
+
+    fn gun_muzzle(&self, scene: &Scene, game: &Game, left: bool, zoomed: bool) -> Option<Vec3> {
         if !self.first_person(game) {
             return None;
         }
@@ -973,7 +1001,7 @@ impl LocalPlayer {
             false => me.held()?,
         };
         let weapon = scene.weapons.get(held.weapon)?;
-        if held.state.zoom != 0 || weapon.view_mesh.is_none() {
+        if (held.state.zoom != 0 && !zoomed) || weapon.view_mesh.is_none() {
             return None;
         }
         let muzzle = weapon.muzzle(self.firing_effect[left as usize]);
@@ -1593,5 +1621,104 @@ mod tests {
                 assert_eq!(screen_split(k, n), expected, "view {k} of {n}");
             }
         }
+    }
+
+    /// A first person rig with the Shotgun's reload animations, their
+    /// lengths and sound events as in Halo 2 PC's fp_shotgun graph
+    /// (reload_continue_empty: 16 frames, the shell sound at frame 1).
+    fn shotgun_rig() -> rig::FirstPersonRig {
+        use blam_cache::animation::{Animation, AnimationGraph, AnimationKind};
+        let anim = |name: &str, frame_count: u16, sound_events: Vec<(u16, usize)>| Animation {
+            name: name.into(),
+            kind: AnimationKind::Base,
+            frame_count,
+            decoded: true,
+            rotations: Vec::new(),
+            translations: Vec::new(),
+            scales: Vec::new(),
+            sound_events,
+            frame_events: Vec::new(),
+            movement: Vec::new(),
+        };
+        let graph = AnimationGraph {
+            animations: vec![
+                anim("first_person:idle", 89, Vec::new()),
+                anim("first_person:fire_1", 26, vec![(1, 2)]),
+                anim("first_person:reload_enter", 19, Vec::new()),
+                anim("first_person:reload_continue_empty", 16, vec![(1, SHELL)]),
+                anim("first_person:reload_exit", 19, vec![(1, EXIT)]),
+            ],
+            ..Default::default()
+        };
+        let none = rig::Skeleton::default();
+        let mut rig = rig::FirstPersonRig::new(graph, &none, &none);
+        rig.sounds = vec![Some(SHELL), Some(EXIT), Some(2)];
+        rig
+    }
+
+    const SHELL: usize = 0;
+    const EXIT: usize = 1;
+
+    /// Reload a Shotgun with `shells` to go, pulling the trigger at
+    /// `pull` seconds if given, with the first person animations
+    /// following; the sounds they started.
+    fn shell_reload(shells: u32, pull: Option<f32>) -> Vec<usize> {
+        let rig = shotgun_rig();
+        let def = h2sim::testing::shotgun();
+        let mut gun = WeaponState::new(&def);
+        (gun.loaded, gun.reserve) = (def.magazine_size - shells, 24);
+        let mut animator = rig::Animator::default();
+        let (mut shots, mut state) = (0, ShellReload::Off);
+        let mut sounds = Vec::new();
+        let dt = 1.0 / 60.0;
+        for step in 0..(8.0 / dt) as usize {
+            let t = step as f32 * dt;
+            let input = h2sim::WeaponInput {
+                reload: step == 0,
+                fire: pull.is_some_and(|p| t >= p && t < p + dt),
+                ..Default::default()
+            };
+            let was = gun.reloading.is_some();
+            let fired = !gun.update(&def, input, dt).is_empty();
+            let cues = HandCues {
+                ready: false,
+                fired,
+                melee: false,
+                thrown: false,
+                reload: (!was && gun.reloading.is_some()).then_some(false),
+                reloading: gun.reloading.is_some(),
+                loaded: gun.loaded,
+            };
+            animate_hand(
+                &mut animator,
+                &rig,
+                false,
+                cues,
+                (&mut shots, &mut state),
+                dt,
+            );
+            sounds.extend(animator.take_sounds());
+        }
+        assert_eq!(state, ShellReload::Off);
+        sounds
+    }
+
+    #[test]
+    fn each_shell_goes_in_with_its_own_pass_and_sound() {
+        let count = |sounds: &[usize], s: usize| sounds.iter().filter(|&&x| x == s).count();
+        for shells in [1, 2, 5, 12] {
+            let sounds = shell_reload(shells, None);
+            assert_eq!(count(&sounds, SHELL), shells as usize, "{shells} shells");
+            assert_eq!(count(&sounds, EXIT), 1, "{shells} shells");
+            // The arms come out after the last shell's in.
+            let last = sounds.iter().rposition(|&s| s == SHELL);
+            assert!(last < sounds.iter().position(|&s| s == EXIT));
+        }
+        // Stopped to fire after two shells: no more go in, and the shot's
+        // animation takes over from the reload's way out.
+        let sounds = shell_reload(5, Some(0.9));
+        assert_eq!(count(&sounds, SHELL), 2);
+        assert_eq!(count(&sounds, EXIT), 0);
+        assert_eq!(count(&sounds, 2), 1);
     }
 }
