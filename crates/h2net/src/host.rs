@@ -6,7 +6,7 @@
 use crate::conn::Connection;
 use crate::discovery::Beacon;
 use crate::live::ToServer;
-use crate::{after, kind, Lobby, Pace, ANY_TEAM, MAGIC, PROTOCOL};
+use crate::{after, kind, Lobby, Pace, ANY_TEAM, HOST_IS_PLAYING, MAGIC, PROTOCOL};
 use h2sim::game::{guest_name, Event, Look, Reader, Writer};
 use h2sim::{Command, Game, World};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -645,8 +645,14 @@ impl Host {
                         } else if r.verified.is_some() && !r.welcomed {
                             // Online, one that comes during a game loads it.
                             Ok(None)
+                        } else if h.map.eq_ignore_ascii_case(&self.map) {
+                            // The same map's name, with other contents.
+                            Err(format!(
+                                "YOUR {} MAP FILE IS DIFFERENT FROM THE HOST'S",
+                                self.map.to_uppercase()
+                            ))
                         } else {
-                            Err(format!("HOST IS PLAYING {}", self.map.to_uppercase()))
+                            Err(format!("{HOST_IS_PLAYING}{}", self.map.to_uppercase()))
                         }
                     });
                     let hello = match checked {
@@ -808,8 +814,10 @@ impl Host {
                         }
                     }
                 }
-                // Controls still on their way from a game that's over.
-                kind::INPUT | kind::ADD_LOCAL | kind::REMOVE_LOCAL if r.welcomed => {}
+                // Controls still on their way from a game that's over; or
+                // a hello for a game it's already in (its last hello from
+                // the lobby, sent as the game started, let it in).
+                kind::HELLO | kind::INPUT | kind::ADD_LOCAL | kind::REMOVE_LOCAL if r.welcomed => {}
                 kind::ALIVE => {}
                 kind::GOT => {
                     let got = rd.u32().map_err(|e| e.to_string())?;

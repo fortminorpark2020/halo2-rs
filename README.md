@@ -66,14 +66,17 @@ Rockets, Snipers, Swords and Shotguns variants and those of Team Hardcore
 motion sensor shows teammates (yellow) and enemies (red) within 25 metres who
 move faster than a crouch-walk or fire; with it off, the HUD has no tracker.
 In team games, T (or X on a controller) puts you on the red or blue team; bots
-fill the smaller team. System Link lists games other PCs on the network are
+fill the smaller team (counting the people on other PCs in the lobby).
+System Link lists games other PCs on the network are
 hosting.
 Menus work with the arrow keys or WASD, Enter and Esc, the mouse, or a
 controller (d-pad or stick, A, B).
 
 In a game, click in the window to look around with the mouse, WASD to move,
 Space to jump, Ctrl or C to crouch, hold Tab for the scoreboard, Esc for the
-pause menu (resume, end the game, quit). ` (backquote) switches between walking
+pause menu (resume, end the game, quit). The game stops while it's up, unless
+someone on another PC plays in it: then only you stop (as in Halo 2's System
+Link). ` (backquote) switches between walking
 and flying (flying: Space / C up / down, Shift fast). When someone reaches the
 score to win, the game stops and the carnage report shows everyone's kills and
 deaths; Continue goes back to the lobby. With a time limit, a clock above the
@@ -179,19 +182,35 @@ and `H2_LIST_VEHICLES=1` lists them as a map loads.
 Controllers use Halo 2's layout (left stick move, right stick look, RT fire,
 LT grenade, A jump, B melee, X reload / hold to pick up, Y switch weapon, click
 sticks to crouch and zoom, Start pauses, hold Back for the scoreboard). A on a
-new controller takes over player one; in the lobby, Start on another
-controller adds a splitscreen player (up to four) and Back takes them out
-again. Start on a new controller during a game drops them straight in.
+new controller takes over player one (the keyboard and mouse still work for
+them too); in the lobby, Start on another controller adds a splitscreen
+player (up to four) and Back or B takes them out again. Start on a new
+controller during a game drops them straight in. Splitscreen splits the
+window top and bottom for two, gives player one the top half and the others
+the bottom quarters for three, and a quarter each for four. A player who
+pauses gets the pause menu in their own view, and only their controller (or
+the keyboard, for Esc) works it. If a controller is unplugged or its battery
+runs out, its player stands still until it comes back or A on another
+controller takes over.
 
 LAN: every lobby and game is open to other PCs on the same network (allow
 h2viewer through Windows Firewall when asked); System Link lists them and joins
-the one you pick. Joined PCs wait in the host's lobby, seeing its choices and
-everyone in it (T or X picks your team there), and follow the host into each game it starts (loading the map
+the one you pick (a game from a different version of h2viewer shows as
+ANOTHER VERSION: update both PCs). Joined PCs wait in the host's lobby, seeing its choices and
+everyone in it (T or X picks your team there; until then the host picks it
+and the lobby shows you in grey), and follow the host into each game it starts (loading the map
 if needed; the game holds its start for them) and back to the lobby after it.
+A PC without the lobby's map can wait there, warned that it doesn't have it,
+but can't follow the host into a game on it.
 The host runs the game and its bots (fewer bots when more people join); if the
 host leaves, the joined PCs go back to System Link. A PC that leaves a game in
 progress leaves its Spartan to a bot, and takes it back, score and all, if it
 joins again (so does a member back in their party's custom game online).
+Two h2viewer windows on one PC can play System Link together, but the
+keyboard, mouse and controllers only reach the window in front (Windows gives
+controller input to the focused window), so two people at one PC should play
+splitscreen; two windows are for trying System Link on your own (set
+`H2_AUTOPILOT=1` for one of them and a bot plays it).
 
 Sound: weapons, reloads, grenades, footsteps, landings, shield recharge, the
 low shield alarm and rockets in flight play from the game's own sound files, placed left or right and

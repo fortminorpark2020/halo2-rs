@@ -20,6 +20,9 @@ pub struct LanGame {
     /// The host PC's name.
     pub computer: String,
     pub players: usize,
+    /// The version of the game it runs (`PROTOCOL`); another can't be
+    /// joined from here.
+    pub protocol: u32,
     session: u64,
     seen: Instant,
 }
@@ -32,6 +35,7 @@ impl LanGame {
             map: map.to_string(),
             computer: address.ip().to_string(),
             players: 0,
+            protocol: PROTOCOL,
             session: 0,
             seen: Instant::now(),
         }
@@ -86,19 +90,41 @@ impl Beacon {
 
 fn read_beacon(data: &[u8], from: IpAddr) -> Option<LanGame> {
     let mut r = Reader::new(data);
-    if r.u32().ok()? != MAGIC || r.u32().ok()? != PROTOCOL {
+    if r.u32().ok()? != MAGIC {
         return None;
     }
-    let session = r.u64().ok()?;
-    let port = r.u16().ok()?;
-    let players = r.u8().ok()? as usize;
-    let map = r.str().ok()?;
-    let computer = r.str().ok()?;
+    let protocol = r.u32().ok()?;
+    let mut rest = || -> Option<_> {
+        let session = r.u64().ok()?;
+        let port = r.u16().ok()?;
+        let players = r.u8().ok()? as usize;
+        Some((session, port, players, r.str().ok()?, r.str().ok()?))
+    };
+    let (session, port, players, map, computer) = match rest() {
+        Some(game) => game,
+        // Another version may say the rest differently; it still shows,
+        // by its address, so the person here knows to update.
+        None if protocol != PROTOCOL => {
+            let id = match from {
+                IpAddr::V4(ip) => u32::from(ip) as u64,
+                IpAddr::V6(ip) => u128::from(ip) as u64,
+            };
+            (
+                id ^ (protocol as u64) << 32,
+                0,
+                0,
+                String::new(),
+                from.to_string(),
+            )
+        }
+        None => return None,
+    };
     Some(LanGame {
         address: SocketAddr::new(from, port),
         map,
         computer,
         players,
+        protocol,
         session,
         seen: Instant::now(),
     })
@@ -168,4 +194,42 @@ pub fn local_ip() -> Option<IpAddr> {
     s.connect(("192.168.0.1", 9)).ok()?;
     let ip = s.local_addr().ok()?.ip();
     (!ip.is_unspecified()).then_some(ip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn beacon(magic: u32, protocol: u32) -> Vec<u8> {
+        let mut w = Writer::default();
+        w.u32(magic);
+        w.u32(protocol);
+        w.u64(7);
+        w.u16(47040);
+        w.u8(3);
+        w.str("lockout");
+        w.str("DEN");
+        w.0
+    }
+
+    #[test]
+    fn games_of_other_versions_show_but_others_dont() {
+        let from = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9));
+        let ours = read_beacon(&beacon(MAGIC, PROTOCOL), from).unwrap();
+        assert_eq!((ours.protocol, ours.map.as_str()), (PROTOCOL, "lockout"));
+        let older = read_beacon(&beacon(MAGIC, PROTOCOL - 1), from).unwrap();
+        assert_eq!(older.protocol, PROTOCOL - 1);
+        assert_eq!(older.computer, "DEN");
+        // Even one whose beacon reads differently.
+        let mut odd = MAGIC.to_le_bytes().to_vec();
+        odd.extend((PROTOCOL + 1).to_le_bytes());
+        let newer = read_beacon(&odd, from).unwrap();
+        assert_eq!(
+            (newer.protocol, newer.computer.as_str()),
+            (PROTOCOL + 1, "192.168.1.9")
+        );
+        // Not a game at all.
+        assert!(read_beacon(&beacon(MAGIC ^ 1, PROTOCOL), from).is_none());
+        assert!(read_beacon(&odd[..6], from).is_none());
+    }
 }

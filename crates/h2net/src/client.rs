@@ -111,7 +111,24 @@ impl Client {
         teams: &[u8],
         me: (&str, Look),
     ) -> std::io::Result<Client> {
-        let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)?;
+        Client::over_tcp(Client::reach(address)?, game, map, teams, me)
+    }
+
+    /// The connection to a host for `over_tcp`, made (or not) within a few
+    /// seconds: a game reaches for it away from its window, which would
+    /// stand still meanwhile.
+    pub fn reach(address: SocketAddr) -> std::io::Result<TcpStream> {
+        TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
+    }
+
+    /// Join a host as `connect` does, over a connection already made to it.
+    pub fn over_tcp(
+        stream: TcpStream,
+        game: &Game,
+        map: &str,
+        teams: &[u8],
+        me: (&str, Look),
+    ) -> std::io::Result<Client> {
         let mut client = Client::over(Connection::tcp(stream)?, game, map, teams, me);
         client.predicts = false;
         client.conn.flush().map_err(std::io::Error::other)?;

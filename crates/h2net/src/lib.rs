@@ -37,6 +37,9 @@ pub use ws::{accept, dial, reply, Request};
 pub const PROTOCOL: u32 = 25;
 /// A joining player's team when the host is to choose it.
 pub const ANY_TEAM: u8 = u8::MAX;
+/// How a host turns away a PC that isn't on its game's map (the map's name
+/// follows).
+pub const HOST_IS_PLAYING: &str = "HOST IS PLAYING ";
 /// The host listens here (or the next free port above it).
 pub const GAME_PORT: u16 = 47040;
 /// Hosts announce their games to this port.

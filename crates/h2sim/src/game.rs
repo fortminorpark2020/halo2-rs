@@ -318,6 +318,9 @@ impl GameType {
 /// Teams in team games: red and blue.
 pub const TEAMS: u8 = 2;
 
+/// A spawn point this close (metres) to someone alive is taken.
+const SPAWN_CLEARANCE: f32 = 1.5;
+
 /// Damage values and timings, from the game's tags where the map has them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rules {
@@ -1178,10 +1181,15 @@ impl Game {
     }
 
     /// Bring a player back at the spawn point farthest from enemies alive
-    /// (in Capture the Flag, on their own side of the map).
+    /// (in Capture the Flag, on their own side of the map), not on top of
+    /// anyone (a teammate spawning just before, say).
     pub fn respawn(&mut self, player: usize) {
         let others: Vec<Vec3> = (0..self.players.len())
             .filter(|&i| self.is_enemy(player, i) && self.players[i].alive)
+            .map(|i| self.players[i].body.position)
+            .collect();
+        let taken: Vec<Vec3> = (0..self.players.len())
+            .filter(|&i| i != player && self.players[i].alive)
             .map(|i| self.players[i].body.position)
             .collect();
         let team = self.players[player].team;
@@ -1208,8 +1216,11 @@ impl Game {
                 }
                 _ => 0.0,
             };
+            // A spot someone stands on only if every spot is taken.
+            let crowded = taken.iter().any(|o| o.distance(pos) < SPAWN_CLEARANCE);
+            let crowding = if crowded { 1000.0 } else { 0.0 };
             // A little randomness so spawns vary when no one is around.
-            let score = nearest.min(50.0) + side + self.random() * 4.0;
+            let score = nearest.min(50.0) + side + self.random() * 4.0 - crowding;
             if score > best.0 {
                 best = (score, (pos, yaw));
             }
@@ -2242,6 +2253,26 @@ pub(crate) mod tests {
         g.players[3].shield = 0.0;
         g.hurt(3, Some(0), 10.0, false, plasma);
         assert!((g.players[3].health - 41.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn teammates_spawn_apart() {
+        let mut g = game();
+        g.rules.game_type = GameType::TeamSlayer;
+        g.spawns = vec![
+            (Vec3::new(0.0, 0.0, 0.0), 0.0),
+            (Vec3::new(40.0, 0.0, 0.0), 0.0),
+            (Vec3::new(40.0, 10.0, 0.0), 0.0),
+        ];
+        // With an enemy on the first spot, two teammates spawning one
+        // after the other each take one of the far spots.
+        g.add_player_on(1);
+        g.players[0].body.position = Vec3::ZERO;
+        let a = g.add_player_on(0);
+        let b = g.add_player_on(0);
+        let (pa, pb) = (g.players[a].body.position, g.players[b].body.position);
+        assert!(pa.x > 30.0 && pb.x > 30.0, "{pa} {pb}");
+        assert!(pa.distance(pb) > SPAWN_CLEARANCE, "{pa} {pb}");
     }
 
     #[test]

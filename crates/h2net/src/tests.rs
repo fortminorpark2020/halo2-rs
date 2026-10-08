@@ -184,6 +184,29 @@ fn a_pc_on_another_map_is_turned_away() {
 }
 
 #[test]
+fn a_pc_with_another_version_of_the_map_is_told_so() {
+    let mut hg = game();
+    hg.add_player();
+    let mut host = Host::new("lockout", 4).unwrap();
+    // Its lockout.map places one more item than the host's.
+    let mut cg = game();
+    cg.item_spawns.push(cg.item_spawns[0]);
+    let mut client = Client::connect(address(&host), &cg, "lockout", &[ANY_TEAM], me()).unwrap();
+    let mut refused = None;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        if let Some(ClientEvent::Refused(why)) = ce.first() {
+            refused = Some(why.clone());
+        }
+        refused.is_some()
+    });
+    assert_eq!(
+        refused.as_deref(),
+        Some("YOUR LOCKOUT MAP FILE IS DIFFERENT FROM THE HOST'S")
+    );
+    assert_eq!(hg.players.len(), 1);
+}
+
+#[test]
 fn hosted_games_can_be_found() {
     let mut browser = Browser::new(10);
     let mut hg = game();
@@ -2909,4 +2932,60 @@ fn a_secure_server_gone_without_a_word_is_just_gone() {
     let dialing = ws::dial_trusting(&url, Duration::from_secs(5), roots);
     let mut dialed = dialing.recv().unwrap().unwrap();
     assert_eq!(end_of(&mut dialed), "connection closed");
+}
+
+#[test]
+fn a_team_change_read_after_the_start_lets_the_pc_in() {
+    let mut hg = game();
+    hg.rules.game_type = h2sim::GameType::TeamSlayer;
+    hg.add_player();
+    let mut host = Host::new("lockout", 13).unwrap();
+    host.set_lobby(Lobby {
+        map: "lockout".into(),
+        game_type: "TEAM SLAYER".into(),
+        score: "50".into(),
+        options: "DEFAULT".into(),
+        teams: true,
+        players: Vec::new(),
+        bots: 0,
+    });
+    // Joined from System Link, it has the lobby's map loaded.
+    let mut cg = game();
+    let mut client = Client::connect(address(&host), &cg, "lockout", &[ANY_TEAM], me()).unwrap();
+    let mut in_lobby = false;
+    pump(&mut host, &mut hg, &mut client, &mut cg, |_, ce, _| {
+        in_lobby |= ce.iter().any(|e| matches!(e, ClientEvent::Lobby(_)));
+        in_lobby
+    });
+    // Someone there picks blue while the host loads the game's map (and
+    // reads no one), so the host reads it only after the start.
+    client.rejoin(&cg, "lockout", &[1]);
+    std::thread::sleep(Duration::from_millis(50));
+    host.start("lockout");
+    let start = Instant::now();
+    let (mut left, mut lost, mut mine) = (Vec::new(), None, None);
+    while start.elapsed() < Duration::from_secs(2) {
+        for e in host.poll(&mut hg, 16) {
+            if let HostEvent::Left { reason, .. } = e {
+                left.push(reason);
+            }
+        }
+        host.send(&hg, &[], false);
+        let (ce, _) = client.poll(&mut cg);
+        for e in ce {
+            match e {
+                // As the game does: the map's loaded, so say hello again.
+                ClientEvent::Start(map) => client.rejoin(&cg, &map, &[1]),
+                ClientEvent::Welcomed { players, .. } => mine = Some(players[0]),
+                ClientEvent::Lost(why) => lost = Some(why),
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(left, Vec::<String>::new());
+    assert_eq!(lost, None);
+    assert_eq!(host.joined(), 1);
+    let mine = mine.expect("welcomed");
+    assert_eq!(hg.players[mine].team, 1);
 }

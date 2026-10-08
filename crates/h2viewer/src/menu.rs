@@ -281,6 +281,8 @@ pub struct SeatInfo {
 
 /// A player in the lobby whose team the game will choose.
 pub const NO_TEAM: u8 = h2net::ANY_TEAM;
+/// How the lobby says someone here plays with the keyboard and mouse.
+pub const KEYBOARD: &str = "KEYBOARD";
 
 /// What the game should do after a menu input.
 #[derive(Clone, Debug, PartialEq)]
@@ -535,6 +537,8 @@ const DIM: [f32; 4] = [0.5, 0.62, 0.8, 0.9];
 const PANEL: [f32; 4] = [0.02, 0.07, 0.14, 0.72];
 const HIGHLIGHT: [f32; 4] = [0.2, 0.45, 0.85, 0.9];
 const WARNING: [f32; 4] = [1.0, 0.55, 0.3, 1.0];
+/// The lobby's mark for someone in a team game with no team yet.
+const UNPICKED: [f32; 3] = [0.5, 0.5, 0.5];
 
 /// The lobby's score to win, as it shows it.
 pub fn score_label(settings: &Settings) -> String {
@@ -915,6 +919,10 @@ impl Menu {
                 }),
             ),
             Row::StartGame => ("START GAME".into(), None),
+            Row::Join(i) if ctx.lan[i].protocol != h2net::PROTOCOL => (
+                ctx.lan[i].computer.to_uppercase(),
+                Some("ANOTHER VERSION".into()),
+            ),
             Row::Join(i) => {
                 let g = &ctx.lan[i];
                 (
@@ -1078,7 +1086,13 @@ impl Menu {
         match input {
             Input::Up | Input::Down => {
                 let selectable = rows.iter().filter(|r| r.selectable(ctx)).count();
-                if selectable > 1 {
+                // The pause menu doesn't wrap round: QUIT is never a nudge
+                // up from RESUME.
+                let end = match input {
+                    Input::Up => self.cursor == 0,
+                    _ => self.cursor + 1 >= n,
+                };
+                if selectable > 1 && !(self.screen == Screen::Pause && end) {
                     loop {
                         self.cursor = if input == Input::Up {
                             (self.cursor + n - 1) % n
@@ -1257,6 +1271,13 @@ impl Menu {
                 Action::Start
             }
             Row::Join(i) => match ctx.lan.get(i) {
+                Some(g) if g.protocol != h2net::PROTOCOL => {
+                    self.notice = Some(format!(
+                        "{} RUNS ANOTHER VERSION, UPDATE BOTH PCS",
+                        g.computer.to_uppercase()
+                    ));
+                    Action::None
+                }
                 Some(g) => {
                     self.sound = Some(Sound::Advance);
                     Action::Join(g.clone())
@@ -1906,7 +1927,11 @@ impl Menu {
         let Some(map) = ctx.maps.get(self.settings.map) else {
             return ROW_Y;
         };
-        if map.picture.is_none() && map.description.is_empty() {
+        // In another PC's lobby on a map not here, there's none to show.
+        let theirs = ctx
+            .host_lobby
+            .is_some_and(|l| !l.map.eq_ignore_ascii_case(&map.name));
+        if theirs || map.picture.is_none() && map.description.is_empty() {
             return ROW_Y;
         }
         let s = f.s;
@@ -1996,10 +2021,11 @@ impl Menu {
         hb.text_left(font, f.at(x, y), 11.0 * s, "PLAYERS", BRIGHT);
         y += 24.0;
         for seat in ctx.seats {
-            let c = if teams && seat.team != NO_TEAM {
-                crate::local::TEAM_COLORS[seat.team.min(1) as usize]
-            } else {
-                crate::local::armor_colors(seat.look)[0]
+            let c = match (teams, seat.team) {
+                // The host puts them on a team when the game starts.
+                (true, NO_TEAM) => UNPICKED,
+                (true, t) => crate::local::TEAM_COLORS[t.min(1) as usize],
+                (false, _) => crate::local::armor_colors(seat.look)[0],
             };
             let how = seat.how;
             // Their colour (or team's) beside their emblem.
@@ -2026,21 +2052,20 @@ impl Menu {
             hb.text_left(font, f.at(x, y), 7.0 * s, "T OR X: CHANGE TEAM", DIM);
             y += 11.0;
         }
+        // Player one at the keyboard here: a controller can take over.
+        let keyboard =
+            ctx.host_lobby.is_none() && ctx.seats.first().is_some_and(|p| p.how == KEYBOARD);
+        let lines = match keyboard {
+            true => [
+                "A ON A CONTROLLER: PLAY AS PLAYER ONE",
+                "START ON ANOTHER: PLAY IN SPLITSCREEN",
+            ],
+            false => ["PRESS START ON A CONTROLLER", "TO PLAY IN SPLITSCREEN"],
+        };
         if invite {
-            hb.text_left(
-                font,
-                f.at(x, y),
-                7.0 * s,
-                "PRESS START ON A CONTROLLER",
-                DIM,
-            );
-            hb.text_left(
-                font,
-                f.at(x, y + 11.0),
-                7.0 * s,
-                "TO PLAY IN SPLITSCREEN",
-                DIM,
-            );
+            for (k, line) in lines.iter().enumerate() {
+                hb.text_left(font, f.at(x, y + 11.0 * k as f32), 7.0 * s, line, DIM);
+            }
         }
     }
 }
@@ -2676,6 +2701,15 @@ mod tests {
         assert_eq!(
             m.input(Input::Select, &ctx(&maps, &lan)),
             Action::Join(game)
+        );
+        // A game of another version shows, but says so rather than joining.
+        let mut other = LanGame::at("10.0.0.3:4000".parse().unwrap(), "midship");
+        other.protocol = h2net::PROTOCOL - 1;
+        let lan = [other];
+        assert_eq!(m.input(Input::Select, &ctx(&maps, &lan)), Action::None);
+        assert_eq!(
+            m.notice.as_deref(),
+            Some("10.0.0.3 RUNS ANOTHER VERSION, UPDATE BOTH PCS")
         );
     }
 

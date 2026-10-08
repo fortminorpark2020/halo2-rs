@@ -564,10 +564,10 @@ impl LocalPlayer {
             return None;
         }
         let kind = game.rules.game_type;
-        let (take, drop) = if self.keyboard {
-            ("E", "Q")
-        } else {
+        let (take, drop) = if self.pad_prompts() {
             ("X", "Y")
+        } else {
+            ("E", "Q")
         };
         let feet = me.body.position;
         let near = |p: Vec3| (p - feet).truncate().length() < 1.0 && (p.z - feet.z).abs() < 1.0;

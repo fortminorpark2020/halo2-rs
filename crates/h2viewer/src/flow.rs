@@ -72,10 +72,91 @@ pub fn bot_for(player: usize) -> (usize, Bot) {
     (player, Bot::new(player as u32 * 7919 + 13))
 }
 
+/// The teams of `bots` bots in a team game with `people` on the teams they
+/// want (`ANY_TEAM`: the smaller, as the host puts them): each on the
+/// smaller team in turn.
+fn bot_teams(people: &[u8], bots: usize) -> Vec<u8> {
+    let mut count = [0usize; TEAMS as usize];
+    let smaller = |count: &[usize]| (0..count.len()).min_by_key(|&t| count[t]).unwrap_or(0);
+    for &t in people {
+        let t = match t {
+            h2net::ANY_TEAM => smaller(&count),
+            t => (t as usize).min(count.len() - 1),
+        };
+        count[t] += 1;
+    }
+    (0..bots)
+        .map(|_| {
+            let t = smaller(&count);
+            count[t] += 1;
+            t as u8
+        })
+        .collect()
+}
+
 impl App {
     /// The menus are showing (over the map, or over a game).
     pub(crate) fn in_menu(&self) -> bool {
         self.mode == Mode::Menu || self.menu_open
+    }
+
+    /// The menu over the game is up for local player `k`: their own pause
+    /// menu, or one for everyone (the carnage report).
+    pub(crate) fn menu_for(&self, k: usize) -> bool {
+        let owner = self.menu_owner.filter(|&o| o < self.locals.len());
+        self.menu_open && owner.is_none_or(|o| o == k)
+    }
+
+    /// The keyboard and mouse work the menus: any of them, but over a game
+    /// only one that's up for the player at the keyboard.
+    pub(crate) fn keyboard_in_menu(&self) -> bool {
+        match self.locals.iter().position(|l| l.keyboard) {
+            Some(k) if self.mode == Mode::Playing => self.menu_for(k),
+            _ => self.in_menu(),
+        }
+    }
+
+    /// Controller `id` works the menus: any of them, but over a game only
+    /// one that's up for its player (or for everyone).
+    pub(crate) fn pad_in_menu(&self, id: GamepadId) -> bool {
+        if self.mode != Mode::Playing {
+            return self.in_menu();
+        }
+        let k = self.locals.iter().position(|l| l.pad == Some(id));
+        self.menu_for(k.unwrap_or(usize::MAX))
+    }
+
+    /// The game stands still: someone here paused it, and no one on another
+    /// PC plays in it (Halo 2 pauses a game at one console, but not one
+    /// over System Link).
+    pub(crate) fn paused(&self) -> bool {
+        let alone = match &self.net {
+            Net::Offline | Net::Connecting { .. } => true,
+            Net::Hosting(host) => {
+                host.joined() == 0 && !self.online.in_match() && !self.online.in_custom()
+            }
+            Net::Joined { .. } => false,
+        };
+        let pause = self.menu_open && self.menu.screen == Screen::Pause;
+        self.mode == Mode::Playing && pause && alone
+    }
+
+    /// Where the menus show: the whole window, or over a game the view of
+    /// the player whose pause menu it is.
+    pub(crate) fn menu_area(&self) -> [u32; 4] {
+        let (w, h) = self.window_size();
+        let (w, h) = (w as u32, h as u32);
+        let window = [0, 0, w, h];
+        let owner = self
+            .menu_owner
+            .filter(|_| self.menu_open && self.mode == Mode::Playing);
+        owner
+            .and_then(|k| {
+                crate::local::viewports(self.locals.len(), w, h)
+                    .get(k)
+                    .copied()
+            })
+            .unwrap_or(window)
     }
 
     /// Run `f` with the menu and what it shows.
@@ -119,16 +200,20 @@ impl App {
         self.after_menu(action);
     }
 
+    /// The mouse in the menus' area: where it is there, and the area's size.
+    fn menu_mouse(&self) -> ([f32; 2], f32, f32) {
+        let [x, y, w, h] = self.menu_area().map(|v| v as f32);
+        ([self.mouse[0] - x, self.mouse[1] - y], w, h)
+    }
+
     pub(crate) fn menu_click(&mut self) {
-        let (w, h) = self.window_size();
-        let pos = self.mouse;
+        let (pos, w, h) = self.menu_mouse();
         let action = self.with_menu(|m, ctx| m.click(pos, w, h, ctx));
         self.after_menu(action);
     }
 
     pub(crate) fn menu_hover(&mut self) {
-        let (w, h) = self.window_size();
-        let pos = self.mouse;
+        let (pos, w, h) = self.menu_mouse();
         self.with_menu(|m, ctx| m.hover(pos, w, h, ctx));
         self.after_menu(Action::None);
     }
@@ -153,8 +238,10 @@ impl App {
             Action::Join(game) => self.join_game(&game),
             Action::SaveProfile => self.menu.profile.save(),
             Action::Resume => {
+                if self.keyboard_in_menu() {
+                    self.set_capture(true);
+                }
                 self.menu_open = false;
-                self.set_capture(true);
             }
             Action::EndGame => self.end_game(),
             Action::Leave => self.leave_game(),
@@ -179,9 +266,26 @@ impl App {
         let seated = self.seats.iter().position(|s| s.pad == Some(id));
         let lobby = self.mode == Mode::Menu && self.menu.screen == Screen::Lobby;
         match press(pad_press) {
+            // A guest's B takes only them out of the lobby.
+            Press::Menu(Input::Back) if lobby && seated.is_some_and(|k| k > 0) => {
+                self.seats.retain(|s| s.pad != Some(id));
+                self.sound.play_ui(&self.scene, menu::Sound::Back);
+            }
             Press::Menu(input) => {
-                if input == Input::Select && seated.is_none() && self.seat_free() {
+                // A on a new controller takes over player one (the keyboard
+                // and mouse still work for them too).
+                let menus = self.mode == Mode::Menu;
+                if input == Input::Select
+                    && menus
+                    && seated.is_none()
+                    && self.seats[0].pad.is_none()
+                {
                     self.seats[0].pad = Some(id);
+                    if self.keyboard_used {
+                        // Taking over, not choosing what's highlighted.
+                        self.sound.play_ui(&self.scene, menu::Sound::Forward);
+                        return;
+                    }
                 }
                 self.menu_input(input);
             }
@@ -266,7 +370,7 @@ impl App {
                 how: if s.pad.is_some() {
                     "CONTROLLER"
                 } else {
-                    "KEYBOARD"
+                    menu::KEYBOARD
                 },
                 team: s.team,
                 level: crate::rank::test_level(k),
@@ -344,12 +448,25 @@ impl App {
         })
     }
 
-    pub(crate) fn open_menu(&mut self, screen: Screen) {
+    /// Bring up a menu over the game: local player `owner`'s pause menu,
+    /// or (None) one for everyone.
+    pub(crate) fn open_menu(&mut self, screen: Screen, owner: Option<usize>) {
         self.menu.show(screen);
         self.menu_open = true;
-        self.fire_held = false;
-        self.zoom_held = false;
-        self.set_capture(false);
+        self.menu_owner = owner;
+        if self.keyboard_in_menu() {
+            self.fire_held = false;
+            self.zoom_held = false;
+            self.set_capture(false);
+        }
+    }
+
+    /// Local player `k` pauses (Start, or Esc at the keyboard): the pause
+    /// menu comes up in their view, unless another menu is up.
+    pub(crate) fn pause(&mut self, k: usize) {
+        if !self.menu_open {
+            self.open_menu(Screen::Pause, Some(k));
+        }
     }
 
     /// Start the lobby's game, loading its map first if it isn't loaded.
@@ -426,15 +543,13 @@ impl App {
     }
 
     fn join_game(&mut self, game: &LanGame) {
-        if game.map.eq_ignore_ascii_case(&self.map_name) {
-            self.begin_join(game);
-            return;
+        // A lobby takes PCs on any map (they need its map only once a game
+        // starts), so one whose map isn't here is joined on the map that is.
+        let path = self.map_named(&game.map);
+        match path.filter(|_| !game.map.eq_ignore_ascii_case(&self.map_name)) {
+            Some(path) => self.begin_load(path, Then::Join(game.clone())),
+            None => self.begin_join(game),
         }
-        let Some(path) = self.map_named(&game.map) else {
-            self.menu.notice = Some(format!("YOU DON'T HAVE {}", menu::map_title(&game.map)));
-            return;
-        };
-        self.begin_load(path, Then::Join(game.clone()));
     }
 
     /// The file of the map LAN games call `name`, if this PC has it.
@@ -682,11 +797,19 @@ impl App {
             .settings
             .bots
             .min(scene::MAX_BODIES.saturating_sub(people));
-        // Each by its seat's name, on the team with the fewest players.
+        // Each by its seat's name; in team games, filling the smaller team
+        // once the people on PCs in the lobby (who come into the game
+        // after it starts) are on theirs.
+        let mut people: Vec<u8> = self.seats.iter().map(|s| s.team).collect();
+        if let Net::Hosting(host) = &self.net {
+            people.extend(host.members().into_iter().flat_map(|m| m.2));
+        }
+        let teams = match self.menu.settings.game_type().teams() {
+            true => bot_teams(&people, bots),
+            false => vec![h2net::ANY_TEAM; bots],
+        };
         let first = self.seats.len();
-        let bots: Vec<_> = (first..first + bots)
-            .map(|k| (h2net::ANY_TEAM, k))
-            .collect();
+        let bots: Vec<_> = teams.into_iter().zip(first..).collect();
         self.seat_players(&bots, &options);
         match &mut self.net {
             Net::Hosting(host) => {
@@ -699,9 +822,6 @@ impl App {
 
     /// Join a LAN game on the map that's loaded.
     pub(crate) fn begin_join(&mut self, game: &LanGame) {
-        // The host's options arrive with its game; start from the map as
-        // it comes.
-        self.seat_players(&[], &GameOptions::default());
         self.connect(game);
     }
 
@@ -727,7 +847,12 @@ impl App {
             for l in self.locals.iter().filter(|l| l.keyboard) {
                 seats.push(seat(l));
             }
-            for l in self.locals.iter().filter(|l| !l.keyboard) {
+            // A guest whose controller went doesn't come back with it.
+            for l in self
+                .locals
+                .iter()
+                .filter(|l| !l.keyboard && l.lost_pad.is_none())
+            {
                 if seats.is_empty() {
                     seats.push(Seat::default());
                 }
@@ -841,8 +966,10 @@ impl App {
         }
         let t = self.game_over.get_or_insert(0.0);
         *t += dt;
-        if *t >= crate::GAME_OVER_DELAY && !self.menu_open {
-            self.open_menu(Screen::PostGame);
+        // The carnage report is for everyone, over anyone's pause menu.
+        let report = self.menu_open && self.menu_owner.is_none();
+        if *t >= crate::GAME_OVER_DELAY && !report {
+            self.open_menu(Screen::PostGame, None);
         }
     }
 
@@ -871,5 +998,20 @@ impl App {
             self.with_menu(|m, ctx| m.draw(&mut hb, font, white, w, h, ctx));
         }
         hb.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bots_fill_the_smaller_team_counting_everyone() {
+        // Two people on red (one joining from another PC): both bots blue.
+        assert_eq!(bot_teams(&[0, 0], 2), [1, 1]);
+        // One who'll be put on the smaller team counts there.
+        assert_eq!(bot_teams(&[0, h2net::ANY_TEAM], 2), [0, 1]);
+        assert_eq!(bot_teams(&[1], 3), [0, 0, 1]);
+        assert_eq!(bot_teams(&[], 2), [0, 1]);
     }
 }

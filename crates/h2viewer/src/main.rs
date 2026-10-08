@@ -89,6 +89,8 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// Most people sharing one screen.
 pub(crate) const MAX_LOCAL: usize = 4;
+/// What a guest whose controller went sees until they play on.
+const LOST_PAD: &str = "CONTROLLER DISCONNECTED: PRESS A TO PLAY ON";
 /// Seconds between someone winning and the carnage report.
 const GAME_OVER_DELAY: f32 = 4.0;
 /// Frames this far apart mean the window isn't being drawn (it's
@@ -1094,6 +1096,10 @@ struct App {
     menu: Menu,
     /// The menu is up over a game (paused, or the carnage report).
     menu_open: bool,
+    /// Whose menu it is over a game: the local player who paused, in whose
+    /// view it shows and who alone stops playing; None, everyone's (the
+    /// carnage report).
+    menu_owner: Option<usize>,
     maps: Vec<MapChoice>,
     /// The campaign missions in the maps folder.
     missions: Vec<MapChoice>,
@@ -1219,7 +1225,11 @@ impl App {
             self.request_local(pad);
             return;
         }
-        if self.locals.len() >= MAX_LOCAL || self.game.players.len() >= scene::MAX_BODIES {
+        if self.game.players.len() >= scene::MAX_BODIES {
+            self.announce("THE GAME IS FULL");
+            return;
+        }
+        if self.locals.len() >= MAX_LOCAL {
             return;
         }
         let i = self.game.add_player();
@@ -1234,10 +1244,15 @@ impl App {
     }
 
     fn pad_pressed(&mut self, id: GamepadId, press: PadPress) {
+        match press {
+            PadPress::Disconnected => return self.pad_lost(id),
+            PadPress::Connected => return self.pad_back(id),
+            _ => {}
+        }
         if self.loading.is_some() {
             return;
         }
-        if self.in_menu() {
+        if self.pad_in_menu(id) {
             self.menu_pad(id, press);
             return;
         }
@@ -1247,20 +1262,26 @@ impl App {
             return;
         }
         let owner = self.locals.iter().position(|l| l.pad == Some(id));
+        // Someone whose controller went is first for a new one; then, for
+        // A, player one at the keyboard.
+        let lost = self.locals.iter().position(|l| l.lost_pad.is_some());
+        let keyboard = self
+            .locals
+            .iter()
+            .position(|l| l.keyboard && l.pad.is_none());
         match (owner, press) {
             (None, PadPress::Claim) => {
-                if let Some(l) = self
-                    .locals
-                    .iter_mut()
-                    .find(|l| l.keyboard && l.pad.is_none())
-                {
-                    l.pad = Some(id);
-                    l.message("CONTROLLER CONNECTED".into());
+                if let Some(k) = lost.or(keyboard) {
+                    self.take_pad(k, id);
                 }
             }
-            (None, PadPress::Join) => self.add_local(Some(id)),
-            (Some(_), PadPress::Join) => self.open_menu(Screen::Pause),
+            (None, PadPress::Join) => match lost {
+                Some(k) => self.take_pad(k, id),
+                None => self.add_local(Some(id)),
+            },
+            (Some(k), PadPress::Join) => self.pause(k),
             (Some(k), p) => {
+                let dual = local::dual_wielding(&self.game, self.locals[k].player);
                 let t = &mut self.locals[k].taps;
                 match p {
                     PadPress::Fire => t.fire = true,
@@ -1270,7 +1291,8 @@ impl App {
                     PadPress::Grenade => t.throw_grenade = true,
                     PadPress::SwitchGrenade => t.switch_grenade = true,
                     PadPress::Vision => t.vision = true,
-                    PadPress::Zoom => t.zoom = true,
+                    // Dual wielding, the right stick's click does nothing.
+                    PadPress::Zoom if !dual => t.zoom = true,
                     _ => {}
                 }
             }
@@ -1278,14 +1300,58 @@ impl App {
         }
     }
 
+    /// Local player `k` plays with controller `id` from now on.
+    fn take_pad(&mut self, k: usize, id: GamepadId) {
+        let l = &mut self.locals[k];
+        l.pad = Some(id);
+        l.lost_pad = None;
+        l.message("CONTROLLER CONNECTED".into());
+    }
+
+    /// A controller went: whoever played with it stands still until it
+    /// comes back or A on another takes over; a guest's place in the lobby
+    /// goes with it.
+    fn pad_lost(&mut self, id: GamepadId) {
+        match self.seats.iter().position(|s| s.pad == Some(id)) {
+            Some(0) => self.seats[0].pad = None,
+            Some(k) => {
+                self.seats.remove(k);
+            }
+            None => {}
+        }
+        for l in self.locals.iter_mut().filter(|l| l.pad == Some(id)) {
+            l.pad = None;
+            l.lost_pad = Some(id);
+            l.message("CONTROLLER DISCONNECTED".into());
+        }
+    }
+
+    /// A controller came back: to whoever lost it.
+    fn pad_back(&mut self, id: GamepadId) {
+        if let Some(k) = self.locals.iter().position(|l| l.lost_pad == Some(id)) {
+            self.take_pad(k, id);
+        }
+    }
+
     fn update(&mut self, dt: f32) {
         self.update_live();
         self.poll_loading();
+        self.poll_connect();
         self.update_music();
         for (id, press) in self.pads.presses() {
             self.pad_pressed(id, press);
         }
-        self.lan_games = self.browser.poll().to_vec();
+        let games = self.browser.poll().to_vec();
+        // What System Link said about a game is old news once a game shows
+        // up or changes map.
+        let new = games.iter().any(|g| {
+            let seen = |o: &h2net::LanGame| o.address == g.address && o.map == g.map;
+            !self.lan_games.iter().any(seen)
+        });
+        if new && self.menu.screen == Screen::SystemLink {
+            self.menu.notice = None;
+        }
+        self.lan_games = games;
         self.menu_time += dt;
         if self.mode == Mode::Menu || self.loading.is_some() {
             // An online host (a match's, or the party's custom game's) lets
@@ -1304,9 +1370,14 @@ impl App {
             self.effects.update(dt);
             return;
         }
-        for l in &mut self.locals {
-            if self.menu_open {
-                break;
+        // Those with a menu up stand still (everyone, while paused).
+        let paused = self.paused();
+        let frozen: Vec<bool> = (0..self.locals.len())
+            .map(|k| paused || self.menu_for(k))
+            .collect();
+        for (l, frozen) in self.locals.iter_mut().zip(frozen) {
+            if frozen {
+                continue;
             }
             if let Some(state) = l.pad.and_then(|id| self.pads.state(id)) {
                 let scale = 1.0 / l.magnification(&self.scene, &self.game);
@@ -1329,9 +1400,18 @@ impl App {
             self.watch_probe();
             return;
         }
+        if self.paused() {
+            // Everything stands still with the game.
+            return;
+        }
         let notice = self.lan_notice();
         for l in &mut self.locals {
-            l.notice = notice.clone().filter(|_| l.keyboard);
+            // A guest whose controller went is told how to play on.
+            let lost = l
+                .lost_pad
+                .filter(|_| !l.keyboard)
+                .map(|_| LOST_PAD.to_string());
+            l.notice = lost.or_else(|| notice.clone().filter(|_| l.keyboard));
             l.update_camera(&self.game, &self.world, self.pending, dt);
         }
         self.watch_probe();
@@ -1406,6 +1486,13 @@ impl App {
         if self.waiting_for_lan(dt) {
             return;
         }
+        if self.paused() {
+            // What's pressed meanwhile doesn't count.
+            for l in &mut self.locals {
+                l.taps = Taps::default();
+            }
+            return;
+        }
         self.pending += dt;
         let mut ticked = false;
         while self.pending >= TICK {
@@ -1418,14 +1505,14 @@ impl App {
                 zoom_held: self.zoom_held,
             };
             let controls = self.mission.as_ref().is_none_or(|m| m.input_enabled());
-            for l in &self.locals {
-                commands[l.player] = if self.menu_open || !controls {
-                    // Standing still while the menu is up (or a cutscene
+            for (k, l) in self.locals.iter().enumerate() {
+                commands[l.player] = if self.menu_for(k) || !controls {
+                    // Standing still while their menu is up (or a cutscene
                     // has the controls).
-                    l.command(None, None)
+                    l.command(&self.game, None, None)
                 } else {
                     let pad = l.pad.and_then(|id| self.pads.state(id));
-                    l.command(l.keyboard.then_some(&keyboard), pad)
+                    l.command(&self.game, l.keyboard.then_some(&keyboard), pad)
                 };
             }
             for (i, bot) in &mut self.bots {
@@ -2157,9 +2244,16 @@ impl App {
     fn render(&mut self) {
         let Some(g) = &self.gpu else { return };
         let (w, h) = g.size();
-        let overlay = self.overlay(w, h);
-        if self.loading.as_ref().is_some_and(Loading::shown) {
-            let frame = Frame::overlay([0, 0, w as u32, h as u32], &overlay);
+        let loading = self.loading.as_ref().is_some_and(Loading::shown);
+        // The loading screen fills the window; a pause menu, the view of
+        // the player who paused.
+        let area = match loading {
+            true => [0, 0, w as u32, h as u32],
+            false => self.menu_area(),
+        };
+        let overlay = self.overlay(area[2] as f32, area[3] as f32);
+        if loading {
+            let frame = Frame::overlay(area, &overlay);
             if let Some(g) = &mut self.gpu {
                 g.render(&[frame]);
             }
@@ -2285,13 +2379,14 @@ impl App {
                 draws.posed.splice(0..0, std::mem::take(&mut body_meshes));
             }
             let (vw, vh) = (viewport[2] as f32, viewport[3] as f32);
-            // The menu replaces the HUD while it's up.
-            let mut hud = if self.menu_open || cutscene_camera.is_some() {
+            // Their menu replaces the HUD while it's up.
+            let menu = self.menu_for(k);
+            let mut hud = if menu || cutscene_camera.is_some() {
                 Vec::new()
             } else {
                 l.build_hud(&self.scene, &self.game, vw, vh)
             };
-            if let Some(m) = self.mission.as_ref().filter(|_| !self.menu_open) {
+            if let Some(m) = self.mission.as_ref().filter(|_| !menu) {
                 mission_screen(
                     &mut hud,
                     &m.screen(&self.scene),
@@ -2304,8 +2399,8 @@ impl App {
             let prompt = self
                 .mission
                 .as_ref()
-                .and_then(|m| m.switch_prompt(&self.scene, &self.game, l.player, l.keyboard));
-            if let Some(text) = prompt.filter(|_| !self.menu_open) {
+                .and_then(|m| m.switch_prompt(&self.scene, &self.game, l.player, !l.pad_prompts()));
+            if let Some(text) = prompt.filter(|_| !menu) {
                 let mut hb = HudBuilder::new(vw, vh);
                 let s = hb.scale();
                 let at = [vw * 0.5, vh * 0.5 + 76.0 * s];
@@ -2317,7 +2412,7 @@ impl App {
                 || l.pad
                     .and_then(|id| self.pads.state(id))
                     .is_some_and(|p| p.scores);
-            if held && !self.menu_open {
+            if held && !menu {
                 let mut hb = HudBuilder::new(vw, vh);
                 let (font, white) = (self.scene.hud_font, self.scene.hud_white);
                 menu::draw_scoreboard(&mut hb, font, white, vw, vh, &scores);
@@ -2376,7 +2471,7 @@ impl App {
             })
             .collect();
         if !overlay.is_empty() {
-            frames.push(Frame::overlay([0, 0, w as u32, h as u32], &overlay));
+            frames.push(Frame::overlay(area, &overlay));
         }
         if let Some(g) = &mut self.gpu {
             g.render(&frames);
@@ -2420,12 +2515,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = [position.x as f32, position.y as f32];
-                if self.in_menu() && self.loading.is_none() {
+                if self.keyboard_in_menu() && self.loading.is_none() {
                     self.menu_hover();
                 }
             }
             WindowEvent::MouseInput { state, button, .. }
-                if self.in_menu() || self.loading.is_some() =>
+                if self.keyboard_in_menu() || self.loading.is_some() =>
             {
                 if state == ElementState::Pressed
                     && button == MouseButton::Left
@@ -2435,7 +2530,7 @@ impl ApplicationHandler for App {
                     self.menu_click();
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } if self.in_menu() => {
+            WindowEvent::MouseWheel { delta, .. } if self.keyboard_in_menu() => {
                 let up = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y > 0.0,
                     MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
@@ -2484,7 +2579,10 @@ impl ApplicationHandler for App {
                 let PhysicalKey::Code(code) = event.physical_key else {
                     return;
                 };
-                if self.menu.editing && self.in_menu() && event.state == ElementState::Pressed {
+                if self.menu.editing
+                    && self.keyboard_in_menu()
+                    && event.state == ElementState::Pressed
+                {
                     self.type_key(code, event.text.as_deref());
                     return;
                 }
@@ -2518,7 +2616,7 @@ impl ApplicationHandler for App {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
-            if !self.captured {
+            if !self.captured || self.paused() {
                 return;
             }
             let Some(k) = self.locals.iter().position(|l| l.keyboard) else {
@@ -2572,7 +2670,7 @@ impl App {
             self.change_team(0);
             return;
         }
-        if self.in_menu() {
+        if self.keyboard_in_menu() {
             let input = match code {
                 KeyCode::ArrowUp | KeyCode::KeyW => menu::Input::Up,
                 KeyCode::ArrowDown | KeyCode::KeyS => menu::Input::Down,
@@ -2588,7 +2686,9 @@ impl App {
             return;
         }
         if code == KeyCode::Escape {
-            self.open_menu(Screen::Pause);
+            if let Some(k) = self.locals.iter().position(|l| l.keyboard) {
+                self.pause(k);
+            }
             return;
         }
         // Space, Enter or E skip a cutscene.
@@ -2785,6 +2885,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         mode: Mode::Menu,
         menu: Menu::new(settings, profile::Profile::load()),
         menu_open: false,
+        menu_owner: None,
         maps,
         missions,
         campaign: false,

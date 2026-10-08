@@ -340,6 +340,9 @@ pub struct LocalPlayer {
     /// Played with the keyboard and mouse (player one).
     pub keyboard: bool,
     pub pad: Option<GamepadId>,
+    /// The controller they lost (unplugged, or out of battery): it coming
+    /// back, or A on another, takes them back.
+    pub lost_pad: Option<GamepadId>,
     /// Flying freely (Tab) instead of walking.
     pub flying: bool,
     pub camera: FlyCamera,
@@ -381,6 +384,7 @@ impl LocalPlayer {
             player,
             keyboard: false,
             pad: None,
+            lost_pad: None,
             flying: false,
             camera: FlyCamera::looking_at(eye, eye + glam::vec3(p.yaw.cos(), p.yaw.sin(), 0.0)),
             taps: Taps::default(),
@@ -449,6 +453,13 @@ impl LocalPlayer {
             .unwrap_or(1.0)
     }
 
+    /// Prompts name the controller's buttons (X, Y) rather than keys (E,
+    /// Q): for players two to four, and player one once a controller's A
+    /// took them over.
+    pub fn pad_prompts(&self) -> bool {
+        self.pad.is_some() || !self.keyboard
+    }
+
     pub fn message(&mut self, text: String) {
         self.messages.push((text, 5.0));
         if self.messages.len() > 4 {
@@ -456,8 +467,14 @@ impl LocalPlayer {
         }
     }
 
-    /// This tick's controls, from the keyboard and mouse and/or a controller.
-    pub fn command(&self, keyboard: Option<&Keyboard>, pad: Option<PadState>) -> Command {
+    /// This tick's controls in `game`, from the keyboard and mouse and/or a
+    /// controller.
+    pub fn command(
+        &self,
+        game: &Game,
+        keyboard: Option<&Keyboard>,
+        pad: Option<PadState>,
+    ) -> Command {
         let mut cmd = Command {
             yaw: self.camera.yaw,
             pitch: self.camera.pitch,
@@ -500,7 +517,9 @@ impl LocalPlayer {
             cmd.jump |= p.jump;
             cmd.crouch |= p.crouch;
             cmd.fire |= p.fire;
-            cmd.zoom |= p.zoom;
+            // Dual wielding, the left trigger fires the left gun; clicking
+            // the right stick does nothing (zoom fires it from the mouse).
+            cmd.zoom |= p.zoom && !dual_wielding(game, self.player);
             cmd.action |= p.action;
             cmd.switch_weapon |= p.switch;
             cmd.throw_grenade |= p.grenade;
@@ -919,6 +938,13 @@ impl LocalPlayer {
         // The shield meter flashes red while the shields are down.
         let flash = shield < 0.25 && me.alive && (game.time * 4.0).fract() < 0.5;
         let mut drew_tracker = false;
+        // The kill feed's foot: above the shield meter and motion tracker.
+        let mut feed = h - 140.0 * s;
+        let mut under_feed = |rect: [f32; 4]| {
+            if rect[1] > h * 0.5 {
+                feed = feed.min(rect[1]);
+            }
+        };
         for widget in &scene.player_hud {
             match widget.name.as_str() {
                 // With the motion sensor off (as in SWAT) there's no tracker.
@@ -926,9 +952,11 @@ impl LocalPlayer {
                     drew_tracker = true;
                     hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0);
                     let rect = hb.widget_rect(widget);
+                    under_feed(rect);
                     self.sensor_blips(&mut hb, scene, game, rect);
                 }
                 "shield_meter" => {
+                    under_feed(hb.widget_rect(widget));
                     let color = if flash { hud::RED } else { hud::BLUE };
                     hb.widget(widget, color, hud_mode::METER_GREY, shield.min(1.0));
                     // An overshield fills the meter again, once green and
@@ -968,14 +996,15 @@ impl LocalPlayer {
                 _ => {}
             }
         }
-        // Kill feed above the motion tracker; score bottom right.
+        // Kill feed above the shield meter and motion tracker, newest
+        // lowest; score bottom right.
         let line = 11.0 * s;
         for (i, (text, left)) in self.messages.iter().rev().enumerate() {
             let mut color = hud::BLUE;
             color[3] *= left.min(1.0);
             hb.text_left(
                 font,
-                [24.0 * s, h - 140.0 * s - i as f32 * line],
+                [24.0 * s, feed - 12.0 * s - i as f32 * line],
                 8.0 * s,
                 text,
                 color,
@@ -1070,7 +1099,7 @@ impl LocalPlayer {
             (game.dual_prompt(self.player), ["Q", "Y"], "DUAL WIELD"),
         ];
         let mut y = h * 0.5 + 64.0 * s;
-        if let Some(text) = vehicle_prompt(scene, game, self.player, self.keyboard) {
+        if let Some(text) = vehicle_prompt(scene, game, self.player, !self.pad_prompts()) {
             hb.text(font, [w * 0.5, y], 9.0 * s, &text, hud::BLUE);
             y += 12.0 * s;
         }
@@ -1091,7 +1120,7 @@ impl LocalPlayer {
         }
         for (weapon, buttons, what) in prompts.into_iter().filter(|_| !riding) {
             if let Some(a) = weapon.and_then(|w| scene.weapons.get(w)) {
-                let button = buttons[!self.keyboard as usize];
+                let button = buttons[self.pad_prompts() as usize];
                 let name = display_name(&a.def.name);
                 let text = format!("HOLD {button} TO {what} {name}");
                 hb.text(font, [w * 0.5, y], 9.0 * s, &text, hud::BLUE);
@@ -1208,13 +1237,21 @@ fn weapon_hud(
     }
 }
 
+/// Player `i` holds a gun in each hand.
+pub fn dual_wielding(game: &Game, i: usize) -> bool {
+    game.players.get(i).is_some_and(|p| p.left.is_some())
+}
+
 /// Where each of `n` splitscreen views goes in a `w` x `h` window: one fills
-/// it, two split it top and bottom, three or four take a quarter each.
+/// it, two split it top and bottom, three put player one across the top
+/// and the others in the bottom quarters (as Halo 2 does), and four take a
+/// quarter each.
 pub fn viewports(n: usize, w: u32, h: u32) -> Vec<[u32; 4]> {
     let (hw, hh) = (w / 2, h / 2);
     match n {
         0 | 1 => vec![[0, 0, w, h]],
         2 => vec![[0, 0, w, hh], [0, hh, w, h - hh]],
+        3 => vec![[0, 0, w, hh], [0, hh, hw, h - hh], [hw, hh, w - hw, h - hh]],
         _ => [
             [0, 0, hw, hh],
             [hw, 0, w - hw, hh],
@@ -1268,16 +1305,28 @@ mod tests {
     }
 
     #[test]
+    fn clicking_the_right_stick_dual_wielding_fires_nothing() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let pad = PadState {
+            zoom: true,
+            ..PadState::default()
+        };
+        assert!(l.command(&game, None, Some(pad)).zoom);
+        // Zoom fires the left gun, so the click doesn't count.
+        game.players[i].left = game.players[i].weapons.first().cloned();
+        assert!(!l.command(&game, None, Some(pad)).zoom);
+    }
+
+    #[test]
     fn splitscreen_views_cover_the_window() {
         for n in 1..=4 {
             let area: u32 = viewports(n, 1280, 721).iter().map(|v| v[2] * v[3]).sum();
-            let expected = if n == 3 {
-                1280 * 721 - 640 * 361
-            } else {
-                1280 * 721
-            };
-            assert_eq!(area, expected, "{n} views");
+            assert_eq!(area, 1280 * 721, "{n} views");
+            assert_eq!(viewports(n, 1280, 721).len(), n);
         }
         assert_eq!(viewports(2, 1280, 720)[1], [0, 360, 1280, 360]);
+        assert_eq!(viewports(3, 1280, 720)[0], [0, 0, 1280, 360]);
     }
 }

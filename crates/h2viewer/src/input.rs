@@ -8,7 +8,9 @@
 use gilrs::{Axis, Button, EventType, GamepadId, Gilrs};
 use glam::Vec2;
 
-const DEAD_ZONE: f32 = 0.2;
+/// The sticks' dead zone, after gilrs' own (a tenth of the way, already
+/// taken off): about a fifth of the way out in all.
+const DEAD_ZONE: f32 = 0.11;
 /// Triggers count as pulled past this.
 const TRIGGER: f32 = 0.3;
 
@@ -53,6 +55,10 @@ pub enum PadPress {
     Down,
     Left,
     Right,
+    /// The controller went (unplugged, or out of battery).
+    Disconnected,
+    /// It's back.
+    Connected,
 }
 
 pub struct Pads {
@@ -96,6 +102,14 @@ impl Pads {
             return out;
         };
         while let Some(ev) = g.next_event() {
+            match ev.event {
+                EventType::Disconnected => {
+                    self.sticks.retain(|s| s.0 != ev.id);
+                    out.push((ev.id, PadPress::Disconnected));
+                }
+                EventType::Connected => out.push((ev.id, PadPress::Connected)),
+                _ => {}
+            }
             if let EventType::AxisChanged(axis @ (Axis::LeftStickX | Axis::LeftStickY), v, _) =
                 ev.event
             {
@@ -177,7 +191,8 @@ mod tests {
 
     #[test]
     fn sticks_ignore_small_movements_and_reach_full_deflection() {
-        assert_eq!(dead_zone(Vec2::new(0.1, 0.1)), Vec2::ZERO);
+        assert_eq!(dead_zone(Vec2::new(0.07, 0.07)), Vec2::ZERO);
+        assert_ne!(dead_zone(Vec2::new(0.1, 0.1)), Vec2::ZERO);
         assert!((dead_zone(Vec2::new(1.0, 0.0)).x - 1.0).abs() < 1e-6);
         let half = dead_zone(Vec2::new(0.6, 0.0)).x;
         assert!(half > 0.4 && half < 0.6);
