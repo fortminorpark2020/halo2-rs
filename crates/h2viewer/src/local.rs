@@ -9,6 +9,7 @@ use crate::hud::{self, HudBuilder};
 use crate::input::PadState;
 use crate::rig;
 use crate::scene::{Scene, Vertex, WeaponAssets};
+use blam_cache::hud::ScreenSplit;
 use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use h2sim::game::{GrenadeKind, Look, Spartan, VehicleAction, TICK};
@@ -924,8 +925,16 @@ impl LocalPlayer {
         }
     }
 
-    pub fn build_hud(&self, scene: &Scene, game: &Game, w: f32, h: f32) -> Vec<gpu::HudBatch> {
-        let mut hb = HudBuilder::new(w, h);
+    /// The HUD of this player's `w` x `h` view, in the tags' `split` layout.
+    pub fn build_hud(
+        &self,
+        scene: &Scene,
+        game: &Game,
+        w: f32,
+        h: f32,
+        split: ScreenSplit,
+    ) -> Vec<gpu::HudBatch> {
+        let mut hb = HudBuilder::for_view(w, h, split);
         let font = scene.hud_font;
         let me = self.me(game);
         let s = hb.scale();
@@ -933,16 +942,21 @@ impl LocalPlayer {
         // The shield meter flashes red while the shields are down.
         let flash = shield < 0.25 && me.alive && (game.time * 4.0).fract() < 0.5;
         let mut drew_tracker = false;
-        for widget in &scene.player_hud {
+        // The kill feed sits above this, and above the shield meter and
+        // motion tracker where they reach higher (as in a splitscreen view).
+        let mut tracker_top = h - 120.0 * s;
+        for widget in &scene.player_hud[split as usize] {
             match widget.name.as_str() {
                 // With the motion sensor off (as in SWAT) there's no tracker.
                 "motion_tracker_background" if !drew_tracker && game.rules.options.radar => {
                     drew_tracker = true;
                     hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0);
                     let rect = hb.widget_rect(widget);
+                    tracker_top = tracker_top.min(rect[1]);
                     self.sensor_blips(&mut hb, scene, game, rect);
                 }
                 "shield_meter" => {
+                    tracker_top = tracker_top.min(hb.widget_rect(widget)[1]);
                     let color = if flash { hud::RED } else { hud::BLUE };
                     hb.widget(widget, color, hud_mode::METER_GREY, shield.min(1.0));
                     // An overshield fills the meter again, once green and
@@ -982,14 +996,15 @@ impl LocalPlayer {
                 _ => {}
             }
         }
-        // Kill feed above the motion tracker; score bottom right.
+        // Kill feed above the shield meter and motion tracker; score
+        // bottom right.
         let line = 11.0 * s;
         for (i, (text, left)) in self.messages.iter().rev().enumerate() {
             let mut color = hud::BLUE;
             color[3] *= left.min(1.0);
             hb.text_left(
                 font,
-                [24.0 * s, h - 140.0 * s - i as f32 * line],
+                [24.0 * s, tracker_top - (i + 1) as f32 * line],
                 8.0 * s,
                 text,
                 color,
@@ -1184,7 +1199,7 @@ fn weapon_hud(
     } else {
         1.0
     };
-    for widget in &weapon.hud {
+    for widget in &weapon.hud[hb.split() as usize] {
         match role(&widget.name, magnification) {
             HudRole::Scope if zoomed => {
                 hb.scope(widget, scene.hud_white, [0.0, 0.0, 0.0, 132.0 / 255.0]);
@@ -1223,12 +1238,15 @@ fn weapon_hud(
 }
 
 /// Where each of `n` splitscreen views goes in a `w` x `h` window: one fills
-/// it, two split it top and bottom, three or four take a quarter each.
+/// it, two split it top and bottom, three give the first player the top
+/// half and the others a bottom quarter each (as Halo 2 does: its HUD gives
+/// the first of three a half screen layout), four take a quarter each.
 pub fn viewports(n: usize, w: u32, h: u32) -> Vec<[u32; 4]> {
     let (hw, hh) = (w / 2, h / 2);
     match n {
         0 | 1 => vec![[0, 0, w, h]],
         2 => vec![[0, 0, w, hh], [0, hh, w, h - hh]],
+        3 => vec![[0, 0, w, hh], [0, hh, hw, h - hh], [hw, hh, w - hw, h - hh]],
         _ => [
             [0, 0, hw, hh],
             [hw, 0, w - hw, hh],
@@ -1236,6 +1254,19 @@ pub fn viewports(n: usize, w: u32, h: u32) -> Vec<[u32; 4]> {
             [hw, hh, w - hw, h - hh],
         ][..n.min(4)]
             .to_vec(),
+    }
+}
+
+/// Which of the HUD tags' layouts view `k` of `n` draws, as Halo 2 picks
+/// it: full screen alone, half for two players and the first of three,
+/// quarter for the rest (Project Cartographer's rebuild of
+/// `new_hud_get_screen_split_type`). It matches `viewports`.
+pub fn screen_split(k: usize, n: usize) -> ScreenSplit {
+    match n {
+        0 | 1 => ScreenSplit::Full,
+        2 => ScreenSplit::Half,
+        3 if k == 0 => ScreenSplit::Half,
+        _ => ScreenSplit::Quarter,
     }
 }
 
@@ -1285,13 +1316,28 @@ mod tests {
     fn splitscreen_views_cover_the_window() {
         for n in 1..=4 {
             let area: u32 = viewports(n, 1280, 721).iter().map(|v| v[2] * v[3]).sum();
-            let expected = if n == 3 {
-                1280 * 721 - 640 * 361
-            } else {
-                1280 * 721
-            };
-            assert_eq!(area, expected, "{n} views");
+            assert_eq!(area, 1280 * 721, "{n} views");
         }
         assert_eq!(viewports(2, 1280, 720)[1], [0, 360, 1280, 360]);
+        assert_eq!(
+            viewports(3, 1920, 1080),
+            [[0, 0, 1920, 540], [0, 540, 960, 540], [960, 540, 960, 540]]
+        );
+    }
+
+    #[test]
+    fn hud_layouts_follow_the_views() {
+        // A full width view is full or half screen; a half width one is
+        // a quarter.
+        for n in 1..=4 {
+            for (k, v) in viewports(n, 1920, 1080).iter().enumerate() {
+                let expected = match (v[2], v[3]) {
+                    (1920, 1080) => ScreenSplit::Full,
+                    (1920, _) => ScreenSplit::Half,
+                    _ => ScreenSplit::Quarter,
+                };
+                assert_eq!(screen_split(k, n), expected, "view {k} of {n}");
+            }
+        }
     }
 }
