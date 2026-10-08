@@ -29,8 +29,11 @@ struct DrawUniforms {
     emblem: [f32; 4],
     emblem_colors: [[f32; 4]; 2],
     /// x: how hidden by active camouflage (0-1), y: overshield glow (drawn
-    /// as a shell over the body), z: seconds, for shimmering.
+    /// as a shell over the body), z: seconds, for shimmering, w: shields
+    /// flaring from a hit (the same shell).
     fx: [f32; 4],
+    /// The flaring shields' colour (rgb).
+    shell: [f32; 4],
 }
 
 const SLOT: u64 = 512;
@@ -88,6 +91,9 @@ pub struct Fx {
     pub camo: f32,
     /// Overshield glow, 0-1.
     pub overshield: f32,
+    /// Shields flaring from a hit, 0-1, and their colour.
+    pub shield: f32,
+    pub shield_color: [f32; 3],
 }
 
 /// HUD batches number the menus' own textures from here.
@@ -200,8 +206,10 @@ struct U {
     emblem: vec4<f32>,
     emblem_primary: vec4<f32>,
     emblem_secondary: vec4<f32>,
-    // x: camouflage, y: overshield shell, z: seconds.
+    // x: camouflage, y: overshield shell, z: seconds, w: shields flaring.
     fx: vec4<f32>,
+    // The flaring shields' colour.
+    shell: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(1) @binding(0) var tex: texture_2d<f32>;
@@ -231,8 +239,9 @@ fn vs(
 ) -> Out {
     var o: Out;
     o.clip = u.mvp * vec4<f32>(position, 1.0);
-    if (u.fx.y > 0.0) {
-        // The overshield's shell sits just outside the armour.
+    if (u.fx.y > 0.0 || u.fx.w > 0.0) {
+        // The overshield's (or flaring shields') shell sits just outside
+        // the armour.
         o.clip = u.mvp * vec4<f32>(position + normal * 0.006, 1.0);
         o.clip.z *= 1.002;
     }
@@ -327,15 +336,19 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     }
     let fog = clamp(distance(i.world, u.camera.xyz) / 400.0, 0.0, 1.0) * u.params.x;
     let sky = vec3<f32>(0.62, 0.70, 0.80);
-    if (u.fx.y > 0.0 || u.fx.x > 0.0) {
+    if (u.fx.y > 0.0 || u.fx.x > 0.0 || u.fx.w > 0.0) {
         let n = normalize(i.normal);
         let v = normalize(u.camera.xyz - i.world);
         let edge = 1.0 - abs(dot(n, v));
         let ripple = 0.5 + 0.5 * sin(i.world.z * 70.0 - u.fx.z * 7.0 + i.world.x * 25.0);
-        if (u.fx.y > 0.0) {
+        if (u.fx.y > 0.0 || u.fx.w > 0.0) {
             // Overshield: a flickering glow, brightest at the edges.
             let glow = (0.03 + 0.6 * pow(edge, 3.0)) * (0.5 + 0.5 * ripple) * u.fx.y;
-            return vec4<f32>(vec3<f32>(0.45, 1.0, 0.55) * glow, 1.0);
+            // Shields taking a hit: a flare of their colour over the whole
+            // body, brightest at the edges.
+            let flare = (0.25 + 0.75 * pow(edge, 1.5)) * (0.6 + 0.4 * ripple) * u.fx.w;
+            let shell = pow(u.shell.rgb, vec3<f32>(2.2)) * flare;
+            return vec4<f32>(vec3<f32>(0.45, 1.0, 0.55) * glow + shell, 1.0);
         }
         // Active camouflage: see-through but for a shimmer at the edges.
         var a = alpha;
@@ -1154,6 +1167,10 @@ impl Gpu {
                 })
             }),
             fx,
+            shell: object.map_or([0.0; 4], |d| {
+                let [r, g, b] = d.fx.shield_color;
+                [r, g, b, 0.0]
+            }),
         };
         self.staging.extend_from_slice(bytemuck::bytes_of(&u));
         self.staging.resize((offset + SLOT) as usize, 0);
@@ -1360,7 +1377,7 @@ impl Gpu {
     }
 
     /// Uniform slots for objects: plain ones, camouflaged ones and
-    /// overshield shells.
+    /// shells (an overshield's glow, shields flaring from a hit).
     fn draw_slots(&mut self, proj: Mat4, cam: Vec3, fog: f32, draws: &[DrawCall]) -> Slotted {
         let now = self.started.elapsed().as_secs_f32();
         let mut out = Slotted::default();
@@ -1376,8 +1393,9 @@ impl Gpu {
                 list.push((d.mesh, o));
             }
             let glow = d.fx.overshield * (1.0 - d.fx.camo);
-            if glow > 0.01 {
-                let fx = [0.0, glow, now, 0.0];
+            let flare = d.fx.shield * (1.0 - d.fx.camo);
+            if glow > 0.01 || flare > 0.01 {
+                let fx = [0.0, glow, now, flare];
                 if let Some(o) = self.slot(proj, d.model, cam, [fog, shading], Some(d), fx) {
                     out.shells.push((d.mesh, o));
                 }

@@ -32,6 +32,7 @@ mod camera;
 mod campaign;
 mod effects;
 mod emblem;
+mod feedback;
 mod flow;
 mod font;
 mod gpu;
@@ -1030,6 +1031,48 @@ enum Mode {
 
 /// Bodies farther than this from the camera aren't posed or drawn.
 const BODY_RANGE: f32 = 80.0;
+/// A third person gun's muzzle flash, times a first person one's size (the
+/// remake's own: the firing effects' particles aren't drawn).
+const THIRD_PERSON_FLASH: f32 = 3.0;
+
+/// One hand's shots so far: which firing effect is next (they take turns,
+/// one a burst) and which rounds have tracers.
+#[derive(Clone, Copy, Debug)]
+struct ShotTally {
+    rounds: usize,
+    /// Firing effects used.
+    effects: usize,
+    /// Game time of the last round.
+    last: f64,
+}
+
+impl Default for ShotTally {
+    fn default() -> ShotTally {
+        ShotTally {
+            rounds: 0,
+            effects: 0,
+            last: f64::NEG_INFINITY,
+        }
+    }
+}
+
+impl ShotTally {
+    /// Count a round fired at game time `time`; true when it starts a new
+    /// firing effect: every shot, or every burst for guns that fire in
+    /// bursts. Rounds at the same moment (a Shotgun's pellets) are one shot.
+    fn fire(&mut self, time: f64, burst: bool) -> bool {
+        let fresh = time != self.last && (!burst || time - self.last > soundscape::BURST_GAP);
+        self.effects += fresh as usize;
+        self.rounds += 1;
+        self.last = time;
+        fresh
+    }
+
+    /// The firing effect of the latest shot.
+    fn effect(&self) -> usize {
+        self.effects.saturating_sub(1)
+    }
+}
 
 /// A Spartan's body posed for this frame.
 struct BodyPose {
@@ -1069,6 +1112,10 @@ struct App {
     /// Time not yet simulated, less than a tick.
     pending: f32,
     effects: Effects,
+    /// Each player's shots with each hand (right, left).
+    shots: Vec<[ShotTally; 2]>,
+    /// Everyone's shields flaring from hits.
+    flares: feedback::ShieldFlares,
     /// Third person animation of each player.
     bodies: Vec<BodyAnimator>,
     /// Actions players started this frame (reload, melee...), for their bodies.
@@ -1427,11 +1474,20 @@ impl App {
                 .map(|_| LOST_PAD.to_string());
             l.notice = lost.or_else(|| notice.clone().filter(|_| l.keyboard));
             l.update_camera(&self.game, &self.world, self.pending, dt);
+            l.feedback.update(dt);
         }
+        self.flares.update(dt);
         self.watch_probe();
         self.animate_bodies(dt);
+        let listeners = self.listeners();
         for l in &mut self.locals {
             l.animate_view_model(&self.scene, &self.game, dt);
+            l.shield_flare = self.flares.flare(l.player);
+            for s in l.take_view_sounds() {
+                let at = l.camera.position;
+                self.sound
+                    .view_sound(&self.scene, s, at, l.player, &listeners);
+            }
         }
         self.effects.update(dt);
         // Badly damaged vehicles smoke, then burn.
@@ -1451,10 +1507,18 @@ impl App {
                 .locals
                 .iter()
                 .any(|l| l.camera.position.distance(p.position) < 0.5);
-            if let Some(r) = self.scene.weapons.get(p.weapon).map(|w| w.round) {
-                if !near {
-                    self.effects.round(p.position, r.glow, r.size, r.fiery);
-                }
+            let Some(w) = self.scene.weapons.get(p.weapon).filter(|_| !near) else {
+                continue;
+            };
+            let r = w.round;
+            let trail = !w.contrails.is_empty();
+            self.effects
+                .round(p.position, r.glow, r.size, r.fiery, !trail);
+            // Its trail: the stretch it flew this frame, laid as it went.
+            let speed = p.velocity.length();
+            for c in &w.contrails {
+                let from = p.position - p.velocity * dt;
+                self.effects.ribbon(from, p.position, speed, dt, c);
             }
         }
         // Needles stuck in people glow until they pop.
@@ -1473,7 +1537,7 @@ impl App {
                 .any(|l| l.player == n.victim || l.camera.position.distance(at) < 0.5);
             if !near {
                 self.effects
-                    .round(at, w.round.glow, w.round.size * 0.7, false);
+                    .round(at, w.round.glow, w.round.size * 0.7, false, true);
             }
         }
         let listeners = self.listeners();
@@ -1649,27 +1713,61 @@ impl App {
 
     fn handle_events(&mut self) {
         let listeners = self.listeners();
-        for e in std::mem::take(&mut self.game.events) {
+        let events = std::mem::take(&mut self.game.events);
+        // Who these ticks hurt, and whose views have felt which round
+        // (a Shotgun's pellets kick once).
+        let hurt: Vec<usize> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Damaged { player, .. } => Some(*player),
+                _ => None,
+            })
+            .collect();
+        let mut felt: Vec<(usize, usize)> = Vec::new();
+        for e in events {
             self.sound.event(&self.scene, &self.game, &listeners, &e);
             match e {
                 Event::Shot {
                     player,
+                    weapon,
                     left,
+                    origin,
+                    direction,
                     hit,
                     hit_player,
-                    ..
                 } => {
-                    if let Some(l) = self.local_of(player) {
+                    if self.shots.len() <= player {
+                        self.shots.resize(player + 1, Default::default());
+                    }
+                    let assets = self.scene.weapons.get(weapon);
+                    let burst = assets.is_some_and(|w| w.def.shots_per_fire > 1);
+                    let tally = &mut self.shots[player][left as usize];
+                    let fresh = tally.fire(self.game.time, burst);
+                    let (effect, round) = (tally.effect(), tally.rounds - 1);
+                    if let Some(l) = self.locals.iter_mut().find(|l| l.player == player) {
                         if left {
                             l.view.fired_left = true;
                         } else {
                             l.view.fired = true;
                         }
+                        l.firing_effect[left as usize] = effect;
+                        // The firing effect's kick, once a shot (or burst).
+                        let forward = l.camera.forward();
+                        if let Some(kick) = assets.and_then(|w| w.kick(effect)).filter(|_| fresh) {
+                            l.feedback.fired(kick, forward);
+                        }
                     }
+                    self.tracer(player, (weapon, left), round, (origin, direction), hit);
                     match (hit, hit_player) {
                         (Some((p, _)), Some(j)) => {
-                            let shielded = self.game.players[j].shield > 0.0;
-                            self.effects.player_hit(p, shielded);
+                            let shielded = self.shields_were_up(j);
+                            if !shielded {
+                                self.effects.blood(p);
+                            }
+                            if hurt.contains(&j) && !felt.contains(&(j, weapon)) {
+                                felt.push((j, weapon));
+                                self.feel_hit(j, weapon, direction, shielded);
+                            }
                         }
                         (Some((p, n)), None) => self.effects.impact(p, n),
                         _ => {}
@@ -1709,8 +1807,10 @@ impl App {
                     }
                 }
                 Event::Exploded { kind, position } => {
-                    self.effects
-                        .explosion(position, kind == GrenadeKind::Plasma);
+                    let plasma = kind == GrenadeKind::Plasma;
+                    self.effects.explosion(position, plasma);
+                    let feedback = self.scene.grenades[plasma as usize].blast_feedback.clone();
+                    self.feel_blast(&feedback, position, &hurt);
                 }
                 Event::Impact {
                     weapon,
@@ -1745,9 +1845,20 @@ impl App {
                             r.fiery,
                             (reach / 1.5).clamp(0.4, 2.0),
                         );
+                        if let Some(w) = self.scene.weapons.get(weapon) {
+                            let feedback = w.blast_feedback.clone();
+                            self.feel_blast(&feedback, position, &hurt);
+                        }
                     } else if let Some(j) = hit_player {
-                        let shielded = self.game.players[j].shield > 0.0;
-                        self.effects.player_hit(position, shielded);
+                        let shielded = self.shields_were_up(j);
+                        if !shielded {
+                            self.effects.blood(position);
+                        }
+                        if hurt.contains(&j) && !felt.contains(&(j, weapon)) {
+                            felt.push((j, weapon));
+                            // Roughly the way the round was going.
+                            self.feel_hit(j, weapon, -normal, shielded);
+                        }
                     } else {
                         self.effects.splash(position, normal, r.glow);
                     }
@@ -1779,6 +1890,20 @@ impl App {
                         l.camera.yaw = yaw;
                         l.camera.pitch = 0.0;
                         l.view.switched = true;
+                        l.feedback.clear();
+                    }
+                }
+                Event::Damaged { player, .. } => {
+                    // Shields that were up flare; knocked out, they pop.
+                    if self.shields_were_up(player) {
+                        self.flares.hit(player);
+                        let p = &self.game.players[player];
+                        if p.shield <= 0.0 && p.alive {
+                            let middle = p.body.position + Vec3::Z * (p.body.height() * 0.5);
+                            let elite = p.look.elite as usize;
+                            self.effects
+                                .shield_pop(middle, self.scene.shield_colors[elite]);
+                        }
                     }
                 }
                 Event::Teleported { player, .. } => {
@@ -1853,6 +1978,118 @@ impl App {
                 _ => {}
             }
         }
+        // Whether shields are up when the next damage comes.
+        self.flares
+            .remember(self.game.players.iter().map(|p| p.shield));
+    }
+
+    /// Player `j`'s shields were up when this tick's damage came.
+    fn shields_were_up(&self, j: usize) -> bool {
+        let now = self.game.players.get(j).map_or(0.0, |p| p.shield);
+        self.flares.were_up(j, now)
+    }
+
+    /// A round of `weapon` hurting player `j` (travelling along
+    /// `direction`): their view kicks and flashes, if they play here.
+    fn feel_hit(&mut self, j: usize, weapon: usize, direction: Vec3, shielded: bool) {
+        let Some(w) = self.scene.weapons.get(weapon) else {
+            return;
+        };
+        for l in self.locals.iter_mut().filter(|l| l.player == j) {
+            let basis = l.camera.basis();
+            l.feedback
+                .hit(&w.hit_feedback, direction, basis, shielded, 1.0);
+        }
+    }
+
+    /// A blast at `at`: the views of players here shake (less further
+    /// off), and those it hurt (in `hurt`) are kicked away from it and
+    /// flash.
+    fn feel_blast(
+        &mut self,
+        feedback: &blam_cache::weapon::DamageFeedback,
+        at: Vec3,
+        hurt: &[usize],
+    ) {
+        for k in 0..self.locals.len() {
+            let j = self.locals[k].player;
+            let shielded = self.shields_were_up(j);
+            let l = &mut self.locals[k];
+            let eye = l.camera.position;
+            l.feedback.blast(feedback, eye.distance(at));
+            if hurt.contains(&j) {
+                let away = (eye - at).normalize_or_zero();
+                let basis = l.camera.basis();
+                l.feedback.hit(feedback, away, basis, shielded, 1.0);
+            }
+        }
+    }
+
+    /// Round `round` of `weapon` fired by `player` (with the `left` hand's
+    /// gun) from `origin` along `direction`, hitting `hit`: its tracer, if
+    /// the round hits at once and is one that has one, from the gun's
+    /// muzzle to what it hit, the head travelling at the round's speed.
+    fn tracer(
+        &mut self,
+        player: usize,
+        (weapon, left): (usize, bool),
+        round: usize,
+        (origin, direction): (Vec3, Vec3),
+        hit: Option<(Vec3, Vec3)>,
+    ) {
+        let Some(w) = self.scene.weapons.get(weapon) else {
+            return;
+        };
+        if w.contrails.is_empty()
+            || w.def.flight.is_some()
+            || !round.is_multiple_of(w.rounds_between_tracers + 1)
+        {
+            return;
+        }
+        let effect = self.shots[player][left as usize].effect();
+        let start = self
+            .locals
+            .iter()
+            .find(|l| l.player == player)
+            .and_then(|l| l.muzzle_point(&self.scene, &self.game, left))
+            .or_else(|| self.world_muzzle(player, left, w.world_muzzle(effect)))
+            .unwrap_or(origin);
+        let end = hit.map_or(origin + direction * w.def.range, |(p, _)| p);
+        for c in &w.contrails {
+            self.effects.ribbon(start, end, w.def.velocity, 0.0, c);
+        }
+    }
+
+    /// A point on the gun in player `i`'s hand (`left`, else the right) as
+    /// their body holds it, `at` in the gun's model space; None while
+    /// their body isn't posed.
+    fn world_muzzle(&self, i: usize, left: bool, at: Vec3) -> Option<Vec3> {
+        let pose = self.body_poses.get(i)?.as_ref()?;
+        Some((pose.object * pose.weapons[left as usize]).transform_point3(at))
+    }
+
+    /// Flashes at the muzzles of the guns others are firing, for a view
+    /// facing `right`/`up` (`own`: its player, seen in first person).
+    fn muzzle_sprites(&self, own: Option<usize>, (r, u): (Vec3, Vec3)) -> Vec<gpu::SpriteVertex> {
+        let mut out = Vec::new();
+        for (i, p) in self.game.players.iter().enumerate() {
+            let hands_free = local::seat_of(&self.game, i)
+                .is_none_or(|(_, _, seat)| seat.role == SeatRole::Passenger);
+            if Some(i) == own || !p.alive || !hands_free {
+                continue;
+            }
+            for (k, held) in [p.held(), p.left.as_ref()].into_iter().enumerate() {
+                let Some((h, w)) = held.and_then(|h| Some((h, self.scene.weapons.get(h.weapon)?)))
+                else {
+                    continue;
+                };
+                let effect = self.shots.get(i).map_or(0, |s| s[k].effect());
+                if let Some(at) = self.world_muzzle(i, k == 1, w.world_muzzle(effect)) {
+                    local::muzzle_flash(&mut out, w, &h.state, at, (r, u), THIRD_PERSON_FLASH);
+                }
+            }
+        }
+        out
     }
 
     /// Pose every Spartan's body (the closest, while each kind of body
@@ -2159,7 +2396,7 @@ impl App {
             }
         }
         for g in &self.game.grenades {
-            let assets = scene.grenades[(g.kind == GrenadeKind::Plasma) as usize];
+            let assets = &scene.grenades[(g.kind == GrenadeKind::Plasma) as usize];
             if let Some(mesh) = assets.mesh {
                 // Tumbling through the air.
                 let spin = if g.velocity.length_squared() > 0.01 {
@@ -2220,7 +2457,11 @@ impl App {
             light,
             colors: Some(colors),
             emblem: p.actor.is_none().then_some(p.look.emblem),
-            fx: local::player_fx(&self.game, player),
+            fx: Fx {
+                shield: self.flares.flare(player),
+                shield_color: self.scene.shield_colors[p.look.elite as usize],
+                ..local::player_fx(&self.game, player)
+            },
         }];
         // Drivers and gunners hold the controls, not their guns.
         let hands_free = local::seat_of(&self.game, player)
@@ -2240,9 +2481,10 @@ impl App {
                     light,
                     colors: None,
                     emblem: None,
-                    // Camouflage hides the gun too; the glow is the body's.
+                    // Camouflage hides the gun too; the glows are the body's.
                     fx: Fx {
                         overshield: 0.0,
+                        shield: 0.0,
                         ..out[0].fx
                     },
                 });
@@ -2381,6 +2623,22 @@ impl App {
                 camera.yaw += yaw;
                 camera.pitch += pitch;
             }
+            // Kicks and shakes move the picture (not the aim, nor the gun
+            // in hand), kept out of walls.
+            if cutscene_camera.is_none() {
+                let o = l.feedback.offset();
+                camera.yaw += o.yaw;
+                camera.pitch += o.pitch;
+                let far = o.position.length();
+                if far > 1e-5 {
+                    let dir = o.position / far;
+                    let d = self
+                        .world
+                        .raycast(camera.position, dir, far + 0.05)
+                        .map_or(far, |t| (t - 0.05).clamp(0.0, far));
+                    camera.position += dir * d;
+                }
+            }
             let (_, r, u) = camera.basis();
             let mut draws = if cutscene_camera.is_some() {
                 local::ViewDraws {
@@ -2442,17 +2700,17 @@ impl App {
                 }
                 None => l.magnification(&self.scene, &self.game),
             };
+            let mut sprites = self.effects.sprites(r, u);
+            sprites.extend(self.effects.ribbons(camera.position));
+            sprites.extend(self.muzzle_sprites(own, (r, u)));
+            sprites.extend(self.objective_sprites(r, u));
             views.push(View {
                 viewport,
                 aspect,
                 magnification,
                 camera,
                 world,
-                sprites: {
-                    let mut sprites = self.effects.sprites(r, u);
-                    sprites.extend(self.objective_sprites(r, u));
-                    sprites
-                },
+                sprites,
                 draws,
                 hud,
                 view_model_proj: l.view_model_proj(aspect),
@@ -2881,6 +3139,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         last_frame: Instant::now(),
         pending: 0.0,
         effects: Effects::new(),
+        shots: Vec::new(),
+        flares: Default::default(),
         bodies: Vec::new(),
         body_actions: Vec::new(),
         body_gestures: Vec::new(),

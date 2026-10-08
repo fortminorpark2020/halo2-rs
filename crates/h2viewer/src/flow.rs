@@ -671,6 +671,8 @@ impl App {
         self.mission = None;
         self.locals.clear();
         self.effects = crate::Effects::new();
+        self.shots.clear();
+        self.flares = Default::default();
         self.bodies.clear();
         self.body_actions.clear();
         self.body_poses.clear();

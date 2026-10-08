@@ -44,6 +44,9 @@ pub struct WeaponDef {
     pub initial_rounds: u32,
     pub maximum_rounds: u32,
     pub reload_time: f32,
+    /// Rounds each `reload_time` puts in, when fewer than a magazine: the
+    /// Shotgun's one shell at a time (0: the whole magazine at once).
+    pub rounds_reloaded: u32,
     pub rounds_per_shot: u32,
     pub projectiles_per_shot: u32,
     /// Radians, at the start and after sustained fire.
@@ -354,6 +357,7 @@ impl WeaponDef {
             initial_rounds: magazine.rounds_total_initial.max(0) as u32,
             maximum_rounds: magazine.rounds_total_maximum.max(0) as u32,
             reload_time: reload,
+            rounds_reloaded: magazine.rounds_reloaded.max(0) as u32,
             rounds_per_shot: barrel.rounds_per_shot.max(0) as u32,
             projectiles_per_shot: barrel.projectiles_per_shot.max(1) as u32,
             error_angle: barrel.error_angle,
@@ -406,6 +410,13 @@ impl WeaponDef {
     /// Energy weapons (no magazine) never run dry here; battery and heat come later.
     pub fn uses_ammo(&self) -> bool {
         self.magazine_size > 0 && self.rounds_per_shot > 0
+    }
+
+    /// Reloads a few rounds at a time (the Shotgun, shell by shell): each
+    /// `reload_time` puts in `rounds_reloaded`, and a pull of the trigger
+    /// stops the reload to fire what's in.
+    pub fn loads_singly(&self) -> bool {
+        self.rounds_reloaded > 0 && self.rounds_reloaded < self.magazine_size
     }
 
     /// Magnification for zoom level `level` (1-based); 1.0 when not zoomed.
@@ -546,13 +557,29 @@ impl WeaponState {
         if let Some(t) = self.reloading.as_mut() {
             *t -= dt;
             if *t <= 0.0 {
-                let take = (def.magazine_size - self.loaded).min(self.reserve);
+                let left = *t;
+                let batch = match def.loads_singly() {
+                    true => def.rounds_reloaded,
+                    false => def.magazine_size,
+                };
+                let take = (def.magazine_size - self.loaded)
+                    .min(self.reserve)
+                    .min(batch);
                 self.loaded += take;
                 self.reserve -= take;
-                self.reloading = None;
+                // Shell by shell, the next one goes in after another
+                // reload time, while there's room and ammo.
+                let more = self.loaded < def.magazine_size && self.reserve > 0 && take > 0;
+                self.reloading = (def.loads_singly() && more).then_some(def.reload_time + left);
             }
-            self.cool(def, dt);
-            return shots;
+            // A pull of the trigger stops a shell-by-shell reload and fires
+            // what's in.
+            let interrupted = pressed && def.loads_singly() && self.has_round(def);
+            if !interrupted || self.reloading.is_none() {
+                self.cool(def, dt);
+                return shots;
+            }
+            self.reloading = None;
         }
         if input.reload {
             self.start_reload(def);
@@ -689,6 +716,7 @@ mod tests {
             initial_rounds: 108,
             maximum_rounds: 144,
             reload_time: 2.0,
+            rounds_reloaded: 0,
             rounds_per_shot: 1,
             projectiles_per_shot: 1,
             error_angle: (0.005_235_988, 0.010_471_975),
@@ -950,6 +978,67 @@ mod tests {
         assert!(w.reloading.is_some());
         run(&def, &mut w, WeaponInput::default(), 2.0);
         assert_eq!((w.loaded, w.reserve), (36, 39));
+    }
+
+    /// The Shotgun's magazine: 12 shells, one every 0.4 s (Halo 2 PC's
+    /// shared.map), from 0 loaded with 12 to spare.
+    fn shotgun() -> (WeaponDef, WeaponState) {
+        let def = WeaponDef {
+            behavior: TriggerBehavior::Latch,
+            rounds_per_second: (0.0, 0.0),
+            shots_per_fire: 1,
+            fire_recovery_time: 1.0,
+            magazine_size: 12,
+            initial_rounds: 36,
+            reload_time: 0.4,
+            rounds_reloaded: 1,
+            ..battle_rifle()
+        };
+        let mut w = WeaponState::new(&def);
+        w.loaded = 0;
+        w.reserve = 12;
+        (def, w)
+    }
+
+    #[test]
+    fn shotguns_load_a_shell_at_a_time() {
+        let (def, mut w) = shotgun();
+        assert!(def.loads_singly() && !battle_rifle().loads_singly());
+        let reload = WeaponInput {
+            reload: true,
+            ..Default::default()
+        };
+        run(&def, &mut w, reload, 1.0 / 120.0);
+        run(&def, &mut w, WeaponInput::default(), 1.0);
+        // Two shells in after a second, still reloading.
+        assert_eq!((w.loaded, w.reserve), (2, 10));
+        assert!(w.reloading.is_some());
+        // Left alone, it fills up: ten more shells over four seconds.
+        run(&def, &mut w, WeaponInput::default(), 4.0);
+        assert_eq!((w.loaded, w.reserve), (12, 0));
+        assert!(w.reloading.is_none());
+    }
+
+    #[test]
+    fn a_pull_of_the_trigger_stops_a_shell_by_shell_reload() {
+        let (def, mut w) = shotgun();
+        let reload = WeaponInput {
+            reload: true,
+            ..Default::default()
+        };
+        run(&def, &mut w, reload, 1.0 / 120.0);
+        run(&def, &mut w, WeaponInput::default(), 0.5);
+        assert_eq!(w.loaded, 1);
+        // Fired half a second in: the shell goes, and the reload stops.
+        let shots = clicks(&def, &mut w, &[0.0], 0.1);
+        assert_eq!(shots.len(), 1);
+        assert_eq!((w.loaded, w.reserve), (0, 11));
+        assert!(w.reloading.is_none());
+        // A pull before the first shell is in doesn't stop it.
+        let (def, mut w) = shotgun();
+        run(&def, &mut w, reload, 1.0 / 120.0);
+        assert!(clicks(&def, &mut w, &[0.1], 0.2).is_empty());
+        assert!(w.reloading.is_some());
     }
 
     #[test]

@@ -195,6 +195,8 @@ pub struct FirstPersonRig {
     /// For each gun model node, the graph node driving it.
     gun_nodes: Vec<Option<usize>>,
     camera: Option<usize>,
+    /// The graph's sounds, in `Scene::sounds`.
+    pub sounds: Vec<Option<usize>>,
 }
 
 impl FirstPersonRig {
@@ -219,6 +221,7 @@ impl FirstPersonRig {
             gun_nodes,
             camera,
             graph,
+            sounds: Vec::new(),
         }
     }
 
@@ -300,6 +303,45 @@ impl FirstPersonRig {
     pub fn gun_skin(&self, world: &[Mat4], gun: &Skeleton) -> Vec<Mat4> {
         self.skin(world, gun, &self.gun_nodes)
     }
+
+    /// The sound (in `Scene::sounds`) of an animation's sound event
+    /// `event`, unless the soundscape already plays it for everyone when
+    /// the animation starts (see `VOICED`).
+    fn event_sound(&self, anim: &Animation, event: usize) -> Option<usize> {
+        let voiced = anim
+            .name
+            .split(':')
+            .any(|part| VOICED.iter().any(|v| part.starts_with(v)));
+        match voiced {
+            true => None,
+            false => self.sounds.get(event).copied().flatten(),
+        }
+    }
+}
+
+/// Animations whose sounds the soundscape plays itself when the moment
+/// comes (`WeaponSounds`: ready, reload, melee), heard by everyone nearby.
+const VOICED: [&str; 4] = ["ready", "reload_full", "reload_empty", "melee_strike"];
+
+/// The sounds of the events (frame, sound) an animation passes between
+/// frames `from` (included) and `to`; a looping one comes round again
+/// every `length` frames.
+fn crossed(events: &[(u16, usize)], from: f32, to: f32, length: Option<f32>) -> Vec<usize> {
+    events
+        .iter()
+        .filter(|&&(f, _)| {
+            let f = f as f32;
+            match length {
+                Some(n) if n > 0.0 => {
+                    // The first time at or after `from` the loop is at f.
+                    let laps = ((from - f) / n).ceil().max(0.0);
+                    f + laps * n < to
+                }
+                _ => from <= f && f < to,
+            }
+        })
+        .map(|&(_, s)| s)
+        .collect()
 }
 
 /// Plays one first person animation at a time, fading between them.
@@ -311,6 +353,8 @@ pub struct Animator {
     blend_from: Vec<NodePose>,
     blend: f32,
     pose: Vec<NodePose>,
+    /// Sounds (in `Scene::sounds`) its animations started, until taken.
+    sounds: Vec<usize>,
 }
 
 impl Animator {
@@ -339,12 +383,22 @@ impl Animator {
         }
     }
 
+    /// The sounds its animations started since last asked.
+    pub fn take_sounds(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.sounds)
+    }
+
     pub fn update(&mut self, rig: &FirstPersonRig, dt: f32) -> &[NodePose] {
+        let before = self.time;
         self.time += dt;
         self.blend += dt;
         let pose = match self.anim.and_then(|a| rig.graph.animations.get(a)) {
             Some(a) => {
                 let last = a.frame_count.saturating_sub(1).max(1) as f32;
+                let (from, to) = (before * FRAME_RATE, self.time * FRAME_RATE);
+                let events = crossed(&a.sound_events, from, to, self.looping.then_some(last));
+                self.sounds
+                    .extend(events.into_iter().filter_map(|e| rig.event_sound(a, e)));
                 let mut frame = self.time * FRAME_RATE;
                 frame = if self.looping {
                     frame % last
@@ -393,6 +447,22 @@ mod tests {
         // The bind pose skins every vertex to where it already is.
         let skin = w[1] * s.inverse_bind[1];
         assert!(skin.abs_diff_eq(Mat4::IDENTITY, 1e-6));
+    }
+
+    #[test]
+    fn sound_events_play_once_per_pass() {
+        let events = [(0, 7), (5, 8)];
+        // Frame 0's event goes off on the first update.
+        assert_eq!(crossed(&events, 0.0, 1.0, None), vec![7]);
+        assert_eq!(crossed(&events, 1.0, 5.0, None), Vec::<usize>::new());
+        assert_eq!(crossed(&events, 4.5, 6.0, None), vec![8]);
+        // A ten-frame loop: frame 5 again at 15, frame 0 at 10.
+        assert_eq!(crossed(&events, 9.0, 12.0, Some(10.0)), vec![7]);
+        assert_eq!(crossed(&events, 12.0, 16.0, Some(10.0)), vec![8]);
+        assert_eq!(
+            crossed(&events, 16.0, 19.0, Some(10.0)),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ fn rifle() -> WeaponDef {
         initial_rounds: 36,
         maximum_rounds: 108,
         reload_time: 1.0,
+        rounds_reloaded: 0,
         rounds_per_shot: 1,
         projectiles_per_shot: 1,
         error_angle: (0.0, 0.0),

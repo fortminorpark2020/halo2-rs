@@ -29,6 +29,9 @@ const VARIANT_OBJECTS: usize = 0x1C;
 const VARIANT_OBJECT_SIZE: usize = 0x10;
 const HLMT_DAMAGE_INFO: usize = 0x60;
 const DAMAGE_INFO_SIZE: usize = 0xF8;
+/// The damage info's shield shaders: first person, and as others see it.
+const DAMAGE_SHIELD_SHADER_FP: usize = 0x7C;
+const DAMAGE_SHIELD_SHADER: usize = 0x84;
 
 const TRAK_POINTS: usize = 0x4;
 const TRAK_POINT_SIZE: usize = 0x1C;
@@ -189,6 +192,11 @@ pub struct ModelTag {
     pub variants: Vec<ModelVariant>,
     pub max_vitality: f32,
     pub max_shield: f32,
+    /// The shader drawn over the body while its shields take hits (a
+    /// plasma shield's shimmer), as others see it and as its owner sees
+    /// their arms (`shield_shader_fp`).
+    pub shield_shader: Option<DatumIndex>,
+    pub shield_shader_fp: Option<DatumIndex>,
 }
 
 impl ModelTag {
@@ -437,9 +445,14 @@ pub fn read_model(set: &mut MapSet, hlmt: DatumIndex) -> Result<ModelTag> {
         });
     }
     let damage = file.read_block(region, &data, HLMT_DAMAGE_INFO, DAMAGE_INFO_SIZE)?;
-    let (max_vitality, max_shield) = match damage.as_chunks::<DAMAGE_INFO_SIZE>().0.first() {
+    let info = damage.as_chunks::<DAMAGE_INFO_SIZE>().0.first();
+    let (max_vitality, max_shield) = match info {
         Some(d) => (f32_at(d, 0x28), f32_at(d, 0x8C)),
         None => (0.0, 0.0),
+    };
+    let shader = |at: usize| {
+        info.map(|d| datum(d, at))
+            .filter(|&s| s != DatumIndex::NONE)
     };
     Ok(ModelTag {
         render_model: datum(&data, HLMT_RENDER_MODEL),
@@ -448,6 +461,8 @@ pub fn read_model(set: &mut MapSet, hlmt: DatumIndex) -> Result<ModelTag> {
         variants,
         max_vitality,
         max_shield,
+        shield_shader: shader(DAMAGE_SHIELD_SHADER),
+        shield_shader_fp: shader(DAMAGE_SHIELD_SHADER_FP),
     })
 }
 

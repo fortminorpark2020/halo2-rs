@@ -218,6 +218,52 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
     Ok(info)
 }
 
+/// The postprocess definition's animated parameters: each names the
+/// function (a data blob) that drives one of the template's values.
+const POSTPROCESS_FUNCTIONS: usize = 0x3C;
+const POSTPROCESS_FUNCTION_SIZE: usize = 0x14;
+const FUNCTION_DATA: usize = 0xC;
+/// A function blob whose output is a colour has this flag in its second
+/// byte; its colours follow the 4-byte header as 32-bit ARGB values.
+const FUNCTION_COLOR_OUTPUT: u8 = 0x20;
+const FUNCTION_COLORS: std::ops::Range<usize> = 0x4..0x14;
+
+/// The colours a shader's animated parameters move between: the shimmer of
+/// a plasma shield, for one. Halo 2 stores each colour as a 32-bit ARGB
+/// value, read here the way its postprocess colours are (bytes B, G, R).
+pub fn animated_colors(set: &mut MapSet, shader: DatumIndex) -> Result<Vec<[f32; 3]>> {
+    let (src, _, data) = set.tag_data(shader)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let pp = file.read_block(region, &data, SHAD_POSTPROCESS, POSTPROCESS_SIZE)?;
+    let Some(pp) = pp.get(..POSTPROCESS_SIZE) else {
+        return Ok(Vec::new());
+    };
+    let functions =
+        file.read_block(region, pp, POSTPROCESS_FUNCTIONS, POSTPROCESS_FUNCTION_SIZE)?;
+    let mut out = Vec::new();
+    for f in functions.as_chunks::<POSTPROCESS_FUNCTION_SIZE>().0 {
+        let size = u32_at(f, FUNCTION_DATA) as usize;
+        let address = u32_at(f, FUNCTION_DATA + 4);
+        // Colour functions are small; anything else isn't one.
+        if !(FUNCTION_COLORS.end..=0x400).contains(&size) {
+            continue;
+        }
+        let Ok(blob) = file.read_in(region, address, size) else {
+            continue;
+        };
+        if blob[1] & FUNCTION_COLOR_OUTPUT == 0 {
+            continue;
+        }
+        for c in blob[FUNCTION_COLORS].as_chunks::<4>().0 {
+            if c[..3] != [0, 0, 0] {
+                out.push(color(c));
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

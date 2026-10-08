@@ -7,6 +7,7 @@ use crate::probe::LevelLight;
 use crate::rig::{FirstPersonRig, Skeleton, SkinnedMesh};
 use blam_cache::animation;
 use blam_cache::bitmap::{self, Image};
+use blam_cache::effect::{self, Contrail};
 use blam_cache::geometry::Mesh;
 use blam_cache::hud::{self, Anchor};
 use blam_cache::lightmap::{self, InstanceLighting};
@@ -16,8 +17,10 @@ use blam_cache::physics::{self, BipedPhysics, PlayerMovement};
 use blam_cache::render::{LevelGeometry, Section, SectionOwner};
 use blam_cache::scenario::PlacedKind;
 use blam_cache::shader::{self, Blend};
+use blam_cache::weapon::DamageFeedback;
 use blam_cache::{
-    render, scenario, sound, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp,
+    render, scenario, sound, vehicle, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn,
+    StructureBsp,
 };
 use glam::{Mat4, Vec3};
 use h2sim::game::FallingDamage;
@@ -259,9 +262,27 @@ pub struct WeaponAssets {
     pub mirror_mesh: Option<usize>,
     pub skeleton: Skeleton,
     pub skin: SkinnedMesh,
-    /// The muzzle: a gun node and the offset from it.
-    pub muzzle_node: usize,
-    pub muzzle: [f32; 3],
+    /// Where each of the barrel's firing effects flashes on the first
+    /// person gun, used in turn shot after shot (the Plasma Rifle's two
+    /// barrels take turns).
+    pub muzzles: Vec<Muzzle>,
+    /// The same on the third person gun, in its model's space.
+    pub world_muzzles: Vec<Vec3>,
+    /// What each firing effect's `jpt!` does to the shooter's view, in the
+    /// same turns (empty for guns that don't kick).
+    pub kicks: Vec<DamageFeedback>,
+    /// What a round does to the view of whoever it hits, and its blast to
+    /// those nearby.
+    pub hit_feedback: DamageFeedback,
+    pub blast_feedback: DamageFeedback,
+    /// The trails its rounds leave (tracers), and how many rounds go
+    /// without one between rounds with one.
+    pub contrails: Vec<Contrail>,
+    pub rounds_between_tracers: usize,
+    /// The muzzle flash's colour, and seconds the barrel's light takes to
+    /// fade after a shot.
+    pub flash_color: [f32; 3],
+    pub illumination_recovery: f32,
     /// Where the gun's root node sits in its first person model.
     pub grip: [f32; 3],
     /// First person animations (arms and gun), when the map has them.
@@ -272,6 +293,45 @@ pub struct WeaponAssets {
     pub sounds: WeaponSounds,
     /// How its rounds look and sound, when they fly.
     pub round: RoundAssets,
+}
+
+/// Where a gun's muzzle flashes: a node of its model and the offset from it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Muzzle {
+    pub node: usize,
+    pub offset: [f32; 3],
+}
+
+impl Default for Muzzle {
+    /// Guns without a muzzle marker flash a little ahead of their root.
+    fn default() -> Muzzle {
+        Muzzle {
+            node: 0,
+            offset: [0.2, 0.0, 0.04],
+        }
+    }
+}
+
+/// The marker a firing effect flashes at on a gun model: `muzzle_flash`
+/// where the effect and the model both have one, else the first of the
+/// effect's trigger markers the model has (`primary_trigger`, and the
+/// Plasma Rifle's second barrel's `primary_trigger1`). `has` says whether
+/// the model has a marker.
+fn firing_marker(locations: &[String], has: impl Fn(&str) -> bool) -> Option<&str> {
+    let muzzle = locations.iter().find(|l| *l == "muzzle_flash" && has(l));
+    muzzle
+        .or_else(|| locations.iter().find(|l| l.contains("trigger") && has(l)))
+        .map(String::as_str)
+}
+
+/// The colour of a shield's shimmer: the average of its shader's colours,
+/// each counted by how bright it is (the dark ones are its shadows).
+fn shield_shimmer(colors: &[[f32; 3]]) -> Option<[f32; 3]> {
+    let luma = |c: &[f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let total: f32 = colors.iter().map(luma).sum();
+    (total > 0.0).then(|| {
+        std::array::from_fn(|i| colors.iter().map(|c| c[i] * luma(c)).sum::<f32>() / total)
+    })
 }
 
 /// A weapon's rounds in flight (rockets, plasma bolts, needles...).
@@ -576,10 +636,12 @@ pub fn placement_matrix(position: [f32; 3], rotation: [f32; 3], scale: f32) -> M
         * Mat4::from_scale(Vec3::splat(scale))
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 pub struct GrenadeAssets {
     pub mesh: Option<usize>,
     pub speed: Option<f32>,
+    /// What its blast does to the views of those nearby.
+    pub blast_feedback: DamageFeedback,
 }
 
 /// How many Spartans can be on screen at once (each gets its own copy of the
@@ -668,6 +730,11 @@ pub struct Scene {
     /// camouflage lasts.
     pub overshield_time: Option<f32>,
     pub camo_time: Option<f32>,
+    /// The shimmer of a Spartan's and an Elite's shields taking a hit, as
+    /// others see it and (`_fp`) on their own arms: from the shield
+    /// shaders their models name.
+    pub shield_colors: [[f32; 3]; 2],
+    pub shield_colors_fp: [[f32; 3]; 2],
     /// The level's baked light, for lighting objects.
     pub level_light: LevelLight,
     /// The player's own HUD (shields, motion tracker, grenades).
@@ -1224,10 +1291,41 @@ impl Loader {
             .map(|d| d.upper_bound.0.max(d.upper_bound.1))
             .filter(|d| *d > 0.0);
 
+        let fx =
+            weapon::read_weapon_effects(&mut self.set, datum, barrel_index).unwrap_or_default();
+        // The markers each firing effect plays at.
+        let locations: Vec<Vec<String>> = fx
+            .firing
+            .iter()
+            .map(|f| {
+                f.fire
+                    .and_then(|e| effect::effect_locations(&mut self.set, e).ok())
+                    .unwrap_or_default()
+            })
+            .collect();
+        // Where each firing effect flashes on a model, in turn; else its
+        // `muzzle_flash` marker.
+        let muzzles_on = |m: &RenderModel| -> Vec<Option<Muzzle>> {
+            let at = |name: &str| {
+                m.marker(name).map(|mk| Muzzle {
+                    node: mk.node as usize,
+                    offset: mk.translation,
+                })
+            };
+            let fallback = at("muzzle_flash");
+            let mut out: Vec<Option<Muzzle>> = locations
+                .iter()
+                .map(|l| firing_marker(l, |n| m.marker(n).is_some()).and_then(at))
+                .map(|mk| mk.or(fallback))
+                .collect();
+            if out.is_empty() {
+                out.push(fallback);
+            }
+            out
+        };
         let mut view_mesh = None;
         let mut mirror_mesh = None;
-        let mut muzzle = [0.2, 0.0, 0.04];
-        let mut muzzle_node = 0;
+        let mut muzzles = vec![Muzzle::default()];
         let mut grip = [0.0; 3];
         let mut skeleton = Skeleton::default();
         let mut skin = SkinnedMesh::default();
@@ -1237,10 +1335,10 @@ impl Loader {
         if let Some(fp) = fp {
             match model::read_render_model(&mut self.set, fp) {
                 Ok(m) => {
-                    if let Some(mk) = m.marker("muzzle_flash") {
-                        muzzle = mk.translation;
-                        muzzle_node = mk.node as usize;
-                    }
+                    muzzles = muzzles_on(&m)
+                        .into_iter()
+                        .map(Option::unwrap_or_default)
+                        .collect();
                     if let Some(root) = m.nodes.first() {
                         grip = root.translation;
                     }
@@ -1277,10 +1375,57 @@ impl Loader {
                     .and_then(|&(_, i)| g.sounds.get(i).copied().flatten());
             }
         }
+        // The rest of the sounds the first person animations play.
+        for r in [&mut rig, &mut elite_rig].into_iter().flatten() {
+            let graph_sounds = r.graph.sounds.clone();
+            r.sounds = graph_sounds
+                .into_iter()
+                .map(|s| s.and_then(|d| self.sound(d)))
+                .collect();
+        }
         let hud = w.hud.map(|h| self.hud_widgets(h)).unwrap_or_default();
         let world_mesh = self.object_mesh(datum, meshes);
-        let fx =
-            weapon::read_weapon_effects(&mut self.set, datum, barrel_index).unwrap_or_default();
+        // The third person gun's muzzles, in its model's space.
+        let world_muzzles: Vec<Vec3> = match model::read_object_render_model(&mut self.set, datum) {
+            Ok(m) => {
+                let bind = Skeleton::new(&m.nodes);
+                muzzles_on(&m)
+                    .into_iter()
+                    .map(|mk| {
+                        let mk = mk.unwrap_or_default();
+                        let node = bind
+                            .inverse_bind
+                            .get(mk.node)
+                            .map_or(Mat4::IDENTITY, Mat4::inverse);
+                        node.transform_point3(Vec3::from(mk.offset))
+                    })
+                    .collect()
+            }
+            Err(_) => vec![Vec3::from(Muzzle::default().offset)],
+        };
+        let jpt = |set: &mut MapSet, d: DatumIndex| {
+            weapon::read_damage_feedback(set, d).unwrap_or_default()
+        };
+        let kicks = fx
+            .firing
+            .iter()
+            .map(|f| {
+                f.damage
+                    .map_or_else(DamageFeedback::default, |d| jpt(&mut self.set, d))
+            })
+            .collect();
+        let (hit_feedback, blast_feedback) =
+            projectile.as_ref().map_or_else(Default::default, |p| {
+                (
+                    jpt(&mut self.set, p.impact_damage),
+                    jpt(&mut self.set, p.detonation_damage),
+                )
+            });
+        let contrails =
+            effect::object_contrails(&mut self.set, barrel.projectile).unwrap_or_default();
+        let fire_light = fx
+            .fire
+            .and_then(|e| effect::effect_light(&mut self.set, e).ok().flatten());
         let sounds = WeaponSounds {
             fire: self.effect_sound(fx.fire),
             empty: self.effect_sound(fx.empty),
@@ -1297,9 +1442,15 @@ impl Loader {
             zoom_in: self.effect_sound(fx.zoom_in),
             zoom_out: self.effect_sound(fx.zoom_out),
         };
+        // A trail's colour is the round's own (from its contrail tag).
+        let trail_color = contrails.first().and_then(Contrail::color);
         let round = match def.flight {
             Some(f) => {
-                let (glow, size, fiery) = round_look(name);
+                let (mut glow, size, fiery) = round_look(name);
+                if let Some(c) = trail_color {
+                    let [r, g, b] = crate::effects::linear([c[0], c[1], c[2]]);
+                    glow = [r, g, b, glow[3]];
+                }
                 let exploding = f.blast.is_some();
                 RoundAssets {
                     mesh: self.object_mesh(barrel.projectile, meshes),
@@ -1317,24 +1468,53 @@ impl Loader {
             }
             None => RoundAssets::default(),
         };
+        // The flash takes the colour of the gun's tracer, else of the light
+        // its firing effect gives off, else of its flying rounds' glow;
+        // else the orange the remake used before.
+        let flash_color = trail_color
+            .map(|c| [c[0], c[1], c[2]])
+            .or(fire_light.map(|l| l.color))
+            .or(def
+                .flight
+                .map(|_| [round.glow[0], round.glow[1], round.glow[2]]))
+            .unwrap_or([1.0, 0.8, 0.4]);
         Some(WeaponAssets {
             tag: datum,
             trigger,
             world_mesh,
             round,
+            muzzles,
+            world_muzzles,
+            kicks,
+            hit_feedback,
+            blast_feedback,
+            contrails,
+            rounds_between_tracers: barrel.rounds_between_tracers.max(0) as usize,
+            flash_color,
+            illumination_recovery: barrel.illumination_recovery_time,
             def,
             view_mesh,
             mirror_mesh,
             skeleton,
             skin,
-            muzzle_node,
-            muzzle,
             grip,
             rig,
             elite_rig,
             hud,
             sounds,
         })
+    }
+
+    /// The shimmer of a biped's shields taking a hit, as others see it and
+    /// on its own first person arms, from its model's shield shaders.
+    fn shield_colors(&mut self, name: &str) -> Option<[[f32; 3]; 2]> {
+        let hlmt = self.find("hlmt", name)?;
+        let m = vehicle::read_model(&mut self.set, hlmt).ok()?;
+        let mut shimmer = |s: Option<DatumIndex>| {
+            shield_shimmer(&shader::animated_colors(&mut self.set, s?).ok()?)
+        };
+        let world = shimmer(m.shield_shader)?;
+        Some([world, shimmer(m.shield_shader_fp).unwrap_or(world)])
     }
 
     /// A HUD bitmap's first image, by tag name.
@@ -1651,6 +1831,31 @@ impl Loader {
 }
 
 impl WeaponAssets {
+    /// The first person muzzle of the firing effect used `effect`th (they
+    /// take turns).
+    pub fn muzzle(&self, effect: usize) -> Muzzle {
+        match self.muzzles.len() {
+            0 => Muzzle::default(),
+            n => self.muzzles[effect % n],
+        }
+    }
+
+    /// The same on the third person gun (model space).
+    pub fn world_muzzle(&self, effect: usize) -> Vec3 {
+        match self.world_muzzles.len() {
+            0 => Vec3::from(Muzzle::default().offset),
+            n => self.world_muzzles[effect % n],
+        }
+    }
+
+    /// What firing the `effect`th time does to the shooter's view.
+    pub fn kick(&self, effect: usize) -> Option<&DamageFeedback> {
+        match self.kicks.len() {
+            0 => None,
+            n => self.kicks.get(effect % n),
+        }
+    }
+
     /// First person animations for a Spartan's or an Elite's arms.
     pub fn rig_for(&self, elite: bool) -> Option<&FirstPersonRig> {
         if elite {
@@ -1954,17 +2159,28 @@ impl Scene {
         let campaign = campaign.then(|| campaign_start(&mut loader.set, &weapons));
         let grenades = ["frag_grenade", "plasma_grenade"].map(|g| {
             let name = format!("objects\\weapons\\grenade\\{g}\\{g}");
+            let projectile = loader
+                .find("proj", &name)
+                .and_then(|p| weapon::read_projectile(&mut loader.set, p).ok());
             GrenadeAssets {
                 mesh: loader
                     .find("eqip", &name)
                     .and_then(|e| loader.object_mesh(e, &mut meshes)),
-                speed: loader
-                    .find("proj", &name)
-                    .and_then(|p| weapon::read_projectile(&mut loader.set, p).ok())
+                speed: projectile
+                    .as_ref()
                     .map(|p| p.initial_velocity)
                     .filter(|v| *v > 0.0),
+                blast_feedback: projectile
+                    .and_then(|p| {
+                        weapon::read_damage_feedback(&mut loader.set, p.detonation_damage).ok()
+                    })
+                    .unwrap_or_default(),
             }
         });
+        let shields = [[SPARTAN, CAMPAIGN_SPARTAN], [ELITE, DERVISH]]
+            .map(|names| names.iter().find_map(|n| loader.shield_colors(n)));
+        // Without the tags, the yellow the remake showed before.
+        let shield = |i: usize, fp: usize| shields[i].map_or([1.0, 0.85, 0.3], |s| s[fp]);
         let named = |loader: &mut Loader, name: &str| loader.sound_named(name);
         let game_sounds = GameSounds {
             explosion: [
@@ -2132,6 +2348,8 @@ impl Scene {
             item_sounds,
             overshield_time,
             camo_time,
+            shield_colors: [shield(0, 0), shield(1, 0)],
+            shield_colors_fp: [shield(0, 1), shield(1, 1)],
             level_light,
             player_hud,
             hud_font,
@@ -2209,6 +2427,41 @@ pub fn mip_chain(img: &Image) -> Vec<(u32, u32, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firing_effects_flash_at_their_own_markers() {
+        let names = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // The Battle Rifle's model and effect both have a muzzle flash.
+        let rifle = names(&["primary_trigger", "primary_ejection", "muzzle_flash"]);
+        assert_eq!(firing_marker(&rifle, |_| true), Some("muzzle_flash"));
+        // The Magnum's effect names one its model lacks.
+        let magnum = |n: &str| n != "muzzle_flash";
+        assert_eq!(firing_marker(&rifle, magnum), Some("primary_trigger"));
+        // The Plasma Rifle's barrels take turns; the Plasma Pistol fires
+        // from its secondary trigger.
+        let upper = names(&["primary_trigger1"]);
+        assert_eq!(firing_marker(&upper, |_| true), Some("primary_trigger1"));
+        let pistol = names(&["secondary_trigger"]);
+        assert_eq!(firing_marker(&pistol, |_| true), Some("secondary_trigger"));
+        assert_eq!(firing_marker(&names(&["root"]), |_| true), None);
+    }
+
+    #[test]
+    fn shields_shimmer_in_their_bright_colours() {
+        // Master Chief's shield shader (lockout's masterchief_mp): gold,
+        // with its dark browns counting for little.
+        let px = |c: [u8; 3]| c.map(|v| v as f32 / 255.0);
+        let chief = [
+            px([244, 225, 89]),
+            px([62, 30, 0]),
+            px([250, 241, 180]),
+            px([224, 121, 18]),
+            px([69, 38, 3]),
+        ];
+        let [r, g, b] = shield_shimmer(&chief).unwrap();
+        assert!(r > 0.85 && g > 0.7 && b < 0.45, "{r} {g} {b}");
+        assert_eq!(shield_shimmer(&[[0.0; 3]]), None);
+    }
 
     #[test]
     fn mip_chain_reaches_1x1() {

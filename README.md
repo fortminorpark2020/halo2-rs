@@ -141,7 +141,8 @@ mouse wheel switches weapon, G throws a grenade, X switches grenade type, E pick
 up (hold to swap weapons), 1-9 pick one directly. B adds a bot. All 15 multiplayer weapons are
 loaded with their real first person models, HUD, crosshairs, scopes and firing
 stats, held by Master Chief's arms with the game's own first person animations
-(ready, idle, fire, reload, melee). Guns whose tags give no rate of fire
+(ready, idle, fire, reload, melee) and the sounds they cue, such as the
+Shotgun's pump. Guns whose tags give no rate of fire
 (the Magnum, Carbine, Shotgun, sniper rifles, Rocket Launcher and others) fire
 as fast as their recovery time allows: the Magnum every 0.1 s, the Sniper
 Rifle every 0.5 s. Holding the trigger keeps the Battle Rifle firing bursts,
@@ -165,6 +166,21 @@ throws everyone in reach, the shooter included. Needles stick in whoever they
 hit and pop a moment later; seven in one target at once set off a supercombine
 that kills. Other Spartans bend at the waist to aim up and down.
 `H2_START_WEAPONS=needler,smg` changes what everyone spawns with, for testing.
+The Shotgun reloads a shell at a time (as its magazine tag says), with its
+own first person animations, and pulling the trigger mid-reload stops it to
+fire what's in.
+
+What you feel: firing kicks your view, being hit knocks it and flashes the
+screen (blue while your shields hold, red after), and explosions nearby shake
+it, by the sizes, lengths and colours in the weapons' damage tags; it moves
+only the picture, never where you aim. Shots leave the tracers and trails
+their rounds' contrail tags give (the Battle Rifle a tracer every third
+round, the Sniper Rifle a smoke trail), drawn from the muzzle. Muzzle flashes
+come from the firing effects' own markers, in each gun's colour, on other
+players' guns too, and briefly light your gun. Shields hit flare in the
+wearer's colour (gold for Spartans, blue for Elites) over the body and your
+own arms, and pop as they go down; how long a flare lasts (half a second) is
+our estimate.
 
 Dual wielding: holding a one-handed gun (SMG, Magnum, Plasma Pistol, Plasma
 Rifle, Needler), stand on another and hold Q (Y on a controller) to take it in

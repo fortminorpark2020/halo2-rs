@@ -4,6 +4,7 @@
 
 use crate::camera::{self, FlyCamera};
 use crate::effects;
+use crate::feedback::ViewFeedback;
 use crate::gpu::{self, hud_mode, DrawCall, Fx, SpriteVertex};
 use crate::hud::{self, HudBuilder};
 use crate::input::{PadPress, PadState};
@@ -89,19 +90,52 @@ struct Hand<'a> {
     frame: Mat4,
 }
 
-/// A flash at the muzzle just after a shot.
-fn muzzle_flash(
+/// Seconds the flash sprite shows at the muzzle after a shot (the
+/// remake's own; the firing effects' particles aren't drawn).
+const FLASH_TIME: f32 = 0.05;
+
+/// A flash at the muzzle just after a shot, the gun's colour; `muzzle_frame`
+/// places the gun node the muzzle hangs from.
+pub fn muzzle_flash(
     out: &mut Vec<SpriteVertex>,
     weapon: &WeaponAssets,
     state: &WeaponState,
-    muzzle_frame: Mat4,
+    muzzle: Vec3,
     (r, u): (Vec3, Vec3),
+    scale: f32,
 ) {
-    if state.since_shot < 0.05 {
-        let muzzle = muzzle_frame.transform_point3(Vec3::from(weapon.muzzle));
-        let size = 0.012 + 0.006 * (state.since_shot * 300.0).sin().abs();
-        effects::quad(out, muzzle, r * size, u * size, [1.0, 0.8, 0.4, 0.9]);
+    if state.since_shot < FLASH_TIME {
+        let size = (0.012 + 0.006 * (state.since_shot * 300.0).sin().abs()) * scale;
+        let [cr, cg, cb] = effects::linear(weapon.flash_color);
+        effects::quad(out, muzzle, r * size, u * size, [cr, cg, cb, 0.9]);
     }
+}
+
+/// How a gun's light brightens the first person view just after a shot,
+/// fading over the barrel's illumination recovery time. How bright isn't
+/// in the tags read here: the flash's colour at full strength, an
+/// estimate.
+fn muzzle_light(
+    light: Option<[f32; 3]>,
+    weapon: &WeaponAssets,
+    state: &WeaponState,
+) -> Option<[f32; 3]> {
+    let recovery = weapon.illumination_recovery;
+    let left = match recovery > 0.0 {
+        true => (1.0 - state.since_shot / recovery).clamp(0.0, 1.0),
+        false => 0.0,
+    };
+    light.map(|l| std::array::from_fn(|i| l[i] + weapon.flash_color[i] * left))
+}
+
+/// Where a reload one shell at a time (the Shotgun's) has got to in the
+/// first person animations: going in, then a shell after another.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ShellReload {
+    #[default]
+    Off,
+    Enter,
+    Shells,
 }
 
 /// What one hand's first person animation should react to.
@@ -111,6 +145,8 @@ struct HandCues {
     melee: bool,
     thrown: bool,
     reload: Option<bool>,
+    /// The gun is reloading now.
+    reloading: bool,
 }
 
 fn animate_hand(
@@ -118,18 +154,38 @@ fn animate_hand(
     rig: &rig::FirstPersonRig,
     dual: bool,
     cues: HandCues,
-    shots: &mut usize,
+    (shots, shells): (&mut usize, &mut ShellReload),
     dt: f32,
 ) {
     if cues.ready {
         animator.play(hand_animation(rig, dual, "ready", *shots), false);
+        *shells = ShellReload::Off;
+    }
+    // A reload a shell at a time: going in, a shell after another while
+    // the gun reloads, and out again once it's done (or stopped to fire).
+    match *shells {
+        ShellReload::Enter | ShellReload::Shells if !cues.reloading => {
+            *shells = ShellReload::Off;
+            if !cues.fired {
+                animator.play(rig.find("first_person:reload_exit", 0), false);
+            }
+        }
+        ShellReload::Enter if animator.finished(rig) => {
+            *shells = ShellReload::Shells;
+            animator.play(rig.find("first_person:reload_continue_empty", 0), true);
+        }
+        _ => {}
     }
     if cues.fired {
         *shots += 1;
+        *shells = ShellReload::Off;
         let anim = hand_animation(rig, dual, "fire_1", *shots);
         if anim.is_some() {
             animator.play(anim, false);
         }
+    }
+    if (cues.melee || cues.thrown) && !dual {
+        *shells = ShellReload::Off;
     }
     if cues.melee && !dual {
         *shots += 1;
@@ -144,7 +200,11 @@ fn animate_hand(
             animator.play(anim, false);
         }
     }
-    if let Some(empty) = cues.reload {
+    let enter = rig.find("first_person:reload_enter", 0);
+    if let (Some(_), Some(enter)) = (cues.reload, enter) {
+        animator.play(Some(enter), false);
+        *shells = ShellReload::Enter;
+    } else if let Some(empty) = cues.reload {
         let name = if empty && !dual {
             "reload_empty"
         } else {
@@ -211,6 +271,7 @@ pub fn player_fx(game: &Game, player: usize) -> Fx {
         Some(p) if p.alive => Fx {
             camo: 1.0 - p.visibility(),
             overshield: p.overshield(&game.rules),
+            ..Fx::default()
         },
         _ => Fx::default(),
     }
@@ -218,10 +279,14 @@ pub fn player_fx(game: &Game, player: usize) -> Fx {
 
 /// Your own arms and gun with active camouflage: still faintly there so
 /// you can see what you hold. (An overshield shows on the HUD instead.)
-fn own_fx(game: &Game, player: usize) -> Fx {
+/// Your shields flaring from a hit show on your arms, in the colour Halo 2
+/// gives them in first person.
+fn own_fx(game: &Game, player: usize, flare: f32, color: [f32; 3]) -> Fx {
     Fx {
         camo: player_fx(game, player).camo * 0.8,
         overshield: 0.0,
+        shield: flare,
+        shield_color: color,
     }
 }
 
@@ -362,6 +427,14 @@ pub struct LocalPlayer {
     pub shown_left: Option<usize>,
     pub left_shots: usize,
     pub shown_dual: bool,
+    /// Each hand's reload a shell at a time, as the animations show it.
+    pub shell_reload: [ShellReload; 2],
+    /// The firing effect each hand's gun used last (its muzzle flashes).
+    pub firing_effect: [usize; 2],
+    /// Camera kicks, shakes and screen flashes.
+    pub feedback: ViewFeedback,
+    /// Their shields flaring from a hit, 0-1 (on their arms).
+    pub shield_flare: f32,
     /// Kill feed and pickups, newest last, with seconds left on screen.
     pub messages: Vec<(String, f32)>,
     /// A standing line at the top of the view (LAN games to join).
@@ -400,6 +473,10 @@ impl LocalPlayer {
             shown_left: None,
             left_shots: 0,
             shown_dual: false,
+            shell_reload: Default::default(),
+            firing_effect: [0; 2],
+            feedback: ViewFeedback::default(),
+            shield_flare: 0.0,
             messages: Vec::new(),
             notice: None,
             view: ViewEvents::default(),
@@ -685,6 +762,8 @@ impl LocalPlayer {
                 .and_then(|w| w.rig_for(elite))
         };
         let right = me.held().map(|h| h.weapon);
+        let reloading =
+            [me.held(), me.left.as_ref()].map(|h| h.is_some_and(|h| h.state.reloading.is_some()));
         if let Some(rig) = rig_of(right) {
             let hand = HandCues {
                 ready: switched || right != self.shown_weapon,
@@ -692,13 +771,14 @@ impl LocalPlayer {
                 melee: view.melee,
                 thrown: view.thrown,
                 reload: view.reload,
+                reloading: reloading[0],
             };
             animate_hand(
                 &mut self.animator,
                 rig,
                 dual,
                 hand,
-                &mut self.shots_fired,
+                (&mut self.shots_fired, &mut self.shell_reload[0]),
                 dt,
             );
         }
@@ -710,17 +790,26 @@ impl LocalPlayer {
                 melee: false,
                 thrown: false,
                 reload: view.reload_left,
+                reloading: reloading[1],
             };
             animate_hand(
                 &mut self.left_animator,
                 rig,
                 true,
                 hand,
-                &mut self.left_shots,
+                (&mut self.left_shots, &mut self.shell_reload[1]),
                 dt,
             );
         }
         self.shown_left = left;
+    }
+
+    /// The sounds this player's first person animations started (the
+    /// Shotgun's pump and shells...), in `Scene::sounds`.
+    pub fn take_view_sounds(&mut self) -> Vec<usize> {
+        let mut out = self.animator.take_sounds();
+        out.extend(self.left_animator.take_sounds());
+        out
     }
 
     /// The camera's frame (x forward, y left, z up, like Halo's first person
@@ -785,10 +874,23 @@ impl LocalPlayer {
         let (Some(mesh), 0) = (weapon.view_mesh, state.zoom) else {
             return out;
         };
-        // The gun and arms take the light where the player stands.
+        // The gun and arms take the light where the player stands, and the
+        // flash of their gun's shots.
         let light = scene.level_light.at(&scene.textures, self.camera.position);
+        let mut light = muzzle_light(light, weapon, state);
         let (_, r, u) = self.camera.basis();
         let elite = self.me(game).look.elite;
+        let arms_fx = own_fx(
+            game,
+            self.player,
+            self.shield_flare,
+            scene.shield_colors_fp[elite as usize],
+        );
+        let left = self.me(game).left.as_ref();
+        let left = left.and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state)));
+        if let Some((lw, ls)) = left {
+            light = muzzle_light(light, lw, ls);
+        }
         let posed = match (weapon.rig_for(elite), scene.arms_for(elite)) {
             (Some(rig), Some(arms)) if !self.animator.pose().is_empty() => {
                 let frame = self.view_frame(game);
@@ -799,7 +901,7 @@ impl LocalPlayer {
                     meshes: (arms.mesh, mesh),
                     frame,
                 };
-                let (world, muzzle) = self.draw_hand(&mut out, game, weapon, &hand, light);
+                let world = self.draw_hand(&mut out, game, weapon, &hand, (light, arms_fx));
                 // The flag's cloth hangs from the top of the pole.
                 let carried = game
                     .flags
@@ -821,8 +923,6 @@ impl LocalPlayer {
                     });
                 }
                 // The left hand's gun: the same arm and gun, mirrored.
-                let left = self.me(game).left.as_ref();
-                let left = left.and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state)));
                 if let Some((lw, ls)) = left {
                     if let (Some(lrig), Some(lmesh)) = (lw.rig_for(elite), lw.mirror_mesh) {
                         if !self.left_animator.pose().is_empty() {
@@ -833,46 +933,90 @@ impl LocalPlayer {
                                 meshes: (arms.mirror, lmesh),
                                 frame: frame * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)),
                             };
-                            let (_, m) = self.draw_hand(&mut out, game, lw, &hand, light);
-                            muzzle_flash(&mut out.view_sprites, lw, ls, m, (r, u));
+                            self.draw_hand(&mut out, game, lw, &hand, (light, arms_fx));
+                            if let Some(at) = self.muzzle_point(scene, game, true) {
+                                muzzle_flash(&mut out.view_sprites, lw, ls, at, (r, u), 1.0);
+                            }
                         }
                     }
                 }
-                Some(muzzle)
+                true
             }
-            _ => None,
+            _ => false,
         };
-        let muzzle_frame = posed.unwrap_or_else(|| {
-            let m = self.view_model_matrix(game, weapon, state);
+        if !posed {
             out.view_models.push(DrawCall {
                 mesh,
-                model: m,
+                model: self.view_model_matrix(game, weapon, state),
                 light,
                 colors: None,
                 emblem: None,
                 fx: Fx::default(),
             });
-            let node = weapon
-                .skeleton
-                .inverse_bind
-                .get(weapon.muzzle_node)
-                .map_or(Mat4::IDENTITY, Mat4::inverse);
-            m * node
-        });
-        muzzle_flash(&mut out.view_sprites, weapon, state, muzzle_frame, (r, u));
+        }
+        if let Some(at) = self.muzzle_point(scene, game, false) {
+            muzzle_flash(&mut out.view_sprites, weapon, state, at, (r, u), 1.0);
+        }
         out
     }
 
-    /// Pose and draw one hand's arm and gun. Returns the rig's world
-    /// matrices and the gun's muzzle frame.
+    /// Where the first person gun in a hand (`left`, else the right) flashes
+    /// now, for its last shot's firing effect: in the world, for tracers to
+    /// start from. None unless seen in first person, unzoomed.
+    pub fn muzzle_point(&self, scene: &Scene, game: &Game, left: bool) -> Option<Vec3> {
+        if !self.first_person(game) {
+            return None;
+        }
+        let me = self.me(game);
+        let held = match left {
+            true => me.left.as_ref()?,
+            false => me.held()?,
+        };
+        let weapon = scene.weapons.get(held.weapon)?;
+        if held.state.zoom != 0 || weapon.view_mesh.is_none() {
+            return None;
+        }
+        let muzzle = weapon.muzzle(self.firing_effect[left as usize]);
+        let elite = me.look.elite;
+        let animator = if left {
+            &self.left_animator
+        } else {
+            &self.animator
+        };
+        let mut frame = self.view_frame(game);
+        if left {
+            frame *= Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
+        }
+        let node = match (weapon.rig_for(elite), scene.arms_for(elite)) {
+            (Some(rig), Some(_)) if !animator.pose().is_empty() => {
+                let world = rig.world(animator.pose());
+                rig.gun_node_world(&world, muzzle.node)
+                    .map_or(frame, |m| frame * m)
+            }
+            // Only the right hand's gun is drawn without animations.
+            _ if left => return None,
+            _ => {
+                let bind = weapon
+                    .skeleton
+                    .inverse_bind
+                    .get(muzzle.node)
+                    .map_or(Mat4::IDENTITY, Mat4::inverse);
+                self.view_model_matrix(game, weapon, &held.state) * bind
+            }
+        };
+        Some(node.transform_point3(Vec3::from(muzzle.offset)))
+    }
+
+    /// Pose and draw one hand's arm and gun, in `light`, the arms with
+    /// `fx`. Returns the rig's world matrices.
     fn draw_hand(
         &self,
         out: &mut ViewDraws,
         game: &Game,
         weapon: &WeaponAssets,
         hand: &Hand,
-        light: Option<[f32; 3]>,
-    ) -> (Vec<Mat4>, Mat4) {
+        (light, fx): (Option<[f32; 3]>, Fx),
+    ) -> Vec<Mat4> {
         let arms = hand.arms;
         let world = hand.rig.world(hand.pose);
         let (arms_mesh, gun_mesh) = hand.meshes;
@@ -892,21 +1036,18 @@ impl LocalPlayer {
             light,
             colors: Some(player_colors(game, self.player)),
             emblem: None,
-            fx: own_fx(game, self.player),
+            fx,
         });
+        // The shields' flare is on the arms, not the gun.
         out.view_models.push(DrawCall {
             mesh: gun_mesh,
             model: hand.frame,
             light,
             colors: None,
             emblem: None,
-            fx: own_fx(game, self.player),
+            fx: Fx { shield: 0.0, ..fx },
         });
-        let muzzle = hand
-            .rig
-            .gun_node_world(&world, weapon.muzzle_node)
-            .map_or(hand.frame, |m| hand.frame * m);
-        (world, muzzle)
+        world
     }
 
     /// Projection for the first person weapon, which ignores zoom.
@@ -954,6 +1095,17 @@ impl LocalPlayer {
         split: ScreenSplit,
     ) -> Vec<gpu::HudBatch> {
         let mut hb = HudBuilder::for_view(w, h, split);
+        // Damage flashes the whole view, under the HUD.
+        if let Some(color) = self.feedback.flash() {
+            hb.quad(
+                scene.hud_white,
+                [0.0, 0.0, w, h],
+                [0.0, 0.0, 1.0, 1.0],
+                color,
+                hud_mode::PLAIN,
+                0.0,
+            );
+        }
         let font = scene.hud_font;
         let me = self.me(game);
         // The corner margins' scale, and the remake's own text's.

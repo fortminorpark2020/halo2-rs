@@ -24,7 +24,7 @@ pub struct Listener {
 /// Distance travelled between footsteps, world units.
 const STRIDE: f32 = 0.8;
 /// Shots closer together than this are one burst (one burst sound).
-const BURST_GAP: f64 = 0.15;
+pub const BURST_GAP: f64 = 0.15;
 /// Announcer lines waiting their turn; beyond this the oldest is dropped.
 const ANNOUNCER_QUEUE: usize = 4;
 /// Pause between announcer lines, seconds.
@@ -313,6 +313,19 @@ impl Soundscape {
         let clip = asset.clips[self.pick(asset.clips.len())].clone();
         self.audio
             .play(&clip, [best[0] * gain, best[1] * gain], 1.0, false);
+    }
+
+    /// A sound a first person animation plays (the Shotgun's pump), heard
+    /// by its `owner` as their own and by others from `at`.
+    pub fn view_sound(
+        &mut self,
+        scene: &Scene,
+        sound: usize,
+        at: Vec3,
+        owner: usize,
+        listeners: &[Listener],
+    ) {
+        self.play(scene, Some(sound), at, Some(owner), listeners, 1.0);
     }
 
     /// The sound of something that just happened in the game.

@@ -605,6 +605,8 @@ impl App {
         self.bodies.clear();
         self.body_poses.clear();
         self.body_actions.clear();
+        self.shots.clear();
+        self.flares = Default::default();
         let old = std::mem::take(&mut self.locals);
         for (l, &p) in old.into_iter().zip(players) {
             let mut seat = LocalPlayer::new(p, &self.game);
