@@ -24,46 +24,58 @@ pub struct Blip {
 }
 
 impl Game {
+    /// Seconds since player `j` last fired: a gun in hand, or their seat's.
+    pub fn since_fired(&self, j: usize) -> f32 {
+        let Some(p) = self.players.get(j) else {
+            return f32::INFINITY;
+        };
+        let held = p.weapons.iter().chain(&p.left);
+        let seat_guns = p.seat.and_then(|(v, s)| {
+            let veh = self.vehicles.get(v)?;
+            let main = veh.weapons.get(s)?.as_ref();
+            let alt = veh.alt_weapons.get(s)?.as_ref();
+            Some([main, alt])
+        });
+        held.map(|h| &h.state)
+            .chain(seat_guns.into_iter().flatten().flatten())
+            .map(|w| w.since_shot)
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// Whether player `j` shows on player `viewer`'s motion sensor.
+    pub fn on_sensor(&self, viewer: usize, j: usize) -> bool {
+        let (Some(me), Some(p)) = (self.players.get(viewer), self.players.get(j)) else {
+            return false;
+        };
+        if !self.rules.options.radar || !me.alive || j == viewer || !p.alive {
+            return false;
+        }
+        let offset = (p.body.position - me.body.position).truncate();
+        if offset.length() > SENSOR_RANGE {
+            return false;
+        }
+        let ally = self.rules.game_type.teams() && !self.is_enemy(viewer, j);
+        let fast = self.movement.sneak_forward.max(0.1) * SNEAK_MARGIN;
+        let moving = p.body.velocity.length() > fast;
+        ally || moving || self.since_fired(j) < SHOT_SHOWS
+    }
+
     /// What player `viewer`'s motion sensor shows (nothing when the game
     /// has it off).
     pub fn sensor_blips(&self, viewer: usize) -> Vec<Blip> {
         let Some(me) = self.players.get(viewer) else {
             return Vec::new();
         };
-        if !self.rules.options.radar || !me.alive {
-            return Vec::new();
-        }
         let here = me.body.position;
         let teams = self.rules.game_type.teams();
-        let fast = self.movement.sneak_forward.max(0.1) * SNEAK_MARGIN;
-        let fired = |j: usize| {
-            let p = &self.players[j];
-            let held = p.weapons.iter().chain(&p.left);
-            let seat_guns = p.seat.and_then(|(v, s)| {
-                let veh = self.vehicles.get(v)?;
-                let main = veh.weapons.get(s)?.as_ref();
-                let alt = veh.alt_weapons.get(s)?.as_ref();
-                Some([main, alt])
-            });
-            held.map(|h| &h.state)
-                .chain(seat_guns.into_iter().flatten().flatten())
-                .any(|w| w.since_shot < SHOT_SHOWS)
-        };
         // Riders show as one blip for their vehicle.
         let mut blips: Vec<(Option<usize>, Blip)> = Vec::new();
         for (j, p) in self.players.iter().enumerate() {
-            if j == viewer || !p.alive {
+            if !self.on_sensor(viewer, j) {
                 continue;
             }
             let offset = (p.body.position - here).truncate();
-            if offset.length() > SENSOR_RANGE {
-                continue;
-            }
             let ally = teams && !self.is_enemy(viewer, j);
-            let moving = p.body.velocity.length() > fast;
-            if !(ally || moving || fired(j)) {
-                continue;
-            }
             let Some((v, _)) = p.seat else {
                 let vehicle = false;
                 blips.push((

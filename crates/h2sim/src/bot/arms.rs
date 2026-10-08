@@ -20,6 +20,14 @@ const SWITCH_WAIT: f32 = 1.5;
 const FETCH_TIME: f32 = 8.0;
 /// Weapons given up on, remembered until respawning.
 const MAX_SHUNNED: usize = 8;
+/// Seconds standing on a weapon without managing to take it before giving
+/// up on it (and whatever else lies there), and how close counts as there.
+const PICKUP_TIME: f32 = 1.5;
+const PICKUP_SPOT: f32 = 0.6;
+/// Holding the button to swap: held for the first `PICKUP_HOLD` seconds of
+/// every `PICKUP_PRESS` (a swap takes a fresh press each time).
+const PICKUP_PRESS: f32 = 0.6;
+const PICKUP_HOLD: f32 = 0.45;
 
 /// How much bots want a weapon kind (power weapons most).
 pub(super) fn weapon_value(game: &Game, w: usize) -> f32 {
@@ -224,15 +232,40 @@ impl Bot {
     }
 
     /// Standing on a weapon worth having: stop and hold the button that
-    /// takes it (swapping out the weaker gun, or into the left hand).
+    /// takes it (swapping out the weaker gun, or into the left hand). One
+    /// that won't come is soon given up on, so as not to stand there.
     pub(super) fn pick_up(&mut self, game: &Game, me: usize, cmd: &mut Command) {
         let p = &game.players[me];
+        let feet = p.body.position;
+        let here =
+            |at: Vec3| (at - feet).truncate().length() < PICKUP_SPOT && (at.z - feet.z).abs() < 0.8;
         let worth = |w: usize| Bot::weapon_gain(game, me, w) > WORTH_SWAPPING;
-        if game.dual_prompt(me).is_some_and(worth) {
+        let dual = game.dual_prompt(me).is_some_and(worth);
+        let swap = game.swap_prompt(me).is_some_and(worth);
+        if !(dual || swap) || self.shunned_weapons.iter().any(|&at| here(at)) {
+            self.pickup_for = 0.0;
+            return;
+        }
+        self.pickup_for += crate::game::TICK;
+        if self.pickup_for > PICKUP_TIME {
+            let spots: Vec<Vec3> = game
+                .item_spawns
+                .iter()
+                .map(|s| s.position)
+                .chain(game.dropped.iter().map(|d| d.position))
+                .filter(|&at| here(at))
+                .collect();
+            for at in spots {
+                self.shun_weapon(at);
+            }
+            self.pickup_for = 0.0;
+            return;
+        }
+        if dual {
             // Holding switch takes it into the left hand.
             cmd.switch_weapon = true;
             cmd.movement = Vec2::ZERO;
-        } else if game.swap_prompt(me).is_some_and(worth) {
+        } else if swap {
             // A swap replaces the gun in hand: have the weaker one out.
             let current = p
                 .weapons
@@ -246,7 +279,7 @@ impl Bot {
                 cmd.switch_weapon = true;
                 self.switch_wait = 0.5;
             } else {
-                cmd.action = true;
+                cmd.action |= self.pickup_for % PICKUP_PRESS < PICKUP_HOLD;
             }
             cmd.movement = Vec2::ZERO;
         }
@@ -367,6 +400,47 @@ mod tests {
         play(&mut g, &mut bot, me, 4.0);
         let held: Vec<usize> = g.players[me].weapons.iter().map(|h| h.weapon).collect();
         assert!(held.contains(&rockets), "{held:?}");
+    }
+
+    #[test]
+    fn bots_let_go_of_the_button_to_swap_again() {
+        let (mut g, _, rockets) = armory();
+        let gun = |g: &Game, name: &str| {
+            let mut def = g.weapons[rockets].clone();
+            def.name = name.into();
+            def
+        };
+        let (magnum, rifle, shotgun) = (
+            gun(&g, "magnum"),
+            gun(&g, "battle_rifle"),
+            gun(&g, "shotgun"),
+        );
+        g.weapons.extend([magnum, rifle, shotgun]);
+        let (magnum, rifle, shotgun) = (2, 3, 4);
+        let me = g.add_player();
+        g.players[me].body.position = Vec3::ZERO;
+        let held = |w: usize| HeldWeapon {
+            weapon: w,
+            state: crate::WeaponState::new(&g.weapons[w]),
+        };
+        g.players[me].weapons = vec![held(magnum), held(rockets)];
+        g.players[me].current = 0;
+        // A rifle and a shotgun at its feet: the magnum goes for the rifle,
+        // and the rifle (now the weaker) for the shotgun.
+        for w in [rifle, shotgun] {
+            g.dropped.push(crate::game::DroppedWeapon {
+                weapon: w,
+                state: crate::WeaponState::new(&g.weapons[w]),
+                position: Vec3::new(0.0, 0.0, 0.1),
+                yaw: 0.0,
+                ttl: 60.0,
+            });
+        }
+        let mut bot = Bot::new(3);
+        play(&mut g, &mut bot, me, 3.0);
+        let mut held: Vec<usize> = g.players[me].weapons.iter().map(|h| h.weapon).collect();
+        held.sort();
+        assert_eq!(held, vec![rockets, shotgun]);
     }
 
     #[test]

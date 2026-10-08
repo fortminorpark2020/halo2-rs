@@ -15,6 +15,9 @@ use glam::{Vec2, Vec3};
 
 /// How far a bot goes out of its way for a vehicle.
 const BOARD_RANGE: f32 = 8.0;
+/// Seconds going for vehicles on foot without getting in before giving up
+/// on the one it's going for (as long as for fetching a weapon).
+const BOARD_TIME: f32 = 8.0;
 /// Close enough to a route point, driving.
 const DRIVE_ARRIVED: f32 = 1.8;
 /// Seconds barely moving before a driver backs up, and how long it does.
@@ -54,6 +57,9 @@ pub(super) struct Riding {
     shunned: Vec<usize>,
     /// The vehicle it was last in, to shun once out.
     last: Option<usize>,
+    /// The vehicle it's going for on foot, and seconds spent going for
+    /// vehicles since it was last in one.
+    going_for: Option<(usize, f32)>,
     /// Driving: seconds barely moving, backing up, times stuck, and
     /// seconds since last stuck.
     stalled: f32,
@@ -133,9 +139,12 @@ impl Bot {
                 };
                 let entry = veh.to_world(def, seat.entry);
                 let d = entry.distance(feet);
+                // In sight, or the one it's going for already (not turning
+                // back each time the seat drops out of sight on the way).
+                let going = self.riding.going_for.is_some_and(|g| g.0 == v);
                 if wanted
                     && best.is_none_or(|b| d < b.3)
-                    && Bot::visible(world, p.eye(), entry + Vec3::Z * 0.3)
+                    && (going || Bot::visible(world, p.eye(), entry + Vec3::Z * 0.3))
                 {
                     best = Some((v, s, entry, d));
                 }
@@ -157,6 +166,19 @@ impl Bot {
             game.vehicle_action(me),
             Some(VehicleAction::Enter { vehicle: v, .. }) if v == vehicle
         )
+    }
+
+    /// On foot going for vehicle `v`: counts the time it takes, and gives
+    /// up on it (until respawning) when that's too long, as when its seat
+    /// is in sight but there's no way up to it.
+    pub(super) fn going_for_ride(&mut self, v: usize, dt: f32) {
+        let r = &mut self.riding;
+        let t = r.going_for.map_or(0.0, |g| g.1) + dt;
+        r.going_for = Some((v, t));
+        if t > BOARD_TIME {
+            r.shunned.push(v);
+            r.going_for = None;
+        }
     }
 
     /// Out of a vehicle (or never in one): forget it, shunning one just
@@ -182,6 +204,7 @@ impl Bot {
     ) -> Command {
         let dt = TICK;
         self.riding.last = Some(v);
+        self.riding.going_for = None;
         let veh = &game.vehicles[v];
         let def = &game.vehicle_defs[veh.def];
         let seat = &def.seats[s];
@@ -198,6 +221,7 @@ impl Bot {
         };
         if target != self.target {
             self.target = target;
+            self.seen.clear();
             self.seen_for = 0.0;
             self.aim_error = Vec2::new(self.random() - 0.5, self.random() - 0.5) * 0.2;
         }
@@ -221,7 +245,8 @@ impl Bot {
             // A gun that lobs its shots (the Wraith's) aims above the target
             // by its barrel's tilt.
             let lob = seat.turret.map_or(0.0, |g| g.elevation);
-            let to = Bot::aim_point(Some(gun), eye, q) - eye;
+            let taken_in = self.perceive(q);
+            let to = Bot::aim_point(Some(gun), eye, q, taken_in) - eye;
             let dist = to.length();
             let yaw = to.y.atan2(to.x) + self.aim_error.x;
             let pitch = (to.z / dist.max(1e-4)).asin() + self.aim_error.y - lob;

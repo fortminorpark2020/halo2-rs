@@ -2148,14 +2148,18 @@ impl Game {
         self.dropped.retain(|d| d.ttl > 0.0);
     }
 
-    /// The weapon on the ground a player could swap for (action key prompt).
+    /// The weapon on the ground a player could swap for (action key prompt):
+    /// one in reach, as for picking it up, not on the floor above or below.
     pub fn swap_prompt(&self, i: usize) -> Option<usize> {
         let p = self.players.get(i)?;
         if !p.alive || p.weapons.len() < 2 || p.objective.is_some() {
             return None;
         }
         let feet = p.body.position;
-        let near = |q: Vec3| Vec2::new(q.x - feet.x, q.y - feet.y).length() < PICKUP_RADIUS;
+        let near = |q: Vec3| {
+            Vec2::new(q.x - feet.x, q.y - feet.y).length() < PICKUP_RADIUS
+                && (q.z - feet.z).abs() < 0.8
+        };
         let held = |w: usize| p.weapons.iter().any(|h| h.weapon == w);
         self.item_spawns
             .iter()
@@ -2610,6 +2614,39 @@ pub(crate) mod tests {
         g.step(&world, &[Command::default()]);
         assert_eq!(g.players[0].weapons.len(), 2);
         assert!(g.item_timers[0] > 0.0);
+    }
+
+    #[test]
+    fn the_swap_prompt_is_only_for_weapons_in_reach() {
+        let mut g = game();
+        // Hands full, standing on the spot of a third kind of gun.
+        g.weapons.push(g.weapons[0].clone());
+        g.item_spawns[0].kind = ItemKind::Weapon(2);
+        g.add_player();
+        let second = HeldWeapon {
+            weapon: 1,
+            state: WeaponState::new(&g.weapons[1]),
+        };
+        g.players[0].weapons.push(second);
+        g.players[0].body.position = Vec3::new(0.0, 3.0, 0.0);
+        assert_eq!(g.swap_prompt(0), Some(2));
+        // Not through the floor from above or below.
+        g.players[0].body.position = Vec3::new(0.0, 3.0, 2.0);
+        assert_eq!(g.swap_prompt(0), None);
+        g.players[0].body.position = Vec3::new(0.0, 3.0, -2.0);
+        assert_eq!(g.swap_prompt(0), None);
+        // Nor a dropped one on the floor above.
+        g.item_timers[0] = 30.0;
+        g.dropped.push(DroppedWeapon {
+            weapon: 2,
+            state: WeaponState::new(&g.weapons[2]),
+            position: Vec3::new(0.0, 3.0, 0.1),
+            yaw: 0.0,
+            ttl: 60.0,
+        });
+        assert_eq!(g.swap_prompt(0), None);
+        g.players[0].body.position = Vec3::new(0.0, 3.0, 0.0);
+        assert_eq!(g.swap_prompt(0), Some(2));
     }
 
     #[test]

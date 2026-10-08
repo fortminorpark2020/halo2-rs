@@ -40,7 +40,11 @@ install. No game files are included in this repository.
   people over, manning turrets and a teammate's Warthog gun). Bots go for
   power weapons and power-ups lying nearby, dual wield, switch to the gun
   that suits the fight, and only spot a camouflaged player close up or when
-  they fire.
+  they fire. They notice enemies as a player would: on screen (the
+  Spartan's 70 degree view), on the motion sensor, heard firing or when shot,
+  and take a moment to react, longer to someone behind them; their aim lags
+  a moment behind a sudden change of direction. In a fight they strafe back
+  and forth, hop now and then, and close in to melee once shields are down.
 - `h2net`: LAN games: hosting, joining, and finding games on the local network.
 - `h2live`: online play, like Halo 2 on Xbox Live: Bungie's levels 1 to 50
   (hidden XP per ranked playlist, won and lost against each opponent), Halo

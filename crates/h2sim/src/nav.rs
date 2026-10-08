@@ -16,8 +16,11 @@ const MAX_LINK: f32 = 10.0;
 const STEP: f32 = 0.25;
 /// Highest step up between floor checks (stairs, kerbs).
 const MAX_RISE: f32 = 0.2;
-/// Deepest drop a walker will take.
-const MAX_DROP: f32 = 2.0;
+/// Deepest drop a walker will take. Halo 2's globals (`matg` falling
+/// damage) make falls under 6 units harmless, and the Spartan's `bipd`
+/// lands hard from 7 units a second (a 5.9 unit fall): this leaves a margin
+/// under both.
+const MAX_DROP: f32 = 4.5;
 /// Height of the clearance check above the floor.
 const KNEE: f32 = 0.3;
 const CHEST: f32 = 0.5;
@@ -40,6 +43,8 @@ const HOP_COST: f32 = 1.0;
 const MIN_EDGE: f32 = 0.1;
 /// Points of two structure BSPs this close are joined.
 const JOIN: f32 = 1.0;
+/// The closest points tried for one that can be walked to straight.
+const NEAREST_TRIED: usize = 32;
 
 #[derive(Debug, Clone, Default)]
 pub struct NavGraph {
@@ -58,6 +63,14 @@ fn floor_below(world: &World, p: Vec3, rise: f32, depth: f32) -> Option<f32> {
     world
         .raycast(top, Vec3::NEG_Z, rise + depth)
         .map(|t| top.z - t)
+}
+
+/// The same, with how level the floor is there (the up part of its normal).
+fn floor_and_slope(world: &World, p: Vec3, rise: f32, depth: f32) -> Option<(f32, f32)> {
+    let top = p + Vec3::Z * rise;
+    world
+        .raycast_hit(top, Vec3::NEG_Z, rise + depth)
+        .map(|(t, n)| (top.z - t, n.z))
 }
 
 /// Whether a Spartan can walk in a straight line from `a` to `b`.
@@ -83,9 +96,14 @@ pub fn walkable(world: &World, a: Vec3, b: Vec3) -> bool {
                 }
             }
         }
-        let Some(z) = floor_below(world, probe, MAX_RISE + 0.05, MAX_DROP) else {
+        // Floor all the way, not the steep side of a walkway that slides a
+        // Spartan off it.
+        let Some((z, up)) = floor_and_slope(world, probe, MAX_RISE + 0.05, MAX_DROP) else {
             return false;
         };
+        if up < FLOOR_UP {
+            return false;
+        }
         // Running off a drop carries a Spartan on through the air: there
         // must be floor at the bottom where it comes down.
         let drop = here.z - z;
@@ -473,22 +491,29 @@ impl NavGraph {
 
     /// The closest point reachable in a straight line from `p`.
     pub fn nearest(&self, world: &World, p: Vec3) -> Option<usize> {
+        self.nearest_avoiding(world, p, &[])
+    }
+
+    /// The closest point reachable in a straight line from `p` that isn't
+    /// one of `blocked` (places a bot tried and couldn't get to); failing
+    /// that, the closest one not blocked, or just the closest.
+    pub fn nearest_avoiding(&self, world: &World, p: Vec3, blocked: &[usize]) -> Option<usize> {
         let mut order: Vec<(f32, usize)> = self
             .points
             .iter()
             .enumerate()
             .map(|(i, q)| (q.distance_squared(p), i))
             .collect();
-        let near = order.len().min(8);
+        let near = order.len().min(NEAREST_TRIED);
         if near < order.len() {
             order.select_nth_unstable_by(near, |a, b| a.0.total_cmp(&b.0));
         }
         order.truncate(near);
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
-        order
-            .iter()
-            .map(|o| o.1)
+        let free = || order.iter().map(|o| o.1).filter(|i| !blocked.contains(i));
+        free()
             .find(|&i| walkable(world, p, self.points[i]))
+            .or_else(|| free().next())
             .or(order.first().map(|o| o.1))
     }
 
@@ -677,6 +702,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_nearest_point_can_leave_out_ones_given_up_on() {
+        let w = level();
+        let g = NavGraph::build(
+            &w,
+            &[
+                Vec3::new(2.0, -4.0, 0.1),
+                Vec3::new(3.0, -4.0, 0.1),
+                Vec3::new(8.0, 2.0, 0.1),
+            ],
+        );
+        let at = Vec3::new(1.5, -4.0, 0.0);
+        assert_eq!(g.nearest(&w, at), Some(0));
+        assert_eq!(g.nearest_avoiding(&w, at, &[0]), Some(1));
+        // Only one behind the wall left: that, though it's no straight walk.
+        assert_eq!(g.nearest_avoiding(&w, at, &[0, 1]), Some(2));
+        assert_eq!(g.nearest_avoiding(&w, at, &[0, 1, 2]), Some(0));
+    }
+
+    #[test]
     fn level_graphs_cover_the_floors() {
         let w = level();
         let spots = [Vec3::new(2.0, 2.0, 0.1), Vec3::new(17.0, 0.0, 2.1)];
@@ -722,6 +766,57 @@ pub(crate) mod tests {
         // With a wide floor below it's fine.
         let beyond = [[6., -5., 0.], [12., -5., 0.], [12., 5., 0.], [6., 5., 0.]];
         assert!(walkable(&world(&[platform, strip, beyond]), top, below));
+    }
+
+    #[test]
+    fn drops_that_dont_hurt_are_a_way_down_only() {
+        let world = |quads: &[[[f32; 3]; 4]]| {
+            let p: Vec<[f32; 3]> = quads.iter().flatten().copied().collect();
+            let idx: Vec<u32> = (0..quads.len() as u32)
+                .flat_map(|q| [0, 1, 2, 0, 2, 3].map(|k| q * 4 + k))
+                .collect();
+            World::new(&p, &idx)
+        };
+        let ground = [[-5., -5., 0.], [20., -5., 0.], [20., 5., 0.], [-5., 5., 0.]];
+        let below = Vec3::new(9.0, 0.0, 0.0);
+        // Off a ledge 4 up (no harm in Halo 2), but not back up it; off one
+        // 7 up (a fall that hurts), not at all.
+        for (height, way_down) in [(4.0, true), (7.0, false)] {
+            let platform = [
+                [0., -5., height],
+                [5., -5., height],
+                [5., 5., height],
+                [0., 5., height],
+            ];
+            let w = world(&[platform, ground]);
+            let top = Vec3::new(4.0, 0.0, height);
+            assert_eq!(walkable(&w, top, below), way_down, "{height}");
+            assert!(!walkable(&w, below, top));
+        }
+    }
+
+    #[test]
+    fn links_keep_to_the_top_of_a_walkway_not_its_steep_side() {
+        // A walkway 2 up, its side sloping steeply down to the ground.
+        let top = [
+            [0., -0.5, 2.],
+            [10., -0.5, 2.],
+            [10., 0.5, 2.],
+            [0., 0.5, 2.],
+        ];
+        let side = [[0., 0.5, 2.], [10., 0.5, 2.], [10., 1.5, 0.], [0., 1.5, 0.]];
+        let p: Vec<[f32; 3]> = [top, side].iter().flatten().copied().collect();
+        let w = World::new(&p, &[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
+        assert!(walkable(
+            &w,
+            Vec3::new(1.0, 0.0, 2.0),
+            Vec3::new(9.0, 0.0, 2.0)
+        ));
+        assert!(!walkable(
+            &w,
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(9.0, 1.0, 1.0)
+        ));
     }
 
     #[test]

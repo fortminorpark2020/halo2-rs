@@ -10,6 +10,7 @@ use crate::player::GRAVITY;
 use crate::weapon::WeaponDef;
 use blam_cache::weapon::TriggerBehavior;
 use glam::{Vec2, Vec3};
+use std::collections::VecDeque;
 
 mod actor;
 mod arms;
@@ -50,6 +51,50 @@ const STANDABLE: f32 = 0.64;
 const SAFE_DROP: f32 = 3.0;
 /// The share of lives a bot takes vehicles it comes across.
 const RIDES: f32 = 0.6;
+/// Noticing enemies in sight, as a person playing would (estimates, not
+/// the game's): seconds to react to one that comes on screen, and to one
+/// off it (looking round first), at least and at most; how near a shot is
+/// heard, and for how long after; and how long one out of sight stays in
+/// mind.
+const REACT_ON_SCREEN: (f32, f32) = (0.15, 0.25);
+const REACT_OFF_SCREEN: (f32, f32) = (0.3, 0.5);
+const HEARING: f32 = 15.0;
+const HEARD_FOR: f32 = 1.0;
+const MEMORY: f32 = 2.0;
+/// Another enemy must be this much nearer than the one being fought to
+/// turn to them.
+const STICK_TO_TARGET: f32 = 0.6;
+/// What a bot has taken in of its target's movement is this many ticks
+/// (about 0.18 s) old: a person's eye-to-hand delay (an estimate).
+const AIM_LAG: usize = 11;
+/// Strafing in a fight: seconds one way, at least and at most, and at each
+/// change the chance of stopping, of turning back the other way, and of a
+/// hop.
+const STRAFE_TIME: (f32, f32) = (0.3, 1.1);
+const STRAFE_STOP: f32 = 0.1;
+const STRAFE_BACK: f32 = 0.75;
+const FIGHT_HOP: f32 = 0.15;
+/// Closing in for a melee: within this distance once the target's shields
+/// are down to this share (or the gun is empty), and always this close.
+const MELEE_CLOSE: f32 = 3.0;
+const MELEE_SHIELD: f32 = 0.5;
+const POINT_BLANK: f32 = 1.6;
+/// Stuck this many times running within this distance of one place, a
+/// bot walks off some other way for a moment (seconds).
+const STUCK_TIMES: u32 = 3;
+const STUCK_SPOT: f32 = 1.0;
+const ESCAPE_TIME: f32 = 1.0;
+
+/// What a bot knows of another player.
+#[derive(Debug, Clone, Copy, Default)]
+struct Notice {
+    /// Seconds since it noticed them, if it has.
+    since: Option<f32>,
+    /// Seconds it takes to react to them once noticed.
+    react: f32,
+    /// Seconds since it last saw them.
+    unseen: f32,
+}
 
 pub struct Bot {
     rng: u32,
@@ -89,6 +134,20 @@ pub struct Bot {
     idle: bool,
     /// Hopped while stuck, and hasn't got going since.
     hopped: bool,
+    /// Where it last got stuck, how many times running it got stuck
+    /// there, and seconds left walking off some other way, which way.
+    stuck_at: Option<Vec3>,
+    stuck_times: u32,
+    escape: f32,
+    escape_yaw: f32,
+    /// Seconds standing on a weapon worth having without getting it.
+    pickup_for: f32,
+    /// What it has noticed of each player, and its own shields and health
+    /// last tick (to tell when it's shot).
+    noticed: Vec<Notice>,
+    vitality: f32,
+    /// Its target's place and velocity over the last few ticks.
+    seen: VecDeque<(Vec3, Vec3)>,
 }
 
 /// Computer players' names, picked by player number.
@@ -134,16 +193,23 @@ fn local(yaw: f32, dir: Vec2) -> Vec2 {
 }
 
 impl Bot {
-    /// Where to point `def` to hit player `q` from `eye`: where they'll
-    /// be when its rounds get there, and higher for rounds that fall.
-    /// Explosive rounds go at the feet, to catch them in the blast.
-    pub(super) fn aim_point(def: Option<&WeaponDef>, eye: Vec3, q: &Spartan) -> Vec3 {
-        let chest = q.eye() - Vec3::Z * 0.12;
+    /// Where to point `def` to hit player `q` from `eye`, taking their
+    /// feet to be at `feet` going at `velocity` (as the bot has taken them
+    /// in): where they'll be when its rounds get there, and higher for
+    /// rounds that fall. Explosive rounds go at the feet, to catch them in
+    /// the blast.
+    pub(super) fn aim_point(
+        def: Option<&WeaponDef>,
+        eye: Vec3,
+        q: &Spartan,
+        (feet, velocity): (Vec3, Vec3),
+    ) -> Vec3 {
+        let chest = feet + (q.eye() - q.body.position) - Vec3::Z * 0.12;
         let Some(f) = def.and_then(|d| d.flight) else {
-            return chest + q.body.velocity * 0.1;
+            return chest + velocity * 0.1;
         };
         let at = match f.blast {
-            Some(_) if q.body.grounded => q.body.position + Vec3::Z * 0.1,
+            Some(_) if q.body.grounded => feet + Vec3::Z * 0.1,
             _ => chest,
         };
         let mut ahead = at;
@@ -152,9 +218,23 @@ impl Bot {
             let d = eye.distance(ahead);
             let speed = (f.speed_at(0.0) + f.speed_at(d)) * 0.5;
             t = d / speed.max(0.5);
-            ahead = at + q.body.velocity * t;
+            ahead = at + velocity * t;
         }
         ahead + Vec3::Z * 0.5 * GRAVITY * f.gravity * t * t
+    }
+
+    /// Where the bot takes its target `q` to be and how fast they're
+    /// going: as it saw them `AIM_LAG` ticks ago, carried on to now. A
+    /// sudden turn of theirs throws its aim for a moment, as it would a
+    /// person's.
+    fn perceive(&mut self, q: &Spartan) -> (Vec3, Vec3) {
+        self.seen.push_back((q.body.position, q.body.velocity));
+        while self.seen.len() > AIM_LAG + 1 {
+            self.seen.pop_front();
+        }
+        let (at, velocity) = self.seen[0];
+        let lag = (self.seen.len() - 1) as f32 * crate::game::TICK;
+        (at + velocity * lag, velocity)
     }
 
     pub fn new(seed: u32) -> Bot {
@@ -185,6 +265,14 @@ impl Bot {
             actor: None,
             idle: false,
             hopped: false,
+            stuck_at: None,
+            stuck_times: 0,
+            escape: 0.0,
+            escape_yaw: 0.0,
+            pickup_for: 0.0,
+            noticed: Vec::new(),
+            vitality: 0.0,
+            seen: VecDeque::new(),
         };
         let rides = bot.random() < RIDES;
         bot.riding.reset(rides);
@@ -229,21 +317,83 @@ impl Bot {
         len < SIGHT && world.raycast(from, d / len.max(1e-4), len).is_none()
     }
 
-    /// The nearest enemy in sight. Camouflaged ones are only spotted close
-    /// up, or when firing gives them away.
-    fn find_target(&self, game: &Game, world: &World, me: usize) -> Option<usize> {
-        let eye = game.players[me].eye();
-        game.players
-            .iter()
-            .enumerate()
-            .filter(|(j, p)| game.is_enemy(me, *j) && p.alive)
-            .map(|(j, p)| {
-                let sight = (SIGHT * p.visibility()).max(CAMO_NOTICE);
-                (j, p.eye().distance(eye), p.eye() - Vec3::Z * 0.1, sight)
-            })
-            .filter(|&(_, d, chest, sight)| d < sight && Bot::visible(world, eye, chest))
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(j, ..)| j)
+    /// The nearest enemy in sight that the bot has noticed, as a person
+    /// playing would: on screen (Halo 2's view, as wide as the Spartan's
+    /// camera), on its motion sensor, heard firing close by, or shooting
+    /// at it. Noticing takes a moment, longer off screen (looking round
+    /// first); one out of sight a while is forgotten. It keeps to the one
+    /// it's fighting unless another is much nearer. Camouflaged enemies
+    /// are only spotted close up, or when firing gives them away.
+    fn find_target(&mut self, game: &Game, world: &World, me: usize) -> Option<usize> {
+        let dt = crate::game::TICK;
+        let p = &game.players[me];
+        let eye = p.eye();
+        let n = game.players.len();
+        if self.noticed.len() != n {
+            self.noticed = vec![Notice::default(); n];
+        }
+        let vitality = p.shield + p.health;
+        let shot = vitality < self.vitality - 0.01;
+        self.vitality = vitality;
+        // Half the view across, and up and down on a 4:3 screen.
+        let across = p.body.biped.camera_field_of_view * 0.5;
+        let up = (across.tan() * 0.75).atan();
+        let mut best: Option<(usize, f32)> = None;
+        for j in 0..n {
+            let q = &game.players[j];
+            if !game.is_enemy(me, j) || !q.alive {
+                self.noticed[j] = Notice::default();
+                continue;
+            }
+            let chest = q.eye() - Vec3::Z * 0.1;
+            let d = chest.distance(eye);
+            let sight = (SIGHT * q.visibility()).max(CAMO_NOTICE);
+            if d >= sight || !Bot::visible(world, eye, chest) {
+                let k = &mut self.noticed[j];
+                k.unseen += dt;
+                if k.unseen > MEMORY {
+                    k.since = None;
+                }
+                continue;
+            }
+            self.noticed[j].unseen = 0.0;
+            if let Some(since) = &mut self.noticed[j].since {
+                *since += dt;
+            } else {
+                let to = (chest - eye) / d.max(1e-4);
+                let side = wrap(to.y.atan2(to.x) - self.yaw).abs();
+                let rise = (to.z.clamp(-1.0, 1.0).asin() - self.pitch).abs();
+                let on_screen = side < across && rise < up;
+                let fired = game.since_fired(j) < HEARD_FOR;
+                let heard = fired && d < HEARING;
+                if on_screen || heard || (shot && fired) || game.on_sensor(me, j) {
+                    let (lo, hi) = if on_screen {
+                        REACT_ON_SCREEN
+                    } else {
+                        REACT_OFF_SCREEN
+                    };
+                    let react = lo + (hi - lo) * self.random();
+                    self.noticed[j] = Notice {
+                        since: Some(0.0),
+                        react,
+                        unseen: 0.0,
+                    };
+                }
+            }
+            let k = self.noticed[j];
+            if k.since.is_none_or(|since| since < k.react) {
+                continue;
+            }
+            let score = if self.target == Some(j) {
+                d * STICK_TO_TARGET
+            } else {
+                d
+            };
+            if best.is_none_or(|b| score < b.1) {
+                best = Some((j, score));
+            }
+        }
+        best.map(|b| b.0)
     }
 
     /// Where the game sends this bot while no one is in sight, and whether
@@ -348,7 +498,9 @@ impl Bot {
             self.heading_for = Some(goal);
             self.route.clear();
             self.no_way = false;
-            if let (Some(a), Some(b)) = (nav.nearest(world, feet), nav.nearest(world, goal)) {
+            // Not starting from a place it couldn't get to.
+            let start = nav.nearest_avoiding(world, feet, &self.blocked);
+            if let (Some(a), Some(b)) = (start, nav.nearest(world, goal)) {
                 // Places given up on may be the only way: forget them.
                 let route = nav.path_avoiding(a, b, &self.blocked).or_else(|| {
                     self.blocked.clear();
@@ -378,7 +530,7 @@ impl Bot {
     /// A route to somewhere within the guard radius of `centre`.
     fn new_route_near(&mut self, nav: &NavGraph, world: &World, from: Vec3, centre: Vec3) {
         self.route.clear();
-        let Some(start) = nav.nearest(world, from) else {
+        let Some(start) = nav.nearest_avoiding(world, from, &self.blocked) else {
             return;
         };
         let close: Vec<usize> = (0..nav.points.len())
@@ -395,10 +547,16 @@ impl Bot {
     }
 
     /// Pick somewhere to go and plan the way there (one with no
-    /// teleporters in a vehicle).
+    /// teleporters in a vehicle; on foot, not from a place it couldn't get
+    /// to).
     fn new_route(&mut self, nav: &NavGraph, world: &World, from: Vec3, on_foot: bool) {
         self.route.clear();
-        let Some(start) = nav.nearest(world, from) else {
+        let start = if on_foot {
+            nav.nearest_avoiding(world, from, &self.blocked)
+        } else {
+            nav.nearest(world, from)
+        };
+        let Some(start) = start else {
             return;
         };
         for _ in 0..4 {
@@ -438,6 +596,12 @@ impl Bot {
             self.target = None;
             self.fetching = None;
             self.shunned_weapons.clear();
+            self.pickup_for = 0.0;
+            self.noticed.clear();
+            self.seen.clear();
+            self.stuck_at = None;
+            self.stuck_times = 0;
+            self.escape = 0.0;
             self.yaw = p.yaw;
             self.pitch = 0.0;
             let rides = self.random() < RIDES && self.actor.is_none();
@@ -454,15 +618,18 @@ impl Bot {
         let feet = p.body.position;
         let eye = p.eye();
         let mut cmd = Command::default();
-        // Stuck against something: hop (once, until it gets going again),
-        // then give up on that way and find another.
+        // Stuck against something: hop (once, until it gets going again
+        // away from there), then give up on that way and find another.
         let moved = (feet - self.last_position).truncate().length();
         self.last_position = feet;
         if moved < 0.4 * dt && !self.idle {
             self.stuck_for += dt;
         } else {
             self.stuck_for = 0.0;
-            if moved >= 0.4 * dt {
+            let away = self
+                .stuck_at
+                .is_none_or(|at| at.distance(feet) > STUCK_SPOT);
+            if moved >= 0.4 * dt && away {
                 self.hopped = false;
             }
         }
@@ -472,6 +639,18 @@ impl Bot {
         }
         if self.stuck_for > 2.0 {
             self.stuck_for = 0.0;
+            // Stuck there time and again (not in a fight): walk off some
+            // other way for a moment.
+            let again = self
+                .stuck_at
+                .is_some_and(|at| at.distance(feet) < STUCK_SPOT);
+            self.stuck_times = if again { self.stuck_times + 1 } else { 1 };
+            self.stuck_at = Some(feet);
+            if self.stuck_times >= STUCK_TIMES && self.target.is_none() {
+                self.stuck_times = 0;
+                self.escape = ESCAPE_TIME;
+                self.escape_yaw = self.random() * std::f32::consts::TAU;
+            }
             if let Some(point) = self.watching.take() {
                 self.block(point);
             }
@@ -500,13 +679,49 @@ impl Bot {
                 a.alert = Some((game.players[t].body.position, 0.0));
             }
             self.target = target;
+            self.seen.clear();
             self.seen_for = 0.0;
             self.aim_error = Vec2::new(self.random() - 0.5, self.random() - 0.5) * 0.4;
         }
+        if target.is_some() {
+            self.escape = 0.0;
+        } else if self.escape > 0.0 {
+            self.escape -= dt;
+            if self.escape <= 0.0 {
+                self.stuck_at = None;
+            }
+            let way = Vec2::from_angle(self.escape_yaw);
+            self.turn_to(self.escape_yaw, 0.0, dt);
+            let drift = p.body.velocity.truncate();
+            cmd.movement = self.keep_off_ledges(world, feet, drift, local(self.yaw, way));
+            cmd.jump = false;
+            self.idle = cmd.movement == Vec2::ZERO;
+            cmd.yaw = self.yaw;
+            cmd.pitch = self.pitch;
+            return cmd;
+        }
+        // Strafe one way then the other like a person, rarely standing
+        // still, now and then with a hop.
         self.strafe_left -= dt;
+        let mut hop = false;
         if self.strafe_left <= 0.0 {
-            self.strafe_left = 0.4 + self.random() * 1.0;
-            self.strafe = [-1.0, 0.0, 1.0][(self.random() * 3.0) as usize % 3];
+            let (lo, hi) = STRAFE_TIME;
+            self.strafe_left = lo + (hi - lo) * self.random();
+            let r = self.random();
+            self.strafe = if r < STRAFE_STOP {
+                0.0
+            } else if self.strafe == 0.0 {
+                if r < 0.55 {
+                    -1.0
+                } else {
+                    1.0
+                }
+            } else if r < STRAFE_BACK {
+                -self.strafe
+            } else {
+                self.strafe
+            };
+            hop = self.random() < FIGHT_HOP;
         }
         self.grenade_wait -= dt;
         self.switch_wait -= dt;
@@ -528,7 +743,8 @@ impl Bot {
             }
             let q = &game.players[t];
             let def = p.held().and_then(|h| game.weapons.get(h.weapon));
-            let to = Bot::aim_point(def, eye, q) - eye;
+            let taken_in = self.perceive(q);
+            let to = Bot::aim_point(def, eye, q, taken_in) - eye;
             let dist = to.length();
             let yaw = to.y.atan2(to.x) + self.aim_error.x;
             let pitch = (to.z / dist.max(1e-4)).asin() + self.aim_error.y;
@@ -578,13 +794,20 @@ impl Bot {
                 self.grenade_wait = 4.0 + self.random() * 6.0;
             }
             // Close in from afar (right up close with a short-range gun
-            // like the shotgun), back off when too close, strafe always.
+            // like the shotgun), and for a melee once their shields are
+            // down or this gun is spent; back off only from a blast of its
+            // own; strafe always.
             let short = def.is_some_and(|d| d.range < SHORT_RANGE);
+            let spent = p.held().zip(def).is_some_and(|(h, d)| {
+                (d.uses_ammo() && h.state.loaded == 0) || h.state.reloading.is_some()
+            });
+            let weak = q.shield <= q.full.shield * MELEE_SHIELD;
+            let melee = !too_close && dist < MELEE_CLOSE && (weak || spent || dist < POINT_BLANK);
             let fwd = if self.actor.is_some() {
                 actor_fwd
-            } else if melee_only || dist > 8.0 || (short && dist > 2.0) {
+            } else if melee_only || dist > 8.0 || (short && dist > 2.0) || melee {
                 1.0
-            } else if dist < 2.5 && !short {
+            } else if too_close && dist < 2.5 {
                 -1.0
             } else {
                 0.0
@@ -623,6 +846,7 @@ impl Bot {
             // A vehicle to take: go to it, and get in.
             walk_to = Some(entry);
             boarding = Bot::board_now(game, me, v);
+            self.going_for_ride(v, dt);
         } else {
             // A better weapon lying close by comes first.
             let actor = self.actor.is_some();
@@ -730,6 +954,11 @@ impl Bot {
             let drift = game.players[me].body.velocity.truncate();
             cmd.movement = self.keep_off_ledges(world, feet, drift, cmd.movement);
         }
+        // A hop now and then in a fight, where it comes down on floor.
+        let fighting = target.is_some() && self.actor.is_none() && !flies;
+        if hop && fighting && p.body.grounded && cmd.movement != Vec2::ZERO {
+            cmd.jump |= self.jump_lands(game, world, me, cmd.movement);
+        }
         // Standing still on purpose isn't being stuck: holding its ground
         // in a fight, or kept back from a ledge, a bot doesn't hop.
         self.idle = cmd.movement == Vec2::ZERO;
@@ -827,6 +1056,29 @@ impl Bot {
         m
     }
 
+    /// Whether a jump now, moving `movement`, comes down on floor all the
+    /// way (not off a ledge): where the speed it has and its air control
+    /// carry it until it lands back at the height it left, and a little
+    /// beyond (not landing on the brink, to be knocked off by a shot).
+    fn jump_lands(&self, game: &Game, world: &World, me: usize, movement: Vec2) -> bool {
+        let body = &game.players[me].body;
+        let feet = body.position;
+        let (s, c) = self.yaw.sin_cos();
+        let (forward, right) = (Vec2::new(c, s), Vec2::new(s, -c));
+        let wish = (forward * movement.y + right * movement.x).normalize_or_zero();
+        let drift = body.velocity.truncate();
+        let gravity = GRAVITY * game.movement.gravity_scale;
+        let airborne = 2.0 * body.biped.jump_velocity / gravity.max(0.1);
+        let push = game.movement.airborne_acceleration;
+        (1..=10).all(|k| {
+            let t = airborne * k as f32 / 8.0;
+            let at = feet.truncate() + drift * t + wish * (0.5 * push * t * t);
+            world
+                .raycast_hit(at.extend(feet.z + 0.5), Vec3::NEG_Z, 1.5)
+                .is_some_and(|(_, n)| n.z >= STANDABLE)
+        })
+    }
+
     fn held_empty(&self, game: &Game, me: usize) -> bool {
         let p = &game.players[me];
         p.held().is_some_and(|h| {
@@ -874,6 +1126,41 @@ mod tests {
         }
         assert!(fired);
         assert!(hurt);
+    }
+
+    #[test]
+    fn bots_notice_enemies_on_screen_or_on_the_motion_sensor() {
+        let world = crate::game::tests::floor();
+        let mut game = crate::game::tests::game();
+        let me = game.add_player();
+        let them = game.add_player();
+        game.players[me].body.position = Vec3::ZERO;
+        for p in &mut game.players {
+            p.body.velocity = Vec3::ZERO;
+        }
+        // Seconds until a bot facing along x takes them on.
+        let notice = |game: &Game, bot: &mut Bot| {
+            (1..=120)
+                .find(|_| bot.find_target(game, &world, me).is_some())
+                .map(|ticks| ticks as f32 * crate::game::TICK)
+        };
+        // In front: noticed after a moment, not at once.
+        game.players[them].body.position = Vec3::new(8.0, 2.0, 0.0);
+        let t = notice(&game, &mut Bot::new(3)).expect("in view");
+        assert!((0.1..0.3).contains(&t), "{t}");
+        // Behind, standing still and quiet: not at all.
+        game.players[them].body.position = Vec3::new(-6.0, 0.0, 0.0);
+        assert_eq!(notice(&game, &mut Bot::new(3)), None);
+        // Behind, running (on the motion sensor): after looking round.
+        game.players[them].body.velocity = Vec3::new(0.0, 2.25, 0.0);
+        let t = notice(&game, &mut Bot::new(3)).expect("on the sensor");
+        assert!((0.25..0.55).contains(&t), "{t}");
+        // Behind, still and past the sensor's reach, but just fired: heard.
+        game.players[them].body.velocity = Vec3::ZERO;
+        game.players[them].body.position = Vec3::new(-12.0, 0.0, 0.0);
+        assert_eq!(notice(&game, &mut Bot::new(3)), None);
+        game.players[them].weapons[0].state.since_shot = 0.1;
+        assert!(notice(&game, &mut Bot::new(3)).is_some());
     }
 
     #[test]
@@ -977,6 +1264,68 @@ mod tests {
     }
 
     #[test]
+    fn bots_give_up_on_a_vehicle_they_cant_get_to() {
+        // A jeep on a block too high to jump onto, in sight from around it.
+        let (mut p, mut i) = (Vec::new(), Vec::new());
+        let mut quad = |c: [[f32; 3]; 4]| {
+            let base = p.len() as u32;
+            p.extend_from_slice(&c);
+            i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        };
+        let (x0, x1, s, h) = (4.5, 7.5, 1.5, 2.0);
+        quad([
+            [-30., -30., 0.],
+            [30., -30., 0.],
+            [30., 30., 0.],
+            [-30., 30., 0.],
+        ]);
+        quad([[x0, -s, h], [x1, -s, h], [x1, s, h], [x0, s, h]]);
+        quad([[x1, -s, 0.], [x1, s, 0.], [x1, s, h], [x1, -s, h]]);
+        quad([[x0, -s, 0.], [x0, -s, h], [x0, s, h], [x0, s, 0.]]);
+        quad([[x0, s, 0.], [x0, s, h], [x1, s, h], [x1, s, 0.]]);
+        quad([[x0, -s, 0.], [x1, -s, 0.], [x1, -s, h], [x0, -s, h]]);
+        let world = World::new(&p, &i);
+        let mut game = crate::game::tests::game();
+        game.set_vehicles(
+            vec![crate::vehicle::tests::jeep()],
+            vec![crate::game::VehicleSpawn {
+                def: 0,
+                position: Vec3::new(6.0, 0.0, h + 0.05),
+                yaw: 0.0,
+                respawn: 30.0,
+            }],
+        );
+        let points: Vec<Vec3> = (-6..=6)
+            .flat_map(|x| (-6..=6).map(move |y| Vec3::new(x as f32 * 3.0, y as f32 * 3.0, 0.0)))
+            .filter(|q| !(x0 - 1.0..x1 + 1.0).contains(&q.x) || q.y.abs() > s + 1.0)
+            .collect();
+        let nav = NavGraph::build(&world, &points);
+        let me = game.add_player();
+        game.players[me].body.position = Vec3::ZERO;
+        let mut bot = Bot::new(3);
+        bot.riding.reset(true);
+        assert!(
+            bot.seat_nearby(&game, &world, me).is_some(),
+            "the seat is in sight"
+        );
+        let mut going_for = 0.0;
+        for _ in 0..60 * 40 {
+            if bot.seat_nearby(&game, &world, me).is_some() {
+                going_for += crate::game::TICK;
+            }
+            let cmd = bot.think(&game, &world, &nav, me);
+            game.step(&world, &[cmd]);
+        }
+        assert!(game.riding(me).is_none());
+        assert!(going_for < 10.0, "went for it for {going_for} s");
+        game.players[me].body.position = Vec3::ZERO;
+        assert!(
+            bot.seat_nearby(&game, &world, me).is_none(),
+            "gave up on it"
+        );
+    }
+
+    #[test]
     fn bots_fight_without_falling_off_ledges() {
         // A 6x6 platform over nothing.
         let world = World::new(
@@ -1040,6 +1389,7 @@ mod tests {
             // Five away (neither closing in nor backing off), not strafing.
             game.players[b].body.position = Vec3::new(5.0, 0.0, 0.0);
             game.players[b].health = game.players[b].full.health;
+            game.players[b].shield = game.players[b].full.shield;
             bot.strafe = 0.0;
             bot.strafe_left = 10.0;
             hops += self::hops(&mut game, &world, &nav, &mut bot, 1);

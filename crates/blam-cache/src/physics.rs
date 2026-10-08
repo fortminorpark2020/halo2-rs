@@ -26,6 +26,8 @@ pub struct BipedPhysics {
     pub jump_velocity: f32,
     pub standing_camera_height: f32,
     pub crouching_camera_height: f32,
+    /// How wide its camera sees, across the screen (radians).
+    pub camera_field_of_view: f32,
     pub height_standing: f32,
     pub height_crouching: f32,
     pub radius: f32,
@@ -77,6 +79,7 @@ impl Default for BipedPhysics {
             jump_velocity: 3.08,
             standing_camera_height: 0.62,
             crouching_camera_height: 0.45,
+            camera_field_of_view: 70f32.to_radians(),
             height_standing: 0.725,
             height_crouching: 0.5,
             radius: 0.175,
@@ -215,6 +218,9 @@ pub fn biped_physics_of(set: &mut MapSet, datum: DatumIndex) -> Result<Option<Bi
         jump_velocity: f32_at(&d, 0x1F8),
         standing_camera_height: f32_at(&d, 0x218),
         crouching_camera_height: f32_at(&d, 0x21C),
+        camera_field_of_view: Some(f32_at(&d, 0xCC))
+            .filter(|f| *f > 0.0)
+            .unwrap_or(BipedPhysics::default().camera_field_of_view),
         height_standing: f32_at(&d, 0x268),
         height_crouching: f32_at(&d, 0x26C),
         radius: f32_at(&d, 0x270),
