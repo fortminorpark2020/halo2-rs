@@ -12,7 +12,7 @@
 //!   h2tool scan  <maps folder>           summary line for every .map in a folder
 //!   h2tool model <file.map> <tag> [png]  render model summary for an object or `mode` tag
 //!   h2tool weapon <file.map> <tag>       a weapon's firing stats (magazine, barrel, projectile)
-//!   h2tool hud   <file.map> <nhdt> [dir] a HUD's bitmap widgets (optionally dump their images)
+//!   h2tool hud   <file.map> <nhdt> [dir] a HUD's bitmap widgets in its full, half and quarter screen layouts (optionally dump their full screen images)
 //!   h2tool jmad  <file.map> <tag>        an animation graph's skeleton and animations
 //!   h2tool jmadscan <file.map>           decode every animation the map can see
 //!   h2tool objects <file.map>            scenery and multiplayer item spawns
@@ -393,29 +393,44 @@ fn hud(path: &str, name: &str, dump: Option<&str>) -> Res {
         .ok_or("no HUD tag with that name")?
         .clone();
     let widgets = hud::read_bitmap_widgets(&mut set, tag.datum)?;
+    // One line per widget, then its full, half and quarter screen layouts:
+    // sequence, image and its size, offset, registration point.
+    let mut images = Vec::new();
     for w in &widgets {
         let bname = set
             .map
             .tag(w.bitmap)
             .map(|t| t.name.clone())
             .unwrap_or_default();
-        println!(
-            "{:<26} {:?} flags {:#x} seq {:>2} offset {:?} reg {:?} {bname}",
-            w.name, w.anchor, w.flags, w.sequence, w.offset, w.registration
-        );
+        println!("{:<26} {:?} flags {:#x} {bname}", w.name, w.anchor, w.flags);
+        let seqs = bitmap::read_sequences(&mut set, w.bitmap).unwrap_or_default();
+        for (split, layout) in ["full", "half", "quarter"].into_iter().enumerate() {
+            let image = (w.bitmap != blam_cache::DatumIndex::NONE)
+                .then(|| hud::widget_image(&seqs, w.sequence[split]))
+                .flatten();
+            let size = image
+                .and_then(|i| bitmap::read_bitmap_at(&mut set, w.bitmap, i).ok())
+                .map(|img| format!("{}x{}", img.width, img.height))
+                .unwrap_or_else(|| "hidden".into());
+            let sprites = usize::try_from(w.sequence[split])
+                .ok()
+                .and_then(|s| seqs.get(s))
+                .map_or(0, |s| s.sprites.len());
+            println!(
+                "    {layout:<8} seq {:>2} image {image:?} {size} sprites {sprites} offset {:?} reg {:?}",
+                w.sequence[split], w.offset[split], w.registration[split]
+            );
+            if split == 0 {
+                images.push(image);
+            }
+        }
     }
     if let Some(dir) = dump {
         std::fs::create_dir_all(dir)?;
-        for w in widgets {
-            if w.bitmap == blam_cache::DatumIndex::NONE {
+        for (w, image) in widgets.into_iter().zip(images) {
+            let Some(index) = image else {
                 continue;
-            }
-            let seqs = bitmap::read_sequences(&mut set, w.bitmap).unwrap_or_default();
-            let index = usize::try_from(w.sequence)
-                .ok()
-                .and_then(|s| seqs.get(s))
-                .map(|s| s.first_bitmap.max(0) as usize)
-                .unwrap_or(0);
+            };
             match bitmap::read_bitmap_at(&mut set, w.bitmap, index) {
                 Ok(img) => {
                     let out = format!("{dir}/{}.png", w.name);

@@ -331,7 +331,8 @@ fn load_level(path: &Path) -> Result<Level, String> {
     // H2_LIST_WEAPONS=1: each weapon's crosshair range and HUD pieces.
     if std::env::var_os("H2_LIST_WEAPONS").is_some() {
         for w in &scene.weapons {
-            let hud: Vec<&str> = w.hud.iter().map(|h| h.name.as_str()).collect();
+            let full = &w.hud[blam_cache::hud::ScreenSplit::Full as usize];
+            let hud: Vec<&str> = full.iter().map(|h| h.name.as_str()).collect();
             println!(
                 "weapon {} autoaim {:.1} range {:.1} damage {:.0} over {:?} vs shield/body {}/{} blast {:?} flight sound {:?} hud {hud:?}",
                 w.def.name,
@@ -2289,7 +2290,8 @@ impl App {
             let mut hud = if self.menu_open || cutscene_camera.is_some() {
                 Vec::new()
             } else {
-                l.build_hud(&self.scene, &self.game, vw, vh)
+                let split = local::screen_split(k, self.locals.len());
+                l.build_hud(&self.scene, &self.game, vw, vh, split)
             };
             if let Some(m) = self.mission.as_ref().filter(|_| !self.menu_open) {
                 mission_screen(

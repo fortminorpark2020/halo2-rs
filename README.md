@@ -65,6 +65,9 @@ Rockets, Snipers, Swords and Shotguns variants and those of Team Hardcore
 (battle rifle starts) and Team Snipers, both with no motion sensor. The
 motion sensor shows teammates (yellow) and enemies (red) within 25 metres who
 move faster than a crouch-walk or fire; with it off, the HUD has no tracker.
+The HUD is drawn at Halo 2's own size: its bitmaps are made for a 1280x960
+screen, so at 1080p they are drawn at 1.125 times their size (the motion
+tracker about a sixth of the screen's height).
 In team games, T (or X on a controller) puts you on the red or blue team; bots
 fill the smaller team. System Link lists games other PCs on the network are
 hosting.
@@ -182,6 +185,10 @@ sticks to crouch and zoom, Start pauses, hold Back for the scoreboard). A on a
 new controller takes over player one; in the lobby, Start on another
 controller adds a splitscreen player (up to four) and Back takes them out
 again. Start on a new controller during a game drops them straight in.
+As in Halo 2, two players split the screen top and bottom, three give the
+first player the top half and the others a quarter each, and four take a
+quarter each; each view uses the HUD tags' own half or quarter screen layout
+(quarter views have no ammo meter).
 
 LAN: every lobby and game is open to other PCs on the same network (allow
 h2viewer through Windows Firewall when asked); System Link lists them and joins
@@ -225,7 +232,7 @@ h2tool sim    lockout.map               # drop a Spartan at every spawn and walk
 h2tool model  lockout.map battle_rifle  # render model nodes and markers
 h2tool weapon lockout.map battle_rifle  # firing stats
 h2tool vehicle zanzibar.map warthog     # seats, speeds, model variants and physics hull
-h2tool hud    lockout.map battle_rifle [dir]  # HUD widgets
+h2tool hud    lockout.map battle_rifle [dir]  # HUD widgets in each screen layout
 h2tool jmad   lockout.map fp_battle_rifle  # animation graph: skeleton and animations
 h2tool jmadscan lockout.map             # decode every animation (reports failures)
 h2tool shader lockout.map fp_arms       # shader template and bitmaps

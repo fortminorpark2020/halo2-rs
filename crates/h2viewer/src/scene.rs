@@ -227,7 +227,8 @@ impl MeshData {
     }
 }
 
-/// A HUD bitmap placed on screen, in Halo 2's 640x480 HUD layout.
+/// A HUD bitmap placed on screen, in one of Halo 2's three HUD layouts
+/// (see `HudBuilder` for the size of its pixels and offsets).
 #[derive(Clone)]
 pub struct HudWidget {
     pub name: String,
@@ -238,6 +239,11 @@ pub struct HudWidget {
     pub registration: [f32; 2],
     pub size: [f32; 2],
 }
+
+/// A HUD's widgets in each of Halo 2's layouts, indexed by `ScreenSplit`:
+/// full screen, half and quarter. A widget the tag hides in a layout is
+/// missing from its list.
+pub type HudLayouts = [Vec<HudWidget>; 3];
 
 /// Everything needed to hold and fire one weapon.
 pub struct WeaponAssets {
@@ -262,7 +268,7 @@ pub struct WeaponAssets {
     pub rig: Option<FirstPersonRig>,
     /// The same for an Elite's arms.
     pub elite_rig: Option<FirstPersonRig>,
-    pub hud: Vec<HudWidget>,
+    pub hud: HudLayouts,
     pub sounds: WeaponSounds,
     /// How its rounds look and sound, when they fly.
     pub round: RoundAssets,
@@ -667,7 +673,7 @@ pub struct Scene {
     /// The level's baked light, for lighting objects.
     pub level_light: LevelLight,
     /// The player's own HUD (shields, motion tracker, grenades).
-    pub player_hud: Vec<HudWidget>,
+    pub player_hud: HudLayouts,
     /// HUD textures for text and solid fills.
     pub hud_font: usize,
     pub hud_white: usize,
@@ -1087,45 +1093,47 @@ impl Loader {
         MeshData::from_sections(&model.sections, &materials, &[])
     }
 
-    fn hud_widgets(&mut self, nhdt: DatumIndex) -> Vec<HudWidget> {
+    fn hud_widgets(&mut self, nhdt: DatumIndex) -> HudLayouts {
+        let mut out = HudLayouts::default();
         let Ok(widgets) = hud::read_bitmap_widgets(&mut self.set, nhdt) else {
-            return Vec::new();
+            return out;
         };
-        let mut out = Vec::new();
         for w in widgets {
             if w.bitmap == DatumIndex::NONE {
                 continue;
             }
-            let key = (w.bitmap, w.sequence);
-            let texture = if let Some(&t) = self.hud_of_bitmap.get(&key) {
-                t
-            } else {
-                let seqs = bitmap::read_sequences(&mut self.set, w.bitmap).unwrap_or_default();
-                let index = usize::try_from(w.sequence)
-                    .ok()
-                    .and_then(|s| seqs.get(s))
-                    .map(|s| s.first_bitmap.max(0) as usize)
-                    .unwrap_or(0);
-                match bitmap::read_bitmap_at(&mut self.set, w.bitmap, index) {
-                    Ok(img) => {
-                        self.hud_textures.push(img);
-                        let t = self.hud_textures.len() - 1;
-                        self.hud_of_bitmap.insert(key, t);
-                        t
+            let seqs = bitmap::read_sequences(&mut self.set, w.bitmap).unwrap_or_default();
+            for (split, layout) in out.iter_mut().enumerate() {
+                let sequence = w.sequence[split];
+                let Some(index) = hud::widget_image(&seqs, sequence) else {
+                    continue;
+                };
+                let key = (w.bitmap, sequence);
+                let texture = if let Some(&t) = self.hud_of_bitmap.get(&key) {
+                    t
+                } else {
+                    match bitmap::read_bitmap_at(&mut self.set, w.bitmap, index) {
+                        Ok(img) => {
+                            self.hud_textures.push(img);
+                            let t = self.hud_textures.len() - 1;
+                            self.hud_of_bitmap.insert(key, t);
+                            t
+                        }
+                        Err(_) => continue,
                     }
-                    Err(_) => continue,
-                }
-            };
-            let img = &self.hud_textures[texture];
-            out.push(HudWidget {
-                name: w.name,
-                texture,
-                anchor: w.anchor,
-                flags: w.flags,
-                offset: [w.offset[0] as f32, w.offset[1] as f32],
-                registration: w.registration,
-                size: [img.width as f32, img.height as f32],
-            });
+                };
+                let img = &self.hud_textures[texture];
+                let offset = w.offset[split];
+                layout.push(HudWidget {
+                    name: w.name.clone(),
+                    texture,
+                    anchor: w.anchor,
+                    flags: w.flags,
+                    offset: [offset[0] as f32, offset[1] as f32],
+                    registration: w.registration[split],
+                    size: [img.width as f32, img.height as f32],
+                });
+            }
         }
         out
     }
@@ -2060,7 +2068,7 @@ impl Scene {
         };
         let player_hud = match loader.find("nhdt", "ui\\hud\\masterchief") {
             Some(h) => loader.hud_widgets(h),
-            None => Vec::new(),
+            None => HudLayouts::default(),
         };
         loader.hud_textures.push(crate::font::atlas());
         let hud_font = loader.hud_textures.len() - 1;
