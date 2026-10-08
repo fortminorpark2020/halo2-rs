@@ -1296,7 +1296,16 @@ fn jmad(path: &str, name: &str) -> Res {
     let mut set = MapSet::open(path)?;
     let tag = find_tag(&set, "jmad", name).ok_or("no jmad with that name")?;
     println!("{}", tag.name);
-    let g = animation::read_animation_graph(&mut set, tag.datum)?;
+    // H2_INHERIT=1 lists what it inherits too.
+    let g = if std::env::var("H2_INHERIT").is_ok() {
+        animation::read_inherited_animation_graph(&mut set, tag.datum)?
+    } else {
+        animation::read_animation_graph(&mut set, tag.datum)?
+    };
+    if let Some(parent) = g.parent {
+        let name = set.locate(parent).map_or("?".to_string(), |(_, t)| t.name);
+        println!("  inherits {name}");
+    }
     for (i, n) in g.nodes.iter().enumerate() {
         println!("  node {i:>2} {:<20} parent {:>3}", n.name, n.parent);
     }
@@ -1360,8 +1369,9 @@ fn jmad(path: &str, name: &str) -> Res {
                 list(a.translations.iter().map(Option::is_some).collect())
             );
         }
+        let [x, y] = a.speed();
         println!(
-            "  anim {i:>3} {:<40} {:?} {} frames{} rot {} trans {} scale {}",
+            "  anim {i:>3} {:<40} {:?} {} frames{} rot {} trans {} scale {}{}",
             a.name,
             a.kind,
             a.frame_count,
@@ -1369,6 +1379,11 @@ fn jmad(path: &str, name: &str) -> Res {
             a.rotations.iter().flatten().count(),
             a.translations.iter().flatten().count(),
             a.scales.iter().flatten().count(),
+            if x.abs().max(y.abs()) >= 0.0005 {
+                format!(" moves {x:.3} {y:.3} a second")
+            } else {
+                String::new()
+            },
         );
     }
     Ok(())

@@ -87,6 +87,8 @@ pub struct Bot {
     pub actor: Option<ActorMind>,
     /// Stood still on purpose last tick (not stuck).
     idle: bool,
+    /// Hopped while stuck, and hasn't got going since.
+    hopped: bool,
 }
 
 /// Computer players' names, picked by player number.
@@ -182,6 +184,7 @@ impl Bot {
             shunned_weapons: Vec::new(),
             actor: None,
             idle: false,
+            hopped: false,
         };
         let rides = bot.random() < RIDES;
         bot.riding.reset(rides);
@@ -451,19 +454,27 @@ impl Bot {
         let feet = p.body.position;
         let eye = p.eye();
         let mut cmd = Command::default();
-        // Stuck against something: hop, then give up on the route.
+        // Stuck against something: hop (once, until it gets going again),
+        // then give up on that way and find another.
         let moved = (feet - self.last_position).truncate().length();
         self.last_position = feet;
         if moved < 0.4 * dt && !self.idle {
             self.stuck_for += dt;
         } else {
             self.stuck_for = 0.0;
+            if moved >= 0.4 * dt {
+                self.hopped = false;
+            }
         }
-        if self.stuck_for > 0.6 {
+        if self.stuck_for > 0.6 && !self.hopped {
             cmd.jump = true;
+            self.hopped = !p.body.grounded;
         }
         if self.stuck_for > 2.0 {
             self.stuck_for = 0.0;
+            if let Some(point) = self.watching.take() {
+                self.block(point);
+            }
             self.route.clear();
             self.heading_for = None;
         }
@@ -714,9 +725,9 @@ impl Bot {
             let drift = game.players[me].body.velocity.truncate();
             cmd.movement = self.keep_off_ledges(world, feet, drift, cmd.movement);
         }
-        // Standing still on purpose isn't being stuck (actors hold their
-        // ground while they fight).
-        self.idle = cmd.movement == Vec2::ZERO && (target.is_none() || self.actor.is_some());
+        // Standing still on purpose isn't being stuck: holding its ground
+        // in a fight, or kept back from a ledge, a bot doesn't hop.
+        self.idle = cmd.movement == Vec2::ZERO;
         cmd.crouch |= self.scripted().is_some_and(|s| s.crouch);
         cmd.yaw = self.yaw;
         cmd.pitch = self.pitch;
@@ -750,14 +761,20 @@ impl Bot {
         }
         self.no_progress += dt;
         if self.no_progress > GIVE_UP {
-            if self.blocked.len() >= MAX_BLOCKED {
-                self.blocked.remove(0);
-            }
-            self.blocked.push(next);
+            self.block(next);
             self.route.clear();
             self.heading_for = None;
             self.watching = None;
         }
+    }
+
+    /// Remember a route point the bot couldn't get to, so its next route
+    /// goes round it.
+    fn block(&mut self, point: usize) {
+        if self.blocked.len() >= MAX_BLOCKED {
+            self.blocked.remove(0);
+        }
+        self.blocked.push(point);
     }
 
     /// Don't walk (or strafe) off a drop that would hurt: where the floor a
@@ -986,6 +1003,72 @@ mod tests {
             }
         }
         assert!(game.players.iter().map(|p| p.kills).sum::<u32>() > 0);
+    }
+
+    /// Rising edges of the jump button over `ticks` of a bot playing.
+    fn hops(game: &mut Game, world: &World, nav: &NavGraph, bot: &mut Bot, ticks: usize) -> usize {
+        let mut hops = 0;
+        let mut held = false;
+        for _ in 0..ticks {
+            let cmd = bot.think(game, world, nav, 0);
+            hops += (cmd.jump && !held) as usize;
+            held = cmd.jump;
+            let mut cmds = vec![Command::default(); game.players.len()];
+            cmds[0] = cmd;
+            game.step(world, &cmds);
+        }
+        hops
+    }
+
+    #[test]
+    fn bots_holding_still_in_a_fight_dont_hop() {
+        let world = crate::game::tests::floor();
+        let mut game = crate::game::tests::game();
+        game.rules.score_to_win = 0;
+        game.add_player();
+        let b = game.add_player();
+        game.players[0].body.position = Vec3::ZERO;
+        let nav = NavGraph::build(&world, &[Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0)]);
+        let mut bot = Bot::new(7);
+        let mut hops = 0;
+        for _ in 0..3 * 60 {
+            // Five away (neither closing in nor backing off), not strafing.
+            game.players[b].body.position = Vec3::new(5.0, 0.0, 0.0);
+            game.players[b].health = game.players[b].full.health;
+            bot.strafe = 0.0;
+            bot.strafe_left = 10.0;
+            hops += self::hops(&mut game, &world, &nav, &mut bot, 1);
+        }
+        assert_eq!(bot.target, Some(b));
+        assert_eq!(hops, 0);
+    }
+
+    #[test]
+    fn a_bot_boxed_in_hops_once_and_finds_another_way() {
+        // A box a little bigger than a Spartan, with the route points
+        // outside it.
+        let (mut p, mut i) = (Vec::new(), Vec::new());
+        let mut quad = |c: [[f32; 3]; 4]| {
+            let base = p.len() as u32;
+            p.extend_from_slice(&c);
+            i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        };
+        let (s, h) = (0.5, 2.0);
+        quad([[-9., -9., 0.], [9., -9., 0.], [9., 9., 0.], [-9., 9., 0.]]);
+        quad([[s, -s, 0.], [s, -s, h], [s, s, h], [s, s, 0.]]);
+        quad([[-s, -s, 0.], [-s, s, 0.], [-s, s, h], [-s, -s, h]]);
+        quad([[-s, s, 0.], [s, s, 0.], [s, s, h], [-s, s, h]]);
+        quad([[-s, -s, 0.], [-s, -s, h], [s, -s, h], [s, -s, 0.]]);
+        let world = World::new(&p, &i);
+        let mut game = crate::game::tests::game();
+        game.add_player();
+        game.players[0].body.position = Vec3::ZERO;
+        let outside = [-3.0, 3.0].map(|x| Vec3::new(x, 0.0, 0.0));
+        let nav = NavGraph::build(&world, &outside);
+        let mut bot = Bot::new(5);
+        let hops = hops(&mut game, &world, &nav, &mut bot, 10 * 60);
+        assert_eq!(hops, 1, "no hopping on the spot");
+        assert!(!bot.blocked.is_empty(), "gave up on the way it couldn't go");
     }
 
     #[test]

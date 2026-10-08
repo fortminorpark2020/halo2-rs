@@ -1810,6 +1810,7 @@ impl App {
             let v = p.body.velocity.truncate();
             let mut input = BodyInput {
                 velocity: glam::vec2(v.x * c + v.y * s, v.y * c - v.x * s),
+                climb: p.body.velocity.z,
                 grounded: p.body.grounded,
                 crouching: p.body.crouch > 0.5,
                 alive: p.alive,
@@ -1891,6 +1892,7 @@ impl App {
         let rig = &body.rig;
         let input = BodyInput {
             velocity: glam::Vec2::ZERO,
+            climb: 0.0,
             grounded: true,
             crouching: false,
             alive: true,
