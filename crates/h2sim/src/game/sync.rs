@@ -321,10 +321,9 @@ impl Event {
                 w.u8(2);
                 w.index(Some(player));
             }
-            Event::Melee { player, hit } => {
+            Event::Melee { player } => {
                 w.u8(3);
                 w.index(Some(player));
-                w.index(hit);
             }
             Event::Thrown { player } => {
                 w.u8(4);
@@ -515,7 +514,6 @@ impl Event {
             },
             3 => Event::Melee {
                 player: r.index_below(players)?,
-                hit: opt_player(r)?,
             },
             4 => Event::Thrown {
                 player: r.index_below(players)?,
@@ -1077,6 +1075,20 @@ mod tests {
         assert!(r.at_end());
         // Cut short: an error, not a panic.
         assert!(Command::read(&mut Reader::new(&w.0[..5])).is_err());
+    }
+
+    #[test]
+    fn melee_and_throw_events_survive_the_trip() {
+        let events = [Event::Melee { player: 1 }, Event::Thrown { player: 0 }];
+        let mut w = Writer::default();
+        for e in &events {
+            e.write(&mut w);
+        }
+        let mut r = Reader::new(&w.0);
+        for e in &events {
+            assert_eq!(Event::read(&mut r, 2, 0, 0), Ok(*e));
+        }
+        assert!(r.at_end());
     }
 
     #[test]

@@ -128,7 +128,7 @@ impl VehicleAssets {
 }
 
 /// Every node's default placement in the model.
-fn bind_pose(m: &RenderModel) -> Vec<Mat4> {
+pub(super) fn bind_pose(m: &RenderModel) -> Vec<Mat4> {
     let local: Vec<NodePose> = m
         .nodes
         .iter()
@@ -143,7 +143,7 @@ fn bind_pose(m: &RenderModel) -> Vec<Mat4> {
 }
 
 /// A marker's placement in the model.
-fn marker(m: &RenderModel, bind: &[Mat4], name: &str) -> Option<Mat4> {
+pub(super) fn marker(m: &RenderModel, bind: &[Mat4], name: &str) -> Option<Mat4> {
     if name.is_empty() {
         return None;
     }

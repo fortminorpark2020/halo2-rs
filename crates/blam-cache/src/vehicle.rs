@@ -46,6 +46,14 @@ const PHMO_RIGID_BODIES: usize = 0x38;
 const RIGID_BODY_SIZE: usize = 0x90;
 const PHMO_LISTS: usize = 0x90;
 const LIST_SIZE: usize = 0x38;
+const PHMO_PHANTOM_TYPES: usize = 0x28;
+const PHANTOM_TYPE_SIZE: usize = 0x68;
+/// Each shape names one of the model's materials, and a material may name
+/// a phantom type (-1 for a solid one).
+const PHMO_MATERIALS: usize = 0x40;
+const MATERIAL_SIZE: usize = 0xC;
+const MATERIAL_PHANTOM_TYPE: usize = 0x8;
+const SHAPE_MATERIAL: usize = 0x4;
 const SHAPE_SPHERE: i16 = 0;
 const SHAPE_PILL: i16 = 1;
 const SHAPE_BOX: i16 = 2;
@@ -189,6 +197,19 @@ pub struct ModelTag {
     pub variants: Vec<ModelVariant>,
     pub max_vitality: f32,
     pub max_shield: f32,
+    /// Health coming back by itself: seconds without damage before it
+    /// starts, seconds to come back from none, and how much of it comes
+    /// back (0 for all of it).
+    pub body_recharge: BodyRecharge,
+}
+
+/// How a model's health comes back by itself (its damage info's body
+/// stun time, recharge time and recharge fraction).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BodyRecharge {
+    pub delay: f32,
+    pub time: f32,
+    pub fraction: f32,
 }
 
 impl ModelTag {
@@ -211,6 +232,56 @@ pub struct HullBox {
     /// The render model node it moves with; it is placed in that node's
     /// space.
     pub node: i16,
+}
+
+/// A shape of a physics model that doesn't block but pushes whatever is in
+/// it (a gravity lift's column, a jump pad), and how it pushes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Phantom {
+    /// In the model's space (we read phantoms for objects that stay put,
+    /// so the node it's on doesn't matter).
+    pub shape: PhantomShape,
+    pub flags: u32,
+    /// The render model marker the pushes go by: toward the marker
+    /// (`center`), toward the line through it along its forward axis
+    /// (`axis`) and along that axis (`direction`).
+    pub marker: String,
+    pub center: Push,
+    pub axis: Push,
+    pub direction: Push,
+}
+
+impl Phantom {
+    /// Phantom type flags: what's inside doesn't fall; players, and
+    /// bipeds (players among them), aren't pushed.
+    pub const NEGATES_GRAVITY: u32 = 1 << 2;
+    pub const IGNORES_PLAYERS: u32 = 1 << 3;
+    pub const IGNORES_BIPEDS: u32 = 1 << 5;
+
+    /// Whether it pushes players.
+    pub fn pushes_players(&self) -> bool {
+        self.flags & (Self::IGNORES_PLAYERS | Self::IGNORES_BIPEDS) == 0
+    }
+}
+
+/// One of a phantom's pushes: world units per second squared, up to a
+/// speed in world units per second.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Push {
+    pub acceleration: f32,
+    pub max_speed: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PhantomShape {
+    /// A box, or a convex piece as its bounds.
+    Box(HullBox),
+    /// A capsule between two points (a sphere when they're the same).
+    Pill {
+        a: [f32; 3],
+        b: [f32; 3],
+        radius: f32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -437,10 +508,14 @@ pub fn read_model(set: &mut MapSet, hlmt: DatumIndex) -> Result<ModelTag> {
         });
     }
     let damage = file.read_block(region, &data, HLMT_DAMAGE_INFO, DAMAGE_INFO_SIZE)?;
-    let (max_vitality, max_shield) = match damage.as_chunks::<DAMAGE_INFO_SIZE>().0.first() {
-        Some(d) => (f32_at(d, 0x28), f32_at(d, 0x8C)),
-        None => (0.0, 0.0),
-    };
+    let first = damage.as_chunks::<DAMAGE_INFO_SIZE>().0.first();
+    let (max_vitality, max_shield) =
+        first.map_or((0.0, 0.0), |d| (f32_at(d, 0x28), f32_at(d, 0x8C)));
+    let body_recharge = first.map_or_else(BodyRecharge::default, |d| BodyRecharge {
+        delay: f32_at(d, 0x30),
+        time: f32_at(d, 0x34),
+        fraction: f32_at(d, 0x38),
+    });
     Ok(ModelTag {
         render_model: datum(&data, HLMT_RENDER_MODEL),
         animations: datum(&data, HLMT_ANIMATIONS),
@@ -448,6 +523,7 @@ pub fn read_model(set: &mut MapSet, hlmt: DatumIndex) -> Result<ModelTag> {
         variants,
         max_vitality,
         max_shield,
+        body_recharge,
     })
 }
 
@@ -527,6 +603,77 @@ pub fn read_physics_model(set: &mut MapSet, phmo: DatumIndex) -> Result<PhysicsM
         mass: f32_at(&data, PHMO_MASS),
         boxes: shapes.into_iter().map(|(_, h)| h).collect(),
     })
+}
+
+/// A physics model's phantoms: the shapes whose material names a phantom
+/// type.
+pub fn read_phantoms(set: &mut MapSet, phmo: DatumIndex) -> Result<Vec<Phantom>> {
+    let (src, _, data) = set.tag_data(phmo)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let types = file.read_block(region, &data, PHMO_PHANTOM_TYPES, PHANTOM_TYPE_SIZE)?;
+    let types = types.as_chunks::<PHANTOM_TYPE_SIZE>().0;
+    if types.is_empty() {
+        return Ok(Vec::new());
+    }
+    let materials = file.read_block(region, &data, PHMO_MATERIALS, MATERIAL_SIZE)?;
+    let materials = materials.as_chunks::<MATERIAL_SIZE>().0;
+    let phantom_type = |shape: &[u8]| {
+        let material = materials.get(usize::try_from(i16_at(shape, SHAPE_MATERIAL)).ok()?)?;
+        types.get(usize::try_from(i16_at(material, MATERIAL_PHANTOM_TYPE)).ok()?)
+    };
+    let push = |t: &[u8], at: usize| Push {
+        acceleration: f32_at(t, at),
+        max_speed: f32_at(t, at + 4),
+    };
+    let mut phantoms = Vec::new();
+    for (kind, at, size) in [
+        (SHAPE_SPHERE, PHMO_SPHERES, SPHERE_SIZE),
+        (SHAPE_PILL, PHMO_PILLS, PILL_SIZE),
+        (SHAPE_BOX, PHMO_BOXES, BOX_SIZE),
+        (SHAPE_POLYHEDRON, PHMO_POLYHEDRA, POLYHEDRON_SIZE),
+    ] {
+        let raw = file.read_block(region, &data, at, size)?;
+        for e in raw.chunks_exact(size) {
+            let Some(t) = phantom_type(e) else {
+                continue;
+            };
+            let r = f32_at(e, 0x2C);
+            let shape = match kind {
+                SHAPE_SPHERE => PhantomShape::Pill {
+                    a: v3(e, 0x70),
+                    b: v3(e, 0x70),
+                    radius: r,
+                },
+                SHAPE_PILL => PhantomShape::Pill {
+                    a: v3(e, 0x30),
+                    b: v3(e, 0x40),
+                    radius: r,
+                },
+                SHAPE_BOX => PhantomShape::Box(HullBox {
+                    center: v3(e, 0x80),
+                    half_extents: v3(e, 0x30).map(|h| h + r),
+                    axes: [v3(e, 0x50), v3(e, 0x60), v3(e, 0x70)],
+                    node: 0,
+                }),
+                _ => PhantomShape::Box(HullBox {
+                    center: v3(e, 0x40),
+                    half_extents: v3(e, 0x30).map(|h| h + r),
+                    axes: IDENTITY,
+                    node: 0,
+                }),
+            };
+            phantoms.push(Phantom {
+                shape,
+                flags: u32_at(t, 0),
+                marker: sid(file, t, 0x8),
+                center: push(t, 0x20),
+                axis: push(t, 0x28),
+                direction: push(t, 0x30),
+            });
+        }
+    }
+    Ok(phantoms)
 }
 
 const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];

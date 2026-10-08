@@ -54,6 +54,7 @@ mod scene;
 mod soundscape;
 mod vehicles;
 
+use blam_cache::animation::{FrameEvent, FRAME_RATE as ANIMATION_RATE};
 use blam_cache::geometry::Mesh;
 use blam_cache::PlayerSpawn;
 use body::{BodyAnimator, BodyInput};
@@ -63,8 +64,9 @@ use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use gpu::{hud_mode, DrawCall, Frame, Fx, HudBatch};
 use h2sim::bot::{bot_look, bot_name};
-use h2sim::game::{guest_name, Event, GrenadeKind, HeldWeapon, Powerup, TICK};
+use h2sim::game::{guest_name, Event, GrenadeDef, GrenadeKind, HeldWeapon, Powerup, TICK};
 use h2sim::vehicle::SeatRole;
+use h2sim::weapon::ArmorScale;
 use h2sim::{
     Bot, Command, Game, GameType, ItemKind, ItemSpawn, KillZone, NavGraph, Rules, WeaponState,
     World,
@@ -144,14 +146,27 @@ fn rules(scene: &Scene) -> Rules {
             .collect()
     };
     let defaults = Rules::default();
-    let mut frag = defaults.frag;
-    let mut plasma = defaults.plasma;
-    if let Some(v) = scene.grenades[0].speed {
-        frag.speed = v;
-    }
-    if let Some(v) = scene.grenades[1].speed {
-        plasma.speed = v;
-    }
+    let [frag, plasma] = [(defaults.frag, 0), (defaults.plasma, 1)]
+        .map(|(def, k)| grenade_def(def, &scene.grenades[k], scene.biped.grenade_velocity));
+    // The throw, from the Spartan's animation: it lets go at the
+    // animation's keyframe and lasts as long as the animation.
+    let throw = scene.body.as_ref().and_then(|b| {
+        let rig = &b.rig;
+        let a = rig.graph.animations.get(rig.find(
+            "combat",
+            body::weapon_style("battle_rifle"),
+            "throw_grenade",
+        )?)?;
+        let release = a.event_frame(PRIMARY_KEYFRAME)?;
+        Some((release as f32 / ANIMATION_RATE, a.duration()))
+    });
+    let (throw_release, throw_time) =
+        throw.unwrap_or((defaults.throw_release, defaults.throw_time));
+    let health = scene
+        .body_recharge
+        .map_or((defaults.health_delay, defaults.health_recharge), |r| {
+            (r.delay, r.time)
+        });
     // H2_START_WEAPONS=needler,smg: what everyone spawns with (testing).
     let start = std::env::var("H2_START_WEAPONS").unwrap_or_default();
     let start: Vec<&str> = start.split(',').filter(|w| !w.is_empty()).collect();
@@ -169,8 +184,12 @@ fn rules(scene: &Scene) -> Rules {
             "beam_rifle",
         ]),
         lunge_weapons: index(&["energy_blade"]),
+        throw_release,
+        throw_time,
         frag,
         plasma,
+        health_delay: health.0,
+        health_recharge: health.1,
         falling: scene.falling.unwrap_or(defaults.falling),
         overshield_time: scene.overshield_time.unwrap_or(defaults.overshield_time),
         camo_time: scene.camo_time.unwrap_or(defaults.camo_time),
@@ -178,8 +197,35 @@ fn rules(scene: &Scene) -> Rules {
     }
 }
 
-/// A weapon's game values, timed to its first person animations.
-fn weapon_def(w: &scene::WeaponAssets) -> h2sim::WeaponDef {
+/// A grenade's game values: `def` with what the map's tags say (the
+/// grenades' projectile tags leave the throw speed to the thrower's biped,
+/// `thrown_at`).
+fn grenade_def(def: GrenadeDef, tags: &scene::GrenadeAssets, thrown_at: f32) -> GrenadeDef {
+    let mut def = def;
+    match tags.speed {
+        Some(v) => def.speed = v,
+        None if thrown_at > 0.0 => def.speed = thrown_at,
+        None => {}
+    }
+    if let Some(p) = tags.projectile {
+        let timer = p.timer.0.max(p.timer.1);
+        if timer > 0.0 {
+            def.fuse = timer;
+        }
+        def.arming = p.arming_time.max(0.0);
+    }
+    if let Some(d) = tags.attached {
+        def.attached = Some((
+            d.upper_bound.0.max(d.upper_bound.1),
+            ArmorScale::from_tags(&d),
+        ));
+    }
+    def
+}
+
+/// A weapon's game values, timed to its first person animations (ready)
+/// and the Spartan's third person ones (`body`: melee).
+fn weapon_def(w: &scene::WeaponAssets, body: Option<&body::BodyRig>) -> h2sim::WeaponDef {
     let mut def = w.def.clone();
     let ready = w.rig.as_ref().and_then(|rig| {
         let i = rig.find("first_person:ready", 0)?;
@@ -188,8 +234,39 @@ fn weapon_def(w: &scene::WeaponAssets) -> h2sim::WeaponDef {
     if let Some(t) = ready.filter(|t| *t > 0.0) {
         def.ready_time = t;
     }
+    if let Some((hit, recover)) = body.and_then(|b| melee_timing(b, &def.name)) {
+        def.melee_hit_time = hit;
+        def.melee_recover_time = recover;
+    }
     def
 }
+
+/// When a melee with the weapon called `weapon` strikes and lets go, in
+/// seconds: the damage keyframe of the Spartan's melee animation for it,
+/// and the keyframe (or the point it allows interruption) after that, or
+/// else its end.
+fn melee_timing(body: &body::BodyRig, weapon: &str) -> Option<(f32, f32)> {
+    let style = body::weapon_style(weapon);
+    let a = body
+        .graph
+        .animations
+        .get(body.find("combat", style, "melee_strike_1")?)?;
+    let hit = a.event_frame(PRIMARY_KEYFRAME)?;
+    let recover = [SECONDARY_KEYFRAME, ALLOW_INTERRUPTION]
+        .into_iter()
+        .filter_map(|e| a.event_frame(e))
+        .filter(|&f| f > hit)
+        .min()
+        .map_or(a.duration(), |f| f as f32 / ANIMATION_RATE);
+    Some((hit as f32 / ANIMATION_RATE, recover))
+}
+
+/// Animation frame events: the moment an action happens (a melee
+/// strikes, a grenade leaves the hand), a later one, and where the rest
+/// of the animation can be cut short.
+const PRIMARY_KEYFRAME: FrameEvent = FrameEvent::Other(0);
+const SECONDARY_KEYFRAME: FrameEvent = FrameEvent::Other(1);
+const ALLOW_INTERRUPTION: FrameEvent = FrameEvent::Other(4);
 
 /// Where players spawn: the map's spawn points, or the middle of the level.
 fn level_spawns(scene: &Scene) -> Vec<(Vec3, f32)> {
@@ -230,7 +307,11 @@ fn new_game(
     };
     let mut game = Game::new(
         rules,
-        scene.weapons.iter().map(weapon_def).collect(),
+        scene
+            .weapons
+            .iter()
+            .map(|w| weapon_def(w, scene.body.as_ref().map(|b| &b.rig)))
+            .collect(),
         level_spawns(scene),
         items,
         scene.movement,
@@ -300,7 +381,7 @@ struct Level {
 fn load_level(path: &Path) -> Result<Level, String> {
     let scene = Scene::load(path).map_err(|e| e.to_string())?;
     println!(
-        "{} triangles, {} textures, {} weapons, {} items, {} vehicles, {} game type points, {} kill zones",
+        "{} triangles, {} textures, {} weapons, {} items, {} vehicles, {} game type points, {} kill zones, {} lift phantoms",
         scene.triangle_count(),
         scene.textures.len() - 1,
         scene.weapons.len(),
@@ -308,6 +389,7 @@ fn load_level(path: &Path) -> Result<Level, String> {
         scene.vehicles.spawns.len(),
         scene.netgame_flags.len(),
         scene.kill_volumes.len(),
+        scene.phantoms.len(),
     );
     if !scene.ai.squads.is_empty() {
         println!(
@@ -330,11 +412,17 @@ fn load_level(path: &Path) -> Result<Level, String> {
             scene.ai.effects.len()
         );
     }
-    // H2_LIST_WEAPONS=1: each weapon's crosshair range and HUD pieces.
+    // H2_LIST_WEAPONS=1: each weapon's crosshair range, melee timing and
+    // HUD pieces, and the grenades.
     if std::env::var_os("H2_LIST_WEAPONS").is_some() {
         for w in &scene.weapons {
             let full = &w.hud[blam_cache::hud::ScreenSplit::Full as usize];
             let hud: Vec<&str> = full.iter().map(|h| h.name.as_str()).collect();
+            let def = weapon_def(w, scene.body.as_ref().map(|b| &b.rig));
+            println!(
+                "weapon {} melee strikes {:.3} s, lets go {:.3} s",
+                def.name, def.melee_hit_time, def.melee_recover_time
+            );
             println!(
                 "weapon {} autoaim {:.1} deg to {:.1}{} range {:.1} damage {:.0} over {:?} vs shield/body {}/{} blast {:?} flight sound {:?} hud {hud:?}",
                 w.def.name,
@@ -354,6 +442,11 @@ fn load_level(path: &Path) -> Result<Level, String> {
                 w.round.flight
             );
         }
+        let r = rules(&scene);
+        println!(
+            "grenade throw lets go {:.3} s, lasts {:.3} s; frag {:?}; plasma {:?}; health back after {} s over {} s",
+            r.throw_release, r.throw_time, r.frag, r.plasma, r.health_delay, r.health_recharge
+        );
     }
     // H2_LIST_VEHICLES=1: where the map's vehicles are.
     if std::env::var_os("H2_LIST_VEHICLES").is_some() {
@@ -402,6 +495,10 @@ fn load_level(path: &Path) -> Result<Level, String> {
     for d in &scene.doors {
         let k = world.add_door(&d.triangles);
         world.set_door(k, !d.open);
+    }
+    // Gravity lifts push whoever is in them.
+    for &p in &scene.phantoms {
+        world.add_phantom(p);
     }
     // Lifts carry whoever stands on them (the mission moves them).
     for part in scene.lifts.iter().flat_map(|l| &l.parts) {

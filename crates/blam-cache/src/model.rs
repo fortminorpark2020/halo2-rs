@@ -121,13 +121,19 @@ impl Bounds {
     }
 }
 
-/// A tag reference in an object's `hlmt` (render model, animations...).
-fn object_model_ref(set: &mut MapSet, object: DatumIndex, field: usize) -> Result<DatumIndex> {
+/// An object tag's model (`hlmt`).
+pub fn object_model(set: &mut MapSet, object: DatumIndex) -> Result<DatumIndex> {
     let (_, _, obj) = set.tag_data(object)?;
     let hlmt = DatumIndex(u32_at(&obj, OBJECT_MODEL + 4));
     if hlmt == DatumIndex::NONE {
         return Err(Error::Corrupt("object has no model".into()));
     }
+    Ok(hlmt)
+}
+
+/// A tag reference in an object's `hlmt` (render model, animations...).
+fn object_model_ref(set: &mut MapSet, object: DatumIndex, field: usize) -> Result<DatumIndex> {
+    let hlmt = object_model(set, object)?;
     let (_, _, model) = set.tag_data(hlmt)?;
     Ok(DatumIndex(u32_at(&model, field + 4)))
 }

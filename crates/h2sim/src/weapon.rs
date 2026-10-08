@@ -77,6 +77,12 @@ pub struct WeaponDef {
     pub ready_time: f32,
     /// Melee damage when it differs from the usual strike (the flag's smash).
     pub melee_damage: Option<f32>,
+    /// Seconds into a melee with it that the strike lands, and that the
+    /// melee lets go (until then it can't fire, melee again or throw a
+    /// grenade): the damage keyframe and the one after it in the
+    /// Spartan's third person melee animation for it.
+    pub melee_hit_time: f32,
+    pub melee_recover_time: f32,
     /// How it fires held in one of two hands, if it can be.
     pub dual: Option<DualWield>,
     /// How its rounds fly, unless they hit at once.
@@ -242,6 +248,11 @@ pub struct DualWield {
 
 /// Used when a weapon's ready animation is unknown.
 pub const DEFAULT_READY_TIME: f32 = 0.5;
+/// Used when a weapon's melee animation is unknown: the Battle Rifle's
+/// (`combat:rifle:br:melee_strike_1` strikes at frame 5 and lets go at
+/// frame 20, at 30 frames a second).
+pub const DEFAULT_MELEE_HIT_TIME: f32 = 5.0 / 30.0;
+pub const DEFAULT_MELEE_RECOVER_TIME: f32 = 20.0 / 30.0;
 
 impl WeaponDef {
     /// The barrel trigger `trigger` fires.
@@ -378,6 +389,8 @@ impl WeaponDef {
             damage_lower_bound: damage.map(|d| d.lower_bound).unwrap_or(0.0),
             ready_time: DEFAULT_READY_TIME,
             melee_damage: None,
+            melee_hit_time: DEFAULT_MELEE_HIT_TIME,
+            melee_recover_time: DEFAULT_MELEE_RECOVER_TIME,
             dual,
             flight,
             armor: damage.map(ArmorScale::from_tags).unwrap_or_default(),
@@ -709,6 +722,8 @@ mod tests {
             damage_lower_bound: 6.0,
             ready_time: DEFAULT_READY_TIME,
             melee_damage: None,
+            melee_hit_time: DEFAULT_MELEE_HIT_TIME,
+            melee_recover_time: DEFAULT_MELEE_RECOVER_TIME,
             dual: None,
             flight: None,
             armor: ArmorScale::default(),

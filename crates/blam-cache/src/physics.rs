@@ -49,6 +49,11 @@ pub struct BipedPhysics {
     pub hard_landing_speed: f32,
     pub soft_landing_time: f32,
     pub hard_landing_time: f32,
+    /// Seconds to crouch down or stand back up.
+    pub crouch_time: f32,
+    /// How fast it throws grenades (world units a second): the grenades'
+    /// own projectile tags leave their speed at zero.
+    pub grenade_velocity: f32,
 }
 
 impl Default for PlayerMovement {
@@ -92,6 +97,8 @@ impl Default for BipedPhysics {
             hard_landing_speed: 7.0,
             soft_landing_time: 0.6,
             hard_landing_time: 0.0,
+            crouch_time: 0.2,
+            grenade_velocity: 10.0,
         }
     }
 }
@@ -229,5 +236,7 @@ pub fn biped_physics_of(set: &mut MapSet, datum: DatumIndex) -> Result<Option<Bi
         hard_landing_time: f32_at(&d, 0x200),
         soft_landing_speed: f32_at(&d, 0x204),
         hard_landing_speed: f32_at(&d, 0x208),
+        crouch_time: f32_at(&d, 0x220),
+        grenade_velocity: f32_at(&d, 0x1B0),
     }))
 }

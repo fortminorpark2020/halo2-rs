@@ -4,6 +4,7 @@ pub mod bot;
 pub mod collision;
 pub mod game;
 pub mod nav;
+pub mod phantom;
 pub mod player;
 pub mod script;
 pub mod testing;

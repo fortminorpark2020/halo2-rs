@@ -632,8 +632,15 @@ mod tests {
             melee: true,
             ..Command::default()
         };
-        // The flag's melee kills outright.
+        // The flag's melee kills outright, when it strikes.
         run(&mut g, &world, &[melee, Command::default()], 1);
+        assert!(g.players[1].alive);
+        run(
+            &mut g,
+            &world,
+            &[Command::default(), Command::default()],
+            30,
+        );
         assert!(!g.players[1].alive);
     }
 

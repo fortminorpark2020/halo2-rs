@@ -2,6 +2,7 @@
 //! capsules, plus doors that block while shut and movers (lifts) that slide
 //! around the level.
 
+use crate::phantom::Phantom;
 use glam::Vec3;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
@@ -88,6 +89,8 @@ pub struct World {
     /// Each door: shut (it blocks) or open.
     shut: Vec<AtomicBool>,
     movers: Vec<Mover>,
+    /// What pushes rather than blocks: gravity lifts and the like.
+    phantoms: Vec<Phantom>,
 }
 
 /// A part of the level that moves (a lift): its triangles where they were
@@ -318,7 +321,18 @@ impl World {
             max,
             shut: Vec::new(),
             movers: Vec::new(),
+            phantoms: Vec::new(),
         }
+    }
+
+    /// Add a phantom (a gravity lift's column, say) that pushes players in
+    /// it.
+    pub fn add_phantom(&mut self, phantom: Phantom) {
+        self.phantoms.push(phantom);
+    }
+
+    pub fn phantoms(&self) -> &[Phantom] {
+        &self.phantoms
     }
 
     /// Add a mover: triangles (where they start) that a lift carries
@@ -708,7 +722,7 @@ pub fn closest_point_triangle(p: Vec3, t: &Triangle) -> Vec3 {
 }
 
 /// Closest points between segments `p1`..`q1` and `p2`..`q2`.
-fn closest_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
+pub(crate) fn closest_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
     let d1 = q1 - p1;
     let d2 = q2 - p2;
     let r = p1 - p2;

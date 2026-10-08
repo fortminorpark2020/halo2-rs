@@ -18,7 +18,13 @@ install. No game files are included in this repository.
   using the speeds, jump velocity and size from the game's own globals and biped tags
   (running keeps to the ground up steps and over the tops of ramps, follows it
   down slopes and drops of up to about 0.06 world units, and falls off anything
-  deeper; it won't squeeze under anything lower than the body),
+  deeper; it won't squeeze under anything lower than the body; crouching takes
+  the biped tag's 0.2 s, and crouching in the air pulls the feet up, so a
+  crouch jump clears a higher ledge; players are solid to each other and can
+  stand on each other's heads), the maps' gravity lifts, vents and jump pads
+  (Lockout, Midship, Ivory Tower, Coagulation, Headlong, Foundation, Warlock,
+  Gemini, Colossus, Backwash, Ascension) pushing players as their physics
+  models' phantoms say,
   vehicles (wheels with suspension, hovering, flight, seats, turrets, splatters
   and wrecks),
   weapons (fire rate, bursts, spread, magazines, reloads, zoom, autoaim) from the weapon tags,
@@ -30,7 +36,9 @@ install. No game files are included in this repository.
   weapons, timed from their tags, the maps' teleporters,
   the rules of every Halo 2 game type: Slayer, Capture the Flag, King of the
   Hill, Oddball, Juggernaut, Territories and Assault, with team versions of
-  Slayer, King and Oddball (shields, health, grenades, pickups, respawns,
+  Slayer, King and Oddball (shields, and health that comes back by itself 10
+  seconds after the last hit over 5 seconds as the Spartan's model tag says,
+  grenades, pickups, respawns,
   friendly fire and betrayals, multi-kill and spree medals, the lead, flags,
   balls and bombs taken, dropped, returned, captured, armed and defused, hills
   that move, territories taken), falling damage and the map's kill zones from
@@ -116,7 +124,8 @@ and bots under callsigns.
 Names show in the lobby, scoreboard, kill feed and announcements, over
 teammates in sight, and over whoever is under your crosshair, which turns red
 on an enemy within your weapon's autoaim as in Halo 2. `H2_LIST_WEAPONS=1`
-lists each weapon's autoaim and HUD pieces as a map loads.
+lists each weapon's autoaim, HUD pieces and melee timing as a map loads, and the
+grenade, throw and health timings.
 
 Capture the Flag: walk onto the enemy flag and press E (X on a controller) to
 take it, then carry it to your own flag's stand while yours is home to score; Q
@@ -164,6 +173,16 @@ on to enemy vehicles, and explosive rounds go off in a blast that hurts and
 throws everyone in reach, the shooter included. Needles stick in whoever they
 hit and pop a moment later; seven in one target at once set off a supercombine
 that kills. Other Spartans bend at the waist to aim up and down.
+
+A melee lands at its animation's damage keyframe (a sixth of a second in with
+the Battle Rifle), not when the button goes down, and you can't fire, melee or
+throw again until the animation lets go (two thirds of a second with the
+Battle Rifle); a melee that lands from behind kills outright. A grenade leaves
+the hand 8 frames into the throw animation and you can't fire until the throw
+ends (1.23 s). Grenades fly at the biped tag's 10 world units a second; a frag
+goes off half a second after it first lands, a plasma grenade 1.5 s after it
+sticks or lands, neither before its tag's 1.5 s arming time, and a plasma
+grenade stuck to someone kills them.
 `H2_START_WEAPONS=needler,smg` changes what everyone spawns with, for testing.
 
 Dual wielding: holding a one-handed gun (SMG, Magnum, Plasma Pistol, Plasma
@@ -172,7 +191,7 @@ your left hand. Right mouse or G (the left trigger) fires it, left mouse the
 right gun; R reloads both. Tapping Q drops the left gun and switches to the one
 on your back. Each gun uses Halo 2's dual wield spread and damage and its dual
 first person animations, with the left hand drawn as the right's mirror image,
-and both ammo counters show. No grenades while dual wielding. In testing,
+and both ammo counters show. No grenades or melee while dual wielding. In testing,
 pressing the number of the one-handed gun in hand gives a second one, and
 `H2_WEAPON=<n> H2_DUAL=1` starts with two.
 

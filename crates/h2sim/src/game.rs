@@ -12,6 +12,7 @@ use blam_cache::physics::{BipedPhysics, PlayerMovement};
 use glam::{Vec2, Vec3};
 
 mod autoaim;
+mod bodies;
 mod campaign;
 mod ctf;
 mod dual;
@@ -216,12 +217,17 @@ const MELEE_RANGE: f32 = 0.9;
 const LUNGE_RANGE: f32 = 2.2;
 /// Melee needs the target within this angle of where the player looks.
 const MELEE_CONE: f32 = 0.6;
-const MELEE_COOLDOWN: f32 = 0.8;
+/// A melee that strikes someone within this angle (radians) of straight
+/// behind them, as they face, kills outright (Halo 2's "backsmack"). The
+/// angle isn't in the tags; this is our guess.
+const BACKSMACK_ANGLE: f32 = std::f32::consts::FRAC_PI_3;
+/// Seconds: a melee strike or a throw this close to its moment happens on
+/// this tick rather than the next (timers add up in floating point).
+const ON_CUE: f32 = 1e-4;
 const PICKUP_RADIUS: f32 = 0.45;
 /// Hold the action key this long to swap weapons.
 const SWAP_HOLD: f32 = 0.25;
 const DROPPED_WEAPON_LIFETIME: f32 = 60.0;
-const GRENADE_THROW_COOLDOWN: f32 = 0.6;
 /// Below this distance from the top of the body, a hit is a headshot.
 const HEAD_HEIGHT: f32 = 0.16;
 /// Seconds between kills that still chain into a multi-kill.
@@ -335,6 +341,10 @@ pub struct Rules {
     pub shield_delay: f32,
     /// Seconds for empty shields to fill.
     pub shield_recharge: f32,
+    /// Seconds without damage before health starts to come back, and
+    /// seconds for it to come back from none (0: it never does).
+    pub health_delay: f32,
+    pub health_recharge: f32,
     pub respawn_time: f32,
     /// Seconds an overshield takes to drain away, and active camouflage lasts.
     pub overshield_time: f32,
@@ -346,6 +356,10 @@ pub struct Rules {
     pub max_grenades: u8,
     pub melee_damage: f32,
     pub lunge_damage: f32,
+    /// Seconds into a grenade throw that it leaves the hand, and that the
+    /// throw lasts (no firing, meleeing or throwing again till then).
+    pub throw_release: f32,
+    pub throw_time: f32,
     pub frag: GrenadeDef,
     pub plasma: GrenadeDef,
     /// Weapons whose headshots kill once shields are down.
@@ -424,11 +438,18 @@ pub struct GrenadeDef {
     pub speed: f32,
     /// Seconds from the first bounce (or sticking) to the explosion.
     pub fuse: f32,
+    /// Seconds it flies before it can go off at all (its tag's arming
+    /// time): a frag bouncing off a wall right in front of you still waits
+    /// this long.
+    pub arming: f32,
     pub sticks: bool,
     pub damage: f32,
     /// Full damage inside the first radius, none beyond the second.
     pub radius: (f32, f32),
     pub armor: ArmorScale,
+    /// What it does to whoever it's stuck to when it goes off, if that
+    /// differs from the blast (a plasma grenade's kills).
+    pub attached: Option<(f32, ArmorScale)>,
 }
 
 impl Default for Rules {
@@ -440,6 +461,10 @@ impl Default for Rules {
             health: 45.0,
             shield_delay: 5.0,
             shield_recharge: 2.0,
+            // The multiplayer Spartan's and Elite's model tags: body stun
+            // time and recharge time.
+            health_delay: 10.0,
+            health_recharge: 5.0,
             respawn_time: 5.0,
             // Halo 2's power-up tags.
             overshield_time: 60.0,
@@ -450,21 +475,31 @@ impl Default for Rules {
             max_grenades: 4,
             melee_damage: 60.0,
             lunge_damage: 150.0,
+            // The Spartan's throw_grenade animation: released at frame 8
+            // of 38, at 30 frames a second.
+            throw_release: 8.0 / 30.0,
+            throw_time: 37.0 / 30.0,
+            // The grenades' projectile tags, and the Spartan's grenade
+            // velocity.
             frag: GrenadeDef {
-                speed: 7.0,
-                fuse: 1.0,
+                speed: 10.0,
+                fuse: 0.5,
+                arming: 1.5,
                 sticks: false,
                 damage: 150.0,
                 radius: (0.75, 1.75),
                 armor: ArmorScale::EXPLOSION,
+                attached: None,
             },
             plasma: GrenadeDef {
-                speed: 7.0,
+                speed: 10.0,
                 fuse: 1.5,
+                arming: 1.5,
                 sticks: true,
                 damage: 120.0,
                 radius: (0.75, 1.5),
                 armor: ArmorScale::EXPLOSION,
+                attached: Some((400.0, ArmorScale::EXPLOSION)),
             },
             headshot_weapons: Vec::new(),
             lunge_weapons: Vec::new(),
@@ -632,8 +667,15 @@ pub struct Spartan {
     pub readying: f32,
     /// Time held toward the next point in timed games.
     hold: f32,
-    melee_cooldown: f32,
-    grenade_cooldown: f32,
+    /// A melee swung: seconds until it strikes, and whether it's the
+    /// sword's lunge.
+    striking: Option<(f32, bool)>,
+    /// A grenade on its way: seconds until it leaves the hand, and which
+    /// kind it is.
+    throwing: Option<(f32, GrenadeKind)>,
+    /// Seconds until the melee or throw under way lets go: no firing,
+    /// meleeing or throwing till then.
+    busy: f32,
     action_held: f32,
     /// Seconds the switch button has been held (negative once acted on).
     switch_held: f32,
@@ -754,10 +796,11 @@ pub enum Event {
     Switched {
         player: usize,
     },
+    /// Swung a melee (it strikes a moment later).
     Melee {
         player: usize,
-        hit: Option<usize>,
     },
+    /// Started throwing a grenade (it leaves the hand a moment later).
     Thrown {
         player: usize,
     },
@@ -1170,8 +1213,9 @@ impl Game {
             last_kill: f64::NEG_INFINITY,
             readying: 0.0,
             hold: 0.0,
-            melee_cooldown: 0.0,
-            grenade_cooldown: 0.0,
+            striking: None,
+            throwing: None,
+            busy: 0.0,
             action_held: 0.0,
             switch_held: f32::MIN,
             seat: None,
@@ -1281,6 +1325,7 @@ impl Game {
         }
         self.players[i].move_with(world, cmd, TICK);
         self.keep_clear(i);
+        self.keep_apart(i);
     }
 
     /// At the next tick, player `i` aims and acts but doesn't move: a host
@@ -1309,17 +1354,23 @@ impl Game {
                 true => p.look_with(&cmd),
                 false => p.move_with(world, &cmd, dt),
             }
-            // Shields recharge after a while without damage.
+            // Shields recharge after a while without damage, and later
+            // health comes back too (not an actor's).
             p.since_damage += dt;
             let full = p.full;
             if p.since_damage > self.rules.shield_delay && p.shield < full.shield {
                 p.shield = (p.shield + full.shield / full.recharge.max(0.1) * dt).min(full.shield);
             }
+            let heals = p.actor.is_none() && self.rules.health_recharge > 0.0;
+            if heals && p.since_damage > self.rules.health_delay && p.health < full.health {
+                let rate = full.health / self.rules.health_recharge;
+                p.health = (p.health + rate * dt).min(full.health);
+            }
             powerups::step(p, &self.rules, dt);
             p.readying = (p.readying - dt).max(0.0);
-            p.melee_cooldown = (p.melee_cooldown - dt).max(0.0);
-            p.grenade_cooldown = (p.grenade_cooldown - dt).max(0.0);
+            p.busy = (p.busy - dt).max(0.0);
         }
+        self.keep_apart(i);
         // Fell out of the level or into a pit; landed hard.
         let feet = self.players[i].body.position;
         if feet.z < world.min.z - 1.0 || self.kill_zones.iter().any(|z| z.kills(feet)) {
@@ -1337,6 +1388,10 @@ impl Game {
                 return;
             }
         }
+
+        // A melee strikes, and a grenade leaves the hand, at its moment in
+        // the animation (in a vehicle, neither happens).
+        self.carry_out(i, dt);
 
         // In a vehicle: driving and gunning; passengers keep their guns.
         let riding = self.players[i].seat.is_some();
@@ -1371,18 +1426,21 @@ impl Game {
         let lunges = self.players[i]
             .held()
             .is_some_and(|h| self.rules.lunge_weapons.contains(&h.weapon));
-        if pressed(cmd.melee, last.melee) && self.players[i].melee_cooldown <= 0.0 && !riding {
-            self.melee(i, lunges);
-        }
-        // Dual wielding, the grenade button is the left trigger.
+        // Dual wielding, the grenade button is the left trigger, and there's
+        // no melee (Halo 2 has no melee animation for two guns).
         let dual = self.players[i].left.is_some();
-        if pressed(cmd.throw_grenade, last.throw_grenade) && !dual && !riding {
+        let free = |g: &Game| g.players[i].busy <= ON_CUE;
+        if pressed(cmd.melee, last.melee) && free(self) && !riding && !dual {
+            self.swing(i, lunges);
+        }
+        if pressed(cmd.throw_grenade, last.throw_grenade) && free(self) && !dual && !riding {
             self.throw_grenade(i);
         }
 
-        // The weapon in hand. The sword's trigger swings it.
+        // The weapon in hand. The sword's trigger swings it. Neither gun
+        // fires while a melee or throw is under way.
         let (eye, (f, r, u)) = (self.players[i].eye(), self.players[i].basis());
-        let ready = self.players[i].readying <= 0.0;
+        let ready = self.players[i].readying <= 0.0 && free(self);
         let mut shots = Vec::new();
         let mut reloaded = Vec::new();
         // A flag in hand only melees.
@@ -1441,9 +1499,8 @@ impl Game {
                 reloaded.push((true, was.1));
             }
         }
-        if lunges && pressed(cmd.fire, last.fire) && ready && self.players[i].melee_cooldown <= 0.0
-        {
-            self.melee(i, true);
+        if lunges && pressed(cmd.fire, last.fire) && ready {
+            self.swing(i, true);
         }
         for (left, empty) in reloaded {
             self.events.push(Event::Reloaded {
@@ -1581,8 +1638,65 @@ impl Game {
         });
     }
 
-    fn melee(&mut self, i: usize, lunge: bool) {
+    /// The weapon in hand's melee timing: seconds to the strike and to
+    /// letting go.
+    fn melee_timing(&self, i: usize) -> (f32, f32) {
+        self.players[i]
+            .held()
+            .and_then(|h| self.weapons.get(h.weapon))
+            .map_or(
+                (
+                    crate::weapon::DEFAULT_MELEE_HIT_TIME,
+                    crate::weapon::DEFAULT_MELEE_RECOVER_TIME,
+                ),
+                |d| (d.melee_hit_time, d.melee_recover_time),
+            )
+    }
+
+    /// Start a melee (the sword's lunge if `lunge`): it strikes at the
+    /// animation's damage keyframe, and nothing else can be done until it
+    /// lets go.
+    fn swing(&mut self, i: usize, lunge: bool) {
+        let (hit, recover) = self.melee_timing(i);
+        let p = &mut self.players[i];
+        p.striking = Some((hit, lunge));
+        p.busy = recover.max(hit);
         self.reveal(i, powerups::FIRE_REVEAL);
+        self.events.push(Event::Melee { player: i });
+    }
+
+    /// The melee or throw under way: on cue, the strike lands or the
+    /// grenade leaves the hand. Getting into a vehicle calls both off.
+    fn carry_out(&mut self, i: usize, dt: f32) {
+        let p = &mut self.players[i];
+        if p.seat.is_some() {
+            p.striking = None;
+            p.throwing = None;
+            return;
+        }
+        if let Some((t, lunge)) = p.striking.as_mut() {
+            *t -= dt;
+            if *t <= ON_CUE {
+                let lunge = *lunge;
+                p.striking = None;
+                self.strike(i, lunge);
+            }
+        }
+        let p = &mut self.players[i];
+        if let Some((t, kind)) = p.throwing.as_mut() {
+            *t -= dt;
+            if *t <= ON_CUE {
+                let kind = *kind;
+                p.throwing = None;
+                self.release_grenade(i, kind);
+            }
+        }
+    }
+
+    /// A melee strikes: the nearest player in reach in front (for the
+    /// sword's lunge, the nearest enemy) is hit, and one hit from behind
+    /// dies.
+    fn strike(&mut self, i: usize, lunge: bool) {
         let (eye, aim) = (self.players[i].eye(), self.players[i].aim());
         let reach = if lunge { LUNGE_RANGE } else { MELEE_RANGE };
         let mut target: Option<(usize, f32)> = None;
@@ -1601,38 +1715,60 @@ impl Game {
                 target = Some((j, d));
             }
         }
-        self.players[i].melee_cooldown = MELEE_COOLDOWN;
-        if let Some((j, _)) = target {
-            if lunge {
-                // The lunge carries the attacker to the target.
-                let to = self.players[j].body.position - self.players[i].body.position;
-                self.players[i].body.position += to * 0.6;
-            }
-            let damage = if lunge {
-                self.rules.lunge_damage
-            } else {
-                // Some weapons (the flag) hit harder than the usual strike.
-                self.players[i]
-                    .held()
-                    .and_then(|h| self.weapons.get(h.weapon))
-                    .and_then(|d| d.melee_damage)
-                    .unwrap_or(self.rules.melee_damage)
-            };
-            self.damage(j, Some(i), damage, false);
+        let Some((j, _)) = target else {
+            return;
+        };
+        if lunge {
+            // The lunge carries the attacker to the target.
+            let to = self.players[j].body.position - self.players[i].body.position;
+            self.players[i].body.position += to * 0.6;
         }
-        self.events.push(Event::Melee {
-            player: i,
-            hit: target.map(|t| t.0),
-        });
+        let damage = if self.behind(i, j) {
+            f32::INFINITY
+        } else if lunge {
+            self.rules.lunge_damage
+        } else {
+            // Some weapons (the flag) hit harder than the usual strike.
+            self.players[i]
+                .held()
+                .and_then(|h| self.weapons.get(h.weapon))
+                .and_then(|d| d.melee_damage)
+                .unwrap_or(self.rules.melee_damage)
+        };
+        self.damage(j, Some(i), damage, false);
     }
 
+    /// Player `i` stands behind player `j`, as `j` faces (within
+    /// `BACKSMACK_ANGLE` of straight behind).
+    fn behind(&self, i: usize, j: usize) -> bool {
+        let (a, b) = (&self.players[i], &self.players[j]);
+        let facing = Vec2::from_angle(b.yaw);
+        let away = (b.body.position - a.body.position).truncate();
+        away.length() > 1e-4 && facing.dot(away.normalize()) > BACKSMACK_ANGLE.cos()
+    }
+
+    /// Start throwing a grenade of the kind in hand, if there's one to
+    /// throw: it leaves the hand at the throw animation's release.
     fn throw_grenade(&mut self, i: usize) {
-        let def = self.grenade_def(self.players[i].grenade);
+        let (release, time) = (self.rules.throw_release, self.rules.throw_time);
         let p = &mut self.players[i];
-        if p.grenade_cooldown > 0.0 || p.objective.is_some() {
+        let count = match p.grenade {
+            GrenadeKind::Frag => p.frags,
+            GrenadeKind::Plasma => p.plasmas,
+        };
+        if count == 0 || p.objective.is_some() {
             return;
         }
-        let count = match p.grenade {
+        p.throwing = Some((release, p.grenade));
+        p.busy = time.max(release);
+        self.events.push(Event::Thrown { player: i });
+    }
+
+    /// A grenade of `kind` leaves player `i`'s hand.
+    fn release_grenade(&mut self, i: usize, kind: GrenadeKind) {
+        let def = self.grenade_def(kind);
+        let p = &mut self.players[i];
+        let count = match kind {
             GrenadeKind::Frag => &mut p.frags,
             GrenadeKind::Plasma => &mut p.plasmas,
         };
@@ -1640,8 +1776,6 @@ impl Game {
             return;
         }
         *count -= 1;
-        p.grenade_cooldown = GRENADE_THROW_COOLDOWN;
-        let kind = p.grenade;
         // Thrown a little above where the player looks.
         let (f, _, u) = p.basis();
         let dir = (f + u * 0.15).normalize();
@@ -1657,7 +1791,6 @@ impl Game {
         };
         self.grenades.push(g);
         self.reveal(i, powerups::FIRE_REVEAL);
-        self.events.push(Event::Thrown { player: i });
     }
 
     fn grenade_def(&self, kind: GrenadeKind) -> GrenadeDef {
@@ -1712,8 +1845,9 @@ impl Game {
             if let Some(f) = g.fuse.as_mut() {
                 *f -= dt;
             }
-            // Grenades that never land go off anyway.
-            if g.fuse.is_some_and(|f| f <= 0.0) || g.age > 6.0 {
+            // Not before it's armed; grenades that never land go off anyway.
+            let armed = g.age >= def.arming - ON_CUE;
+            if g.fuse.is_some_and(|f| f <= 0.0) && armed || g.age > 6.0 {
                 exploded.push(gi);
             }
             self.grenades[gi] = g;
@@ -1726,6 +1860,11 @@ impl Game {
 
     fn explode(&mut self, world: &World, g: Grenade) {
         let def = self.grenade_def(g.kind);
+        // Whoever it's stuck to takes its own damage for that (a stuck
+        // plasma grenade kills), as well as the blast.
+        if let (Some(j), Some((damage, armor))) = (g.stuck, def.attached) {
+            self.hurt(j, Some(g.owner), damage, false, armor);
+        }
         let blast = Blast {
             damage: (0.0, def.damage),
             radius: def.radius,
@@ -2635,15 +2774,26 @@ pub(crate) mod tests {
         let mut g = game();
         duel(&mut g);
         g.players[1].body.position = Vec3::new(1.5, 0.0, 0.0);
-        let throw = Command {
-            throw_grenade: true,
+        let aim = Command {
             pitch: -0.6,
             ..Command::default()
         };
+        let throw = Command {
+            throw_grenade: true,
+            ..aim
+        };
         g.step(&world, &[throw, Command::default()]);
+        // The throw starts; the grenade leaves the hand at the release.
+        assert!(g.events.iter().any(|e| matches!(e, Event::Thrown { .. })));
+        let mut ticks = 0;
+        while g.grenades.is_empty() && ticks < 60 {
+            g.step(&world, &[aim, Command::default()]);
+            ticks += 1;
+        }
+        assert_eq!(ticks, 16, "8 frames of 30 into the throw");
         assert_eq!(g.players[0].frags, 1);
         for _ in 0..(4.0 / TICK) as usize {
-            g.step(&world, &[Command::default(), Command::default()]);
+            g.step(&world, &[aim, Command::default()]);
         }
         assert!(g.grenades.is_empty());
         assert!(

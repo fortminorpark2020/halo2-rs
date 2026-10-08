@@ -17,7 +17,8 @@ use blam_cache::render::{LevelGeometry, Section, SectionOwner};
 use blam_cache::scenario::PlacedKind;
 use blam_cache::shader::{self, Blend};
 use blam_cache::{
-    render, scenario, sound, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp,
+    render, scenario, sound, vehicle, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn,
+    StructureBsp,
 };
 use glam::{Mat4, Vec3};
 use h2sim::game::FallingDamage;
@@ -30,6 +31,7 @@ use std::sync::Arc;
 
 mod actors;
 mod lifts;
+mod phantoms;
 mod vehicles;
 
 pub use actors::{CampaignAi, CinemaBody, EffectLook};
@@ -580,6 +582,10 @@ pub fn placement_matrix(position: [f32; 3], rotation: [f32; 3], scale: f32) -> M
 pub struct GrenadeAssets {
     pub mesh: Option<usize>,
     pub speed: Option<f32>,
+    /// Its projectile tag (fuse and arming time), and the damage it does
+    /// to whoever it's stuck to, if it has its own (the plasma grenade's).
+    pub projectile: Option<weapon::Projectile>,
+    pub attached: Option<weapon::Damage>,
 }
 
 /// How many Spartans can be on screen at once (each gets its own copy of the
@@ -693,7 +699,12 @@ pub struct Scene {
     pub blip: Option<usize>,
     /// Pits and drops that kill.
     pub kill_volumes: Vec<scenario::KillVolume>,
+    /// Gravity lifts and the like: what pushes players.
+    pub phantoms: Vec<h2sim::phantom::Phantom>,
     pub falling: Option<FallingDamage>,
+    /// How the multiplayer Spartan's health comes back by itself, from
+    /// its model tag.
+    pub body_recharge: Option<vehicle::BodyRecharge>,
     /// The map's vehicles, and their guns (in `weapons`).
     pub vehicles: Vehicles,
     /// A campaign mission's start, on campaign maps.
@@ -1349,6 +1360,14 @@ impl Loader {
         })
     }
 
+    /// How the multiplayer Spartan's health comes back, from its model.
+    fn body_recharge(&mut self) -> Option<vehicle::BodyRecharge> {
+        let bipd = self.find("bipd", SPARTAN)?;
+        let hlmt = model::object_model(&mut self.set, bipd).ok()?;
+        let m = vehicle::read_model(&mut self.set, hlmt).ok()?;
+        Some(m.body_recharge).filter(|r| r.time > 0.0)
+    }
+
     fn hud_bitmap(&mut self, name: &str) -> Option<usize> {
         let datum = self.find("bitm", name)?;
         let img = bitmap::read_bitmap_at(&mut self.set, datum, 0).ok()?;
@@ -1801,7 +1820,9 @@ impl Scene {
         let (ball, bomb) = (carried(BALL), carried(BOMB));
         let netgame_flags = scenario::netgame_flags(&mut loader.set).unwrap_or_default();
         let kill_volumes = scenario::kill_volumes(&mut loader.set).unwrap_or_default();
+        let phantoms = loader.phantoms();
         let falling = loader.falling();
+        let body_recharge = loader.body_recharge();
         let level_light = LevelLight::new(&meshes[0]);
         let mut objects = Vec::new();
         // Campaign maps also place doors, crates and switches; scripts make
@@ -1954,15 +1975,20 @@ impl Scene {
         let campaign = campaign.then(|| campaign_start(&mut loader.set, &weapons));
         let grenades = ["frag_grenade", "plasma_grenade"].map(|g| {
             let name = format!("objects\\weapons\\grenade\\{g}\\{g}");
+            let projectile = loader
+                .find("proj", &name)
+                .and_then(|p| weapon::read_projectile(&mut loader.set, p).ok());
+            let attached = projectile
+                .map(|p| p.attached_detonation_damage)
+                .filter(|d| *d != DatumIndex::NONE)
+                .and_then(|d| weapon::read_damage(&mut loader.set, d).ok());
             GrenadeAssets {
                 mesh: loader
                     .find("eqip", &name)
                     .and_then(|e| loader.object_mesh(e, &mut meshes)),
-                speed: loader
-                    .find("proj", &name)
-                    .and_then(|p| weapon::read_projectile(&mut loader.set, p).ok())
-                    .map(|p| p.initial_velocity)
-                    .filter(|v| *v > 0.0),
+                speed: projectile.map(|p| p.initial_velocity).filter(|v| *v > 0.0),
+                projectile,
+                attached,
             }
         });
         let named = |loader: &mut Loader, name: &str| loader.sound_named(name);
@@ -2148,7 +2174,9 @@ impl Scene {
             bomb_icon,
             blip,
             kill_volumes,
+            phantoms,
             falling,
+            body_recharge,
             vehicles,
         })
     }

@@ -51,6 +51,8 @@ fn rifle() -> WeaponDef {
         damage_lower_bound: 20.0,
         ready_time: crate::weapon::DEFAULT_READY_TIME,
         melee_damage: None,
+        melee_hit_time: crate::weapon::DEFAULT_MELEE_HIT_TIME,
+        melee_recover_time: crate::weapon::DEFAULT_MELEE_RECOVER_TIME,
         dual: None,
         flight: None,
         armor: Default::default(),

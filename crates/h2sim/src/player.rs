@@ -122,14 +122,7 @@ impl Player {
             return self.fly(world, input, dt);
         }
         let m = self.movement;
-        // Crouch eases over ~0.1 s.
-        let target = if input.crouch { 1.0 } else { 0.0 };
-        let new_crouch = self.crouch + (target - self.crouch).clamp(-dt * 10.0, dt * 10.0);
-        if new_crouch < self.crouch && !self.fits(world, self.position, new_crouch) {
-            // Something overhead: stay crouched.
-        } else {
-            self.crouch = new_crouch;
-        }
+        self.crouch_toward(world, input.crouch, dt);
 
         // Desired horizontal velocity from input, in world space.
         let fwd = Vec2::new(input.yaw.cos(), input.yaw.sin());
@@ -168,6 +161,7 @@ impl Player {
         let change = delta.clamp_length_max(accel * dt);
         self.velocity.x += change.x;
         self.velocity.y += change.y;
+        let floating = self.pushed(world, dt);
 
         if input.jump && !self.jump_held && self.grounded {
             self.velocity.z = self.biped.jump_velocity;
@@ -182,7 +176,9 @@ impl Player {
         }
 
         let gravity = GRAVITY * m.gravity_scale * self.gravity;
-        self.velocity.z -= gravity * dt;
+        if !floating {
+            self.velocity.z -= gravity * dt;
+        }
         let was_grounded = self.grounded;
         let falling = (-self.velocity.z).max(0.0);
         self.position += self.velocity * dt;
@@ -203,6 +199,84 @@ impl Player {
             }
         }
         self.on_level = self.grounded;
+    }
+
+    /// The level's phantoms (gravity lifts) that the body is in push it,
+    /// and one pushing it upward lifts it off the ground. Returns whether
+    /// one holds gravity off.
+    fn pushed(&mut self, world: &World, dt: f32) -> bool {
+        let phantoms = world.phantoms();
+        if phantoms.is_empty() {
+            return false;
+        }
+        let (a, b) = self.capsule(self.position);
+        let (middle, rising) = ((a + b) * 0.5, self.velocity.z.max(0.0));
+        let mut floating = false;
+        for p in phantoms
+            .iter()
+            .filter(|p| p.touches(a, b, self.biped.radius))
+        {
+            self.velocity = p.push(middle, self.velocity, dt);
+            floating |= p.negates_gravity;
+        }
+        if self.velocity.z > rising {
+            self.grounded = false;
+        }
+        floating
+    }
+
+    /// Crouch down or stand up over the biped's crouch time. On the ground
+    /// the body shrinks and grows from the top, the feet staying on the
+    /// floor. In the air it shrinks from the bottom, the head staying
+    /// where it is, so crouching mid-jump pulls the feet up onto a ledge
+    /// they'd otherwise miss (a crouch jump); standing up again lets the
+    /// feet down, where there's room below, or else grows upward. With
+    /// something in the way either way, it stays crouched.
+    fn crouch_toward(&mut self, world: &World, down: bool, dt: f32) {
+        let rate = match self.biped.crouch_time {
+            t if t > 0.0 => dt / t,
+            _ => 1.0,
+        };
+        let target = if down { 1.0 } else { 0.0 };
+        let crouch = self.crouch + (target - self.crouch).clamp(-rate, rate);
+        if crouch == self.crouch {
+            return;
+        }
+        // How much taller the body gets (shorter, below zero).
+        let b = &self.biped;
+        let grow = (b.height_crouching - b.height_standing) * (crouch - self.crouch);
+        if self.grounded {
+            if grow <= 0.0 || self.fits(world, self.position, crouch) {
+                self.crouch = crouch;
+            }
+            return;
+        }
+        if grow <= 0.0 {
+            self.position.z -= grow;
+            self.crouch = crouch;
+            return;
+        }
+        let lower = self.position - Vec3::Z * grow;
+        if self.room_below(world, lower) {
+            self.position = lower;
+            self.crouch = crouch;
+        } else if self.fits(world, self.position, crouch) {
+            self.crouch = crouch;
+        }
+    }
+
+    /// Whether the bottom of the body, with its feet let down to `feet`,
+    /// is clear of the level.
+    fn room_below(&self, world: &World, feet: Vec3) -> bool {
+        let r = self.biped.radius;
+        let mut c = Vec::new();
+        world.capsule_contacts(
+            feet + Vec3::Z * r,
+            feet + Vec3::Z * (self.height() * 0.5).max(r),
+            r * 0.95,
+            &mut c,
+        );
+        c.is_empty()
     }
 
     /// A step on the ground. The body moves level: floors lift it, the
@@ -459,6 +533,57 @@ mod tests {
             PlayerMovement::default(),
             BipedPhysics::default(),
         )
+    }
+
+    #[test]
+    fn a_gravity_lift_carries_a_player_up_its_middle() {
+        use crate::phantom::{Phantom, Push, Shape};
+        let mut w = room();
+        // Lockout's lift: a 4.5 tall column that holds gravity off, draws
+        // players to its middle and lifts them at up to 4 wu/s.
+        w.add_phantom(Phantom {
+            shape: Shape::Box {
+                center: Vec3::new(0.0, 0.0, 2.25),
+                axes: [Vec3::X, Vec3::Y, Vec3::Z],
+                half_extents: Vec3::new(0.6, 0.6, 2.25),
+            },
+            origin: Vec3::ZERO,
+            forward: Vec3::Z,
+            center: Push::default(),
+            axis: Push {
+                acceleration: 10.0,
+                max_speed: 10.0,
+            },
+            direction: Push {
+                acceleration: 10.0,
+                max_speed: 4.0,
+            },
+            negates_gravity: true,
+        });
+        let mut p = player_at(0.0);
+        p.position.x = 0.4;
+        p.update(&w, Input::default(), 0.1);
+        let mut top = 0.0f32;
+        for k in 0..240 {
+            p.update(&w, Input::default(), 1.0 / 60.0);
+            top = top.max(p.position.z);
+            if k == 60 {
+                assert!(!p.grounded && p.position.z > 2.0, "{p:?}");
+                assert!(
+                    (p.velocity.z - 4.0).abs() < 0.05,
+                    "rises at 4: {}",
+                    p.velocity.z
+                );
+                assert!(
+                    p.position.x.abs() < 0.05,
+                    "drawn to the middle: {}",
+                    p.position.x
+                );
+            }
+        }
+        // It lets go once the feet clear its top, and the player coasts on.
+        let coast = 4.0f32.powi(2) / (2.0 * GRAVITY);
+        assert!(top > 4.5 && top < 4.5 + coast + 0.1, "top {top}");
     }
 
     #[test]
