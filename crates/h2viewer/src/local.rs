@@ -654,16 +654,19 @@ impl LocalPlayer {
             .filter(|&(j, left)| left > 0.0 && game.players.get(j).is_some_and(|p| p.alive));
     }
 
-    /// The gun the crosshair belongs to, and how far it's zoomed: the
-    /// seat's, or the one in hand.
+    /// The gun the crosshair belongs to, and how far it's zoomed, by
+    /// `seat_gun`'s rule: a driver's or gunner's seat's, if it has one,
+    /// else the one in hand. A Warthog's or Spectre's driver has no gun
+    /// (the trigger sounds the horn), so no autoaim and no aim assist to
+    /// pull at their steering.
     fn gun<'a>(&self, game: &'a Game) -> Option<(&'a WeaponDef, u32)> {
-        let me = self.me(game);
-        match me.seat.and_then(|(v, s)| game.seat_weapon(v, s)) {
-            Some(def) => Some((def, 0)),
-            None => me
-                .held()
-                .and_then(|h| Some((game.weapons.get(h.weapon)?, h.state.zoom))),
+        if let Some((v, s, seat)) = seat_of(game, self.player) {
+            if seat.role != SeatRole::Passenger {
+                return Some((game.seat_weapon(v, s)?, 0));
+            }
         }
+        let held = self.me(game).held()?;
+        Some((game.weapons.get(held.weapon)?, held.state.zoom))
     }
 
     /// Look around with a controller's right stick, as Halo 2 does: the
@@ -1071,6 +1074,37 @@ impl LocalPlayer {
         }
     }
 
+    /// Where the HUD's lines under the crosshair start (`hb`'s top of
+    /// text): as far below it as they sat when it was in the middle of the
+    /// view, and lower if the reticles shown reach further.
+    fn under_crosshair(&self, hb: &HudBuilder, scene: &Scene, game: &Game) -> f32 {
+        let extra = self.extra_flags();
+        let split = hb.split() as usize;
+        let bottom = match self.seat_gun(scene, game) {
+            Some(gun) => gun.and_then(|(weapon, _)| {
+                let flags = (SEAT_UNIT_FLAGS, extra);
+                reticle_bottom(hb, &weapon.hud[split], flags, seat_hud_role)
+            }),
+            None => {
+                let me = self.me(game);
+                let left = me
+                    .left
+                    .as_ref()
+                    .and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state)));
+                let right = self.current(scene, game).and_then(|(weapon, state)| {
+                    let flags = (unit_flags(left.is_some(), state.zoom), extra);
+                    reticle_bottom(hb, &weapon.hud[split], flags, hud_role)
+                });
+                let left = left.and_then(|(weapon, state)| {
+                    let flags = (unit_flags(true, state.zoom), extra);
+                    reticle_bottom(hb, &weapon.hud[split], flags, left_hud_role)
+                });
+                right.into_iter().chain(left).reduce(f32::max)
+            }
+        };
+        under_reticle(hb, bottom)
+    }
+
     /// The HUD of this player's `w` x `h` view, in the tags' `split` layout.
     pub fn build_hud(
         &self,
@@ -1213,14 +1247,11 @@ impl LocalPlayer {
         }
         self.name_tags(&mut hb, scene, game, (w, h));
         self.objective_waypoints(&mut hb, scene, game, (w, h));
+        // The lines under the crosshair: RELOAD (or the weapon's name as it
+        // comes up), then the prompts below that.
+        let under = self.under_crosshair(&hb, scene, game);
         if let Some(text) = self.objective_prompt(game) {
-            hb.text(
-                font,
-                [w * 0.5, h * 0.5 + 64.0 * t],
-                9.0 * t,
-                &text,
-                hud::BLUE,
-            );
+            hb.text(font, [w * 0.5, under + 16.0 * t], 9.0 * t, &text, hud::BLUE);
         }
         if game.over() {
             let text = match (game.winning_team, game.winner) {
@@ -1248,7 +1279,7 @@ impl LocalPlayer {
             (game.swap_prompt(self.player), ["E", "X"], "PICK UP"),
             (game.dual_prompt(self.player), ["Q", "Y"], "DUAL WIELD"),
         ];
-        let mut y = h * 0.5 + 64.0 * t;
+        let mut y = under + 16.0 * t;
         if let Some(text) = vehicle_prompt(scene, game, self.player, !self.pad_prompts()) {
             hb.text(font, [w * 0.5, y], 9.0 * t, &text, hud::BLUE);
             y += 12.0 * t;
@@ -1258,14 +1289,8 @@ impl LocalPlayer {
                 // A vehicle gun's HUD is its reticle (and one for aiming
                 // at friends).
                 let reticle = self.reticle_color();
-                let flags = (tags::UNIT_DEFAULT | tags::UNIT_UNZOOMED, self.extra_flags());
-                weapon_hud(&mut hb, scene, weapon, state, reticle, flags, |w| {
-                    if w.name.contains("friend") {
-                        HudRole::FriendlyReticle
-                    } else {
-                        HudRole::Reticle
-                    }
-                });
+                let flags = (SEAT_UNIT_FLAGS, self.extra_flags());
+                weapon_hud(&mut hb, scene, weapon, state, reticle, flags, seat_hud_role);
             }
             return hb.finish();
         }
@@ -1296,11 +1321,11 @@ impl LocalPlayer {
             } else {
                 "RELOAD"
             };
-            hb.text(font, [w * 0.5, h * 0.5 + 48.0 * t], 12.0 * t, msg, hud::RED);
+            hb.text(font, [w * 0.5, under], 12.0 * t, msg, hud::RED);
         } else if me.readying > 0.0 {
             hb.text(
                 font,
-                [w * 0.5, h * 0.5 + 48.0 * t],
+                [w * 0.5, under],
                 10.0 * t,
                 &display_name(&def.name),
                 hud::BLUE,
@@ -1329,6 +1354,50 @@ fn vehicle_prompt(scene: &Scene, game: &Game, i: usize, keyboard: bool) -> Optio
     };
     let name = &scene.vehicles.kinds.get(game.vehicles[v].def)?.name;
     Some(format!("HOLD {button} TO {what} {name}"))
+}
+
+/// The unit state flags a vehicle gun's HUD shows by.
+const SEAT_UNIT_FLAGS: u16 = tags::UNIT_DEFAULT | tags::UNIT_UNZOOMED;
+
+/// What a vehicle gun's HUD widgets are: its reticle, and one for aiming at
+/// friends.
+fn seat_hud_role(w: &HudWidget) -> HudRole {
+    if w.name.contains("friend") {
+        HudRole::FriendlyReticle
+    } else {
+        HudRole::Reticle
+    }
+}
+
+/// How far below the crosshair the HUD's lines under it start, in pixels
+/// of a 1280x960 screen (counted as the remake's text is): where they sat
+/// below a crosshair in the middle of the view.
+const UNDER_CROSSHAIR: f32 = 48.0;
+
+/// The lowest edge of the reticles among a weapon's HUD `widgets` (in
+/// `hb`'s layout) that show with these state flags, `role` saying which
+/// are reticles, in window pixels.
+fn reticle_bottom(
+    hb: &HudBuilder,
+    widgets: &[HudWidget],
+    (unit, extra): (u16, u16),
+    role: impl Fn(&HudWidget) -> HudRole,
+) -> Option<f32> {
+    widgets
+        .iter()
+        .filter(|w| w.state.shows(unit, extra))
+        .filter(|w| matches!(role(w), HudRole::Reticle | HudRole::FriendlyReticle))
+        .map(|w| hb.widget_rect(w)[3])
+        .reduce(f32::max)
+}
+
+/// Where the HUD's lines under the crosshair start: `UNDER_CROSSHAIR`
+/// below it, or a little below the reticle's `bottom` edge if that is
+/// lower.
+fn under_reticle(hb: &HudBuilder, bottom: Option<f32>) -> f32 {
+    let t = hb.text_scale();
+    let under = hb.anchor(Anchor::Crosshair)[1] + UNDER_CROSSHAIR * t;
+    bottom.map_or(under, |b| under.max(b + 4.0 * t))
 }
 
 /// A weapon's HUD widgets: background with spare ammo, ammo meter,
@@ -1581,6 +1650,134 @@ mod tests {
         };
         assert!(single.shows(unit_flags(false, 0), 0));
         assert!(!single.shows(unit_flags(true, 0), 0));
+    }
+
+    /// A reticle `size` pixels across, centred on the crosshair, shown
+    /// with the `yes_unit` flags.
+    fn reticle(name: &str, size: f32, yes_unit: u16) -> HudWidget {
+        HudWidget {
+            registration: [0.5, 0.5],
+            size: [size, size],
+            ..widget(name, yes_unit)
+        }
+    }
+
+    #[test]
+    fn the_lines_under_the_crosshair_clear_the_lowered_reticle() {
+        // The battle rifle's reticle and the rocket launcher's, the
+        // tallest of the multiplayer weapons' (lockout.map: 70 and 126
+        // pixels of a 1280x960 screen in full screen, 34 and 62 split).
+        let views = [
+            (1280.0, 720.0, ScreenSplit::Full),
+            (1920.0, 1080.0, ScreenSplit::Full),
+            (2560.0, 1440.0, ScreenSplit::Full),
+            (1280.0, 360.0, ScreenSplit::Half),
+            (960.0, 540.0, ScreenSplit::Quarter),
+        ];
+        for (w, h, split) in views {
+            let hb = HudBuilder::for_view(w, h, split).with_crosshair(0.165);
+            let t = hb.text_scale();
+            let cross = hb.anchor(Anchor::Crosshair)[1];
+            let full = split == ScreenSplit::Full;
+            let sizes = if full { [70.0, 126.0] } else { [34.0, 62.0] };
+            for size in sizes {
+                let widgets = [reticle("crosshair", size, 0)];
+                let flags = (unit_flags(false, 0), 0);
+                let bottom = reticle_bottom(&hb, &widgets, flags, hud_role);
+                let reticle = hb.widget_rect(&widgets[0]);
+                assert_eq!(bottom, Some(reticle[3]));
+                let under = under_reticle(&hb, bottom);
+                // RELOAD's top is below the reticle, and no nearer the
+                // crosshair than it sat under one in the middle.
+                assert!(under > reticle[3], "{w}x{h} {size}: {under}");
+                assert!(under >= cross + UNDER_CROSSHAIR * t - 1e-3);
+                assert!(under > h * 0.5 + UNDER_CROSSHAIR * t, "lowered too");
+            }
+        }
+        // The battle rifle's keeps the gap it had at 720p.
+        let hb = HudBuilder::new(1280.0, 720.0).with_crosshair(0.165);
+        let widgets = [reticle("crosshair", 70.0, 0)];
+        let bottom = reticle_bottom(&hb, &widgets, (unit_flags(false, 0), 0), hud_role);
+        assert_eq!(under_reticle(&hb, bottom), 360.0 * 1.165 + 48.0);
+        // Only the reticles shown count: not the zoom ticks reaching down
+        // from it zoomed in, nor one the state flags hide.
+        let tick = HudWidget {
+            offset: [-12.0, 40.0],
+            size: [26.0, 176.0],
+            ..widget("bottom_crosshair", tags::UNIT_ZOOM_LEVEL_1)
+        };
+        let hidden = reticle("crosshair", 500.0, tags::UNIT_ZOOM_LEVEL_1);
+        let widgets = [widgets[0].clone(), tick, hidden];
+        let flags = (unit_flags(false, 0), 0);
+        assert_eq!(reticle_bottom(&hb, &widgets, flags, hud_role), bottom);
+        assert_eq!(under_reticle(&hb, None), 360.0 * 1.165 + 48.0);
+    }
+
+    #[test]
+    fn a_driver_without_a_seat_gun_gets_no_aim_assist() {
+        let world = h2sim::testing::floor();
+        let mut game = h2sim::testing::game();
+        // Guns drawn to enemies 6 degrees out to 21 units, as the battle
+        // rifle is.
+        for w in &mut game.weapons {
+            w.magnetism_angle = 6f32.to_radians();
+            w.magnetism_range = 21.0;
+        }
+        let (me, enemy) = (game.add_player(), game.add_player());
+        game.players[enemy].body.position = Vec3::new(8.0, 0.0, 0.0);
+        // A Warthog with no gun of its own: a driver and a passenger.
+        let seat = |role, y: f32| SeatDef {
+            role,
+            position: Vec3::new(0.0, y, 0.4),
+            entry: Vec3::new(0.0, y * 3.0, 0.4),
+            entry_radius: 1.0,
+            eye: Vec3::new(0.0, y, 0.6),
+            exposed: true,
+            third_person: true,
+            weapon: None,
+            alt_weapon: None,
+            pivot: None,
+            turret: None,
+            pitch_range: [-0.8, 0.8],
+            animation: String::new(),
+            ai_only: false,
+            camera: Vec::new(),
+        };
+        let jeep = h2sim::vehicle::VehicleDef {
+            name: "warthog".into(),
+            seats: vec![seat(SeatRole::Driver, 0.2), seat(SeatRole::Passenger, -0.2)],
+            ..Default::default()
+        };
+        let spawn = h2sim::game::VehicleSpawn {
+            def: 0,
+            position: Vec3::new(0.0, -3.0, 0.0),
+            yaw: 0.0,
+            respawn: 30.0,
+        };
+        game.set_vehicles(vec![jeep], vec![spawn]);
+        // Aimed right at the enemy, from wherever they sit.
+        let aimed = |game: &Game| {
+            let mut l = LocalPlayer::new(me, game);
+            let q = &game.players[enemy].body;
+            let at = q.position + Vec3::Z * q.height() * 0.5;
+            l.camera = FlyCamera::looking_at(l.camera.position, at);
+            l
+        };
+        let l = aimed(&game);
+        assert!(l.gun(&game).is_some());
+        assert_eq!(l.magnet(&game, &world).map(|m| m.player), Some(enemy));
+        // Driving, the trigger is the horn: the battle rifle they carry
+        // neither slows nor steers the wheel.
+        game.enter_vehicle(me, 0, 0);
+        assert_eq!(game.players[me].seat, Some((0, 0)));
+        let l = aimed(&game);
+        assert!(l.gun(&game).is_none());
+        assert!(l.magnet(&game, &world).is_none());
+        // A passenger aims their own gun.
+        game.enter_vehicle(me, 0, 1);
+        assert_eq!(game.players[me].seat, Some((0, 1)));
+        let l = aimed(&game);
+        assert_eq!(l.magnet(&game, &world).map(|m| m.player), Some(enemy));
     }
 
     #[test]

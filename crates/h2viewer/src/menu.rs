@@ -29,6 +29,9 @@ pub enum Screen {
     Options,
     SystemLink,
     Profile,
+    /// The profile's look settings (Halo 2 keeps look sensitivity and
+    /// invert look among its profile's controller settings).
+    Controls,
     Pause,
     PostGame,
     /// Online: the party lobby (and signing in, until signed in).
@@ -389,6 +392,8 @@ enum Row {
     EmblemPrimary,
     EmblemSecondary,
     EmblemBackColor,
+    /// On to the profile's look settings.
+    Controls,
     LookSensitivity,
     MouseSensitivity,
     InvertLook,
@@ -531,6 +536,8 @@ const ROW_Y: f32 = 128.0;
 const ROW_W: f32 = 300.0;
 const ROW_H: f32 = 26.0;
 const ROW_STEP: f32 = 32.0;
+/// The line of hints at the bottom (rows must end above it).
+const HINT_Y: f32 = 440.0;
 /// The lobby's right-hand panels (map, players).
 const PANEL_X: f32 = 372.0;
 const PANEL_W: f32 = 228.0;
@@ -677,6 +684,7 @@ impl Menu {
             Screen::Options => "GAME OPTIONS",
             Screen::SystemLink => "SYSTEM LINK",
             Screen::Profile => "PLAYER PROFILE",
+            Screen::Controls => "CONTROLS",
             Screen::Pause => "PAUSED",
             Screen::PostGame => "GAME OVER",
             Screen::Live => "ONLINE",
@@ -706,10 +714,9 @@ impl Menu {
                 Row::EmblemPrimary,
                 Row::EmblemSecondary,
                 Row::EmblemBackColor,
-                Row::LookSensitivity,
-                Row::MouseSensitivity,
-                Row::InvertLook,
+                Row::Controls,
             ],
+            Screen::Controls => vec![Row::LookSensitivity, Row::MouseSensitivity, Row::InvertLook],
             Screen::Lobby if ctx.host_lobby.is_some() => vec![
                 Row::GameType,
                 Row::Map,
@@ -877,6 +884,7 @@ impl Menu {
                 "EMBLEM BACK COLOR".into(),
                 Some(color_name(self.profile.look.emblem.colors[2]).into()),
             ),
+            Row::Controls => ("CONTROLS".into(), None),
             Row::LookSensitivity => (
                 "LOOK SENSITIVITY".into(),
                 Some(self.profile.controls.look_sensitivity.to_string()),
@@ -1258,6 +1266,7 @@ impl Menu {
             Row::Multiplayer => forward(self, Screen::Lobby),
             Row::SystemLink => forward(self, Screen::SystemLink),
             Row::Profile => forward(self, Screen::Profile),
+            Row::Controls => forward(self, Screen::Controls),
             Row::Quit => Action::Quit,
             Row::Name => {
                 self.editing = true;
@@ -1560,6 +1569,10 @@ impl Menu {
                 self.back_to_main(Row::Profile);
                 Action::None
             }
+            Screen::Controls => {
+                self.back_to(Screen::Profile, Row::Controls, ctx);
+                Action::None
+            }
             Screen::Campaign => {
                 self.back_to_main(Row::Multiplayer);
                 Action::None
@@ -1620,9 +1633,9 @@ impl Menu {
         // The online lists are wider still, for players' doings.
         let players = matches!(self.screen, Screen::Players | Screen::RecentPlayers);
         let list = players || matches!(self.screen, Screen::Playlists | Screen::Matchmaking);
-        // The game options' eleven rows (and the lists of players) sit
-        // closer to fit above the hint.
-        let step = if self.screen == Screen::Options || players {
+        // The game options' eleven rows, the profile's ten (and the lists
+        // of players) sit closer to fit above the hint.
+        let step = if matches!(self.screen, Screen::Options | Screen::Profile) || players {
             ROW_STEP - 4.0
         } else {
             ROW_STEP
@@ -1722,6 +1735,7 @@ impl Menu {
             | Screen::Options
             | Screen::SystemLink
             | Screen::Profile
+            | Screen::Controls
             | Screen::Live
             | Screen::Players
             | Screen::RecentPlayers
@@ -1898,7 +1912,7 @@ impl Menu {
             Screen::Lobby if in_custom(ctx) => "ENTER OR A: SELECT   ESC OR B: BACK TO THE PARTY",
             _ => "ENTER OR A: SELECT   ESC OR B: BACK",
         };
-        hb.text_left(font, f.at(ROW_X, 440.0), 8.0 * s, hint, DIM);
+        hb.text_left(font, f.at(ROW_X, HINT_Y), 8.0 * s, hint, DIM);
     }
 
     /// A line over the rows saying what they are.
@@ -2799,6 +2813,10 @@ mod tests {
                 m.input(Input::Down, &c);
             }
         };
+        // They have a screen of their own, off the profile.
+        to(&mut m, Row::Controls);
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.screen, Screen::Controls);
         // Halo 2's look sensitivity of 3 to start, from 1 to 10.
         to(&mut m, Row::LookSensitivity);
         assert_eq!(m.profile.controls.look_sensitivity, 3);
@@ -2817,6 +2835,54 @@ mod tests {
         to(&mut m, Row::InvertLook);
         assert_eq!(m.input(Input::Select, &c), Action::SaveProfile);
         assert!(m.profile.controls.invert_look);
+        // Back to the profile, on CONTROLS.
+        m.input(Input::Back, &c);
+        assert_eq!(m.screen, Screen::Profile);
+        assert_eq!(m.rows(&c)[m.cursor], Row::Controls);
+    }
+
+    #[test]
+    fn every_screens_rows_end_above_the_hint() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        let screens = [
+            Screen::Main,
+            Screen::Lobby,
+            Screen::Options,
+            Screen::Profile,
+            Screen::Controls,
+            Screen::Pause,
+            Screen::PostGame,
+            Screen::Live,
+            Screen::Player,
+            Screen::Matchmaking,
+            Screen::Pregame,
+        ];
+        for screen in screens {
+            m.show(screen);
+            assert!(!m.lists(), "{screen:?} scrolls");
+            // Signed in, the online lobby has as many as eight.
+            let n = match screen {
+                Screen::Live => 8,
+                _ => m.rows(&c).len(),
+            };
+            let bottom = m.row_rect(n - 1)[3];
+            assert!(bottom < HINT_Y, "{screen:?}'s {n} rows end at {bottom}");
+        }
+        // The lists show as many as fit, and scroll.
+        for screen in [
+            Screen::SystemLink,
+            Screen::Players,
+            Screen::RecentPlayers,
+            Screen::Playlists,
+        ] {
+            m.show(screen);
+            assert!(m.lists());
+            // Their place in the list goes under the last row shown.
+            let bottom = m.row_rect(MAX_LIST_ROWS)[1] + 9.0;
+            assert!(bottom < HINT_Y, "{screen:?}: {bottom}");
+        }
     }
 
     #[test]

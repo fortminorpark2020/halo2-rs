@@ -99,10 +99,10 @@ your primary and secondary armour colours from Halo 2's 18, and build your
 emblem (one of Halo 2's 64 pictures in two colours over one of its 32
 backgrounds), with your model turning beside the menu. Your emblem shows in
 the lobby and on the scoreboard, Elites wear it on their back, and a team's
-Capture the Flag flag carries its first player's emblem. LOOK SENSITIVITY
-(the controller's right stick) and MOUSE SENSITIVITY run from 1 to 10, 3 by
-default as in Halo 2, and INVERT LOOK turns looking up and down around for
-both. It's saved in `%APPDATA%\halo2-rs\profile.txt` (the look settings as
+Capture the Flag flag carries its first player's emblem. Its CONTROLS screen
+has the look settings: LOOK SENSITIVITY (the controller's right stick) and
+MOUSE SENSITIVITY run from 1 to 10, 3 by default as in Halo 2, and INVERT
+LOOK turns looking up and down around for both. It's saved in `%APPDATA%\halo2-rs\profile.txt` (the look settings as
 `look_sensitivity=`, `mouse_sensitivity=` and `invert_look=yes`/`no`) and
 sent to the other PCs in a System Link game (the look settings stay on your
 PC; splitscreen guests look at the defaults). In team games armour takes the
@@ -230,10 +230,11 @@ sensitivity, slower zoomed), speeding up to two and a half times that over
 Halo 2's aim assist, from each weapon's magnetism angle and range (narrower
 and farther zoomed, none for the sniper rifles unzoomed): the stick turns
 slower with the crosshair on an enemy (friction), and while either stick moves
-the view follows an enemy it's on (adhesion). The mouse gets none. A on a
-new controller takes over player one (the keyboard and mouse still work for
-them too); in the lobby, Start on another controller adds a splitscreen
-player (up to four) and Back or B takes them out again. Start on a new
+the view follows an enemy it's on (adhesion). The mouse gets none, and nor
+does a Warthog's or Spectre's driver, who has no gun. A on a new controller
+takes over player one (the keyboard and mouse still work for them too); in
+the lobby, Start on another controller adds a splitscreen player (up to
+four) and Back or B takes them out again. Start on a new
 controller during a game drops them straight in. As in Halo 2, two players
 split the screen top and bottom, three give the first player the top half
 and the others a quarter each, and four take a quarter each; each view uses
