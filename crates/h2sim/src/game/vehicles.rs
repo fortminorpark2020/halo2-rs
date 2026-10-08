@@ -572,6 +572,12 @@ impl Game {
             Some((dir, muzzle)) if def.flight.is_some() => (dir, muzzle),
             _ => (at_target, eye),
         };
+        // Bullets go where autoaim steers them, as from a gun in hand.
+        let assisted = def.flight.is_none() && self.players[i].actor.is_none();
+        let dir = match assisted.then(|| self.autoaim(world, i, origin, dir, &def, 0)) {
+            Some(Some((_, Some(point)))) => (point - origin).normalize_or(dir),
+            _ => dir,
+        };
         let right = dir.cross(Vec3::Z).normalize_or(Vec3::X);
         let up = right.cross(dir);
         let states = if alt {

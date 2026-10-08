@@ -266,8 +266,6 @@ pub struct WeaponAssets {
     pub sounds: WeaponSounds,
     /// How its rounds look and sound, when they fly.
     pub round: RoundAssets,
-    /// Enemies this close under the crosshair turn it red.
-    pub autoaim_range: f32,
 }
 
 /// A weapon's rounds in flight (rockets, plasma bolts, needles...).
@@ -1328,7 +1326,6 @@ impl Loader {
             elite_rig,
             hud,
             sounds,
-            autoaim_range: w.autoaim_range,
         })
     }
 

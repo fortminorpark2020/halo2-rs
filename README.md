@@ -18,7 +18,7 @@ install. No game files are included in this repository.
   using the speeds, jump velocity and size from the game's own globals and biped tags,
   vehicles (wheels with suspension, hovering, flight, seats, turrets, splatters
   and wrecks),
-  weapons (fire rate, bursts, spread, magazines, reloads, zoom) from the weapon tags,
+  weapons (fire rate, bursts, spread, magazines, reloads, zoom, autoaim) from the weapon tags,
   with Halo 2's damage table (sniper rounds twice as hard on shields, plasma
   1.5 times on shields but a third on bodies, explosions half on shields),
   the maps' power-ups (the overshield charges shields to three times and
@@ -123,7 +123,15 @@ mouse wheel switches weapon, G throws a grenade, X switches grenade type, E pick
 up (hold to swap weapons), 1-9 pick one directly. B adds a bot. All 15 multiplayer weapons are
 loaded with their real first person models, HUD, crosshairs, scopes and firing
 stats, held by Master Chief's arms with the game's own first person animations
-(ready, idle, fire, reload, melee). Bullets hit at once; plasma bolts, needles,
+(ready, idle, fire, reload, melee). Holding the trigger keeps the Battle Rifle
+firing bursts, and the Magnum, Carbine, Shotgun and sniper rifles shots, as
+fast as each recovers (their tags say so; the Rocket Launcher, Brute Shot and
+Fuel Rod need a fresh pull); a pull late in the Carbine's recovery is held over
+until it can fire. Spread grows over a burst or sustained fire as the tags
+give it. Each weapon's autoaim angle and range from its tags steer bullets
+fired close to an enemy into them (zoomed, it reaches farther through a
+narrower cone), and the crosshair turns red while it would. Getting hurt knocks
+you out of zoom. Bullets hit at once; plasma bolts, needles,
 rockets, Brute Shot grenades and Fuel Rod shots fly at their tag speeds (rockets
 speed up, Brute Shot rounds arc), needles and the Fuel Rod home in, rockets lock
 on to enemy vehicles, and explosive rounds go off in a blast that hurts and

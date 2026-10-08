@@ -1,7 +1,7 @@
 //! Weapon firing: triggers, bursts, rate of fire, spread, ammo and reloading,
 //! driven by the values in the weapon's tags.
 
-use blam_cache::weapon::{Damage, Projectile, TriggerBehavior, TriggerInput, Weapon};
+use blam_cache::weapon::{Barrel, Damage, Projectile, TriggerBehavior, TriggerInput, Weapon};
 use glam::Vec3;
 
 /// Halo 2 drives reload length from animations; this stands in until they
@@ -14,6 +14,10 @@ const DEFAULT_RANGE: f32 = 1000.0;
 const INSTANT_SPEED: f32 = 100.0;
 /// Flying rounds with no range of their own go this far.
 const FLIGHT_RANGE: f32 = 150.0;
+/// Seconds: a barrel this close to ready fires on this tick rather than
+/// the next. Timers add up in floating point, where 1/15 s isn't exactly
+/// four 60ths of a second.
+const READY: f32 = 1e-4;
 
 /// Everything about a weapon the simulation needs, flattened from its tags.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,12 +27,19 @@ pub struct WeaponDef {
     /// Scorpion's machine gun, the Banshee's bomb).
     pub input: TriggerInput,
     pub behavior: TriggerBehavior,
-    /// Firing effects per second at the start and after sustained fire.
+    /// Firing effects per second at the start and after sustained fire; 0
+    /// for guns paced by their recovery alone (the Magnum, the sniper rifles).
     pub rounds_per_second: (f32, f32),
     pub rate_acceleration_time: f32,
     /// Shots per trigger pull; 0 means keep firing while held.
     pub shots_per_fire: u32,
     pub fire_recovery_time: f32,
+    /// A trigger still held when the barrel recovers pulls again: holding
+    /// it down keeps the Battle Rifle firing bursts.
+    pub keeps_firing: bool,
+    /// The last part of the recovery (0..1 of it) in which a pull is held
+    /// over and fires as soon as the barrel recovers.
+    pub soft_recovery: f32,
     pub magazine_size: u32,
     pub initial_rounds: u32,
     pub maximum_rounds: u32,
@@ -44,6 +55,11 @@ pub struct WeaponDef {
     pub distribution_angle: f32,
     pub zoom_levels: u32,
     pub zoom_range: (f32, f32),
+    /// Autoaim: rounds fired within this angle (radians) of an enemy no
+    /// farther away than the range are steered at them (see
+    /// `Game::autoaim`).
+    pub autoaim_angle: f32,
+    pub autoaim_range: f32,
     pub range: f32,
     /// World units per second (very fast bullets are treated as instant).
     pub velocity: f32,
@@ -267,12 +283,8 @@ impl WeaponDef {
             _ => 0,
         };
         let rps = (
-            barrel.rounds_per_second.0.max(0.1),
-            barrel
-                .rounds_per_second
-                .1
-                .max(barrel.rounds_per_second.0)
-                .max(0.1),
+            barrel.rounds_per_second.0.max(0.0),
+            barrel.rounds_per_second.1.max(barrel.rounds_per_second.0),
         );
         let reload = if magazine.reload_time > 0.0 {
             magazine.reload_time
@@ -329,6 +341,10 @@ impl WeaponDef {
             rate_acceleration_time: barrel.acceleration_time,
             shots_per_fire,
             fire_recovery_time: barrel.fire_recovery_time.max(0.0),
+            // Holding a trigger that charges (the Plasma Pistol's) charges
+            // it rather than firing again.
+            keeps_firing: barrel.flags & Barrel::KEEPS_FIRING != 0 && trigger.charging_time <= 0.0,
+            soft_recovery: barrel.soft_recovery_fraction.clamp(0.0, 1.0),
             magazine_size: magazine.rounds_loaded_maximum.max(0) as u32,
             initial_rounds: magazine.rounds_total_initial.max(0) as u32,
             maximum_rounds: magazine.rounds_total_maximum.max(0) as u32,
@@ -342,6 +358,8 @@ impl WeaponDef {
             distribution_angle: barrel.distribution_angle,
             zoom_levels: w.zoom_levels.max(0) as u32,
             zoom_range: w.zoom_range,
+            autoaim_angle: w.autoaim_angle.max(0.0),
+            autoaim_range: w.autoaim_range.max(0.0),
             range,
             velocity,
             damage: upper.unwrap_or(0.0),
@@ -429,6 +447,8 @@ pub struct WeaponState {
     cooldown: f32,
     /// Shots still to come from the current trigger pull.
     burst_left: u32,
+    /// A pull late in the recovery, to fire once it's over.
+    queued: bool,
     fire_held: bool,
     zoom_held: bool,
     /// 0..1: how far sustained fire has pushed spread and rate of fire.
@@ -448,6 +468,7 @@ impl WeaponState {
             zoom: 0,
             cooldown: 0.0,
             burst_left: 0,
+            queued: false,
             fire_held: false,
             zoom_held: false,
             heat: 0.0,
@@ -481,8 +502,17 @@ impl WeaponState {
         if self.can_reload(def) {
             self.reloading = Some(def.reload_time);
             self.burst_left = 0;
+            self.queued = false;
             self.zoom = 0;
         }
+    }
+
+    /// Put away for another weapon: out of zoom, the reload abandoned and
+    /// no pull held over.
+    pub fn put_away(&mut self) {
+        self.zoom = 0;
+        self.reloading = None;
+        self.queued = false;
     }
 
     /// Advance by `dt` seconds; returns the projectiles fired.
@@ -513,14 +543,24 @@ impl WeaponState {
             return shots;
         }
 
-        // A trigger pull starts a burst (or one shot); spew weapons fire while held.
+        // A trigger pull starts a burst (or one shot); spew weapons fire
+        // while held (if they have a rate of fire), and so do guns that keep
+        // firing (the Battle Rifle, a burst each time it recovers). A pull
+        // late in the recovery waits for it to end; one earlier is lost.
         if self.burst_left == 0 {
+            if pressed
+                && self.cooldown > READY
+                && self.cooldown <= def.fire_recovery_time * def.soft_recovery
+            {
+                self.queued = true;
+            }
             let wants = if def.shots_per_fire == 0 {
-                input.fire
+                input.fire && def.rounds_per_second.1 > 0.0
             } else {
-                pressed
+                pressed || self.queued || (def.keeps_firing && input.fire)
             };
-            if wants && self.cooldown <= 0.0 {
+            if wants && self.cooldown <= READY {
+                self.queued = false;
                 if !self.has_round(def) {
                     self.start_reload(def);
                     return shots;
@@ -533,9 +573,8 @@ impl WeaponState {
             }
         }
 
-        self.cooldown -= dt;
         let mut firing = false;
-        while self.burst_left > 0 && self.cooldown <= 0.0 {
+        while self.burst_left > 0 && self.cooldown <= READY {
             if !self.has_round(def) {
                 self.burst_left = 0;
                 break;
@@ -547,7 +586,9 @@ impl WeaponState {
             self.burst_left -= 1;
             let rate = def.rounds_per_second.0
                 + (def.rounds_per_second.1 - def.rounds_per_second.0) * self.heat;
-            self.cooldown += 1.0 / rate;
+            if rate > 0.0 {
+                self.cooldown += 1.0 / rate;
+            }
             if self.burst_left == 0 && def.shots_per_fire > 0 {
                 self.cooldown += def.fire_recovery_time;
             }
@@ -571,12 +612,21 @@ impl WeaponState {
             }
             self.since_shot = 0.0;
         }
+        // The tick's time passes after its rounds leave, so a round the
+        // barrel is ready for goes on the tick it's ready.
+        self.cooldown -= dt;
         if self.cooldown < 0.0 && self.burst_left == 0 {
             self.cooldown = 0.0;
         }
-        if firing {
+        // Spread grows over continuous firing: a whole burst, or a spew
+        // weapon's trigger held down.
+        let spewing = def.shots_per_fire == 0
+            && input.fire
+            && def.rounds_per_second.1 > 0.0
+            && self.has_round(def);
+        if firing || self.burst_left > 0 || spewing {
             let t = def.error_acceleration_time.max(1e-3);
-            self.heat = (self.heat + dt.max(1.0 / 30.0) / t).min(1.0);
+            self.heat = (self.heat + dt / t).min(1.0);
         } else {
             self.cool(def, dt);
         }
@@ -613,6 +663,8 @@ mod tests {
             rate_acceleration_time: 0.0,
             shots_per_fire: 3,
             fire_recovery_time: 0.26,
+            keeps_firing: true,
+            soft_recovery: 0.0,
             magazine_size: 36,
             initial_rounds: 108,
             maximum_rounds: 144,
@@ -626,6 +678,8 @@ mod tests {
             distribution_angle: 0.0,
             zoom_levels: 1,
             zoom_range: (2.0, 2.0),
+            autoaim_angle: 0.052_359_88,
+            autoaim_range: 17.0,
             range: 40.0,
             velocity: 400.0,
             damage: 6.0,
@@ -662,11 +716,7 @@ mod tests {
         let def = battle_rifle();
         let mut w = WeaponState::new(&def);
         assert_eq!((w.loaded, w.reserve), (36, 72));
-        let fire = WeaponInput {
-            fire: true,
-            ..Default::default()
-        };
-        let shots = run(&def, &mut w, fire, 1.0);
+        let shots = clicks(&def, &mut w, &[0.0], 1.0);
         assert_eq!(shots.len(), 3);
         // 15 rounds per second inside the burst.
         let gap = shots[1].0 - shots[0].0;
@@ -675,6 +725,126 @@ mod tests {
         for (_, s) in &shots {
             assert!(s.yaw.hypot(s.pitch) <= def.error_angle.1 + 1e-6);
         }
+    }
+
+    /// Press the trigger for one step at each of `at` (seconds) and run
+    /// for `seconds`.
+    fn clicks(def: &WeaponDef, w: &mut WeaponState, at: &[f32], seconds: f32) -> Vec<(f32, Shot)> {
+        let dt = 1.0 / 120.0;
+        let mut out = Vec::new();
+        let mut t = 0.0;
+        while t < seconds {
+            let fire = at.iter().any(|&c| t >= c && t < c + dt);
+            let input = WeaponInput {
+                fire,
+                ..Default::default()
+            };
+            for s in w.update(def, input, dt) {
+                out.push((t, s));
+            }
+            t += dt;
+        }
+        out
+    }
+
+    #[test]
+    fn holding_the_trigger_keeps_firing_bursts() {
+        let def = battle_rifle();
+        let mut w = WeaponState::new(&def);
+        let fire = WeaponInput {
+            fire: true,
+            ..Default::default()
+        };
+        let shots = run(&def, &mut w, fire, 1.2);
+        // A burst at once, then another each time the rifle recovers:
+        // three rounds 1/15 s apart, 1/15 s more and 0.26 s of recovery.
+        assert_eq!(shots.len(), 9);
+        let cycle = shots[3].0 - shots[0].0;
+        assert!((cycle - (3.0 / 15.0 + 0.26)).abs() < 0.02, "cycle {cycle}");
+        // A weapon that needs a fresh pull (the rocket launcher) fires once.
+        let def = WeaponDef {
+            keeps_firing: false,
+            ..battle_rifle()
+        };
+        let mut w = WeaponState::new(&def);
+        assert_eq!(run(&def, &mut w, fire, 1.0).len(), 3);
+    }
+
+    #[test]
+    fn pulls_late_in_the_recovery_wait_for_it() {
+        // Clicked again 0.15 s after the burst's last round: the rifle is
+        // still recovering (for 1/15 s and 0.26 s more). The Battle Rifle
+        // has no soft recovery, so the pull is lost.
+        let def = battle_rifle();
+        let mut w = WeaponState::new(&def);
+        let last = 2.0 / 15.0;
+        assert_eq!(clicks(&def, &mut w, &[0.0, last + 0.15], 1.0).len(), 3);
+        // Held over by one whose last part of recovery takes pulls (the
+        // Carbine's is 0.8 of it), it fires as the recovery ends...
+        let def = WeaponDef {
+            soft_recovery: 0.8,
+            ..battle_rifle()
+        };
+        let mut w = WeaponState::new(&def);
+        let shots = clicks(&def, &mut w, &[0.0, last + 0.15], 1.0);
+        assert_eq!(shots.len(), 6);
+        assert!((shots[3].0 - (last + 1.0 / 15.0 + 0.26)).abs() < 0.02);
+        // ...but not one pulled before that part.
+        let mut w = WeaponState::new(&def);
+        assert_eq!(clicks(&def, &mut w, &[0.0, last + 0.01], 1.0).len(), 3);
+    }
+
+    #[test]
+    fn recovery_alone_paces_guns_with_no_rate_of_fire() {
+        // The Magnum's tags: no rounds per second, 0.1 s of recovery.
+        let def = WeaponDef {
+            rounds_per_second: (0.0, 0.0),
+            shots_per_fire: 1,
+            fire_recovery_time: 0.1,
+            keeps_firing: false,
+            ..battle_rifle()
+        };
+        let mut w = WeaponState::new(&def);
+        let at: Vec<f32> = (0..6).map(|k| k as f32 * 0.15).collect();
+        assert_eq!(clicks(&def, &mut w, &at, 1.0).len(), 6);
+        // A spew trigger with no rate of fire never fires.
+        let def = WeaponDef {
+            rounds_per_second: (0.0, 0.0),
+            shots_per_fire: 0,
+            ..battle_rifle()
+        };
+        let mut w = WeaponState::new(&def);
+        let fire = WeaponInput {
+            fire: true,
+            ..Default::default()
+        };
+        assert!(run(&def, &mut w, fire, 1.0).is_empty());
+    }
+
+    #[test]
+    fn spread_grows_through_a_burst() {
+        // Over many bursts, the first round of each stays inside the
+        // initial error; the last ones spread toward the final error.
+        let def = WeaponDef {
+            magazine_size: 300,
+            initial_rounds: 300,
+            ..battle_rifle()
+        };
+        let mut w = WeaponState::new(&def);
+        let at: Vec<f32> = (0..100).map(|k| k as f32 * 0.5).collect();
+        let shots = clicks(&def, &mut w, &at, 50.0);
+        assert_eq!(shots.len(), 300);
+        let widest = |k: usize| {
+            shots
+                .iter()
+                .skip(k)
+                .step_by(3)
+                .map(|(_, s)| s.yaw.hypot(s.pitch))
+                .fold(0.0f32, f32::max)
+        };
+        assert!(widest(0) <= def.error_angle.0 + 1e-6, "{}", widest(0));
+        assert!(widest(2) > def.error_angle.0 * 1.3, "{}", widest(2));
+        assert!(widest(2) <= def.error_angle.1 + 1e-6);
     }
 
     #[test]

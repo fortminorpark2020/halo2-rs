@@ -333,9 +333,10 @@ fn load_level(path: &Path) -> Result<Level, String> {
         for w in &scene.weapons {
             let hud: Vec<&str> = w.hud.iter().map(|h| h.name.as_str()).collect();
             println!(
-                "weapon {} autoaim {:.1} range {:.1} damage {:.0} over {:?} vs shield/body {}/{} blast {:?} flight sound {:?} hud {hud:?}",
+                "weapon {} autoaim {:.1} deg to {:.1} range {:.1} damage {:.0} over {:?} vs shield/body {}/{} blast {:?} flight sound {:?} hud {hud:?}",
                 w.def.name,
-                w.autoaim_range,
+                w.def.autoaim_angle.to_degrees(),
+                w.def.autoaim_range,
                 w.def.range,
                 w.def.damage,
                 w.def.damage_range,

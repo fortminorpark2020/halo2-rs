@@ -11,6 +11,7 @@ use crate::weapon::{ArmorScale, Blast, WeaponDef, WeaponInput, WeaponState};
 use blam_cache::physics::{BipedPhysics, PlayerMovement};
 use glam::{Vec2, Vec3};
 
+mod autoaim;
 mod campaign;
 mod ctf;
 mod dual;
@@ -23,6 +24,7 @@ mod sync;
 mod teleporters;
 mod vehicles;
 mod zones;
+use autoaim::aim_basis;
 pub use campaign::{ActorSpawn, CharacterDef, Mind, Side};
 pub use ctf::{Flag, FlagEvent, NEUTRAL};
 pub use options::{MapWeapons, Options};
@@ -1399,8 +1401,9 @@ impl Game {
                 zoom: cmd.zoom && !dual,
             };
             let w = gun.unwrap_or_default();
+            let zoom = held.state.zoom;
             for shot in held.state.update(&def, input, dt) {
-                shots.push((shot.direction(f, r, u), def.clone(), w, false));
+                shots.push((shot, def.clone(), w, false, zoom));
             }
             if held.state.reloading.is_some() && !was.0 {
                 reloaded.push((false, was.1));
@@ -1421,7 +1424,7 @@ impl Game {
             };
             let w = left.unwrap_or_default();
             for shot in held.state.update(&def, input, dt) {
-                shots.push((shot.direction(f, r, u), def.clone(), w, true));
+                shots.push((shot, def.clone(), w, true, 0));
             }
             if held.state.reloading.is_some() && !was.0 {
                 reloaded.push((true, was.1));
@@ -1438,8 +1441,16 @@ impl Game {
                 empty,
             });
         }
-        for (dir, def, w, left) in shots {
-            self.fire(world, i, eye, dir, &def, w, left);
+        // Rounds that hit at once go where autoaim steers them (players
+        // only: actors aim for themselves). Spread is added after.
+        let assisted = self.players[i].actor.is_none();
+        for (shot, def, w, left, zoom) in shots {
+            let aim = assisted && def.flight.is_none();
+            let (f, r, u) = match aim.then(|| self.autoaim(world, i, eye, f, &def, zoom)) {
+                Some(Some((_, Some(point)))) => aim_basis(point - eye),
+                _ => (f, r, u),
+            };
+            self.fire(world, i, eye, shot.direction(f, r, u), &def, w, left);
         }
         self.players[i].last = cmd;
     }
@@ -1450,8 +1461,7 @@ impl Game {
             return;
         }
         if let Some(h) = p.weapons.get_mut(p.current) {
-            h.state.zoom = 0;
-            h.state.reloading = None;
+            h.state.put_away();
         }
         p.current = (p.current + 1) % p.weapons.len();
         p.readying = ready_time(&self.weapons, p);
@@ -1744,6 +1754,10 @@ impl Game {
         }
         p.since_damage = 0.0;
         p.reveal = p.reveal.max(powerups::HURT_REVEAL);
+        // Getting hurt knocks a player out of their scope, as in Halo 2.
+        if let Some(h) = p.weapons.get_mut(p.current) {
+            h.state.zoom = 0;
+        }
         // What gets past the shields (all of it once they're down).
         let past = if p.shield <= 0.0 {
             amount
@@ -2208,6 +2222,20 @@ pub(crate) mod tests {
             .events
             .iter()
             .any(|e| matches!(e, Event::Killed { headshot: true, .. })));
+    }
+
+    #[test]
+    fn getting_hurt_knocks_you_out_of_zoom() {
+        let world = floor();
+        let mut g = game();
+        g.weapons[0].zoom_levels = 1;
+        duel(&mut g);
+        g.players[1].weapons[0].state.zoom = 1;
+        let mut c = aim_at(&g, 0, 1, 0.4);
+        c.fire = true;
+        g.step(&world, &[c, Command::default()]);
+        assert!(g.players[1].shield < 70.0);
+        assert_eq!(g.players[1].weapons[0].state.zoom, 0);
     }
 
     #[test]

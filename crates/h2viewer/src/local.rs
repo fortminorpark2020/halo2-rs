@@ -369,6 +369,8 @@ pub struct LocalPlayer {
     pub friends_seen: Vec<usize>,
     /// The player under the crosshair right now, and how far.
     pub aimed_at: Option<(usize, f32)>,
+    /// The enemy the gun's autoaim is on, if any: the crosshair is red.
+    pub autoaimed: Option<usize>,
     /// Where the mission's waypoints point.
     pub nav_points: Vec<Vec3>,
 }
@@ -399,6 +401,7 @@ impl LocalPlayer {
             tagged: None,
             friends_seen: Vec::new(),
             aimed_at: None,
+            autoaimed: None,
             nav_points: Vec::new(),
         }
     }
@@ -552,6 +555,7 @@ impl LocalPlayer {
     fn tag(&mut self, game: &Game, world: &World, dt: f32) {
         self.friends_seen.clear();
         self.aimed_at = None;
+        self.autoaimed = None;
         let me = self.me(game);
         if !me.alive {
             self.tagged = None;
@@ -573,6 +577,16 @@ impl LocalPlayer {
             }
         }
         let dir = self.camera.forward();
+        // The gun the crosshair belongs to: the seat's, or the one in hand.
+        let gun = match me.seat.and_then(|(v, s)| game.seat_weapon(v, s)) {
+            Some(def) => Some((def, 0)),
+            None => me
+                .held()
+                .and_then(|h| Some((game.weapons.get(h.weapon)?, h.state.zoom))),
+        };
+        self.autoaimed = gun
+            .and_then(|(def, zoom)| game.autoaim(world, self.player, eye, dir, def, zoom))
+            .map(|(j, _)| j);
         self.aimed_at = game.player_along(world, self.player, eye, dir, NAME_RANGE);
         match self.aimed_at {
             Some((j, _)) => self.tagged = Some((j, NAME_LINGER)),
@@ -587,12 +601,12 @@ impl LocalPlayer {
             .filter(|&(j, left)| left > 0.0 && game.players.get(j).is_some_and(|p| p.alive));
     }
 
-    /// The crosshair's colour: red with an enemy under it in the weapon's
-    /// range, as in Halo 2.
-    fn reticle_color(&self, game: &Game, weapon: &WeaponAssets) -> [f32; 4] {
-        match self.aimed_at {
-            Some((j, d)) if d <= weapon.autoaim_range && game.is_enemy(self.player, j) => hud::RED,
-            _ => hud::BLUE,
+    /// The crosshair's colour: red while the gun's autoaim is on an enemy
+    /// (one under it or close to it, in the weapon's range), as in Halo 2.
+    fn reticle_color(&self) -> [f32; 4] {
+        match self.autoaimed {
+            Some(_) => hud::RED,
+            None => hud::BLUE,
         }
     }
 
@@ -1078,7 +1092,7 @@ impl LocalPlayer {
             if let Some((weapon, state)) = gun {
                 // A vehicle gun's HUD is its reticle (and one for aiming
                 // at friends).
-                let reticle = self.reticle_color(game, weapon);
+                let reticle = self.reticle_color();
                 weapon_hud(&mut hb, scene, weapon, state, reticle, |name, _| {
                     if name.contains("friend") {
                         HudRole::Hidden
@@ -1102,7 +1116,7 @@ impl LocalPlayer {
             return hb.finish();
         };
         let def = &weapon.def;
-        let reticle = self.reticle_color(game, weapon);
+        let reticle = self.reticle_color();
         weapon_hud(&mut hb, scene, weapon, state, reticle, hud_role);
         let left = me.left.as_ref();
         if let Some((lw, ls)) = left.and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state))) {

@@ -106,6 +106,8 @@ pub struct Trigger {
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Barrel {
+    /// The barrel flags (see [`Barrel::KEEPS_FIRING`]).
+    pub flags: u32,
     /// Firing effects per second, from the first shot up to sustained fire.
     pub rounds_per_second: (f32, f32),
     pub acceleration_time: f32,
@@ -114,6 +116,9 @@ pub struct Barrel {
     pub shots_per_fire: (i16, i16),
     /// Seconds after a set of shots before the barrel can fire again.
     pub fire_recovery_time: f32,
+    /// The last part of the recovery (0..1 of it) in which a pull of the
+    /// trigger is held over to fire once the barrel recovers.
+    pub soft_recovery_fraction: f32,
     pub magazine: i16,
     pub rounds_per_shot: i16,
     pub projectiles_per_shot: i16,
@@ -134,6 +139,14 @@ pub struct Barrel {
     pub dual_minimum_error: f32,
     pub dual_error_angle: (f32, f32),
     pub dual_damage_scale: f32,
+}
+
+impl Barrel {
+    /// "Don't clear fire bit after recovering": a trigger still held when
+    /// the barrel recovers fires it again (set on the Battle Rifle, Magnum,
+    /// Plasma Pistol, Carbine, Shotgun and both sniper rifles; not on the
+    /// Rocket Launcher, Brute Shot or Fuel Rod, which need a fresh pull).
+    pub const KEEPS_FIRING: u32 = 1 << 11;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -340,11 +353,13 @@ pub fn read_weapon(set: &mut MapSet, weap: DatumIndex) -> Result<Weapon> {
         .0
         .iter()
         .map(|b| Barrel {
+            flags: u32_at(b, 0x0),
             rounds_per_second: range(b, 0x4),
             acceleration_time: f32_at(b, 0xC),
             deceleration_time: f32_at(b, 0x10),
             shots_per_fire: (i16_at(b, 0x1C), i16_at(b, 0x1E)),
             fire_recovery_time: f32_at(b, 0x20),
+            soft_recovery_fraction: f32_at(b, 0x24),
             magazine: i16_at(b, 0x28),
             rounds_per_shot: i16_at(b, 0x2A),
             error_acceleration_time: f32_at(b, 0x38),
