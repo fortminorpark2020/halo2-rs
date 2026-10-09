@@ -50,7 +50,11 @@ Halo 2.
 
 All work is pushed. Nothing is left only on a local machine.
 
-### `controller-wip` (top priority; based on `main` fcec0f4)
+### `controller-wip` (top priority; based on `main` fcec0f4; draft PR #1)
+
+Local gate passes on a447980 (fmt, clippy -D warnings, all tests) and the
+Windows build works. CI on PR #1 builds a downloadable Windows exe
+(`halo2-rs-windows` artifact).
 
 Done: Halo 2's controller settings (Controller Vibration driven by the
 weapons' and damage's jpt! player-response tags, Automatic Look Centering,
