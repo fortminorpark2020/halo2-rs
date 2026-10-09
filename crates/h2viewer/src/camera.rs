@@ -25,7 +25,7 @@ const SENSITIVITY: f32 = 0.0025;
 const MAX_FOV_X: f32 = 100.0;
 /// The camera looks no farther up or down than a player can aim
 /// (`Spartan::look_with`), so shots always leave through the crosshair.
-const MAX_PITCH: f32 = 1.5;
+const MAX_PITCH: f32 = h2sim::game::MAX_PITCH;
 
 impl FlyCamera {
     pub fn looking_at(position: Vec3, target: Vec3) -> Self {
@@ -254,8 +254,8 @@ pub struct StickLook {
 
 impl StickLook {
     /// Radians to turn in `dt` seconds for `stick` (x right, y up): x to
-    /// the left, y up. `scale` scales the turn rates (the sensitivity,
-    /// and slower zoomed in).
+    /// the left, y up. `rates` are the turn rates across and up or down
+    /// at full stick, radians a second (`stick_rates`, or a seat's).
     ///
     /// As Halo 2 does it (its player control update, re-implemented from
     /// the CC0 decompilation): pushed both across and up or down, the
@@ -266,7 +266,7 @@ impl StickLook {
     /// threshold, the rate grows steadily to the acceleration's scale
     /// over its time, counted from the frame before, and starts over once
     /// the stick comes back under it.
-    pub fn turn(&mut self, control: &PlayerControl, stick: Vec2, scale: f32, dt: f32) -> Vec2 {
+    pub fn turn(&mut self, control: &PlayerControl, stick: Vec2, rates: Vec2, dt: f32) -> Vec2 {
         let stick = diagonal(stick);
         let axis = |v: f32, held: &mut f32, rate: f32, (time, most): (f32, f32)| {
             let mut speed_up = 1.0;
@@ -281,23 +281,20 @@ impl StickLook {
             } else {
                 *held = 0.0;
             }
-            look_function(&control.look_function, v) * rate * speed_up * scale * dt
+            look_function(&control.look_function, v) * rate * speed_up * dt
         };
         let [across, up] = &mut self.pegged;
-        let yaw = axis(
-            stick.x,
-            across,
-            control.look_yaw_rate,
-            control.yaw_acceleration,
-        );
-        let pitch = axis(
-            stick.y,
-            up,
-            control.look_pitch_rate,
-            control.pitch_acceleration,
-        );
+        let yaw = axis(stick.x, across, rates.x, control.yaw_acceleration);
+        let pitch = axis(stick.y, up, rates.y, control.pitch_acceleration);
         Vec2::new(-yaw, pitch)
     }
+}
+
+/// The stick's turn rates (across, up or down, radians a second at full
+/// stick): the globals' times `scale` (the sensitivity, and slower zoomed
+/// in).
+pub fn stick_rates(control: &PlayerControl, scale: f32) -> Vec2 {
+    Vec2::new(control.look_yaw_rate, control.look_pitch_rate) * scale
 }
 
 /// The look stick pushed both across and up or down (each more than a
@@ -442,7 +439,7 @@ mod tests {
         let mut look = StickLook::default();
         let mut turn = Vec2::ZERO;
         for _ in 0..(secs / DT).round() as usize {
-            turn = look.turn(&control, stick, 1.0, DT);
+            turn = look.turn(&control, stick, stick_rates(&control, 1.0), DT);
         }
         Vec2::new(-turn.x, turn.y) / DT * 180.0 / std::f32::consts::PI
     }
@@ -477,10 +474,18 @@ mod tests {
         let control = PlayerControl::default();
         let mut look = StickLook::default();
         for _ in 0..60 {
-            look.turn(&control, Vec2::X, 1.0, DT);
+            look.turn(&control, Vec2::X, stick_rates(&control, 1.0), DT);
         }
-        look.turn(&control, Vec2::new(0.5, 0.0), 1.0, DT);
-        let again = -look.turn(&control, Vec2::X, 1.0, DT).x / DT;
+        look.turn(
+            &control,
+            Vec2::new(0.5, 0.0),
+            stick_rates(&control, 1.0),
+            DT,
+        );
+        let again = -look
+            .turn(&control, Vec2::X, stick_rates(&control, 1.0), DT)
+            .x
+            / DT;
         assert!(again.to_degrees() < 125.0);
     }
 
@@ -500,7 +505,9 @@ mod tests {
         let mut look = StickLook::default();
         let (mut turned, mut t) = (0.0f32, 0.0);
         while turned < std::f32::consts::TAU {
-            turned -= look.turn(&control, Vec2::X, 1.0, DT).x;
+            turned -= look
+                .turn(&control, Vec2::X, stick_rates(&control, 1.0), DT)
+                .x;
             t += DT;
         }
         assert!((t - 1.45).abs() < 0.03, "{t}");

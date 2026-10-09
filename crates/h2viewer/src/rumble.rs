@@ -382,6 +382,9 @@ mod tests {
         constant[0x14..0x18].copy_from_slice(&0.25f32.to_le_bytes());
         assert_eq!(TagFunction::parse(&constant), TagFunction::Constant(0.25));
         assert_eq!(TagFunction::parse(&[]), TagFunction::None);
-        assert!(matches!(TagFunction::parse(&[9, 0, 0]), TagFunction::Other(_)));
+        assert!(matches!(
+            TagFunction::parse(&[9, 0, 0]),
+            TagFunction::Other(_)
+        ));
     }
 }

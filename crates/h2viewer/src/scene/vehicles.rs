@@ -9,7 +9,7 @@ use blam_cache::{ai, scenario, weapon, DatumIndex, GroupTag};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use h2sim::game::VehicleSpawn;
 use h2sim::vehicle::{
-    Drive, HoverPad, HullBox, SeatDef, SeatRole, TurretGun, Vehicle, VehicleDef, Wheel,
+    Drive, HoverPad, HullBox, SeatDef, SeatLook, SeatRole, TurretGun, Vehicle, VehicleDef, Wheel,
     SUSPENSION_TRAVEL,
 };
 use std::collections::HashMap;
@@ -208,6 +208,16 @@ fn turret_gun(m: &RenderModel, bind: &[Mat4], part: &VehiclePart, attach: Mat4) 
 /// only actors.
 fn player_seats(tag: &VehicleTag) -> impl Iterator<Item = &vehicle::Seat> {
     tag.seats.iter().filter(|s| !s.has(seat_flags::BOARDING))
+}
+
+/// The seat's own controller turn rates (the tag's degrees a second).
+fn seat_look(s: &vehicle::Seat) -> SeatLook {
+    SeatLook {
+        yaw: s.yaw_rate.map(f32::to_radians),
+        pitch: s.pitch_rate.map(f32::to_radians),
+        speeds: s.speed_range,
+        exponent: s.speed_exponent,
+    }
 }
 
 impl Loader {
@@ -529,6 +539,7 @@ impl Loader {
                 animation: s.animation.clone(),
                 ai_only,
                 camera: self.camera_track(s.camera_track),
+                look: seat_look(s),
             });
             stances.push(leak(&s.animation));
         }
@@ -558,6 +569,7 @@ impl Loader {
                     animation: s.animation.clone(),
                     ai_only: s.has(seat_flags::INVALID_FOR_PLAYER),
                     camera: self.camera_track(s.camera_track),
+                    look: seat_look(s),
                 });
                 stances.push(leak(&s.animation));
             }

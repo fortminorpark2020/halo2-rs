@@ -13,10 +13,10 @@ use blam_cache::lightmap::{self, InstanceLighting};
 use blam_cache::model::{self, RenderModel};
 use blam_cache::pathfinding;
 use blam_cache::physics::{self, BipedPhysics, PlayerControl, PlayerMovement};
-use blam_cache::weapon::Vibration;
 use blam_cache::render::{LevelGeometry, Section, SectionOwner};
 use blam_cache::scenario::PlacedKind;
 use blam_cache::shader::{self, Blend};
+use blam_cache::weapon::Vibration;
 use blam_cache::{
     render, scenario, sound, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp,
 };

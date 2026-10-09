@@ -63,15 +63,15 @@ fn press(e: PadEvent) -> Press {
         PadEvent::Down(PadButton::Up) | PadEvent::Stick(Dir::Up) | PadEvent::Repeat(Dir::Up) => {
             Press::Menu(Input::Up)
         }
-        PadEvent::Down(PadButton::Down) | PadEvent::Stick(Dir::Down) | PadEvent::Repeat(Dir::Down) => {
-            Press::Menu(Input::Down)
-        }
-        PadEvent::Down(PadButton::Left) | PadEvent::Stick(Dir::Left) | PadEvent::Repeat(Dir::Left) => {
-            Press::Menu(Input::Left)
-        }
-        PadEvent::Down(PadButton::Right) | PadEvent::Stick(Dir::Right) | PadEvent::Repeat(Dir::Right) => {
-            Press::Menu(Input::Right)
-        }
+        PadEvent::Down(PadButton::Down)
+        | PadEvent::Stick(Dir::Down)
+        | PadEvent::Repeat(Dir::Down) => Press::Menu(Input::Down),
+        PadEvent::Down(PadButton::Left)
+        | PadEvent::Stick(Dir::Left)
+        | PadEvent::Repeat(Dir::Left) => Press::Menu(Input::Left),
+        PadEvent::Down(PadButton::Right)
+        | PadEvent::Stick(Dir::Right)
+        | PadEvent::Repeat(Dir::Right) => Press::Menu(Input::Right),
         PadEvent::Down(PadButton::A) => Press::Menu(Input::Select),
         PadEvent::Down(PadButton::B) => Press::Menu(Input::Back),
         PadEvent::Down(PadButton::Start) => Press::Join,

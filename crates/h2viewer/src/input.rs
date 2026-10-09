@@ -549,7 +549,12 @@ impl StickLayout {
     /// Legacy layouts first snap each stick to its nearer axis but near a
     /// diagonal, as Halo 2 does (`legacy_snap`).
     pub fn apply(self, left: Vec2, right: Vec2) -> (Vec2, Vec2) {
-        let snapped = || (legacy_snap(left, LEGACY_ZONES[0]), legacy_snap(right, LEGACY_ZONES[1]));
+        let snapped = || {
+            (
+                legacy_snap(left, LEGACY_ZONES[0]),
+                legacy_snap(right, LEGACY_ZONES[1]),
+            )
+        };
         match self {
             StickLayout::Default => (left, right),
             StickLayout::Southpaw => (right, left),
@@ -1072,7 +1077,10 @@ impl Pads {
             Source::Gilrs(g) => (g.gamepads())
                 .map(|(id, pad)| {
                     let pull = |b| pad.button_data(b).map_or(0.0, |d| d.value());
-                    (id.into(), [Button::LeftTrigger2, Button::RightTrigger2].map(pull))
+                    (
+                        id.into(),
+                        [Button::LeftTrigger2, Button::RightTrigger2].map(pull),
+                    )
                 })
                 .collect(),
             Source::Script(s) => s.pulls(),
@@ -1510,7 +1518,8 @@ impl Script {
         let p = self.pad(id);
         if !p.connected {
             p.connected = true;
-            self.raw.push((id, Raw::Connected("scripted controller".into())));
+            self.raw
+                .push((id, Raw::Connected("scripted controller".into())));
         }
     }
 
@@ -1537,7 +1546,10 @@ impl Script {
             return;
         };
         let args = &words[2..];
-        let buttons: Vec<PadButton> = args.iter().filter_map(|a| PadButton::from_name(a)).collect();
+        let buttons: Vec<PadButton> = args
+            .iter()
+            .filter_map(|a| PadButton::from_name(a))
+            .collect();
         match verb {
             "connect" => self.connect(id),
             "disconnect" => {
@@ -1580,7 +1592,10 @@ impl Script {
                 }
             }
             "trigger" => {
-                let (Some(&side), Some(v)) = (args.first(), args.get(1).and_then(|v| v.parse::<f32>().ok())) else {
+                let (Some(&side), Some(v)) = (
+                    args.first(),
+                    args.get(1).and_then(|v| v.parse::<f32>().ok()),
+                ) else {
                     println!("controllers: script: which trigger, and how far, in {line:?}?");
                     return;
                 };
@@ -1920,7 +1935,10 @@ mod tests {
         // A round stick's full diagonal: 0.596 each way through the dead
         // zone, 0.843 squared off (Halo 2's worked numbers).
         let c = condition(Vec2::splat(std::f32::consts::FRAC_1_SQRT_2));
-        assert!((c.x - 0.843).abs() < 0.001 && (c.y - 0.843).abs() < 0.001, "{c}");
+        assert!(
+            (c.x - 0.843).abs() < 0.001 && (c.y - 0.843).abs() < 0.001,
+            "{c}"
+        );
         // A square stick's corner: full both ways, no further.
         assert_eq!(condition(Vec2::new(1.0, -1.0)), Vec2::new(1.0, -1.0));
         assert_eq!(condition(Vec2::new(0.1, 0.2)), Vec2::ZERO);
@@ -1928,7 +1946,8 @@ mod tests {
 
     #[test]
     fn legacy_layouts_snap_their_sticks_as_halo_2s_do() {
-        let at = |deg: f32, push: f32| Vec2::new(deg.to_radians().cos(), deg.to_radians().sin()) * push;
+        let at =
+            |deg: f32, push: f32| Vec2::new(deg.to_radians().cos(), deg.to_radians().sin()) * push;
         // On the diagonal, both full.
         let d = legacy_snap(at(45.0, 0.8), LEGACY_ZONES[0]);
         assert!((d - Vec2::splat(0.8)).length() < 1e-5, "{d}");
@@ -1950,7 +1969,10 @@ mod tests {
         // and moves less; the right, 25 off, looks up alone.
         let (movement, look) = StickLayout::Legacy.apply(left, right);
         assert!((look - Vec2::ONE).length() < 1e-5, "{look}");
-        assert!((movement - Vec2::new(0.0, less)).length() < 1e-5, "{movement}");
+        assert!(
+            (movement - Vec2::new(0.0, less)).length() < 1e-5,
+            "{movement}"
+        );
     }
 
     #[test]
@@ -1979,7 +2001,13 @@ mod tests {
         pads.script("up 0 RT");
         assert_eq!(pads.events(), [(pad(0), PadEvent::Down(RT))]);
         assert!(pads.reading(pad(0)).unwrap().held.contains(RT));
-        assert!(!pads.reading(pad(0)).unwrap().state(ButtonLayout::Default, StickLayout::Default).trigger_down);
+        assert!(
+            !pads
+                .reading(pad(0))
+                .unwrap()
+                .state(ButtonLayout::Default, StickLayout::Default)
+                .trigger_down
+        );
         pads.events();
         assert!(!pads.reading(pad(0)).unwrap().held.contains(RT));
         // Partway, by script.
@@ -1988,7 +2016,10 @@ mod tests {
         assert_eq!(pads.events(), [(pad(0), PadEvent::Down(LT))]);
         let r = pads.reading(pad(0)).unwrap();
         assert_eq!(r.pull, [0.6, 0.0]);
-        assert!(r.state(ButtonLayout::Default, StickLayout::Default).trigger_down);
+        assert!(
+            r.state(ButtonLayout::Default, StickLayout::Default)
+                .trigger_down
+        );
     }
 
     #[test]
@@ -2215,20 +2246,14 @@ mod tests {
     fn a_diagonal_push_moves_a_menu_once() {
         let mut dir = None;
         // Mostly right, a little up: right, once, however it wobbles.
-        assert_eq!(
-            stick_dir(&mut dir, Vec2::new(0.95, 0.6)),
-            Some(Dir::Right)
-        );
+        assert_eq!(stick_dir(&mut dir, Vec2::new(0.95, 0.6)), Some(Dir::Right));
         assert_eq!(stick_dir(&mut dir, Vec2::new(0.6, 0.95)), None);
         assert_eq!(stick_dir(&mut dir, Vec2::new(0.7, 0.7)), None);
         // Swung round to straight up: up, once the right has let go.
         assert_eq!(stick_dir(&mut dir, Vec2::new(0.2, 0.95)), Some(Dir::Up));
         assert_eq!(stick_dir(&mut dir, Vec2::ZERO), None);
         assert_eq!(dir, None);
-        assert_eq!(
-            stick_dir(&mut dir, Vec2::new(-0.5, -0.95)),
-            Some(Dir::Down)
-        );
+        assert_eq!(stick_dir(&mut dir, Vec2::new(-0.5, -0.95)), Some(Dir::Down));
     }
 
     #[test]
@@ -2289,7 +2314,11 @@ mod tests {
         let dir = claims_dir("script");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pads.txt");
-        std::fs::write(&path, "# a note\nconnect 1\npress 1 A 0\nstick 1 right 0.5 -1").unwrap();
+        std::fs::write(
+            &path,
+            "# a note\nconnect 1\npress 1 A 0\nstick 1 right 0.5 -1",
+        )
+        .unwrap();
         let mut pads = Pads::with(
             Source::Script(Script::new(Some(path.clone()), false)),
             Claims::in_dir(None),
@@ -2298,16 +2327,16 @@ mod tests {
         let events = pads.events();
         assert_eq!(
             events,
-            [
-                (pad(1), PadEvent::Connected),
-                (pad(1), PadEvent::Down(A))
-            ]
+            [(pad(1), PadEvent::Connected), (pad(1), PadEvent::Down(A))]
         );
         // The unfinished last line waits for its end.
         let r = pads.reading(pad(1)).unwrap();
         assert_eq!(r.right, Vec2::ZERO);
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         writeln!(f, "\nstick 1 left -1 0\ndisconnect 1").unwrap();
         let events = pads.events();
         assert_eq!(

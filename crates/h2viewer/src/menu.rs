@@ -1685,10 +1685,17 @@ impl Menu {
         }
         let [row, col] = self.key;
         let rows = KEYBOARD_CHARS.len() + 1;
-        let len = |r: usize| KEYBOARD_CHARS.get(r).map_or(KEYBOARD_KEYS.len(), |k| k.len());
+        let len = |r: usize| {
+            KEYBOARD_CHARS
+                .get(r)
+                .map_or(KEYBOARD_KEYS.len(), |k| k.len())
+        };
         // Between the characters and the wide keys under them, the key
         // nearest across.
-        let across = |from: usize, to: usize, col: usize| match (from < KEYBOARD_CHARS.len(), to < KEYBOARD_CHARS.len()) {
+        let across = |from: usize, to: usize, col: usize| match (
+            from < KEYBOARD_CHARS.len(),
+            to < KEYBOARD_CHARS.len(),
+        ) {
             (true, false) => (col * KEYBOARD_KEYS.len() / 10).min(KEYBOARD_KEYS.len() - 1),
             (false, true) => [1, 5, 8][col.min(2)].min(len(to) - 1),
             _ => col.min(len(to) - 1),
@@ -1746,7 +1753,10 @@ impl Menu {
     /// The on-screen keyboard's key at `pos` (window pixels).
     fn key_at(&self, [x, y]: [f32; 2], w: f32, h: f32) -> Option<[usize; 2]> {
         let f = Frame::new(w, h);
-        let rows = KEYBOARD_CHARS.iter().map(|k| k.len()).chain([KEYBOARD_KEYS.len()]);
+        let rows = KEYBOARD_CHARS
+            .iter()
+            .map(|k| k.len())
+            .chain([KEYBOARD_KEYS.len()]);
         let mut keys = rows
             .enumerate()
             .flat_map(|(row, n)| (0..n).map(move |col| [row, col]));
@@ -1855,7 +1865,10 @@ impl Menu {
     fn stop_restoring(&mut self, ctx: &Context) {
         self.restoring = false;
         let rows = self.rows(ctx);
-        self.cursor = rows.iter().position(|&r| r == Row::RestoreDefaults).unwrap_or(0);
+        self.cursor = rows
+            .iter()
+            .position(|&r| r == Row::RestoreDefaults)
+            .unwrap_or(0);
         self.sound.get_or_insert(Sound::Back);
     }
 
@@ -2253,10 +2266,19 @@ impl Menu {
         let right = Menu::key_rect([0, 9])[2];
         let bottom = Menu::key_rect([KEYBOARD_CHARS.len(), 0])[3];
         let back = f.rect([x - 10.0, y - 30.0, right + 10.0, bottom + 10.0]);
-        hb.quad(white, back, [0.0; 4], [0.0, 0.03, 0.08, 0.92], hud_mode::PLAIN, 0.0);
+        hb.quad(
+            white,
+            back,
+            [0.0; 4],
+            [0.0, 0.03, 0.08, 0.92],
+            hud_mode::PLAIN,
+            0.0,
+        );
         let line = format!("ENTER GAMERTAG: {}_", self.profile.name);
         hb.text_left(font, f.at(x, y - 22.0), 10.0 * s, &line, BRIGHT);
-        let rows = KEYBOARD_CHARS.iter().map(|k| k.chars().map(String::from).collect());
+        let rows = KEYBOARD_CHARS
+            .iter()
+            .map(|k| k.chars().map(String::from).collect());
         let wide = KEYBOARD_KEYS.iter().map(|k| k.to_string()).collect();
         let rows: Vec<Vec<String>> = rows.chain([wide]).collect();
         for (row, keys) in rows.iter().enumerate() {
@@ -3485,7 +3507,12 @@ mod tests {
         };
         assert_eq!(
             rows(0),
-            [Row::Resume, Row::ControllerSettings, Row::EndGame, Row::Quit]
+            [
+                Row::Resume,
+                Row::ControllerSettings,
+                Row::EndGame,
+                Row::Quit
+            ]
         );
         for guest in 1..crate::MAX_LOCAL {
             assert_eq!(rows(guest), [Row::Resume, Row::ControllerSettings]);
@@ -3584,7 +3611,10 @@ mod tests {
         // B backs out of it too.
         m.input(Input::Select, &c);
         assert_eq!(m.input(Input::Back, &c), Action::None);
-        assert_eq!((m.screen, m.rows(&c)[m.cursor]), (Screen::Controls, Row::RestoreDefaults));
+        assert_eq!(
+            (m.screen, m.rows(&c)[m.cursor]),
+            (Screen::Controls, Row::RestoreDefaults)
+        );
         assert_eq!(m.profile.guests[0], g);
         // RESET TO DEFAULTS does.
         m.input(Input::Select, &c);

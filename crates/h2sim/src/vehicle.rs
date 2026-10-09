@@ -90,6 +90,45 @@ pub struct SeatDef {
     /// down to looking up: (pitch, offset from the eye with x along the
     /// look and z up). Empty if the seat has no camera track.
     pub camera: Vec<(f32, Vec3)>,
+    /// How fast a controller's look turns here, if the seat sets it.
+    pub look: SeatLook,
+}
+
+/// How fast a controller's look turns in a seat, from the seat's tag: in
+/// Halo 2 a seat may set its own turn rates, standing still and at speed,
+/// in place of the player's (the sensitivity then does nothing on that
+/// axis). A Warthog driver's look turns 60 degrees a second across at
+/// rest and 20 flat out (Halo 2's player control update, re-implemented
+/// from the CC0 decompilation; the numbers are the tags').
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SeatLook {
+    /// Radians a second across, and up or down, standing still and at
+    /// speed. Both zero keeps the player's rate on that axis.
+    pub yaw: [f32; 2],
+    pub pitch: [f32; 2],
+    /// The vehicle speeds the rates run between (world units a second),
+    /// and the curve's exponent (zero is a straight line).
+    pub speeds: [f32; 2],
+    pub exponent: f32,
+}
+
+impl SeatLook {
+    /// The turn rates (across, up or down) with the vehicle going `speed`;
+    /// `None` where the seat keeps the player's.
+    pub fn rates(&self, speed: f32) -> [Option<f32>; 2] {
+        let [slow, fast] = self.speeds;
+        let mut f = if fast > slow {
+            ((speed - slow) / (fast - slow)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if self.exponent != 0.0 {
+            f = f.powf(self.exponent);
+        }
+        let rate =
+            |[rest, top]: [f32; 2]| (rest > 0.0 || top > 0.0).then(|| rest + (top - rest) * f);
+        [rate(self.yaw), rate(self.pitch)]
+    }
 }
 
 impl SeatDef {
@@ -1064,6 +1103,7 @@ pub(crate) mod tests {
                 pitch_range: [-0.8, 0.8],
                 animation: "warthog_d".into(),
                 ai_only: false,
+                look: SeatLook::default(),
             }],
             max_forward_speed: 7.65,
             max_reverse_speed: 3.0,
@@ -1181,6 +1221,34 @@ pub(crate) mod tests {
         assert!(origin.z.abs() < 0.08, "origin {origin}");
         assert!(v.up().z > 0.99);
         assert!(v.asleep, "comes to rest");
+    }
+
+    #[test]
+    fn a_seat_sets_its_own_look_rates_by_speed() {
+        // The Warthog driver's, from the tag: 60 degrees a second across
+        // at rest to 20 flat out, between 5.5 and 9 units a second on a
+        // curve of 1.6; 30 up and down at any speed.
+        let look = SeatLook {
+            yaw: [60f32.to_radians(), 20f32.to_radians()],
+            pitch: [30f32.to_radians(); 2],
+            speeds: [5.5, 9.0],
+            exponent: 1.6,
+        };
+        let deg = |speed| look.rates(speed).map(|r| r.map(f32::to_degrees));
+        let close = |a: Option<f32>, b: f32| (a.unwrap() - b).abs() < 1e-3;
+        let [yaw, pitch] = deg(3.0);
+        assert!(close(yaw, 60.0) && close(pitch, 30.0));
+        let half = 0.5f32.powf(1.6);
+        assert!(close(deg(7.25)[0], 60.0 - 40.0 * half));
+        assert!(close(deg(20.0)[0], 20.0));
+        // Unset rates keep the player's; a passenger's seat sets none.
+        let tank = SeatLook {
+            yaw: [40f32.to_radians(); 2],
+            ..SeatLook::default()
+        };
+        assert!(close(tank.rates(5.0)[0].map(f32::to_degrees), 40.0));
+        assert_eq!(tank.rates(5.0)[1], None);
+        assert_eq!(SeatLook::default().rates(5.0), [None, None]);
     }
 
     #[test]

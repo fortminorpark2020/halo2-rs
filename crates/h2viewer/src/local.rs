@@ -12,7 +12,7 @@ use crate::scene::{HudWidget, Scene, Vertex, WeaponAssets};
 use blam_cache::hud::{self as tags, Anchor, ScreenSplit};
 use blam_cache::physics::PlayerControl;
 use glam::{Mat4, Vec2, Vec3};
-use h2sim::game::{GrenadeKind, Look, Magnet, Spartan, VehicleAction, TICK};
+use h2sim::game::{GrenadeKind, Look, Magnet, Spartan, VehicleAction, MAX_PITCH, TICK};
 use h2sim::vehicle::{SeatDef, SeatRole};
 use h2sim::{Command, Game, GameType, WeaponDef, WeaponState, World};
 use std::collections::HashSet;
@@ -395,6 +395,8 @@ pub struct LocalPlayer {
     pub typing: bool,
     /// They had a gun in each hand last tick (`App::latch_left_hands`).
     pub was_dual: bool,
+    /// How far down and up they may look now (`limit_pitch`).
+    pub pitch_limits: [f32; 2],
     /// Flying freely (Tab) instead of walking.
     pub flying: bool,
     pub camera: FlyCamera,
@@ -451,6 +453,7 @@ impl LocalPlayer {
             level_time: 0.0,
             typing: false,
             was_dual: false,
+            pitch_limits: [-MAX_PITCH, MAX_PITCH],
             flying: false,
             camera: FlyCamera::looking_at(eye, eye + glam::vec3(p.yaw.cos(), p.yaw.sin(), 0.0)),
             taps: Taps::default(),
@@ -640,7 +643,10 @@ impl LocalPlayer {
     /// A gun in each hand, on foot (riding, the buttons are the seat's: as
     /// with one gun).
     pub fn two_guns(&self, game: &Game) -> bool {
-        let riding = game.players.get(self.player).is_some_and(|p| p.seat.is_some());
+        let riding = game
+            .players
+            .get(self.player)
+            .is_some_and(|p| p.seat.is_some());
         dual_wielding(game, self.player) && !riding
     }
 
@@ -762,12 +768,23 @@ impl LocalPlayer {
             "PLEASE RECONNECT THE CONTROLLER AND PRESS A TO CONTINUE."
         };
         let (half_w, half_h) = ((w * 0.5 - 8.0).min(230.0 * t), 34.0 * t);
-        let rect = [w * 0.5 - half_w, h * 0.5 - half_h, w * 0.5 + half_w, h * 0.5 + half_h];
+        let rect = [
+            w * 0.5 - half_w,
+            h * 0.5 - half_h,
+            w * 0.5 + half_w,
+            h * 0.5 + half_h,
+        ];
         let back = [0.0, 0.03, 0.08, 0.88];
         hb.quad(scene.hud_white, rect, [0.0; 4], back, hud_mode::PLAIN, 0.0);
         let font = scene.hud_font;
         let title = "CONTROLLER DISCONNECTED";
-        hb.text(font, [w * 0.5, h * 0.5 - 22.0 * t], 11.0 * t, title, hud::BLUE);
+        hb.text(
+            font,
+            [w * 0.5, h * 0.5 - 22.0 * t],
+            11.0 * t,
+            title,
+            hud::BLUE,
+        );
         hb.text(font, [w * 0.5, h * 0.5 + 6.0 * t], 7.0 * t, line, hud::BLUE);
     }
 
@@ -792,13 +809,50 @@ impl LocalPlayer {
     ) {
         let magnet = self.magnet(game, world);
         let magnification = self.magnification(scene, game);
-        let look = (self.controls, magnification);
+        let seat = seat_of(game, self.player)
+            .filter(|_| !self.flying)
+            .map_or([None; 2], |(v, _, seat)| {
+                seat.look.rates(game.vehicles[v].velocity.length())
+            });
+        let look = (self.controls, magnification, seat);
         let me = self.me(game);
-        let walking = (me.alive && me.seat.is_none() && !self.flying)
-            .then(|| me.body.velocity.length());
+        let walking =
+            (me.alive && me.seat.is_none() && !self.flying).then(|| me.body.velocity.length());
         let assisted = magnet.is_some();
         self.turn_with_stick(&scene.player_control, pad, look, magnet, dt);
         self.center_look(&scene.player_control, pad, walking, assisted, dt);
+    }
+
+    /// How far they may look down and up, as Halo 2 limits it (its player
+    /// control update, re-implemented from the CC0 decompilation): 85.5
+    /// degrees either way on foot; in a seat whose camera has a pitch
+    /// range, that range, tilted with the vehicle along the look (when it
+    /// isn't on its side) and kept within 85.5 degrees. The limits move to
+    /// new ones at most π/256 a Halo 2 tick (about 21 degrees a second),
+    /// so getting into a Warthog lowers a view looking up smoothly.
+    pub fn limit_pitch(&mut self, game: &Game, dt: f32) {
+        let mut limits = [-MAX_PITCH, MAX_PITCH];
+        if let Some((v, _, seat)) = seat_of(game, self.player).filter(|_| !self.flying) {
+            let [low, high] = seat.pitch_range;
+            if low != 0.0 || high != 0.0 {
+                let up = game.vehicles[v].rotation * Vec3::Z;
+                let yaw = self.camera.yaw;
+                let along = Vec3::new(yaw.cos(), yaw.sin(), 0.0);
+                let tilt = if up.z > 0.2 {
+                    up.dot(along).clamp(-1.0, 1.0).asin()
+                } else {
+                    0.0
+                };
+                limits = [low - tilt, high - tilt].map(|p| p.clamp(-MAX_PITCH, MAX_PITCH));
+            }
+        }
+        // Halo 2 ticks 30 times a second.
+        let step = std::f32::consts::PI / 256.0 * 30.0 * dt;
+        for (now, to) in self.pitch_limits.iter_mut().zip(limits) {
+            *now += (to - *now).clamp(-step, step);
+        }
+        let [low, high] = self.pitch_limits;
+        self.camera.pitch = self.camera.pitch.clamp(low, high.max(low));
     }
 
     /// Automatic Look Centering, as Halo 2 has it: on foot, with the
@@ -840,18 +894,23 @@ impl LocalPlayer {
         self.camera.pitch -= pitch.signum() * step.min(pitch.abs());
     }
 
-    /// `look_with_stick`, with the `(controls, magnification)` to look
-    /// with and the enemy the aim is drawn to.
+    /// `look_with_stick`, with the `(controls, magnification, seat's
+    /// rates)` to look with and the enemy the aim is drawn to. A seat's
+    /// own rate (`SeatLook`) takes the place of the sensitivity's on its
+    /// axis; zoomed in, both slow down alike.
     fn turn_with_stick(
         &mut self,
         control: &PlayerControl,
         pad: &PadState,
-        (controls, magnification): (camera::Controls, f32),
+        (controls, magnification, seat): (camera::Controls, f32, [Option<f32>; 2]),
         magnet: Option<Magnet>,
         dt: f32,
     ) {
-        let scale = controls.stick_scale() / magnification.max(1.0);
-        let mut turn = self.stick.turn(control, pad.look, scale, dt);
+        let mut rates = camera::stick_rates(control, controls.stick_scale());
+        rates.x = seat[0].unwrap_or(rates.x);
+        rates.y = seat[1].unwrap_or(rates.y);
+        let rates = rates / magnification.max(1.0);
+        let mut turn = self.stick.turn(control, pad.look, rates, dt);
         turn.y *= controls.pitch_sign();
         if let Some(m) = magnet {
             turn *= camera::friction(m.off, m.angle, control.magnetism_friction);
@@ -1800,7 +1859,7 @@ mod tests {
             look: Vec2::new(0.6, 0.0),
             ..PadState::default()
         };
-        let look = (camera::Controls::default(), 1.0);
+        let look = (camera::Controls::default(), 1.0, [None; 2]);
         let turned = |magnet| {
             let mut l = LocalPlayer::new(i, &game);
             let yaw = l.camera.yaw;
@@ -1824,7 +1883,7 @@ mod tests {
         let mut game = h2sim::testing::game();
         let i = game.add_player();
         let control = PlayerControl::default();
-        let look = (camera::Controls::default(), 1.0);
+        let look = (camera::Controls::default(), 1.0, [None; 2]);
         let dt = 1.0 / 60.0;
         // An enemy 10 units ahead strafing right at a unit a second, for
         // a second.
@@ -1931,6 +1990,77 @@ mod tests {
     }
 
     #[test]
+    fn the_view_eases_into_a_seats_pitch_range() {
+        let mut game = h2sim::testing::game();
+        let me = game.add_player();
+        let seat = SeatDef {
+            role: SeatRole::Driver,
+            position: Vec3::new(0.0, 0.2, 0.4),
+            entry: Vec3::new(0.0, 0.6, 0.4),
+            entry_radius: 1.0,
+            eye: Vec3::new(0.0, 0.2, 0.6),
+            exposed: true,
+            third_person: true,
+            weapon: None,
+            alt_weapon: None,
+            pivot: None,
+            turret: None,
+            // The Warthog driver's camera's, from the tag.
+            pitch_range: [-0.785, 0.785],
+            animation: String::new(),
+            ai_only: false,
+            camera: Vec::new(),
+            look: Default::default(),
+        };
+        let jeep = h2sim::vehicle::VehicleDef {
+            name: "warthog".into(),
+            seats: vec![seat],
+            ..Default::default()
+        };
+        let spawn = h2sim::game::VehicleSpawn {
+            def: 0,
+            position: Vec3::new(0.0, -3.0, 0.0),
+            yaw: 0.0,
+            respawn: 30.0,
+        };
+        game.set_vehicles(vec![jeep], vec![spawn]);
+        let tick = 1.0 / 30.0;
+        // On foot: 85.5 degrees up at most.
+        let mut l = LocalPlayer::new(me, &game);
+        l.camera.yaw = 0.0;
+        l.camera.pitch = 1.55;
+        l.limit_pitch(&game, tick);
+        assert_eq!(l.camera.pitch, MAX_PITCH);
+        // In the seat the limit comes down π/256 a tick, the view with it
+        // once it gets there, to the seat's 45 degrees.
+        l.camera.pitch = 1.3;
+        game.enter_vehicle(me, 0, 0);
+        game.vehicles[0].rotation = glam::Quat::IDENTITY;
+        let step = std::f32::consts::PI / 256.0;
+        for _ in 0..10 {
+            l.limit_pitch(&game, tick);
+        }
+        assert_eq!(l.camera.pitch, 1.3);
+        for _ in 0..10 {
+            l.limit_pitch(&game, tick);
+        }
+        assert!((l.camera.pitch - (MAX_PITCH - 20.0 * step)).abs() < 1e-4);
+        for _ in 0..60 {
+            l.limit_pitch(&game, tick);
+        }
+        assert!((l.camera.pitch - 0.785).abs() < 1e-5);
+        // Nosed down 0.2 radians along the look, the range tilts with it.
+        game.vehicles[0].rotation = glam::Quat::from_rotation_y(0.2);
+        for _ in 0..60 {
+            l.limit_pitch(&game, tick);
+        }
+        assert!((l.camera.pitch - 0.585).abs() < 1e-4, "{}", l.camera.pitch);
+        l.camera.pitch = -1.2;
+        l.limit_pitch(&game, tick);
+        assert!((l.camera.pitch + 0.985).abs() < 1e-4, "{}", l.camera.pitch);
+    }
+
+    #[test]
     fn a_driver_without_a_seat_gun_gets_no_aim_assist() {
         let world = h2sim::testing::floor();
         let mut game = h2sim::testing::game();
@@ -1959,6 +2089,7 @@ mod tests {
             animation: String::new(),
             ai_only: false,
             camera: Vec::new(),
+            look: Default::default(),
         };
         let jeep = h2sim::vehicle::VehicleDef {
             name: "warthog".into(),
@@ -2252,7 +2383,11 @@ mod tests {
         let after = l.camera.pitch;
         assert!(after > -0.6 && after < 0.0, "{after}");
         walk(&mut l, &forward, 2.25, 10.0);
-        assert!(l.camera.pitch.abs() < 0.05 && l.camera.pitch <= 0.0, "{}", l.camera.pitch);
+        assert!(
+            l.camera.pitch.abs() < 0.05 && l.camera.pitch <= 0.0,
+            "{}",
+            l.camera.pitch
+        );
         // Not looking up or down, not strafing only, not riding, not with
         // an enemy in the aim assist, not standing still.
         let looking = PadState {
@@ -2310,11 +2445,47 @@ mod tests {
     }
 
     #[test]
+    fn a_seats_own_look_rate_takes_the_sensitivitys_place() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let control = PlayerControl::default();
+        let pad = PadState {
+            look: Vec2::ONE,
+            ..PadState::default()
+        };
+        let turned = |sensitivity: u8, seat, magnification| {
+            let controls = camera::Controls {
+                look_sensitivity: sensitivity,
+                ..camera::Controls::default()
+            };
+            let mut l = LocalPlayer::new(i, &game);
+            let (yaw, pitch) = (l.camera.yaw, l.camera.pitch);
+            l.turn_with_stick(&control, &pad, (controls, magnification, seat), None, 0.1);
+            let degrees = |a: f32| (a * 10.0).to_degrees();
+            (degrees(yaw - l.camera.yaw), degrees(l.camera.pitch - pitch))
+        };
+        // A Scorpion driver's: 40 a second across whatever the
+        // sensitivity; up and down keeps the player's (60 at 3, 90 at 6).
+        let seat = [Some(40f32.to_radians()), None];
+        for (sensitivity, up) in [(3, 60.0), (6, 90.0)] {
+            let (across, pitch) = turned(sensitivity, seat, 1.0);
+            assert!((across - 40.0).abs() < 1e-2, "{across}");
+            assert!((pitch - up).abs() < 1e-2, "{pitch}");
+        }
+        // Zoomed in two times, half as fast.
+        let (across, _) = turned(3, seat, 2.0);
+        assert!((across - 20.0).abs() < 1e-2, "{across}");
+        // No seat: the player's 120 across.
+        let (across, _) = turned(3, [None; 2], 1.0);
+        assert!((across - 120.0).abs() < 1e-2, "{across}");
+    }
+
+    #[test]
     fn legacy_turns_with_the_left_stick() {
         let mut game = h2sim::testing::game();
         let i = game.add_player();
         let control = PlayerControl::default();
-        let look = (camera::Controls::default(), 1.0);
+        let look = (camera::Controls::default(), 1.0, [None; 2]);
         let reading = PadReading {
             left: Vec2::new(0.6, 0.0),
             ..PadReading::default()
@@ -2373,10 +2544,16 @@ mod tests {
         l.typing = true;
         assert_eq!(l.prompt_button("E", Function::Reload), "E");
         l.hint("PRESS {FLASHLIGHT} FOR ACTIVE CAMOUFLAGE");
-        assert_eq!(l.messages.last().unwrap().0, "PRESS V FOR ACTIVE CAMOUFLAGE");
+        assert_eq!(
+            l.messages.last().unwrap().0,
+            "PRESS V FOR ACTIVE CAMOUFLAGE"
+        );
         l.typing = false;
         l.hint("PRESS {FLASHLIGHT} FOR ACTIVE CAMOUFLAGE");
-        assert_eq!(l.messages.last().unwrap().0, "PRESS X FOR ACTIVE CAMOUFLAGE");
+        assert_eq!(
+            l.messages.last().unwrap().0,
+            "PRESS X FOR ACTIVE CAMOUFLAGE"
+        );
         assert_eq!(l.prompt_button("Q", Function::SwitchWeapons), "Y");
     }
 

@@ -1513,6 +1513,8 @@ impl App {
             }
             if l.flying {
                 l.camera.update(&self.keys, dt);
+            } else {
+                l.limit_pitch(&self.game, dt);
             }
         }
         self.check_game_over(dt);

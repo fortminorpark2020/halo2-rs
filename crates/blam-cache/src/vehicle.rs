@@ -81,6 +81,16 @@ pub struct Seat {
     pub pitch_range: [f32; 2],
     pub built_in_gunner: DatumIndex,
     pub entry_radius: f32,
+    /// How fast the rider's controller look turns in this seat, degrees a
+    /// second, standing still and at speed: across (+0x44, +0x48) and up
+    /// or down (+0x4C, +0x50). Zero keeps the profile's rate.
+    pub yaw_rate: [f32; 2],
+    pub pitch_rate: [f32; 2],
+    /// The vehicle speeds those run between (world units a second,
+    /// +0x54/+0x58), and the curve between (+0x5C, an exponent; zero
+    /// is a straight line).
+    pub speed_range: [f32; 2],
+    pub speed_exponent: f32,
 }
 
 impl Seat {
@@ -329,6 +339,10 @@ pub fn read_vehicle(set: &mut MapSet, vehi: DatumIndex) -> Result<VehicleTag> {
             yaw_range: [f32_at(s, 0x88), f32_at(s, 0x8C)],
             built_in_gunner: datum(s, 0x90),
             entry_radius: f32_at(s, 0x98),
+            yaw_rate: [f32_at(s, 0x44), f32_at(s, 0x48)],
+            pitch_rate: [f32_at(s, 0x4C), f32_at(s, 0x50)],
+            speed_range: [f32_at(s, 0x54), f32_at(s, 0x58)],
+            speed_exponent: f32_at(s, 0x5C),
         });
     }
     let anti_gravity = file

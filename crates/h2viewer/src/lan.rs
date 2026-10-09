@@ -4,11 +4,11 @@
 //! into each game it starts.
 
 use crate::flow::bot_for;
+use crate::input::PadId;
 use crate::local::{Keyboard, LocalPlayer};
 use crate::menu::{self, Screen, SeatInfo};
 use crate::options::GameOptions;
 use crate::{scene, App, Mode, Then};
-use crate::input::PadId;
 use h2net::{Client, ClientEvent, Host, HostEvent, LanGame, Lobby, LobbyPlayer};
 use h2sim::game::{guest_name, TICK};
 use h2sim::Command;
