@@ -42,7 +42,7 @@ pub fn color(color: u8) -> [f32; 3] {
 }
 
 /// Splitscreen guests with settings of their own: NAME(1) to NAME(3).
-const GUESTS: usize = crate::MAX_LOCAL - 1;
+pub const GUESTS: usize = crate::MAX_LOCAL - 1;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {

@@ -390,6 +390,9 @@ pub struct LocalPlayer {
     /// Seconds they've moved forward without looking up or down, for
     /// Automatic Look Centering.
     pub level_time: f32,
+    /// They played with the keyboard and mouse last (and not their
+    /// controller): prompts name keys.
+    pub typing: bool,
     /// Flying freely (Tab) instead of walking.
     pub flying: bool,
     pub camera: FlyCamera,
@@ -444,6 +447,7 @@ impl LocalPlayer {
             controls: camera::Controls::default(),
             rumble: crate::rumble::Rumbler::default(),
             level_time: 0.0,
+            typing: false,
             flying: false,
             camera: FlyCamera::looking_at(eye, eye + glam::vec3(p.yaw.cos(), p.yaw.sin(), 0.0)),
             taps: Taps::default(),
@@ -519,7 +523,14 @@ impl LocalPlayer {
     /// Q): for players two to four, and player one once a controller's A
     /// took them over.
     pub fn pad_prompts(&self) -> bool {
-        self.pad.is_some() || !self.keyboard
+        (self.pad.is_some() || !self.keyboard) && !(self.keyboard && self.typing)
+    }
+
+    /// A message from a mission's scripts, `HINT_FLASHLIGHT` in it naming
+    /// the key or button for the flashlight (the Arbiter's camouflage).
+    pub fn hint(&mut self, text: &str) {
+        let button = self.prompt_button("V", Function::Flashlight);
+        self.message(text.replace(HINT_FLASHLIGHT, button));
     }
 
     /// What a prompt says to press for `f`: the `key` at the keyboard, or
@@ -1556,6 +1567,10 @@ fn weapon_hud(
 /// A: someone whose controller went, else player one at the keyboard.
 /// Start: only a guest whose controller went (player one at the keyboard
 /// plays on without theirs), else no one, and Start brings in a new player.
+/// Where a mission's hint names the flashlight's key or button
+/// (`LocalPlayer::hint`).
+pub const HINT_FLASHLIGHT: &str = "{FLASHLIGHT}";
+
 pub fn new_pad_for(locals: &[LocalPlayer], press: PadButton) -> Option<usize> {
     let lost = |l: &LocalPlayer| l.lost_pad.is_some();
     match press {
@@ -2237,6 +2252,14 @@ mod tests {
         assert_eq!(l.prompt_button("E", Function::Reload), "B");
         l.controls.buttons = ButtonLayout::Recon;
         assert_eq!(l.prompt_button("E", Function::Reload), "RB");
+        // Back at the keyboard, keys again, till the controller's used.
+        l.typing = true;
+        assert_eq!(l.prompt_button("E", Function::Reload), "E");
+        l.hint("PRESS {FLASHLIGHT} FOR ACTIVE CAMOUFLAGE");
+        assert_eq!(l.messages.last().unwrap().0, "PRESS V FOR ACTIVE CAMOUFLAGE");
+        l.typing = false;
+        l.hint("PRESS {FLASHLIGHT} FOR ACTIVE CAMOUFLAGE");
+        assert_eq!(l.messages.last().unwrap().0, "PRESS X FOR ACTIVE CAMOUFLAGE");
         assert_eq!(l.prompt_button("Q", Function::SwitchWeapons), "Y");
     }
 

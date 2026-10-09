@@ -1073,6 +1073,9 @@ struct App {
     /// The people at this computer between games: player one (keyboard and
     /// maybe a controller) and the others with controllers.
     seats: Vec<flow::Seat>,
+    /// The guest settings each controller played with last
+    /// (`flow::pick_slot`).
+    pad_slots: Vec<(PadId, usize)>,
     pads: Pads,
     window: Option<Arc<Window>>,
     gpu: Option<gpu::Gpu>,
@@ -1259,13 +1262,15 @@ impl App {
         if self.locals.len() >= MAX_LOCAL {
             return;
         }
+        let slot = self.guest_slot(pad);
         let i = self.game.add_player();
         let profile = &self.menu.profile;
-        let guest = guest_name(&profile.name, self.locals.len());
+        let guest = guest_name(&profile.name, slot);
         self.game.set_name(i, &guest);
-        self.game.set_look(i, profile.look.guest(self.locals.len()));
+        self.game.set_look(i, profile.look.guest(slot));
         let mut l = LocalPlayer::new(i, &self.game);
         l.pad = pad;
+        l.slot = slot;
         self.locals.push(l);
         self.announce(&format!("{guest} JOINED"));
     }
@@ -1320,6 +1325,7 @@ impl App {
             // What it does in the game is up to the player's layout.
             (Some(k), b) => {
                 let l = &mut self.locals[k];
+                l.typing = false;
                 let layout = l.controls.buttons;
                 if let Some(f) = layout.function(b) {
                     l.taps.pad.insert(f);
@@ -1624,7 +1630,7 @@ impl App {
                 self.body_gestures.extend(m.take_gestures());
                 for hint in m.take_hints() {
                     for l in &mut self.locals {
-                        l.message(hint.clone());
+                        l.hint(&hint);
                     }
                 }
                 let nav_points = m.nav_points(&self.scene, &self.game);
@@ -2645,6 +2651,7 @@ impl ApplicationHandler for App {
                         self.fire_held = down;
                         if let Some(l) = self.keyboard_local() {
                             l.taps.fire |= down;
+                            l.typing |= down;
                         }
                     }
                     MouseButton::Right => {
@@ -2827,6 +2834,7 @@ impl App {
         };
         let player = self.locals[k].player;
         let l = &mut self.locals[k];
+        l.typing = true;
         match code {
             KeyCode::Backquote => {
                 l.flying = !l.flying;
@@ -2979,6 +2987,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         focus: (Vec3::ZERO, 1.0),
         locals: Vec::new(),
         seats: vec![flow::Seat::default()],
+        pad_slots: Vec::new(),
         pads: if headless { Pads::none() } else { Pads::new() },
         window: None,
         gpu: None,

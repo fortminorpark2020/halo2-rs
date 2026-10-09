@@ -343,7 +343,25 @@ pub enum Typed {
     Text(String),
     Erase,
     Done,
+    /// Put the gamertag back as it was.
+    Cancel,
 }
+
+/// The on-screen keyboard, for typing a gamertag with a controller (as
+/// Halo 2 had): the characters a gamertag can have, row by row, and under
+/// them `KEYBOARD_KEYS`.
+const KEYBOARD_CHARS: [&str; 5] = [
+    "ABCDEFGHIJ",
+    "KLMNOPQRST",
+    "UVWXYZ0123",
+    "456789.-'!",
+    "?,()/:<>+",
+];
+const KEYBOARD_KEYS: [&str; 3] = ["SPACE", "BACKSPACE", "DONE"];
+/// Where it is (640x480 units): left, top, a key's width and height, and
+/// the step from one key to the next.
+const KEYBOARD_AT: [f32; 2] = [180.0, 240.0];
+const KEY: [f32; 3] = [26.0, 20.0, 28.0];
 
 /// The menu's sounds, for the game to play.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -404,6 +422,13 @@ enum Row {
     LookSensitivity,
     MouseSensitivity,
     InvertLook,
+    LookCentering,
+    Vibration,
+    DualWieldInversion,
+    /// Halo 2's Restore Controller Defaults, and its two answers.
+    RestoreDefaults,
+    ResetToDefaults,
+    KeepSettings,
     /// The pause menu's way to a player's own controller settings.
     ControllerSettings,
     GameType,
@@ -517,6 +542,10 @@ impl Row {
                 | Row::LookSensitivity
                 | Row::MouseSensitivity
                 | Row::InvertLook
+                | Row::LookCentering
+                | Row::Vibration
+                | Row::DualWieldInversion
+                | Row::ResetToDefaults
         )
     }
 }
@@ -533,15 +562,25 @@ pub struct Menu {
     pub profile: Profile,
     /// Typing a new gamertag.
     pub editing: bool,
+    /// The gamertag before, for B to put back, and the on-screen
+    /// keyboard's key (row, then column).
+    name_before: String,
+    key: [usize; 2],
     /// The campaign's difficulty, in `DIFFICULTIES`.
     pub difficulty: usize,
     /// The account picked from the online or recent players, and which
     /// list it was.
     player: u64,
     list: Screen,
-    /// Whose settings the controller screen changes: a local player's
-    /// from their pause menu, or (None) player one's from the profile.
+    /// Whose settings the controller screen changes: a player's (their
+    /// profile slot: 0 is player one, then the guests) from their pause
+    /// menu or the lobby, or (None) player one's from the profile.
     controls_for: Option<usize>,
+    /// The screen the controller screen goes back to: the profile, the
+    /// pause menu or the lobby.
+    controls_from: Screen,
+    /// The controller screen asks whether to restore its defaults.
+    restoring: bool,
 }
 
 /// Layout, in Halo 2's 640x480 screen units.
@@ -600,6 +639,11 @@ fn on_off(on: bool) -> String {
     if on { "ON" } else { "OFF" }.into()
 }
 
+/// A controller setting's value, in Halo 2's words.
+fn enabled(on: bool) -> String {
+    if on { "ENABLED" } else { "DISABLED" }.into()
+}
+
 /// "1ST", "2ND"...
 pub fn place(n: usize) -> String {
     let suffix = match (n % 100, n % 10) {
@@ -654,10 +698,14 @@ impl Menu {
             sound: None,
             profile,
             editing: false,
+            name_before: String::new(),
+            key: [0, 0],
             difficulty: 1,
             player: 0,
             list: Screen::Players,
             controls_for: None,
+            controls_from: Screen::Profile,
+            restoring: false,
         }
     }
 
@@ -666,9 +714,18 @@ impl Menu {
     pub fn pausing(&self) -> bool {
         match self.screen {
             Screen::Pause => true,
-            Screen::Controls => self.controls_for.is_some(),
+            Screen::Controls => self.controls_from == Screen::Pause,
             _ => false,
         }
+    }
+
+    /// A player's controller settings from the lobby (Y on their
+    /// controller): `slot`'s in the profile.
+    pub fn open_controls(&mut self, slot: usize) {
+        self.show(Screen::Controls);
+        self.controls_for = Some(slot);
+        self.controls_from = Screen::Lobby;
+        self.sound = Some(Sound::Forward);
     }
 
     /// The local player whose controller settings the controller screen
@@ -682,10 +739,16 @@ impl Menu {
         self.profile.controls_of(self.controls_player())
     }
 
+    /// The settings the controller screen shows, to change.
+    fn controls_mut(&mut self) -> &mut Controls {
+        self.profile.controls_of_mut(self.controls_player())
+    }
+
     pub fn show(&mut self, screen: Screen) {
         self.screen = screen;
         self.cursor = 0;
         self.scroll = 0;
+        self.restoring = false;
     }
 
     /// The screen is a list that scrolls when long.
@@ -725,6 +788,7 @@ impl Menu {
             Screen::SystemLink => "SYSTEM LINK",
             Screen::Profile => "PLAYER PROFILE",
             // Halo 2's names for it off the profile and in a game.
+            Screen::Controls if self.restoring => "RESTORE CONTROLLER DEFAULTS",
             Screen::Controls if self.controls_for.is_some() => "CONTROLLER SETTINGS",
             Screen::Controls => "CONTROLLER",
             Screen::Pause => "PAUSED",
@@ -758,6 +822,7 @@ impl Menu {
                 Row::EmblemBackColor,
                 Row::Controls,
             ],
+            Screen::Controls if self.restoring => vec![Row::ResetToDefaults, Row::KeepSettings],
             // In Halo 2's order; the mouse is player one's alone.
             Screen::Controls => {
                 let mut rows = vec![
@@ -765,10 +830,14 @@ impl Menu {
                     Row::ButtonLayout,
                     Row::LookSensitivity,
                     Row::InvertLook,
+                    Row::LookCentering,
+                    Row::Vibration,
+                    Row::DualWieldInversion,
                 ];
                 if self.controls_player() == 0 {
                     rows.push(Row::MouseSensitivity);
                 }
+                rows.push(Row::RestoreDefaults);
                 rows
             }
             Screen::Lobby if ctx.host_lobby.is_some() => vec![
@@ -962,8 +1031,23 @@ impl Menu {
             ),
             Row::InvertLook => (
                 "LOOK INVERSION".into(),
-                Some(on_off(self.controls().invert_look)),
+                Some(enabled(self.controls().invert_look)),
             ),
+            Row::LookCentering => (
+                "AUTOMATIC LOOK CENTERING".into(),
+                Some(enabled(self.controls().look_centering)),
+            ),
+            Row::Vibration => (
+                "CONTROLLER VIBRATION".into(),
+                Some(enabled(self.controls().vibration)),
+            ),
+            Row::DualWieldInversion => (
+                "DUAL WIELD INVERSION".into(),
+                Some(enabled(self.controls().dual_wield_inversion)),
+            ),
+            Row::RestoreDefaults => ("RESTORE DEFAULTS".into(), None),
+            Row::ResetToDefaults => ("RESET TO DEFAULTS".into(), None),
+            Row::KeepSettings => ("USE CURRENT SETTINGS".into(), None),
             Row::ControllerSettings => ("CONTROLLER SETTINGS".into(), None),
             Row::GameType => (
                 "GAME TYPE".into(),
@@ -1294,20 +1378,20 @@ impl Menu {
                 *c = cycle(*c as usize, PROFILE_COLORS as usize) as u8;
             }
             Row::ThumbstickLayout => {
-                let c = self.profile.controls_of_mut(self.controls_for.unwrap_or(0));
+                let c = self.controls_mut();
                 let all = StickLayout::ALL;
                 let at = all.iter().position(|&l| l == c.sticks).unwrap_or(0);
                 c.sticks = all[cycle(at, all.len())];
             }
             Row::ButtonLayout => {
-                let c = self.profile.controls_of_mut(self.controls_for.unwrap_or(0));
+                let c = self.controls_mut();
                 let all = ButtonLayout::ALL;
                 let at = all.iter().position(|&l| l == c.buttons).unwrap_or(0);
                 c.buttons = all[cycle(at, all.len())];
             }
             // Sensitivity runs from 1 to 10.
             Row::LookSensitivity | Row::MouseSensitivity => {
-                let c = self.profile.controls_of_mut(self.controls_for.unwrap_or(0));
+                let c = self.controls_mut();
                 let n = if row == Row::LookSensitivity {
                     &mut c.look_sensitivity
                 } else {
@@ -1318,10 +1402,10 @@ impl Menu {
                     Controls::MAX_SENSITIVITY as usize,
                 ) as u8;
             }
-            Row::InvertLook => {
-                let c = self.profile.controls_of_mut(self.controls_for.unwrap_or(0));
-                c.invert_look ^= true;
-            }
+            Row::InvertLook => self.controls_mut().invert_look ^= true,
+            Row::LookCentering => self.controls_mut().look_centering ^= true,
+            Row::Vibration => self.controls_mut().vibration ^= true,
+            Row::DualWieldInversion => self.controls_mut().dual_wield_inversion ^= true,
             _ => return false,
         }
         true
@@ -1351,15 +1435,17 @@ impl Menu {
             Row::Profile => forward(self, Screen::Profile),
             Row::Controls => {
                 self.controls_for = None;
+                self.controls_from = Screen::Profile;
                 forward(self, Screen::Controls)
             }
             Row::ControllerSettings => {
                 self.controls_for = Some(ctx.owner);
+                self.controls_from = Screen::Pause;
                 forward(self, Screen::Controls)
             }
             Row::Quit => Action::Quit,
             Row::Name => {
-                self.editing = true;
+                self.start_editing();
                 self.sound = Some(Sound::Forward);
                 Action::None
             }
@@ -1396,11 +1482,37 @@ impl Menu {
             | Row::ButtonLayout
             | Row::LookSensitivity
             | Row::MouseSensitivity
-            | Row::InvertLook => {
+            | Row::InvertLook
+            | Row::LookCentering
+            | Row::Vibration
+            | Row::DualWieldInversion => {
                 if self.adjust(row, 1, ctx) {
                     self.sound = Some(Sound::Cursor);
                 }
                 self.saving(row)
+            }
+            // Asked first, on USE CURRENT SETTINGS.
+            Row::RestoreDefaults => {
+                self.restoring = true;
+                self.cursor = 1;
+                self.sound = Some(Sound::Forward);
+                Action::None
+            }
+            // The controller's settings as Halo 2 starts them; the mouse's
+            // are the keyboard's, and stay.
+            Row::ResetToDefaults => {
+                let c = self.controls_mut();
+                *c = Controls {
+                    mouse_sensitivity: c.mouse_sensitivity,
+                    ..Controls::default()
+                };
+                self.stop_restoring(ctx);
+                self.sound = Some(Sound::Advance);
+                Action::SaveProfile
+            }
+            Row::KeepSettings => {
+                self.stop_restoring(ctx);
+                Action::None
             }
             Row::StartGame if ctx.maps.is_empty() => {
                 self.notice = Some("NO MULTIPLAYER MAPS FOUND".into());
@@ -1545,8 +1657,95 @@ impl Menu {
     /// The online service turned down our gamertag: type another, here.
     pub fn ask_gamertag(&mut self, why: &str) {
         self.show(Screen::Live);
-        self.editing = true;
+        self.start_editing();
         self.notice = Some(why.into());
+    }
+
+    /// Typing a gamertag: at the keyboard, or on the on-screen one.
+    fn start_editing(&mut self) {
+        self.editing = true;
+        self.name_before.clone_from(&self.profile.name);
+        self.key = [0, 0];
+    }
+
+    /// A controller works the on-screen keyboard: moving between its keys,
+    /// A pressing one, B putting the gamertag back. (X erases, Y types a
+    /// space and Start is done, as `typed`.)
+    pub fn keyboard(&mut self, input: Input) -> Action {
+        if !self.editing {
+            return Action::None;
+        }
+        let [row, col] = self.key;
+        let rows = KEYBOARD_CHARS.len() + 1;
+        let len = |r: usize| KEYBOARD_CHARS.get(r).map_or(KEYBOARD_KEYS.len(), |k| k.len());
+        // Between the characters and the wide keys under them, the key
+        // nearest across.
+        let across = |from: usize, to: usize, col: usize| match (from < KEYBOARD_CHARS.len(), to < KEYBOARD_CHARS.len()) {
+            (true, false) => (col * KEYBOARD_KEYS.len() / 10).min(KEYBOARD_KEYS.len() - 1),
+            (false, true) => [1, 5, 8][col.min(2)].min(len(to) - 1),
+            _ => col.min(len(to) - 1),
+        };
+        self.key = match input {
+            Input::Up | Input::Down => {
+                let to = if input == Input::Up {
+                    (row + rows - 1) % rows
+                } else {
+                    (row + 1) % rows
+                };
+                [to, across(row, to, col)]
+            }
+            Input::Left => [row, (col + len(row) - 1) % len(row)],
+            Input::Right => [row, (col + 1) % len(row)],
+            Input::Select => return self.press_key(),
+            Input::Back => return self.typed(Typed::Cancel),
+        };
+        self.sound = Some(Sound::Cursor);
+        Action::None
+    }
+
+    /// The on-screen keyboard's key pressed.
+    fn press_key(&mut self) -> Action {
+        let [row, col] = self.key;
+        match KEYBOARD_CHARS.get(row) {
+            Some(keys) => {
+                let c = keys.chars().nth(col).unwrap_or(' ');
+                self.typed(Typed::Text(c.to_string()))
+            }
+            None => match col {
+                0 => self.typed(Typed::Text(" ".into())),
+                1 => self.typed(Typed::Erase),
+                _ => self.typed(Typed::Done),
+            },
+        }
+    }
+
+    /// Where the on-screen keyboard's key `[row, col]` is (640x480 units).
+    fn key_rect([row, col]: [usize; 2]) -> [f32; 4] {
+        let [x, y] = KEYBOARD_AT;
+        let [w, h, step] = KEY;
+        let top = y + row as f32 * (h + 2.0);
+        if row < KEYBOARD_CHARS.len() {
+            let left = x + col as f32 * step;
+            [left, top, left + w, top + h]
+        } else {
+            // The wide keys share the width of ten.
+            let wide = (10.0 * step - 2.0) / KEYBOARD_KEYS.len() as f32;
+            let left = x + col as f32 * (wide + 2.0);
+            [left, top, left + wide, top + h]
+        }
+    }
+
+    /// The on-screen keyboard's key at `pos` (window pixels).
+    fn key_at(&self, [x, y]: [f32; 2], w: f32, h: f32) -> Option<[usize; 2]> {
+        let f = Frame::new(w, h);
+        let rows = KEYBOARD_CHARS.iter().map(|k| k.len()).chain([KEYBOARD_KEYS.len()]);
+        let mut keys = rows
+            .enumerate()
+            .flat_map(|(row, n)| (0..n).map(move |col| [row, col]));
+        keys.find(|&key| {
+            let [x0, y0, x1, y1] = f.rect(Menu::key_rect(key));
+            x >= x0 && x < x1 && y >= y0 && y < y1
+        })
     }
 
     /// Leave the game (or the carnage report) for the lobby: the host's
@@ -1596,6 +1795,12 @@ impl Menu {
                 }
                 Action::None
             }
+            Typed::Cancel => {
+                self.editing = false;
+                name.clone_from(&self.name_before);
+                self.sound = Some(Sound::Back);
+                Action::None
+            }
             Typed::Done => {
                 self.editing = false;
                 *name = clean_name(name);
@@ -1638,6 +1843,14 @@ impl Menu {
     }
 
     /// Back to `screen`, on `row`, leaving any notice behind.
+    /// Restore Controller Defaults answered: back on its row.
+    fn stop_restoring(&mut self, ctx: &Context) {
+        self.restoring = false;
+        let rows = self.rows(ctx);
+        self.cursor = rows.iter().position(|&r| r == Row::RestoreDefaults).unwrap_or(0);
+        self.sound.get_or_insert(Sound::Back);
+    }
+
     fn back_to(&mut self, screen: Screen, row: Row, ctx: &Context) {
         self.show(screen);
         self.notice = None;
@@ -1661,11 +1874,17 @@ impl Menu {
                 self.back_to_main(Row::Profile);
                 Action::None
             }
+            Screen::Controls if self.restoring => {
+                self.stop_restoring(ctx);
+                Action::None
+            }
             // Back where it was opened from.
             Screen::Controls => {
-                match self.controls_for.take() {
-                    Some(_) => self.back_to(Screen::Pause, Row::ControllerSettings, ctx),
-                    None => self.back_to(Screen::Profile, Row::Controls, ctx),
+                self.controls_for = None;
+                match self.controls_from {
+                    Screen::Pause => self.back_to(Screen::Pause, Row::ControllerSettings, ctx),
+                    Screen::Lobby => self.back_to(Screen::Lobby, Row::StartGame, ctx),
+                    _ => self.back_to(Screen::Profile, Row::Controls, ctx),
                 }
                 Action::None
             }
@@ -1729,9 +1948,14 @@ impl Menu {
         // The online lists are wider still, for players' doings.
         let players = matches!(self.screen, Screen::Players | Screen::RecentPlayers);
         let list = players || matches!(self.screen, Screen::Playlists | Screen::Matchmaking);
-        // The game options' eleven rows, the profile's ten (and the lists
-        // of players) sit closer to fit above the hint.
-        let step = if matches!(self.screen, Screen::Options | Screen::Profile) || players {
+        // The game options' eleven rows, the profile's ten, the controller
+        // settings' nine (and the lists of players) sit closer to fit above
+        // the hint.
+        let closer = matches!(
+            self.screen,
+            Screen::Options | Screen::Profile | Screen::Controls
+        );
+        let step = if closer || players {
             ROW_STEP - 4.0
         } else {
             ROW_STEP
@@ -1773,6 +1997,13 @@ impl Menu {
 
     /// The mouse moved to `pos` (window pixels).
     pub fn hover(&mut self, pos: [f32; 2], w: f32, h: f32, ctx: &Context) {
+        if self.editing {
+            if let Some(key) = self.key_at(pos, w, h).filter(|&k| k != self.key) {
+                self.key = key;
+                self.sound = Some(Sound::Cursor);
+            }
+            return;
+        }
         if let Some((k, _)) = self.row_at(pos, w, h, ctx) {
             if k != self.cursor {
                 self.cursor = k;
@@ -1784,6 +2015,11 @@ impl Menu {
     /// A click at `pos`: settings step down on their left part and up
     /// elsewhere; other rows are chosen.
     pub fn click(&mut self, pos: [f32; 2], w: f32, h: f32, ctx: &Context) -> Action {
+        // The on-screen keyboard's keys work with the mouse too.
+        if let Some(key) = self.key_at(pos, w, h).filter(|_| self.editing) {
+            self.key = key;
+            return self.press_key();
+        }
         let Some((k, along)) = self.row_at(pos, w, h, ctx) else {
             return Action::None;
         };
@@ -1975,8 +2211,13 @@ impl Menu {
                 hb.text_left(font, at, 9.0 * s, line, TEXT);
             }
         }
+        if self.editing {
+            self.draw_keyboard(hb, font, white, &f);
+        }
         let hint = match self.screen {
-            _ if self.editing => "TYPE A GAMERTAG, THEN PRESS ENTER",
+            _ if self.editing => {
+                "TYPE A GAMERTAG, THEN ENTER   A: TYPE  X: BACKSPACE  Y: SPACE  START: DONE  B: CANCEL"
+            }
             Screen::Main => "ENTER OR A: SELECT",
             Screen::PostGame => "ENTER OR A: CONTINUE",
             Screen::Pregame => "",
@@ -1987,6 +2228,39 @@ impl Menu {
             _ => "ENTER OR A: SELECT   ESC OR B: BACK",
         };
         hb.text_left(font, f.at(ROW_X, HINT_Y), 8.0 * s, hint, DIM);
+    }
+
+    /// The on-screen keyboard, over the rows, with the gamertag so far.
+    fn draw_keyboard(&self, hb: &mut HudBuilder, font: usize, white: usize, f: &Frame) {
+        let s = f.s;
+        let [x, y] = KEYBOARD_AT;
+        let right = Menu::key_rect([0, 9])[2];
+        let bottom = Menu::key_rect([KEYBOARD_CHARS.len(), 0])[3];
+        let back = f.rect([x - 10.0, y - 30.0, right + 10.0, bottom + 10.0]);
+        hb.quad(white, back, [0.0; 4], [0.0, 0.03, 0.08, 0.92], hud_mode::PLAIN, 0.0);
+        let line = format!("ENTER GAMERTAG: {}_", self.profile.name);
+        hb.text_left(font, f.at(x, y - 22.0), 10.0 * s, &line, BRIGHT);
+        let rows = KEYBOARD_CHARS.iter().map(|k| k.chars().map(String::from).collect());
+        let wide = KEYBOARD_KEYS.iter().map(|k| k.to_string()).collect();
+        let rows: Vec<Vec<String>> = rows.chain([wide]).collect();
+        for (row, keys) in rows.iter().enumerate() {
+            for (col, label) in keys.iter().enumerate() {
+                let rect = Menu::key_rect([row, col]);
+                let (bg, fg) = if [row, col] == self.key {
+                    (HIGHLIGHT, BRIGHT)
+                } else {
+                    (PANEL, TEXT)
+                };
+                hb.quad(white, f.rect(rect), [0.0; 4], bg, hud_mode::PLAIN, 0.0);
+                let size = 10.0;
+                let width = label.chars().count() as f32 * size * crate::font::ASPECT;
+                let at = [
+                    (rect[0] + rect[2] - width) * 0.5,
+                    rect[1] + (KEY[1] - size) * 0.5,
+                ];
+                hb.text_left(font, f.at(at[0], at[1]), size * s, label, fg);
+            }
+        }
     }
 
     /// A line over the rows saying what they are.
@@ -2033,6 +2307,18 @@ impl Menu {
             Row::InvertLook => "IF THIS IS ENABLED, MOVING THE THUMBSTICK UP CAUSES YOU TO LOOK DOWN.",
             Row::MouseSensitivity => {
                 "CHOOSE THE SPEED AT WHICH THE MOUSE LOOKS AROUND, FOR WHOEVER PLAYS AT THE KEYBOARD."
+            }
+            Row::LookCentering => {
+                "THIS CAUSES YOUR VIEW TO AUTOMATICALLY RE-CENTER AS YOU MOVE FORWARD."
+            }
+            Row::Vibration => {
+                "IF THIS IS ENABLED, YOUR CONTROLLER WILL VIBRATE IN RESPONSE TO GAME EVENTS."
+            }
+            Row::DualWieldInversion => {
+                "IF THIS IS ENABLED, THEN THE PRIMARY AND SECONDARY WEAPONS BUTTONS WILL BE SWAPPED WHEN DUAL WIELDING."
+            }
+            Row::RestoreDefaults | Row::ResetToDefaults | Row::KeepSettings => {
+                "USE DEFAULT SETTINGS FOR YOUR CONTROLLER."
             }
             _ => return None,
         };
@@ -2166,7 +2452,8 @@ impl Menu {
         };
         let lines = ctx.seats.len() + (bots > 0) as usize;
         let invite = ctx.local < crate::MAX_LOCAL;
-        let hints = invite as usize * 2 + teams as usize;
+        let pads = ctx.seats.iter().any(|seat| seat.how == "CONTROLLER");
+        let hints = invite as usize * 2 + teams as usize + pads as usize;
         let height = 34.0 + 16.0 * lines as f32 + 6.0 + 11.0 * hints as f32;
         hb.quad(
             white,
@@ -2208,6 +2495,11 @@ impl Menu {
         y += 6.0;
         if teams {
             hb.text_left(font, f.at(x, y), 7.0 * s, "T OR X: CHANGE TEAM", DIM);
+            y += 11.0;
+        }
+        if pads {
+            let line = "Y: YOUR CONTROLLER SETTINGS";
+            hb.text_left(font, f.at(x, y), 7.0 * s, line, DIM);
             y += 11.0;
         }
         // Player one at the keyboard here: a controller can take over.
@@ -2910,6 +3202,85 @@ mod tests {
     }
 
     #[test]
+    fn a_controller_types_a_gamertag_on_the_on_screen_keyboard() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.profile.name = "CHIEF".into();
+        m.show(Screen::Profile);
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert!(m.editing);
+        // Erase it all, then A types the key under the cursor: A, then
+        // two right for C...
+        for _ in 0..5 {
+            m.typed(Typed::Erase);
+        }
+        m.keyboard(Input::Select);
+        m.keyboard(Input::Right);
+        m.keyboard(Input::Right);
+        m.keyboard(Input::Select);
+        assert_eq!(m.profile.name, "AC");
+        // ...and down twice to W, then left round to 3.
+        m.keyboard(Input::Down);
+        m.keyboard(Input::Down);
+        for _ in 0..3 {
+            m.keyboard(Input::Left);
+        }
+        m.keyboard(Input::Select);
+        assert_eq!(m.profile.name, "AC3");
+        // Under the characters: SPACE, BACKSPACE and DONE.
+        m.keyboard(Input::Down);
+        m.keyboard(Input::Down);
+        m.keyboard(Input::Down);
+        assert_eq!(m.key, [5, 2]);
+        m.keyboard(Input::Left);
+        m.keyboard(Input::Select);
+        assert_eq!(m.profile.name, "AC");
+        m.keyboard(Input::Left);
+        m.keyboard(Input::Select);
+        m.keyboard(Input::Up);
+        assert_eq!(m.key, [4, 1]);
+        m.keyboard(Input::Select);
+        assert_eq!(m.profile.name, "AC ,");
+        // B puts the gamertag back as it was.
+        assert_eq!(m.keyboard(Input::Back), Action::None);
+        assert!(!m.editing);
+        assert_eq!(m.profile.name, "CHIEF");
+        // DONE keeps it.
+        m.input(Input::Select, &c);
+        m.typed(Typed::Erase);
+        m.key = [5, 2];
+        assert_eq!(m.keyboard(Input::Select), Action::SaveProfile);
+        assert!(!m.editing);
+        assert_eq!(m.profile.name, "CHIE");
+        // The mouse clicks its keys too: Q, then DONE.
+        m.input(Input::Select, &c);
+        let f = Frame::new(1280.0, 720.0);
+        let centre = |key| {
+            let [x0, y0, x1, y1] = f.rect(Menu::key_rect(key));
+            [(x0 + x1) * 0.5, (y0 + y1) * 0.5]
+        };
+        assert_eq!(m.click(centre([1, 6]), 1280.0, 720.0, &c), Action::None);
+        assert_eq!(m.profile.name, "CHIEQ");
+        let done = m.click(centre([5, 2]), 1280.0, 720.0, &c);
+        assert_eq!(done, Action::SaveProfile);
+        assert!(!m.editing);
+        // Every key is on the screen and none overlap.
+        let keys: Vec<[usize; 2]> = (0..6)
+            .flat_map(|r| (0..10).map(move |c| [r, c]))
+            .filter(|&[r, c]| c < KEYBOARD_CHARS.get(r).map_or(3, |k| k.len()))
+            .collect();
+        for &a in &keys {
+            let [x0, y0, x1, y1] = Menu::key_rect(a);
+            assert!(x0 >= 0.0 && x1 <= 640.0 && y0 >= 0.0 && y1 < 396.0, "{a:?}");
+            for &b in keys.iter().filter(|&&b| b != a) {
+                let [u0, v0, u1, v1] = Menu::key_rect(b);
+                assert!(x1 <= u0 || u1 <= x0 || y1 <= v0 || v1 <= y0, "{a:?} {b:?}");
+            }
+        }
+    }
+
+    #[test]
     fn the_profile_picks_a_model_colours_and_a_gamertag() {
         let maps = maps();
         let c = ctx(&maps, &[]);
@@ -3006,7 +3377,11 @@ mod tests {
                 "BUTTON LAYOUT",
                 "LOOK SENSITIVITY",
                 "LOOK INVERSION",
-                "MOUSE SENSITIVITY"
+                "AUTOMATIC LOOK CENTERING",
+                "CONTROLLER VIBRATION",
+                "DUAL WIELD INVERSION",
+                "MOUSE SENSITIVITY",
+                "RESTORE DEFAULTS"
             ]
         );
         // Button layouts, right through and back.
@@ -3046,6 +3421,36 @@ mod tests {
         assert!(m.note(&c).unwrap().contains("ANCIENT LEFTIES"));
         // The guests are untouched.
         assert_eq!(m.profile.guests, Profile::default().guests);
+    }
+
+    #[test]
+    fn a_guest_opens_their_controller_settings_from_the_lobby() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.profile.name = "JOHN".into();
+        m.show(Screen::Lobby);
+        m.open_controls(3);
+        assert_eq!(m.screen, Screen::Controls);
+        assert_eq!(m.title(&c), "CONTROLLER SETTINGS");
+        assert_eq!(m.header(&c).as_deref(), Some("FOR JOHN(3)"));
+        // Not a pause: nothing is playing.
+        assert!(!m.pausing());
+        assert!(!m.rows(&c).contains(&Row::MouseSensitivity));
+        m.input(Input::Down, &c);
+        m.input(Input::Right, &c);
+        assert_eq!(m.profile.guests[2].buttons, ButtonLayout::Southpaw);
+        assert_eq!(m.profile.controls, Controls::default());
+        // B goes back to the lobby.
+        assert_eq!(m.input(Input::Back, &c), Action::None);
+        assert_eq!(m.screen, Screen::Lobby);
+        // The profile's CONTROLLER is player one's again, and goes back
+        // there.
+        m.show(Screen::Profile);
+        m.choose(Row::Controls, &c);
+        assert!(m.rows(&c).contains(&Row::MouseSensitivity));
+        m.input(Input::Back, &c);
+        assert_eq!(m.screen, Screen::Profile);
     }
 
     #[test]
@@ -3090,6 +3495,78 @@ mod tests {
     }
 
     #[test]
+    fn halo_2s_other_controller_settings_toggle_and_restore() {
+        let maps = maps();
+        let c = Context {
+            owner: 1,
+            ..ctx(&maps, &[])
+        };
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Pause);
+        m.choose(Row::ControllerSettings, &c);
+        let to = |m: &mut Menu, row: Row| {
+            while m.rows(&c)[m.cursor] != row {
+                m.input(Input::Down, &c);
+            }
+        };
+        // Vibration starts on, the others off, in Halo 2's words.
+        let value = |m: &Menu, row| m.label(row, &c).1.unwrap();
+        assert_eq!(value(&m, Row::Vibration), "ENABLED");
+        assert_eq!(value(&m, Row::LookCentering), "DISABLED");
+        assert_eq!(value(&m, Row::DualWieldInversion), "DISABLED");
+        assert_eq!(value(&m, Row::InvertLook), "DISABLED");
+        to(&mut m, Row::LookCentering);
+        assert!(m.note(&c).unwrap().contains("RE-CENTER"));
+        assert_eq!(m.input(Input::Right, &c), Action::SaveProfile);
+        to(&mut m, Row::Vibration);
+        assert!(m.note(&c).unwrap().contains("VIBRATE"));
+        assert_eq!(m.input(Input::Select, &c), Action::SaveProfile);
+        to(&mut m, Row::DualWieldInversion);
+        assert!(m.note(&c).unwrap().contains("SWAPPED WHEN DUAL WIELDING"));
+        assert_eq!(m.input(Input::Left, &c), Action::SaveProfile);
+        m.input(Input::Up, &c);
+        m.input(Input::Up, &c);
+        m.input(Input::Up, &c);
+        m.input(Input::Right, &c);
+        let g = m.profile.guests[0];
+        assert!(g.look_centering && !g.vibration && g.dual_wield_inversion && g.invert_look);
+        assert_eq!(m.profile.controls, Controls::default());
+        // Restore Controller Defaults asks first, on USE CURRENT SETTINGS.
+        to(&mut m, Row::RestoreDefaults);
+        assert!(m.note(&c).unwrap().contains("DEFAULT SETTINGS"));
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.title(&c), "RESTORE CONTROLLER DEFAULTS");
+        assert_eq!(m.rows(&c), [Row::ResetToDefaults, Row::KeepSettings]);
+        assert_eq!(m.rows(&c)[m.cursor], Row::KeepSettings);
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.title(&c), "CONTROLLER SETTINGS");
+        assert_eq!(m.rows(&c)[m.cursor], Row::RestoreDefaults);
+        assert_eq!(m.profile.guests[0], g);
+        // B backs out of it too.
+        m.input(Input::Select, &c);
+        assert_eq!(m.input(Input::Back, &c), Action::None);
+        assert_eq!((m.screen, m.rows(&c)[m.cursor]), (Screen::Controls, Row::RestoreDefaults));
+        assert_eq!(m.profile.guests[0], g);
+        // RESET TO DEFAULTS does.
+        m.input(Input::Select, &c);
+        m.input(Input::Up, &c);
+        assert_eq!(m.input(Input::Select, &c), Action::SaveProfile);
+        assert_eq!(m.profile.guests[0], Controls::default());
+        assert_eq!(m.rows(&c)[m.cursor], Row::RestoreDefaults);
+        // Player one's mouse is the keyboard's: it stays.
+        m.profile.controls.mouse_sensitivity = 9;
+        m.profile.controls.buttons = ButtonLayout::Recon;
+        m.show(Screen::Profile);
+        m.choose(Row::Controls, &c);
+        to(&mut m, Row::RestoreDefaults);
+        m.input(Input::Select, &c);
+        m.input(Input::Up, &c);
+        m.input(Input::Select, &c);
+        assert_eq!(m.profile.controls.buttons, ButtonLayout::Default);
+        assert_eq!(m.profile.controls.mouse_sensitivity, 9);
+    }
+
+    #[test]
     fn mouse_sensitivity_is_only_player_ones() {
         let maps = maps();
         let mut m = Menu::new(Settings::default(), Profile::default());
@@ -3102,7 +3579,7 @@ mod tests {
             m.choose(Row::ControllerSettings, &c);
             let mouse = m.rows(&c).contains(&Row::MouseSensitivity);
             assert_eq!(mouse, owner == 0, "player {owner}");
-            assert_eq!(m.rows(&c).len(), 4 + mouse as usize);
+            assert_eq!(m.rows(&c).len(), 8 + mouse as usize);
         }
     }
 
@@ -3137,13 +3614,15 @@ mod tests {
         }
         m.show(Screen::Pause);
         assert_eq!(m.rows(&c).len(), 4);
-        // The controller screen's five rows fit its longest setting, and
+        // The controller screen's nine rows fit its longest setting, and
         // end left of its panel and above its notes.
         m.show(Screen::Controls);
-        assert_eq!(m.rows(&c).len(), 5);
-        let [x0, _, x1, bottom] = m.row_rect(4);
+        assert_eq!(m.rows(&c).len(), 9);
+        let [x0, _, x1, bottom] = m.row_rect(8);
         let text = |s: &str, size: f32| s.len() as f32 * size * crate::font::ASPECT;
         let widest = text("THUMBSTICK LAYOUT", 11.0) + text("< LEGACY SOUTHPAW >", 11.0) + 20.0;
+        assert!(x1 - x0 > widest + 8.0, "{} for {widest}", x1 - x0);
+        let widest = text("AUTOMATIC LOOK CENTERING", 11.0) + text("< DISABLED >", 11.0) + 20.0;
         assert!(x1 - x0 > widest + 8.0, "{} for {widest}", x1 - x0);
         assert!(x1 < CONTROLS_PANEL[0] - 8.0);
         assert!(bottom < 400.0);

@@ -610,6 +610,8 @@ impl App {
             let mut seat = LocalPlayer::new(p, &self.game);
             seat.keyboard = l.keyboard;
             seat.pad = l.pad;
+            seat.lost_pad = l.lost_pad;
+            seat.slot = l.slot;
             seat.messages = l.messages;
             self.locals.push(seat);
         }
@@ -626,8 +628,10 @@ impl App {
             waiting_pads.remove(0)
         };
         if player < self.game.players.len() {
+            let slot = self.guest_slot(pad);
             let mut l = LocalPlayer::new(player, &self.game);
             l.pad = pad;
+            l.slot = slot;
             self.locals.push(l);
             let name = crate::local::player_name(&self.game, usize::MAX, player);
             self.announce(&format!("{name} JOINED"));

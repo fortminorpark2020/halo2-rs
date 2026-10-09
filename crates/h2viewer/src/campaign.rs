@@ -1788,7 +1788,7 @@ impl Host for Ctx<'_> {
             "player_training_activate_stealth" => {
                 self.st
                     .hints
-                    .push("PRESS V (LB) FOR ACTIVE CAMOUFLAGE".into());
+                    .push("PRESS {FLASHLIGHT} FOR ACTIVE CAMOUFLAGE".into());
                 Value::Void
             }
             "cheat_active_camouflage_by_player" => {
