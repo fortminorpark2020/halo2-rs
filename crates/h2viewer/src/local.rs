@@ -2,19 +2,20 @@
 //! controls. Splitscreen is several of these, each drawn in its own part of
 //! the window.
 
-use crate::camera::{self, FlyCamera};
+use crate::camera::{self, FlyCamera, StickLook};
 use crate::effects;
 use crate::gpu::{self, hud_mode, DrawCall, Fx, SpriteVertex};
 use crate::hud::{self, HudBuilder};
-use crate::input::{PadPress, PadState};
+use crate::input::{Function, FunctionSet, PadButton, PadState, Pads};
 use crate::rig;
-use crate::scene::{Scene, Vertex, WeaponAssets};
-use blam_cache::hud::{Anchor, ScreenSplit};
+use crate::scene::{HudWidget, Scene, Vertex, WeaponAssets};
+use blam_cache::hud::{self as tags, Anchor, ScreenSplit};
+use blam_cache::physics::PlayerControl;
 use gilrs::GamepadId;
-use glam::{Mat4, Vec3};
-use h2sim::game::{GrenadeKind, Look, Spartan, VehicleAction, TICK};
+use glam::{Mat4, Vec2, Vec3};
+use h2sim::game::{GrenadeKind, Look, Magnet, Spartan, VehicleAction, TICK};
 use h2sim::vehicle::{SeatDef, SeatRole};
-use h2sim::{Command, Game, GameType, WeaponState, World};
+use h2sim::{Command, Game, GameType, WeaponDef, WeaponState, World};
 use std::collections::HashSet;
 use winit::keyboard::KeyCode;
 
@@ -32,37 +33,68 @@ enum HudRole {
     Static,
     /// The crosshair: red over an enemy in range.
     Reticle,
+    /// The crosshair over a teammate: green.
+    FriendlyReticle,
     Scope,
-    /// Only while zoomed (scope ticks, magnification label).
+    /// Only while zoomed (scope ticks, magnification labels).
     Zoomed,
     Hidden,
 }
 
 /// The role of a widget of the left hand's gun (dual wielding): only its
 /// own background and ammo meter, top left.
-fn left_hud_role(name: &str) -> HudRole {
-    match name {
+fn left_hud_role(w: &HudWidget) -> HudRole {
+    match w.name.as_str() {
         "weapon_background_left" => HudRole::Background,
         "ammo_meter_left" => HudRole::AmmoMeter,
         _ => HudRole::Hidden,
     }
 }
 
-fn hud_role(name: &str, magnification: f32) -> HudRole {
-    match name {
-        "weapon_background_single" | "weapon_background_right" => HudRole::Background,
+/// The role of a widget of the gun in hand. When it shows is up to its
+/// state flags (`weapon_hud`).
+fn hud_role(w: &HudWidget) -> HudRole {
+    match w.name.as_str() {
+        "weapon_background_single" | "weapon_background_right" | "weapon_background_zoomed" => {
+            HudRole::Background
+        }
         "ammo_meter_single" | "ammo_meter_right" => HudRole::AmmoMeter,
         "ammo_meter_zoomed" => HudRole::ZoomedAmmoMeter,
         "crosshair" => HudRole::Reticle,
-        "heat_background" | "heat_background_right" | "battery_meter" => HudRole::Static,
+        "crosshair_friendly" | "crosshair_friend" => HudRole::FriendlyReticle,
+        "heat_background"
+        | "heat_background_right"
+        | "battery_meter"
+        | "heat_background_zoomed"
+        | "heat_border_zoomed"
+        | "battery_background_zoomed"
+        | "battery_border_zoomed" => HudRole::Static,
         n if n.contains("scope_mask") => HudRole::Scope,
         "left_crosshair" | "right_crosshair" | "top_crosshair" | "bottom_crosshair"
         | "distance_meter" | "covenant_2xa" | "covenant_2xb" => HudRole::Zoomed,
-        n => match n.strip_suffix('x').and_then(|m| m.parse::<f32>().ok()) {
-            Some(m) if (m - magnification).abs() < 0.5 => HudRole::Zoomed,
-            _ => HudRole::Hidden,
-        },
+        // The magnification labels ("2x", the sniper rifle's "5x" and
+        // "10x"), each at the zoom level its state flags name.
+        _ if w.state.yes_unit & (tags::UNIT_ZOOM_LEVEL_1 | tags::UNIT_ZOOM_LEVEL_2) != 0 => {
+            HudRole::Zoomed
+        }
+        _ => HudRole::Hidden,
     }
+}
+
+/// The unit state flags Halo 2's HUD widgets show by: one gun or two,
+/// and the zoom level.
+fn unit_flags(dual: bool, zoom: u32) -> u16 {
+    let wield = if dual {
+        tags::UNIT_DUAL_WIELDING
+    } else {
+        tags::UNIT_SINGLE_WIELDING
+    };
+    let zoom = match zoom {
+        0 => tags::UNIT_UNZOOMED,
+        1 => tags::UNIT_ZOOM_LEVEL_1,
+        _ => tags::UNIT_ZOOM_LEVEL_2,
+    };
+    tags::UNIT_DEFAULT | wield | zoom
 }
 
 /// Alternate between a weapon's melee swings.
@@ -290,6 +322,9 @@ pub struct Taps {
     pub throw_grenade: bool,
     pub switch_grenade: bool,
     pub vision: bool,
+    /// A controller's buttons pressed, by what they do under its player's
+    /// layout (done as the tick finds the game: dual wielding or not).
+    pub pad: FunctionSet,
 }
 
 /// What a player's first person view should react to this frame.
@@ -354,6 +389,9 @@ pub struct LocalPlayer {
     /// The controller they lost (unplugged, or out of battery): it coming
     /// back, or A on another, takes them back.
     pub lost_pad: Option<GamepadId>,
+    /// Their look settings and controller layouts (from the profile:
+    /// player one's, or this guest's).
+    pub controls: camera::Controls,
     /// Flying freely (Tab) instead of walking.
     pub flying: bool,
     pub camera: FlyCamera,
@@ -386,10 +424,16 @@ pub struct LocalPlayer {
     pub friends_seen: Vec<usize>,
     /// The player under the crosshair right now, and how far.
     pub aimed_at: Option<(usize, f32)>,
-    /// The enemy the gun's autoaim is on, if any: the crosshair is red.
-    pub autoaimed: Option<usize>,
+    /// Who the gun's autoaim is on, if anyone, and whether they're a
+    /// teammate: the crosshair is red over an enemy, green over a friend.
+    pub autoaimed: Option<(usize, bool)>,
     /// Where the mission's waypoints point.
     pub nav_points: Vec<Vec3>,
+    /// The controller's look, sped up while the stick is held pegged.
+    pub stick: StickLook,
+    /// The enemy a controller's aim followed last frame, and which way
+    /// they were (yaw, pitch).
+    pub adhesion: Option<(usize, Vec2)>,
 }
 
 impl LocalPlayer {
@@ -401,6 +445,7 @@ impl LocalPlayer {
             keyboard: false,
             pad: None,
             lost_pad: None,
+            controls: camera::Controls::default(),
             flying: false,
             camera: FlyCamera::looking_at(eye, eye + glam::vec3(p.yaw.cos(), p.yaw.sin(), 0.0)),
             taps: Taps::default(),
@@ -422,6 +467,8 @@ impl LocalPlayer {
             aimed_at: None,
             autoaimed: None,
             nav_points: Vec::new(),
+            stick: StickLook::default(),
+            adhesion: None,
         }
     }
 
@@ -574,6 +621,25 @@ impl LocalPlayer {
         self.pad.is_some() || !self.keyboard
     }
 
+    /// What a prompt says to press for `f`: the `key` at the keyboard, or
+    /// the button the player's layout puts it on.
+    pub fn prompt_button(&self, key: &'static str, f: Function) -> &'static str {
+        if !self.pad_prompts() {
+            return key;
+        }
+        self.controls
+            .buttons
+            .button(f)
+            .map_or("?", PadButton::label)
+    }
+
+    /// This player's controller now, under their layouts, if it's
+    /// connected and this window takes its input.
+    pub fn pad_state(&self, pads: &Pads) -> Option<PadState> {
+        let reading = pads.reading(self.pad?)?;
+        Some(reading.state(self.controls.buttons, self.controls.sticks))
+    }
+
     pub fn message(&mut self, text: String) {
         self.messages.push((text, 0.0));
         if self.messages.len() > 4 {
@@ -633,21 +699,18 @@ impl LocalPlayer {
             cmd.switch_weapon |= held(KeyCode::KeyQ);
             cmd.throw_grenade |= held(KeyCode::KeyG) && k.captured;
         }
+        let dual = dual_wielding(game, self.player);
         if let Some(p) = pad {
-            if p.left != glam::Vec2::ZERO {
-                cmd.movement = p.left;
+            if p.movement != Vec2::ZERO {
+                cmd.movement = p.movement;
             }
-            cmd.jump |= p.jump;
-            cmd.crouch |= p.crouch;
-            cmd.fire |= p.fire;
-            // Dual wielding, the left trigger fires the left gun; clicking
-            // the right stick does nothing (zoom fires it from the mouse).
-            cmd.zoom |= p.zoom && !dual_wielding(game, self.player);
-            cmd.action |= p.action;
-            cmd.switch_weapon |= p.switch;
-            cmd.throw_grenade |= p.grenade;
-            // Halo 2's X both reloads and picks up.
-            cmd.reload |= p.action;
+            for f in p.held.iter() {
+                apply(&mut cmd, f, dual);
+            }
+        }
+        // And those pressed since the last tick, so a quick one counts.
+        for f in t.pad.iter() {
+            apply(&mut cmd, f, dual);
         }
         cmd
     }
@@ -712,16 +775,9 @@ impl LocalPlayer {
             }
         }
         let dir = self.camera.forward();
-        // The gun the crosshair belongs to: the seat's, or the one in hand.
-        let gun = match me.seat.and_then(|(v, s)| game.seat_weapon(v, s)) {
-            Some(def) => Some((def, 0)),
-            None => me
-                .held()
-                .and_then(|h| Some((game.weapons.get(h.weapon)?, h.state.zoom))),
-        };
-        self.autoaimed = gun
-            .and_then(|(def, zoom)| game.autoaim(world, self.player, eye, dir, def, zoom))
-            .map(|(j, _)| j);
+        self.autoaimed = self
+            .gun(game)
+            .and_then(|(def, zoom)| game.autoaim_target(world, self.player, eye, dir, def, zoom));
         self.aimed_at = game.player_along(world, self.player, eye, dir, NAME_RANGE);
         match self.aimed_at {
             Some((j, _)) => self.tagged = Some((j, NAME_LINGER)),
@@ -736,12 +792,106 @@ impl LocalPlayer {
             .filter(|&(j, left)| left > 0.0 && game.players.get(j).is_some_and(|p| p.alive));
     }
 
+    /// The gun the crosshair belongs to, and how far it's zoomed, by
+    /// `seat_gun`'s rule: a driver's or gunner's seat's, if it has one,
+    /// else the one in hand. A Warthog's or Spectre's driver has no gun
+    /// (the trigger sounds the horn), so no autoaim and no aim assist to
+    /// pull at their steering.
+    fn gun<'a>(&self, game: &'a Game) -> Option<(&'a WeaponDef, u32)> {
+        if let Some((v, s, seat)) = seat_of(game, self.player) {
+            if seat.role != SeatRole::Passenger {
+                return Some((game.seat_weapon(v, s)?, 0));
+            }
+        }
+        let held = self.me(game).held()?;
+        Some((game.weapons.get(held.weapon)?, held.state.zoom))
+    }
+
+    /// Look around with a controller's look stick (the right one, but for
+    /// the thumbstick layouts that move it), as Halo 2 does: the globals'
+    /// look rates, look function and speed-up when pegged, scaled by the
+    /// player's look sensitivity (and slower zoomed in). Its aim assist
+    /// (the mouse has none, as in Halo 2 Vista) slows the look near an
+    /// enemy in the gun's magnetism (friction), and has the crosshair
+    /// follow the one it's on as they move across the view while either
+    /// stick is moved (adhesion). How strongly comes from the globals; how
+    /// adhesion follows (that share of the turn toward them since the last
+    /// frame) is the remake's reading of it.
+    pub fn look_with_stick(
+        &mut self,
+        scene: &Scene,
+        game: &Game,
+        world: &World,
+        pad: &PadState,
+        dt: f32,
+    ) {
+        let magnet = self.magnet(game, world);
+        let magnification = self.magnification(scene, game);
+        let look = (self.controls, magnification);
+        self.turn_with_stick(&scene.player_control, pad, look, magnet, dt);
+    }
+
+    /// `look_with_stick`, with the `(controls, magnification)` to look
+    /// with and the enemy the aim is drawn to.
+    fn turn_with_stick(
+        &mut self,
+        control: &PlayerControl,
+        pad: &PadState,
+        (controls, magnification): (camera::Controls, f32),
+        magnet: Option<Magnet>,
+        dt: f32,
+    ) {
+        let scale = controls.stick_scale() / magnification.max(1.0);
+        let mut turn = self.stick.turn(control, pad.look, scale, dt);
+        turn.y *= controls.pitch_sign();
+        if let Some(m) = magnet {
+            turn *= camera::friction(m.off, m.angle, control.magnetism_friction);
+        }
+        let toward = magnet.map(|m| (m.player, camera::angles_to(self.camera.position, m.centre)));
+        let moving = pad.movement != Vec2::ZERO || pad.look != Vec2::ZERO;
+        if let (Some((j, now)), Some((was_on, was)), true) = (toward, self.adhesion, moving) {
+            if j == was_on {
+                let adhesion = control.magnetism_adhesion.clamp(0.0, 1.0);
+                turn += camera::angle_change(was, now) * adhesion;
+            }
+        }
+        self.adhesion = toward;
+        self.camera.turn(turn);
+    }
+
+    /// No controller look this frame (none, or a menu is up): its
+    /// speed-up and adhesion start over.
+    pub fn stop_stick(&mut self) {
+        self.stick = StickLook::default();
+        self.adhesion = None;
+    }
+
+    /// The enemy a controller's aim is drawn to (`Game::magnetism`).
+    fn magnet(&self, game: &Game, world: &World) -> Option<Magnet> {
+        if self.flying || !self.me(game).alive {
+            return None;
+        }
+        let (def, zoom) = self.gun(game)?;
+        let (eye, dir) = (self.camera.position, self.camera.forward());
+        game.magnetism(world, self.player, eye, dir, def, zoom)
+    }
+
     /// The crosshair's colour: red while the gun's autoaim is on an enemy
     /// (one under it or close to it, in the weapon's range), as in Halo 2.
+    /// Its red is the tag's (the crosshair's "flash red" HUD shader).
     fn reticle_color(&self) -> [f32; 4] {
         match self.autoaimed {
-            Some(_) => hud::RED,
-            None => hud::BLUE,
+            Some((_, false)) => hud::RETICLE_RED,
+            _ => hud::BLUE,
+        }
+    }
+
+    /// The extra state flags the HUD's widgets show by: an autoaim on a
+    /// teammate shows the green crosshair in place of the usual one.
+    fn extra_flags(&self) -> u16 {
+        match self.autoaimed {
+            Some((_, true)) => tags::EXTRA_AUTOAIM_FRIENDLY,
+            _ => 0,
         }
     }
 
@@ -752,9 +902,11 @@ impl LocalPlayer {
         if !me.alive {
             return;
         }
-        let view_proj = self
-            .camera
-            .view_proj(w / h.max(1.0), self.magnification(scene, game));
+        let view_proj = self.camera.view_proj(
+            &scene.lens(),
+            w / h.max(1.0),
+            self.magnification(scene, game),
+        );
         let t = hb.text_scale();
         let tagged = self
             .tagged
@@ -1024,9 +1176,10 @@ impl LocalPlayer {
         (world, muzzle)
     }
 
-    /// Projection for the first person weapon, which ignores zoom.
-    pub fn view_model_proj(&self, aspect: f32) -> Mat4 {
-        camera::projection(aspect, 1.0, 0.005, 10.0) * self.camera.view()
+    /// Projection for the first person weapon, which ignores zoom (and
+    /// takes the world's field of view, as Halo 2 does).
+    pub fn view_model_proj(&self, lens: &camera::Lens, aspect: f32) -> Mat4 {
+        lens.projection(aspect, 1.0, 0.005, 10.0) * self.camera.view()
     }
 
     /// Dots on the motion sensor in `rect` (window pixels), forward up.
@@ -1059,6 +1212,37 @@ impl LocalPlayer {
         }
     }
 
+    /// Where the HUD's lines under the crosshair start (`hb`'s top of
+    /// text): as far below it as they sat when it was in the middle of the
+    /// view, and lower if the reticles shown reach further.
+    fn under_crosshair(&self, hb: &HudBuilder, scene: &Scene, game: &Game) -> f32 {
+        let extra = self.extra_flags();
+        let split = hb.split() as usize;
+        let bottom = match self.seat_gun(scene, game) {
+            Some(gun) => gun.and_then(|(weapon, _)| {
+                let flags = (SEAT_UNIT_FLAGS, extra);
+                reticle_bottom(hb, &weapon.hud[split], flags, seat_hud_role)
+            }),
+            None => {
+                let me = self.me(game);
+                let left = me
+                    .left
+                    .as_ref()
+                    .and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state)));
+                let right = self.current(scene, game).and_then(|(weapon, state)| {
+                    let flags = (unit_flags(left.is_some(), state.zoom), extra);
+                    reticle_bottom(hb, &weapon.hud[split], flags, hud_role)
+                });
+                let left = left.and_then(|(weapon, state)| {
+                    let flags = (unit_flags(true, state.zoom), extra);
+                    reticle_bottom(hb, &weapon.hud[split], flags, left_hud_role)
+                });
+                right.into_iter().chain(left).reduce(f32::max)
+            }
+        };
+        under_reticle(hb, bottom)
+    }
+
     /// The HUD of this player's `w` x `h` view, in the tags' `split` layout.
     pub fn build_hud(
         &self,
@@ -1068,7 +1252,7 @@ impl LocalPlayer {
         h: f32,
         split: ScreenSplit,
     ) -> Vec<gpu::HudBatch> {
-        let mut hb = HudBuilder::for_view(w, h, split);
+        let mut hb = HudBuilder::for_view(w, h, split).with_crosshair(scene.lens().crosshair);
         let font = scene.hud_font;
         let me = self.me(game);
         // The corner margins' scale, and the remake's own text's.
@@ -1152,14 +1336,11 @@ impl LocalPlayer {
         self.draw_scores(&mut hb, scene, game);
         self.name_tags(&mut hb, scene, game, (w, h));
         self.objective_waypoints(&mut hb, scene, game, (w, h));
+        // The lines under the crosshair: RELOAD (or the weapon's name as it
+        // comes up), then the prompts below that.
+        let under = self.under_crosshair(&hb, scene, game);
         if let Some(text) = self.objective_prompt(game) {
-            hb.text(
-                font,
-                [w * 0.5, h * 0.5 + 64.0 * t],
-                9.0 * t,
-                &text,
-                hud::BLUE,
-            );
+            hb.text(font, [w * 0.5, under + 16.0 * t], 9.0 * t, &text, hud::BLUE);
         }
         if !me.alive {
             let text = format!("RESPAWN IN {}", me.respawn_in.ceil().max(1.0));
@@ -1173,12 +1354,17 @@ impl LocalPlayer {
             return hb.finish();
         }
         let riding = me.seat.is_some();
+        let action = self.prompt_button("E", Function::Reload);
         let prompts = [
-            (game.swap_prompt(self.player), ["E", "X"], "PICK UP"),
-            (game.dual_prompt(self.player), ["Q", "Y"], "DUAL WIELD"),
+            (game.swap_prompt(self.player), action, "PICK UP"),
+            (
+                game.dual_prompt(self.player),
+                self.prompt_button("Q", Function::SwitchWeapons),
+                "DUAL WIELD",
+            ),
         ];
-        let mut y = h * 0.5 + 64.0 * t;
-        if let Some(text) = vehicle_prompt(scene, game, self.player, !self.pad_prompts()) {
+        let mut y = under + 16.0 * t;
+        if let Some(text) = vehicle_prompt(scene, game, self.player, action) {
             hb.text(font, [w * 0.5, y], 9.0 * t, &text, hud::BLUE);
             y += 12.0 * t;
         }
@@ -1187,19 +1373,13 @@ impl LocalPlayer {
                 // A vehicle gun's HUD is its reticle (and one for aiming
                 // at friends).
                 let reticle = self.reticle_color();
-                weapon_hud(&mut hb, scene, weapon, state, reticle, |name, _| {
-                    if name.contains("friend") {
-                        HudRole::Hidden
-                    } else {
-                        HudRole::Reticle
-                    }
-                });
+                let flags = (SEAT_UNIT_FLAGS, self.extra_flags());
+                weapon_hud(&mut hb, scene, weapon, state, reticle, flags, seat_hud_role);
             }
             return hb.finish();
         }
-        for (weapon, buttons, what) in prompts.into_iter().filter(|_| !riding) {
+        for (weapon, button, what) in prompts.into_iter().filter(|_| !riding) {
             if let Some(a) = weapon.and_then(|w| scene.weapons.get(w)) {
-                let button = buttons[self.pad_prompts() as usize];
                 let name = display_name(&a.def.name);
                 let text = format!("HOLD {button} TO {what} {name}");
                 hb.text(font, [w * 0.5, y], 9.0 * t, &text, hud::BLUE);
@@ -1211,12 +1391,12 @@ impl LocalPlayer {
         };
         let def = &weapon.def;
         let reticle = self.reticle_color();
-        weapon_hud(&mut hb, scene, weapon, state, reticle, hud_role);
         let left = me.left.as_ref();
+        let flags = (unit_flags(left.is_some(), state.zoom), self.extra_flags());
+        weapon_hud(&mut hb, scene, weapon, state, reticle, flags, hud_role);
         if let Some((lw, ls)) = left.and_then(|h| Some((scene.weapons.get(h.weapon)?, &h.state))) {
-            weapon_hud(&mut hb, scene, lw, ls, reticle, |name, _| {
-                left_hud_role(name)
-            });
+            let flags = (unit_flags(true, ls.zoom), flags.1);
+            weapon_hud(&mut hb, scene, lw, ls, reticle, flags, left_hud_role);
         }
         if def.uses_ammo() && state.loaded == 0 && state.reloading.is_none() {
             let msg = if state.reserve == 0 {
@@ -1224,11 +1404,11 @@ impl LocalPlayer {
             } else {
                 "RELOAD"
             };
-            hb.text(font, [w * 0.5, h * 0.5 + 48.0 * t], 12.0 * t, msg, hud::RED);
+            hb.text(font, [w * 0.5, under], 12.0 * t, msg, hud::RED);
         } else if me.readying > 0.0 {
             hb.text(
                 font,
-                [w * 0.5, h * 0.5 + 48.0 * t],
+                [w * 0.5, under],
                 10.0 * t,
                 &display_name(&def.name),
                 hud::BLUE,
@@ -1238,9 +1418,8 @@ impl LocalPlayer {
     }
 }
 
-/// What holding the action button would do to a vehicle nearby.
-fn vehicle_prompt(scene: &Scene, game: &Game, i: usize, keyboard: bool) -> Option<String> {
-    let button = if keyboard { "E" } else { "X" };
+/// What holding the action `button` would do to a vehicle nearby.
+fn vehicle_prompt(scene: &Scene, game: &Game, i: usize, button: &str) -> Option<String> {
     let (v, what) = match game.vehicle_action(i)? {
         VehicleAction::Hijack { vehicle, .. } => (vehicle, "BOARD"),
         VehicleAction::Enter { vehicle, seat } => {
@@ -1259,27 +1438,77 @@ fn vehicle_prompt(scene: &Scene, game: &Game, i: usize, keyboard: bool) -> Optio
     Some(format!("HOLD {button} TO {what} {name}"))
 }
 
+/// The unit state flags a vehicle gun's HUD shows by.
+const SEAT_UNIT_FLAGS: u16 = tags::UNIT_DEFAULT | tags::UNIT_UNZOOMED;
+
+/// What a vehicle gun's HUD widgets are: its reticle, and one for aiming at
+/// friends.
+fn seat_hud_role(w: &HudWidget) -> HudRole {
+    if w.name.contains("friend") {
+        HudRole::FriendlyReticle
+    } else {
+        HudRole::Reticle
+    }
+}
+
+/// How far below the crosshair the HUD's lines under it start, in pixels
+/// of a 1280x960 screen (counted as the remake's text is): where they sat
+/// below a crosshair in the middle of the view.
+const UNDER_CROSSHAIR: f32 = 48.0;
+
+/// The lowest edge of the reticles among a weapon's HUD `widgets` (in
+/// `hb`'s layout) that show with these state flags, `role` saying which
+/// are reticles, in window pixels.
+fn reticle_bottom(
+    hb: &HudBuilder,
+    widgets: &[HudWidget],
+    (unit, extra): (u16, u16),
+    role: impl Fn(&HudWidget) -> HudRole,
+) -> Option<f32> {
+    widgets
+        .iter()
+        .filter(|w| w.state.shows(unit, extra))
+        .filter(|w| matches!(role(w), HudRole::Reticle | HudRole::FriendlyReticle))
+        .map(|w| hb.widget_rect(w)[3])
+        .reduce(f32::max)
+}
+
+/// Where the HUD's lines under the crosshair start: `UNDER_CROSSHAIR`
+/// below it, or a little below the reticle's `bottom` edge if that is
+/// lower.
+fn under_reticle(hb: &HudBuilder, bottom: Option<f32>) -> f32 {
+    let t = hb.text_scale();
+    let under = hb.anchor(Anchor::Crosshair)[1] + UNDER_CROSSHAIR * t;
+    bottom.map_or(under, |b| under.max(b + 4.0 * t))
+}
+
 /// A weapon's HUD widgets: background with spare ammo, ammo meter,
-/// crosshair, scope. `role` says which widgets are this hand's.
+/// crosshair, scope. `role` says which widgets are this hand's; each
+/// shows while the `(unit, extra)` state flags hold what its own state
+/// asks for, as in Halo 2 (the sniper rifle's "10x" only at its second
+/// zoom level, the green crosshair only over a friend).
 fn weapon_hud(
     hb: &mut HudBuilder,
     scene: &Scene,
     weapon: &WeaponAssets,
     state: &WeaponState,
     reticle: [f32; 4],
-    role: impl Fn(&str, f32) -> HudRole,
+    (unit, extra): (u16, u16),
+    role: impl Fn(&HudWidget) -> HudRole,
 ) {
     let font = scene.hud_font;
     let zoomed = state.zoom > 0;
     let def = &weapon.def;
-    let magnification = def.magnification(state.zoom);
     let ammo_fill = if def.uses_ammo() {
         state.loaded as f32 / def.magazine_size.max(1) as f32
     } else {
         1.0
     };
     for widget in &weapon.hud[hb.split() as usize] {
-        match role(&widget.name, magnification) {
+        if !widget.state.shows(unit, extra) {
+            continue;
+        }
+        match role(widget) {
             HudRole::Scope if zoomed => {
                 hb.scope(widget, scene.hud_white, [0.0, 0.0, 0.0, 132.0 / 255.0]);
             }
@@ -1303,6 +1532,9 @@ fn weapon_hud(
             }
             HudRole::Static => hb.widget(widget, hud::BLUE, hud_mode::CHANNELS, 0.0),
             HudRole::Reticle => hb.widget(widget, reticle, hud_mode::CHANNELS, 0.0),
+            HudRole::FriendlyReticle => {
+                hb.widget(widget, hud::RETICLE_GREEN, hud_mode::CHANNELS, 0.0)
+            }
             HudRole::Zoomed if zoomed => {
                 let color = if widget.name.ends_with("_crosshair") {
                     reticle
@@ -1320,17 +1552,17 @@ fn weapon_hud(
 /// A: someone whose controller went, else player one at the keyboard.
 /// Start: only a guest whose controller went (player one at the keyboard
 /// plays on without theirs), else no one, and Start brings in a new player.
-pub fn new_pad_for(locals: &[LocalPlayer], press: PadPress) -> Option<usize> {
+pub fn new_pad_for(locals: &[LocalPlayer], press: PadButton) -> Option<usize> {
     let lost = |l: &LocalPlayer| l.lost_pad.is_some();
     match press {
         // A guest whose controller went first: their view asks for A, and
         // player one can play on at the keyboard meanwhile.
-        PadPress::Claim => locals
+        PadButton::A => locals
             .iter()
             .position(|l| lost(l) && !l.keyboard)
             .or_else(|| locals.iter().position(lost))
             .or_else(|| locals.iter().position(|l| l.keyboard && l.pad.is_none())),
-        PadPress::Join => locals.iter().position(|l| lost(l) && !l.keyboard),
+        PadButton::Start => locals.iter().position(|l| lost(l) && !l.keyboard),
         _ => None,
     }
 }
@@ -1338,6 +1570,33 @@ pub fn new_pad_for(locals: &[LocalPlayer], press: PadPress) -> Option<usize> {
 /// Player `i` holds a gun in each hand.
 pub fn dual_wielding(game: &Game, i: usize) -> bool {
     game.players.get(i).is_some_and(|p| p.left.is_some())
+}
+
+/// Do what a controller's button does under its player's layout, as the
+/// game is now (`dual`: a gun in each hand).
+fn apply(cmd: &mut Command, f: Function, dual: bool) {
+    match f {
+        Function::RightWeapon => cmd.fire = true,
+        // The game's grenade button: a grenade, the left hand's gun dual
+        // wielding, or a vehicle's boost or second weapon.
+        Function::LeftWeapon => cmd.throw_grenade = true,
+        Function::ThrowGrenade => cmd.throw_grenade |= !dual,
+        Function::MeleeOrLeftWeapon if dual => cmd.throw_grenade = true,
+        Function::MeleeOrLeftWeapon | Function::Melee => cmd.melee = true,
+        // Halo 2's X both reloads and (held) picks up.
+        Function::Reload => {
+            cmd.reload = true;
+            cmd.action = true;
+        }
+        Function::SwitchWeapons => cmd.switch_weapon = true,
+        Function::Jump => cmd.jump = true,
+        Function::SwapGrenades => cmd.switch_grenade = true,
+        Function::Flashlight => cmd.vision = true,
+        // Dual wielding, zoom does nothing (the mouse's zoom fires the left
+        // gun).
+        Function::Zoom => cmd.zoom |= !dual,
+        Function::Crouch => cmd.crouch = true,
+    }
 }
 
 /// Where each of `n` splitscreen views goes in a `w` x `h` window: one fills
@@ -1376,19 +1635,259 @@ pub fn screen_split(k: usize, n: usize) -> ScreenSplit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::{ButtonLayout, ButtonSet, PadReading, StickLayout};
+
+    /// A HUD widget named `name` that says yes to the `yes_unit` flags.
+    fn widget(name: &str, yes_unit: u16) -> HudWidget {
+        HudWidget {
+            name: name.into(),
+            texture: 0,
+            anchor: Anchor::Crosshair,
+            flags: 0,
+            state: tags::WidgetState {
+                yes_unit,
+                ..Default::default()
+            },
+            offset: [0.0; 2],
+            registration: [0.0; 2],
+            size: [1.0; 2],
+        }
+    }
 
     #[test]
-    fn hud_roles_follow_widget_names() {
+    fn hud_roles_follow_widget_names_and_states() {
+        let role = |name| hud_role(&widget(name, 0));
+        assert_eq!(role("weapon_background_right"), HudRole::Background);
+        assert_eq!(role("weapon_background_left"), HudRole::Hidden);
         assert_eq!(
-            hud_role("weapon_background_right", 1.0),
+            left_hud_role(&widget("weapon_background_left", 0)),
             HudRole::Background
         );
-        assert_eq!(hud_role("weapon_background_left", 1.0), HudRole::Hidden);
-        assert_eq!(hud_role("ammo_meter_single", 1.0), HudRole::AmmoMeter);
-        assert_eq!(hud_role("scope_mask", 2.0), HudRole::Scope);
-        assert_eq!(hud_role("5x", 5.0), HudRole::Zoomed);
-        assert_eq!(hud_role("10x", 5.0), HudRole::Hidden);
-        assert_eq!(hud_role("crosshair_friendly", 1.0), HudRole::Hidden);
+        assert_eq!(role("ammo_meter_single"), HudRole::AmmoMeter);
+        assert_eq!(role("scope_mask"), HudRole::Scope);
+        assert_eq!(role("crosshair_friendly"), HudRole::FriendlyReticle);
+        assert_eq!(role("backpack"), HudRole::Hidden);
+        // The sniper rifle's magnification labels, by their state flags
+        // (its zoom levels are 3.5 and 9.5 times, its labels 5x and 10x).
+        assert_eq!(hud_role(&widget("5x", 0x90)), HudRole::Zoomed);
+        assert_eq!(hud_role(&widget("10x", 0x110)), HudRole::Zoomed);
+    }
+
+    /// The enemy a controller's aim is drawn to, at `centre`, `off`
+    /// radians from the crosshair in the battle rifle's 6 degree cone.
+    fn magnet_at(centre: Vec3, off: f32) -> Magnet {
+        Magnet {
+            player: 1,
+            off,
+            angle: 6f32.to_radians(),
+            centre,
+        }
+    }
+
+    #[test]
+    fn friction_slows_the_stick_on_an_enemy() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let control = PlayerControl::default();
+        let pad = PadState {
+            look: Vec2::new(0.6, 0.0),
+            ..PadState::default()
+        };
+        let look = (camera::Controls::default(), 1.0);
+        let turned = |magnet| {
+            let mut l = LocalPlayer::new(i, &game);
+            let yaw = l.camera.yaw;
+            l.turn_with_stick(&control, &pad, look, magnet, 0.1);
+            l.camera.yaw - yaw
+        };
+        // 0.6 of the stick to the right: Halo 2's 30 degrees a second.
+        let free = turned(None);
+        assert!((free.to_degrees() + 3.0).abs() < 1e-3, "{free}");
+        let ahead = Vec3::new(10.0, 0.0, 0.0);
+        let on = turned(Some(magnet_at(ahead, 0.0)));
+        assert!((on / free - 0.4).abs() < 1e-4, "{on}");
+        let half = turned(Some(magnet_at(ahead, 3f32.to_radians())));
+        assert!((half / free - 0.7).abs() < 1e-4, "{half}");
+        let edge = turned(Some(magnet_at(ahead, 6f32.to_radians())));
+        assert!((edge / free - 1.0).abs() < 1e-4, "{edge}");
+    }
+
+    #[test]
+    fn adhesion_follows_an_enemy_only_while_a_stick_moves() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let control = PlayerControl::default();
+        let look = (camera::Controls::default(), 1.0);
+        let dt = 1.0 / 60.0;
+        // An enemy 10 units ahead strafing right at a unit a second, for
+        // a second.
+        let follow = |pad: PadState| {
+            let mut l = LocalPlayer::new(i, &game);
+            let (f, r, _) = l.camera.basis();
+            let (eye, yaw) = (l.camera.position, l.camera.yaw);
+            for k in 0..=60 {
+                let at = eye + f * 10.0 + r * (k as f32 * dt);
+                l.turn_with_stick(&control, &pad, look, Some(magnet_at(at, 0.0)), dt);
+            }
+            l.camera.yaw - yaw
+        };
+        let strafing = PadState {
+            movement: Vec2::X,
+            ..PadState::default()
+        };
+        let followed = follow(strafing);
+        let across = 0.1f32.atan();
+        assert!((followed + 0.7 * across).abs() < 1e-4, "{followed}");
+        // Hands off the controller: no help.
+        assert_eq!(follow(PadState::default()), 0.0);
+    }
+
+    #[test]
+    fn hud_state_follows_the_hands_and_the_zoom() {
+        let five = tags::WidgetState {
+            yes_unit: 0x90,
+            no_unit: 0x140,
+            ..Default::default()
+        };
+        assert!(!five.shows(unit_flags(false, 0), 0));
+        assert!(five.shows(unit_flags(false, 1), 0));
+        assert!(!five.shows(unit_flags(false, 2), 0));
+        // The SMG's lone right hand display hides dual wielding.
+        let single = tags::WidgetState {
+            yes_unit: 0x10,
+            no_unit: 0x20,
+            ..Default::default()
+        };
+        assert!(single.shows(unit_flags(false, 0), 0));
+        assert!(!single.shows(unit_flags(true, 0), 0));
+    }
+
+    /// A reticle `size` pixels across, centred on the crosshair, shown
+    /// with the `yes_unit` flags.
+    fn reticle(name: &str, size: f32, yes_unit: u16) -> HudWidget {
+        HudWidget {
+            registration: [0.5, 0.5],
+            size: [size, size],
+            ..widget(name, yes_unit)
+        }
+    }
+
+    #[test]
+    fn the_lines_under_the_crosshair_clear_the_lowered_reticle() {
+        // The battle rifle's reticle and the rocket launcher's, the
+        // tallest of the multiplayer weapons' (lockout.map: 70 and 126
+        // pixels of a 1280x960 screen in full screen, 34 and 62 split).
+        let views = [
+            (1280.0, 720.0, ScreenSplit::Full),
+            (1920.0, 1080.0, ScreenSplit::Full),
+            (2560.0, 1440.0, ScreenSplit::Full),
+            (1280.0, 360.0, ScreenSplit::Half),
+            (960.0, 540.0, ScreenSplit::Quarter),
+        ];
+        for (w, h, split) in views {
+            let hb = HudBuilder::for_view(w, h, split).with_crosshair(0.165);
+            let t = hb.text_scale();
+            let cross = hb.anchor(Anchor::Crosshair)[1];
+            let full = split == ScreenSplit::Full;
+            let sizes = if full { [70.0, 126.0] } else { [34.0, 62.0] };
+            for size in sizes {
+                let widgets = [reticle("crosshair", size, 0)];
+                let flags = (unit_flags(false, 0), 0);
+                let bottom = reticle_bottom(&hb, &widgets, flags, hud_role);
+                let reticle = hb.widget_rect(&widgets[0]);
+                assert_eq!(bottom, Some(reticle[3]));
+                let under = under_reticle(&hb, bottom);
+                // RELOAD's top is below the reticle, and no nearer the
+                // crosshair than it sat under one in the middle.
+                assert!(under > reticle[3], "{w}x{h} {size}: {under}");
+                assert!(under >= cross + UNDER_CROSSHAIR * t - 1e-3);
+                assert!(under > h * 0.5 + UNDER_CROSSHAIR * t, "lowered too");
+            }
+        }
+        // The battle rifle's keeps the gap it had at 720p.
+        let hb = HudBuilder::new(1280.0, 720.0).with_crosshair(0.165);
+        let widgets = [reticle("crosshair", 70.0, 0)];
+        let bottom = reticle_bottom(&hb, &widgets, (unit_flags(false, 0), 0), hud_role);
+        assert_eq!(under_reticle(&hb, bottom), 360.0 * 1.165 + 48.0);
+        // Only the reticles shown count: not the zoom ticks reaching down
+        // from it zoomed in, nor one the state flags hide.
+        let tick = HudWidget {
+            offset: [-12.0, 40.0],
+            size: [26.0, 176.0],
+            ..widget("bottom_crosshair", tags::UNIT_ZOOM_LEVEL_1)
+        };
+        let hidden = reticle("crosshair", 500.0, tags::UNIT_ZOOM_LEVEL_1);
+        let widgets = [widgets[0].clone(), tick, hidden];
+        let flags = (unit_flags(false, 0), 0);
+        assert_eq!(reticle_bottom(&hb, &widgets, flags, hud_role), bottom);
+        assert_eq!(under_reticle(&hb, None), 360.0 * 1.165 + 48.0);
+    }
+
+    #[test]
+    fn a_driver_without_a_seat_gun_gets_no_aim_assist() {
+        let world = h2sim::testing::floor();
+        let mut game = h2sim::testing::game();
+        // Guns drawn to enemies 6 degrees out to 21 units, as the battle
+        // rifle is.
+        for w in &mut game.weapons {
+            w.magnetism_angle = 6f32.to_radians();
+            w.magnetism_range = 21.0;
+        }
+        let (me, enemy) = (game.add_player(), game.add_player());
+        game.players[enemy].body.position = Vec3::new(8.0, 0.0, 0.0);
+        // A Warthog with no gun of its own: a driver and a passenger.
+        let seat = |role, y: f32| SeatDef {
+            role,
+            position: Vec3::new(0.0, y, 0.4),
+            entry: Vec3::new(0.0, y * 3.0, 0.4),
+            entry_radius: 1.0,
+            eye: Vec3::new(0.0, y, 0.6),
+            exposed: true,
+            third_person: true,
+            weapon: None,
+            alt_weapon: None,
+            pivot: None,
+            turret: None,
+            pitch_range: [-0.8, 0.8],
+            animation: String::new(),
+            ai_only: false,
+            camera: Vec::new(),
+        };
+        let jeep = h2sim::vehicle::VehicleDef {
+            name: "warthog".into(),
+            seats: vec![seat(SeatRole::Driver, 0.2), seat(SeatRole::Passenger, -0.2)],
+            ..Default::default()
+        };
+        let spawn = h2sim::game::VehicleSpawn {
+            def: 0,
+            position: Vec3::new(0.0, -3.0, 0.0),
+            yaw: 0.0,
+            respawn: 30.0,
+        };
+        game.set_vehicles(vec![jeep], vec![spawn]);
+        // Aimed right at the enemy, from wherever they sit.
+        let aimed = |game: &Game| {
+            let mut l = LocalPlayer::new(me, game);
+            let q = &game.players[enemy].body;
+            let at = q.position + Vec3::Z * q.height() * 0.5;
+            l.camera = FlyCamera::looking_at(l.camera.position, at);
+            l
+        };
+        let l = aimed(&game);
+        assert!(l.gun(&game).is_some());
+        assert_eq!(l.magnet(&game, &world).map(|m| m.player), Some(enemy));
+        // Driving, the trigger is the horn: the battle rifle they carry
+        // neither slows nor steers the wheel.
+        game.enter_vehicle(me, 0, 0);
+        assert_eq!(game.players[me].seat, Some((0, 0)));
+        let l = aimed(&game);
+        assert!(l.gun(&game).is_none());
+        assert!(l.magnet(&game, &world).is_none());
+        // A passenger aims their own gun.
+        game.enter_vehicle(me, 0, 1);
+        assert_eq!(game.players[me].seat, Some((0, 1)));
+        let l = aimed(&game);
+        assert_eq!(l.magnet(&game, &world).map(|m| m.player), Some(enemy));
     }
 
     #[test]
@@ -1417,6 +1916,7 @@ mod tests {
             texture: 0,
             anchor: Anchor::Scoreboard,
             flags: 0,
+            state: tags::WidgetState::default(),
             offset,
             registration: [0.0; 2],
             size,
@@ -1469,19 +1969,178 @@ mod tests {
         assert!(l.messages.is_empty());
     }
 
+    /// A controller with `buttons` held, under the button `layout`.
+    fn pressing(layout: ButtonLayout, buttons: &[PadButton]) -> PadState {
+        let mut held = ButtonSet::default();
+        for &b in buttons {
+            held.insert(b);
+        }
+        let reading = PadReading {
+            held,
+            ..PadReading::default()
+        };
+        reading.state(layout, StickLayout::Default)
+    }
+
+    /// Player `i` takes a second gun in their left hand.
+    fn dual_wield(game: &mut Game, i: usize) {
+        game.players[i].left = game.players[i].weapons.first().cloned();
+        assert!(dual_wielding(game, i));
+    }
+
     #[test]
     fn clicking_the_right_stick_dual_wielding_fires_nothing() {
         let mut game = h2sim::testing::game();
         let i = game.add_player();
         let l = LocalPlayer::new(i, &game);
-        let pad = PadState {
-            zoom: true,
-            ..PadState::default()
-        };
+        let pad = pressing(ButtonLayout::Default, &[PadButton::RightStick]);
         assert!(l.command(&game, None, Some(pad)).zoom);
         // Zoom fires the left gun, so the click doesn't count.
-        game.players[i].left = game.players[i].weapons.first().cloned();
+        dual_wield(&mut game, i);
         assert!(!l.command(&game, None, Some(pad)).zoom);
+    }
+
+    #[test]
+    fn bumper_jumper_jumps_with_lb_and_swaps_grenades_with_a() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let press = |layout, b| l.command(&game, None, Some(pressing(layout, &[b])));
+        let bj = |b| press(ButtonLayout::BumperJumper, b);
+        let c = bj(PadButton::LB);
+        assert!(c.jump && !c.vision);
+        let c = bj(PadButton::A);
+        assert!(c.switch_grenade && !c.jump);
+        let c = bj(PadButton::RB);
+        assert!(c.melee && !c.switch_grenade);
+        let c = bj(PadButton::B);
+        assert!(c.reload && c.action && !c.melee);
+        let c = bj(PadButton::X);
+        assert!(c.vision && !c.reload && !c.action);
+        assert!(bj(PadButton::Y).switch_weapon);
+        // Halo 2's default, for comparison: LB the flashlight, A jump.
+        assert!(press(ButtonLayout::Default, PadButton::LB).vision);
+        assert!(press(ButtonLayout::Default, PadButton::A).jump);
+        assert!(press(ButtonLayout::Default, PadButton::X).action);
+    }
+
+    #[test]
+    fn boxers_left_trigger_melees_or_fires_the_left_gun() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let pad = pressing(ButtonLayout::Boxer, &[PadButton::LT]);
+        let c = l.command(&game, None, Some(pad));
+        assert!(c.melee && !c.throw_grenade);
+        dual_wield(&mut game, i);
+        let c = l.command(&game, None, Some(pad));
+        assert!(c.throw_grenade && !c.melee);
+    }
+
+    #[test]
+    fn boxers_b_throws_grenades_but_never_fires_the_left_gun() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let pad = pressing(ButtonLayout::Boxer, &[PadButton::B]);
+        let c = l.command(&game, None, Some(pad));
+        assert!(c.throw_grenade && !c.melee);
+        dual_wield(&mut game, i);
+        let c = l.command(&game, None, Some(pad));
+        assert!(!c.throw_grenade && !c.melee);
+    }
+
+    #[test]
+    fn green_thumb_melees_with_the_right_stick_and_zooms_with_b() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let stick = pressing(ButtonLayout::GreenThumb, &[PadButton::RightStick]);
+        let c = l.command(&game, None, Some(stick));
+        assert!(c.melee && !c.zoom);
+        let b = pressing(ButtonLayout::GreenThumb, &[PadButton::B]);
+        let c = l.command(&game, None, Some(b));
+        assert!(c.zoom && !c.melee);
+        // Dual wielding, B does nothing.
+        dual_wield(&mut game, i);
+        let c = l.command(&game, None, Some(b));
+        assert!(!c.zoom && !c.melee && !c.throw_grenade);
+        assert!(l.command(&game, None, Some(stick)).melee);
+    }
+
+    #[test]
+    fn southpaw_fires_with_the_left_trigger() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let press = |b| l.command(&game, None, Some(pressing(ButtonLayout::Southpaw, &[b])));
+        let c = press(PadButton::LT);
+        assert!(c.fire && !c.throw_grenade);
+        let c = press(PadButton::RT);
+        assert!(c.throw_grenade && !c.fire);
+    }
+
+    #[test]
+    fn legacy_turns_with_the_left_stick() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let control = PlayerControl::default();
+        let look = (camera::Controls::default(), 1.0);
+        let reading = PadReading {
+            left: Vec2::new(0.6, 0.0),
+            ..PadReading::default()
+        };
+        let turned = |sticks| {
+            let pad = reading.state(ButtonLayout::Default, sticks);
+            let mut l = LocalPlayer::new(i, &game);
+            let yaw = l.camera.yaw;
+            l.turn_with_stick(&control, &pad, look, None, 0.1);
+            (l.camera.yaw - yaw, pad.movement)
+        };
+        // Legacy: the left stick turns, at the right stick's rate.
+        let (turn, movement) = turned(StickLayout::Legacy);
+        assert!((turn.to_degrees() + 3.0).abs() < 1e-3, "{turn}");
+        assert_eq!(movement, Vec2::ZERO);
+        // By default it strafes.
+        let (turn, movement) = turned(StickLayout::Default);
+        assert_eq!(turn, 0.0);
+        assert_eq!(movement, Vec2::new(0.6, 0.0));
+    }
+
+    #[test]
+    fn taps_resolve_when_the_tick_runs() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let mut l = LocalPlayer::new(i, &game);
+        // Boxer's left trigger tapped and let go between ticks, with one
+        // gun in hand...
+        let lt = ButtonLayout::Boxer.function(PadButton::LT).unwrap();
+        l.taps.pad.insert(lt);
+        let c = l.command(&game, None, None);
+        assert!(c.melee && !c.throw_grenade);
+        // ...but a second one by the tick: it fires that.
+        dual_wield(&mut game, i);
+        let c = l.command(&game, None, None);
+        assert!(c.throw_grenade && !c.melee);
+    }
+
+    #[test]
+    fn pick_up_and_vehicle_prompts_name_the_layouts_button() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let mut l = LocalPlayer::new(i, &game);
+        l.keyboard = true;
+        assert_eq!(l.prompt_button("E", Function::Reload), "E");
+        assert_eq!(l.prompt_button("Q", Function::SwitchWeapons), "Q");
+        // Once a controller's A takes player one over, its buttons.
+        l.pad = Some(pad(0));
+        assert_eq!(l.prompt_button("E", Function::Reload), "X");
+        assert_eq!(l.prompt_button("Q", Function::SwitchWeapons), "Y");
+        l.controls.buttons = ButtonLayout::BumperJumper;
+        assert_eq!(l.prompt_button("E", Function::Reload), "B");
+        l.controls.buttons = ButtonLayout::Recon;
+        assert_eq!(l.prompt_button("E", Function::Reload), "RB");
+        assert_eq!(l.prompt_button("Q", Function::SwitchWeapons), "Y");
     }
 
     /// A controller's id, which gilrs hands out only for controllers it
@@ -1504,23 +2163,23 @@ mod tests {
         locals[1].pad = Some(pad(1));
         // Player one's controller went: they play on at the keyboard.
         locals[0].lost_pad = Some(pad(0));
-        assert_eq!(new_pad_for(&locals, PadPress::Join), None);
-        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(0));
+        assert_eq!(new_pad_for(&locals, PadButton::Start), None);
+        assert_eq!(new_pad_for(&locals, PadButton::A), Some(0));
         // A guest whose controller went is the one Start (or A) is for.
         locals[1].pad = None;
         locals[1].lost_pad = Some(pad(1));
-        assert_eq!(new_pad_for(&locals, PadPress::Join), Some(1));
-        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(1));
+        assert_eq!(new_pad_for(&locals, PadButton::Start), Some(1));
+        assert_eq!(new_pad_for(&locals, PadButton::A), Some(1));
         locals[0].lost_pad = None;
-        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(1));
+        assert_eq!(new_pad_for(&locals, PadButton::A), Some(1));
         // No one lost theirs: A takes player one at the keyboard, unless
         // a controller already has them.
         locals[1].lost_pad = None;
         locals[1].pad = Some(pad(1));
-        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(0));
-        assert_eq!(new_pad_for(&locals, PadPress::Join), None);
+        assert_eq!(new_pad_for(&locals, PadButton::A), Some(0));
+        assert_eq!(new_pad_for(&locals, PadButton::Start), None);
         locals[0].pad = Some(pad(2));
-        assert_eq!(new_pad_for(&locals, PadPress::Claim), None);
+        assert_eq!(new_pad_for(&locals, PadButton::A), None);
     }
 
     #[test]

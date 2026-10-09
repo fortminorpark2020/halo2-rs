@@ -49,6 +49,10 @@ pub struct BipedPhysics {
     pub hard_landing_speed: f32,
     pub soft_landing_time: f32,
     pub hard_landing_time: f32,
+    /// The unit's "camera field of view", radians: 70 degrees for every
+    /// biped and vehicle in the multiplayer maps. Halo's field of view
+    /// is horizontal, across a 4:3 screen.
+    pub camera_field_of_view: f32,
 }
 
 impl Default for PlayerMovement {
@@ -92,12 +96,15 @@ impl Default for BipedPhysics {
             hard_landing_speed: 7.0,
             soft_landing_time: 0.6,
             hard_landing_time: 0.0,
+            camera_field_of_view: 70f32.to_radians(),
         }
     }
 }
 
 const MATG_PLAYER_CONTROL: usize = 0xF0;
 const PLAYER_CONTROL_SIZE: usize = 0x80;
+/// The player control block's look function: a block of reals.
+const PLAYER_CONTROL_LOOK_FUNCTION: usize = 0x74;
 const MATG_PLAYER_INFORMATION: usize = 0x130;
 const MATG_FALLING_DAMAGE: usize = 0x140;
 const FALLING_DAMAGE_SIZE: usize = 0x68;
@@ -140,6 +147,89 @@ pub fn player_movement(set: &mut MapSet) -> Result<PlayerMovement> {
             1.0
         },
     })
+}
+
+/// `matg` "Player Control": where the crosshair sits, and how a
+/// controller's stick looks around and its aim assist pulls.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerControl {
+    /// How much the look slows with the crosshair on an enemy (0..1).
+    pub magnetism_friction: f32,
+    /// How much of an enemy's movement across the view the crosshair
+    /// follows (0..1).
+    pub magnetism_adhesion: f32,
+    /// Where the crosshair sits, from -1 to 1 across and down the view
+    /// (0 is the middle; Halo 2's is 0.165, a little below it).
+    pub crosshair: [f32; 2],
+    /// Turning and looking up and down at full stick, radians per second
+    /// (the tag gives degrees).
+    pub look_yaw_rate: f32,
+    pub look_pitch_rate: f32,
+    /// The stick counts as pegged past this (0..1).
+    pub look_peg_threshold: f32,
+    /// Held pegged, the look speeds up to `scale` times over `time`
+    /// seconds: (time, scale), for turning and for looking up and down.
+    pub yaw_acceleration: (f32, f32),
+    pub pitch_acceleration: (f32, f32),
+    /// The look speed (0..1 of the rate) at evenly spaced points of the
+    /// stick's travel, from the middle to the edge.
+    pub look_function: Vec<f32>,
+}
+
+impl Default for PlayerControl {
+    /// Values from Halo 2 PC's globals (the same in every multiplayer
+    /// map), used when the tag can't be read.
+    fn default() -> Self {
+        PlayerControl {
+            magnetism_friction: 0.6,
+            magnetism_adhesion: 0.7,
+            crosshair: [0.0, 0.165],
+            look_yaw_rate: 120f32.to_radians(),
+            look_pitch_rate: 60f32.to_radians(),
+            look_peg_threshold: 0.85,
+            yaw_acceleration: (0.8, 2.5),
+            pitch_acceleration: (0.8, 2.5),
+            look_function: vec![0.0, 0.05, 0.1, 0.25, 0.58, 1.0],
+        }
+    }
+}
+
+pub fn player_control(set: &mut MapSet) -> Result<PlayerControl> {
+    let matg = set.map.globals;
+    let (src, _, data) = set.tag_data(matg)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let control = file.read_block(region, &data, MATG_PLAYER_CONTROL, PLAYER_CONTROL_SIZE)?;
+    if control.len() < PLAYER_CONTROL_SIZE {
+        return Ok(PlayerControl::default());
+    }
+    let curve = file.read_block(region, &control, PLAYER_CONTROL_LOOK_FUNCTION, 4)?;
+    Ok(player_control_from(&control, &curve))
+}
+
+/// Player control from the globals' block and its look function's.
+fn player_control_from(control: &[u8], curve: &[u8]) -> PlayerControl {
+    let f = |at: usize| f32_at(control, at);
+    let mut look_function: Vec<f32> = curve
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
+        .collect();
+    if look_function.len() < 2 {
+        look_function = PlayerControl::default().look_function;
+    }
+    PlayerControl {
+        magnetism_friction: f(0x0),
+        magnetism_adhesion: f(0x4),
+        crosshair: [f(0x18), f(0x1C)],
+        look_pitch_rate: f(0x40).to_radians(),
+        look_yaw_rate: f(0x44).to_radians(),
+        look_peg_threshold: f(0x48),
+        yaw_acceleration: (f(0x4C), f(0x50)),
+        pitch_acceleration: (f(0x54), f(0x58)),
+        look_function,
+    }
 }
 
 /// `matg` "Falling Damage": how far a fall hurts and how far kills.
@@ -229,5 +319,42 @@ pub fn biped_physics_of(set: &mut MapSet, datum: DatumIndex) -> Result<Option<Bi
         hard_landing_time: f32_at(&d, 0x200),
         soft_landing_speed: f32_at(&d, 0x204),
         hard_landing_speed: f32_at(&d, 0x208),
+        camera_field_of_view: f32_at(&d, 0xCC),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_control_reads_the_globals_layout() {
+        // Halo 2's own block (lockout.map's), with its look function.
+        let mut block = vec![0u8; PLAYER_CONTROL_SIZE];
+        for (at, v) in [
+            (0x0, 0.6f32),
+            (0x4, 0.7),
+            (0x8, 0.5),
+            (0x1C, 0.165),
+            (0x40, 60.0),
+            (0x44, 120.0),
+            (0x48, 0.85),
+            (0x4C, 0.8),
+            (0x50, 2.5),
+            (0x54, 0.8),
+            (0x58, 2.5),
+        ] {
+            block[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let curve: Vec<u8> = [0.0f32, 0.05, 0.1, 0.25, 0.58, 1.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let c = player_control_from(&block, &curve);
+        assert_eq!(c, PlayerControl::default());
+        assert!((c.look_yaw_rate.to_degrees() - 120.0).abs() < 1e-4);
+        // No look function: Halo 2's.
+        let c = player_control_from(&block, &[]);
+        assert_eq!(c.look_function, PlayerControl::default().look_function);
+    }
 }

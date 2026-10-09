@@ -19,9 +19,10 @@
 //! again to get out; the view follows the vehicle and it steers toward
 //! where you look. G (left trigger) boosts a Ghost or Banshee.
 //!
-//! Controllers (Halo 2's layout, see `input`): A takes over player one,
-//! Start joins as another splitscreen player (in a game: the pause menu),
-//! hold Back for the scoreboard.
+//! Controllers (Halo 2's button and thumbstick layouts, Bumper Jumper and
+//! Recon, chosen per player on the profile's CONTROLLER screen; see
+//! `input`): A takes over player one, Start joins as another splitscreen
+//! player (in a game: the pause menu), hold Back for the scoreboard.
 //!
 //! LAN: every game is open to other PCs on the network; System Link lists
 //! the games other PCs host (see `lan`).
@@ -75,7 +76,7 @@ use h2sim::{
     World,
 };
 use hud::HudBuilder;
-use input::{PadPress, Pads};
+use input::{PadButton, PadEvent, Pads};
 use lan::Net;
 use local::{display_name, player_colors, Keyboard, LocalPlayer, Taps};
 use menu::{MapChoice, Menu, Screen, Settings};
@@ -314,6 +315,20 @@ fn load_level(path: &Path) -> Result<Level, String> {
         scene.netgame_flags.len(),
         scene.kill_volumes.len(),
     );
+    let control = &scene.player_control;
+    println!(
+        "view: {:.1} degrees across 4:3, crosshair {:.3} below the middle; stick look {:.0}/{:.0} degrees a second, pegged past {:.2} for x{:.1} over {:.1} s, curve {:?}; aim assist friction {:.2}, adhesion {:.2}",
+        scene.biped.camera_field_of_view.to_degrees(),
+        control.crosshair[1],
+        control.look_yaw_rate.to_degrees(),
+        control.look_pitch_rate.to_degrees(),
+        control.look_peg_threshold,
+        control.yaw_acceleration.1,
+        control.yaw_acceleration.0,
+        control.look_function,
+        control.magnetism_friction,
+        control.magnetism_adhesion,
+    );
     if !scene.ai.squads.is_empty() {
         println!(
             "{} squads, {} characters, {} actor bodies, {} scripts, {} doors, {} lifts, {} switches",
@@ -341,10 +356,12 @@ fn load_level(path: &Path) -> Result<Level, String> {
             let full = &w.hud[blam_cache::hud::ScreenSplit::Full as usize];
             let hud: Vec<&str> = full.iter().map(|h| h.name.as_str()).collect();
             println!(
-                "weapon {} autoaim {:.1} deg to {:.1}{} range {:.1} damage {:.0} over {:?} vs shield/body {}/{} blast {:?} flight sound {:?} hud {hud:?}",
+                "weapon {} autoaim {:.1} deg to {:.1}, magnetism {:.1} deg to {:.1}{} range {:.1} damage {:.0} over {:?} vs shield/body {}/{} blast {:?} flight sound {:?} hud {hud:?}",
                 w.def.name,
                 w.def.autoaim_angle.to_degrees(),
                 w.def.autoaim_range,
+                w.def.magnetism_angle.to_degrees(),
+                w.def.magnetism_range,
                 if w.def.autoaim_zoomed_only {
                     " zoomed only"
                 } else {
@@ -1271,12 +1288,13 @@ impl App {
         self.announce(&line);
     }
 
-    fn pad_pressed(&mut self, id: GamepadId, press: PadPress) {
-        match press {
-            PadPress::Disconnected => return self.pad_lost(id),
-            PadPress::Connected => return self.pad_back(id),
-            _ => {}
-        }
+    fn pad_pressed(&mut self, id: GamepadId, event: PadEvent) {
+        let button = match event {
+            PadEvent::Disconnected => return self.pad_lost(id),
+            PadEvent::Connected => return self.pad_back(id),
+            PadEvent::Down(b) => Some(b),
+            PadEvent::Stick(_) => None,
+        };
         if self.skip_intro() {
             return;
         }
@@ -1284,44 +1302,48 @@ impl App {
             return;
         }
         if self.pad_in_menu(id) {
-            self.menu_pad(id, press);
+            self.menu_pad(id, event);
             return;
         }
+        // The left stick's pushes are only for menus.
+        let Some(button) = button else {
+            return;
+        };
         // A, Start or the trigger skip a cutscene.
-        let skip = matches!(press, PadPress::Claim | PadPress::Join | PadPress::Fire);
+        let skip = matches!(button, PadButton::A | PadButton::Start | PadButton::RT);
         if skip && self.mission.as_mut().is_some_and(|m| m.skip_cutscene()) {
             return;
         }
         let owner = self.locals.iter().position(|l| l.pad == Some(id));
-        match (owner, press) {
-            (None, PadPress::Claim) => {
-                if let Some(k) = local::new_pad_for(&self.locals, press) {
+        match (owner, button) {
+            (None, PadButton::A) => {
+                if let Some(k) = local::new_pad_for(&self.locals, button) {
                     self.take_pad(k, id);
                 }
             }
-            (None, PadPress::Join) => match local::new_pad_for(&self.locals, press) {
+            (None, PadButton::Start) => match local::new_pad_for(&self.locals, button) {
                 Some(k) => self.take_pad(k, id),
                 None => self.add_local(Some(id)),
             },
-            (Some(k), PadPress::Join) => {
+            (Some(k), PadButton::Start) => {
                 // Its legend shows the controller's buttons.
                 self.menu.controller |= !self.menu_open;
                 self.pause(k);
             }
-            (Some(k), p) => {
-                let dual = local::dual_wielding(&self.game, self.locals[k].player);
-                let t = &mut self.locals[k].taps;
-                match p {
-                    PadPress::Fire => t.fire = true,
-                    PadPress::Melee => t.melee = true,
-                    PadPress::Reload => t.reload = true,
-                    PadPress::SwitchWeapon => t.switch_weapon = true,
-                    PadPress::Grenade => t.throw_grenade = true,
-                    PadPress::SwitchGrenade => t.switch_grenade = true,
-                    PadPress::Vision => t.vision = true,
-                    // Dual wielding, the right stick's click does nothing.
-                    PadPress::Zoom if !dual => t.zoom = true,
-                    _ => {}
+            // What it does in the game is up to the player's layout.
+            (Some(k), b) => {
+                let l = &mut self.locals[k];
+                let layout = l.controls.buttons;
+                if let Some(f) = layout.function(b) {
+                    l.taps.pad.insert(f);
+                }
+                if self.pads.log {
+                    let what = layout.meaning(b);
+                    let (name, label) = (layout.name(), b.label());
+                    println!(
+                        "controllers: pad {id} (player {}, {name}): {label} -> {what}",
+                        k + 1
+                    );
                 }
             }
             _ => {}
@@ -1366,6 +1388,26 @@ impl App {
         }
     }
 
+    /// The controllers people here play with, or lost and wait for, or
+    /// asked a host to play with: this window's, held against other
+    /// copies of the game on this PC.
+    fn pads_in_use(&self) -> Vec<GamepadId> {
+        let seats = self.seats.iter().map(|s| s.pad);
+        let locals = self.locals.iter().flat_map(|l| [l.pad, l.lost_pad]);
+        let waiting = match &self.net {
+            Net::Joined { waiting_pads, .. } => waiting_pads.as_slice(),
+            _ => &[],
+        };
+        let mut ids: Vec<GamepadId> = seats
+            .chain(locals)
+            .chain(waiting.iter().copied())
+            .flatten()
+            .collect();
+        ids.sort_by_key(|&id| usize::from(id));
+        ids.dedup();
+        ids
+    }
+
     /// A controller came back: to whoever lost it.
     fn pad_back(&mut self, id: GamepadId) {
         if let Some(k) = self.locals.iter().position(|l| l.lost_pad == Some(id)) {
@@ -1378,9 +1420,16 @@ impl App {
         self.poll_loading();
         self.poll_connect();
         self.update_music();
-        for (id, press) in self.pads.presses() {
-            self.pad_pressed(id, press);
+        for (id, event) in self.pads.events() {
+            self.pad_pressed(id, event);
         }
+        // Each player's own look settings and controller layouts (a
+        // controller's Start or A may just have added a player).
+        for (k, l) in self.locals.iter_mut().enumerate() {
+            l.controls = self.menu.profile.controls_of(k);
+        }
+        let in_use = self.pads_in_use();
+        self.pads.keep_claimed(&in_use);
         // The game's sounds hold while it's paused, as in Halo 2.
         self.sound.audio.pause_game(self.paused());
         let games = self.browser.poll().to_vec();
@@ -1424,12 +1473,14 @@ impl App {
             .map(|k| paused || self.menu_for(k))
             .collect();
         for (l, frozen) in self.locals.iter_mut().zip(frozen) {
+            match l.pad_state(&self.pads).filter(|_| !frozen) {
+                Some(state) => {
+                    l.look_with_stick(&self.scene, &self.game, &self.world, &state, dt);
+                }
+                None => l.stop_stick(),
+            }
             if frozen {
                 continue;
-            }
-            if let Some(state) = l.pad.and_then(|id| self.pads.state(id)) {
-                let scale = 1.0 / l.magnification(&self.scene, &self.game);
-                l.camera.look_stick(state.right, dt, scale);
             }
             if l.flying {
                 l.camera.update(&self.keys, dt);
@@ -1605,7 +1656,7 @@ impl App {
                     // has the controls).
                     l.command(&self.game, None, None)
                 } else {
-                    let pad = l.pad.and_then(|id| self.pads.state(id));
+                    let pad = l.pad_state(&self.pads);
                     l.command(&self.game, l.keyboard.then_some(&keyboard), pad)
                 };
             }
@@ -2147,7 +2198,7 @@ impl App {
         let px = (w - 640.0 * s) * 0.5 + SPOT[0] * s;
         let py = (h - 480.0 * s) * 0.5 + SPOT[1] * s;
         let aspect = w / h.max(1.0);
-        let half = camera::half_height(aspect) * DISTANCE;
+        let half = self.scene.lens().centred().half_height(aspect) * DISTANCE;
         let x = (px / (w * 0.5) - 1.0) * half * aspect;
         let y = (1.0 - py / (h * 0.5)) * half;
         let (f, r, u) = camera.basis();
@@ -2438,6 +2489,7 @@ impl App {
             viewport: [u32; 4],
             aspect: f32,
             magnification: f32,
+            lens: camera::Lens,
             camera: FlyCamera,
             /// The camera's up (it banks in the menus' flythrough).
             up: Vec3,
@@ -2461,10 +2513,12 @@ impl App {
             let stand = FlyCamera::looking_at(Vec3::ZERO, Vec3::X);
             let (preview, posed) = self.preview_draws(&stand, (w, h));
             body_meshes.extend(posed);
+            let lens = self.scene.lens().centred();
             views.push(View {
                 viewport,
                 aspect,
-                magnification: camera::fov_magnification(aspect, flythrough::FOV),
+                magnification: lens.fov_magnification(aspect, flythrough::FOV),
+                lens,
                 camera: FlyCamera::looking_at(at, at + forward),
                 up,
                 scene: SceneSlot::Backdrop,
@@ -2477,7 +2531,7 @@ impl App {
                     posed: std::mem::take(&mut body_meshes),
                 },
                 hud: Vec::new(),
-                view_model_proj: stand.view_proj(aspect, 1.0),
+                view_model_proj: stand.view_proj(&lens, aspect, 1.0),
             });
         } else if !in_game {
             // The level behind the menus.
@@ -2492,6 +2546,7 @@ impl App {
                 viewport,
                 aspect: viewport[2] as f32 / viewport[3].max(1) as f32,
                 magnification: 1.0,
+                lens: self.scene.lens().centred(),
                 camera,
                 up: Vec3::Z,
                 scene: SceneSlot::Level,
@@ -2575,10 +2630,11 @@ impl App {
                     vh,
                 );
             }
+            let button = l.prompt_button("E", input::Function::Reload);
             let prompt = self
                 .mission
                 .as_ref()
-                .and_then(|m| m.switch_prompt(&self.scene, &self.game, l.player, !l.pad_prompts()));
+                .and_then(|m| m.switch_prompt(&self.scene, &self.game, l.player, button));
             if let Some(text) = prompt.filter(|_| !menu) {
                 let mut hb = HudBuilder::for_view(vw, vh, split);
                 let t = hb.text_scale();
@@ -2589,9 +2645,7 @@ impl App {
             // The scoreboard while Tab or Back is held, and once the game
             // is over (until the carnage report), in everyone's view.
             let held = (l.keyboard && self.keys.contains(&KeyCode::Tab))
-                || l.pad
-                    .and_then(|id| self.pads.state(id))
-                    .is_some_and(|p| p.scores);
+                || l.pad_state(&self.pads).is_some_and(|p| p.scores);
             let over = self.game.over() && !campaign;
             if (held || over) && !menu {
                 let mut hb = HudBuilder::new(vw, vh);
@@ -2605,14 +2659,20 @@ impl App {
                 menu::draw_scoreboard(&mut hb, font, white, vw, vh, &board);
                 hud.extend(hb.finish());
             }
+            // A cutscene's camera looks through the middle.
+            let lens = match cutscene_camera {
+                Some(_) => self.scene.lens().centred(),
+                None => self.scene.lens(),
+            };
             let magnification = match cutscene_camera {
-                Some((_, _, fov)) => camera::fov_magnification(aspect, fov),
+                Some((_, _, fov)) => lens.fov_magnification(aspect, fov),
                 None => l.magnification(&self.scene, &self.game),
             };
             views.push(View {
                 viewport,
                 aspect,
                 magnification,
+                lens,
                 camera,
                 up: Vec3::Z,
                 scene: SceneSlot::Level,
@@ -2625,7 +2685,7 @@ impl App {
                 },
                 draws,
                 hud,
-                view_model_proj: l.view_model_proj(aspect),
+                view_model_proj: l.view_model_proj(&lens, aspect),
             });
         }
         let mut frames: Vec<Frame> = views
@@ -2644,9 +2704,9 @@ impl App {
                         emblem: None,
                         fx: Fx::default(),
                     }),
-                    sky_proj: camera::projection(v.aspect, v.magnification, 1.0, 10000.0)
+                    sky_proj: v.lens.projection(v.aspect, v.magnification, 1.0, 10000.0)
                         * look(Vec3::ZERO),
-                    view_proj: camera::projection(v.aspect, v.magnification, 0.05, 2000.0)
+                    view_proj: v.lens.projection(v.aspect, v.magnification, 0.05, 2000.0)
                         * look(v.camera.position),
                     camera: v.camera.position,
                     world: &v.world,
@@ -2692,6 +2752,8 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        // Until it has focus, controllers no window claimed aren't its.
+        self.pads.set_focused(window.has_focus());
         self.window = Some(window);
         self.last_frame = Instant::now();
     }
@@ -2776,7 +2838,9 @@ impl ApplicationHandler for App {
                 self.keys.clear();
                 self.fire_held = false;
                 self.zoom_held = false;
+                self.pads.set_focused(false);
             }
+            WindowEvent::Focused(true) => self.pads.set_focused(true),
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else {
                     return;
@@ -2824,10 +2888,15 @@ impl ApplicationHandler for App {
             let Some(k) = self.locals.iter().position(|l| l.keyboard) else {
                 return;
             };
-            let scale = 1.0 / self.locals[k].magnification(&self.scene, &self.game);
-            self.locals[k]
-                .camera
-                .look(delta.0 as f32, delta.1 as f32, scale);
+            // The mouse is player one's, with their profile's settings.
+            let controls = self.menu.profile.controls;
+            let scale =
+                controls.mouse_scale() / self.locals[k].magnification(&self.scene, &self.game);
+            self.locals[k].camera.look(
+                delta.0 as f32,
+                delta.1 as f32 * controls.pitch_sign(),
+                scale,
+            );
         }
     }
 
@@ -2841,6 +2910,14 @@ impl ApplicationHandler for App {
         if self.last_frame.elapsed() > NOT_DRAWING {
             self.keep_alive();
             self.update_live();
+            // Controllers still come and go, but what's pressed meanwhile
+            // (minimized, say) would all work the game at once when it's
+            // back.
+            for (id, event) in self.pads.events() {
+                if matches!(event, PadEvent::Connected | PadEvent::Disconnected) {
+                    self.pad_pressed(id, event);
+                }
+            }
         }
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -2963,6 +3040,13 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // H2_PADS=<seconds>: list the controllers and print what they do for
+    // that long, then quit (no maps or window needed).
+    let pads = std::env::var("H2_PADS").ok();
+    if let Some(seconds) = pads.and_then(|v| v.parse::<f32>().ok()) {
+        input::probe(seconds, &profile::Profile::load());
+        return Ok(());
+    }
     let path = find_map()?;
     println!("loading {}", path.display());
     let level = load_level(&path)?;
@@ -3073,7 +3157,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         focus: (Vec3::ZERO, 1.0),
         locals: Vec::new(),
         seats: vec![flow::Seat::default()],
-        pads: Pads::new(),
+        pads: if headless { Pads::none() } else { Pads::new() },
         window: None,
         gpu: None,
         keys: HashSet::new(),

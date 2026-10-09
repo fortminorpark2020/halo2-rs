@@ -9,6 +9,11 @@ use blam_cache::hud::{Anchor, ScreenSplit, FLIP_HORIZONTALLY, FLIP_VERTICALLY};
 /// Halo 2's HUD blue.
 pub const BLUE: [f32; 4] = [0.30, 0.62, 1.0, 0.9];
 pub const RED: [f32; 4] = [1.0, 0.25, 0.2, 0.95];
+/// The crosshair over an enemy and over a friend: the flash colours of
+/// its HUD shaders, `widget_simple_flash_red` (255, 0, 0) and
+/// `widget_simple_flash_green` (51, 255, 0).
+pub const RETICLE_RED: [f32; 4] = [1.0, 0.0, 0.0, 0.95];
+pub const RETICLE_GREEN: [f32; 4] = [0.2, 1.0, 0.0, 0.95];
 /// HUD blue, dimmed (the grenade type not selected).
 pub const DIM_BLUE: [f32; 4] = [0.30, 0.62, 1.0, 0.4];
 
@@ -39,6 +44,9 @@ pub struct HudBuilder {
     /// Text gets a dark shadow, so small HUD lines read over bright snow,
     /// sky or walls (menus have their own dark backing).
     shadow: bool,
+    /// How far below the middle the crosshair sits, as a fraction of half
+    /// the view's height.
+    crosshair: f32,
     batches: Vec<HudBatch>,
 }
 
@@ -81,8 +89,16 @@ impl HudBuilder {
             bitmap_scale,
             offset_scale,
             shadow: true,
+            crosshair: 0.0,
             batches: Vec::new(),
         }
+    }
+
+    /// The same, with the crosshair (and the scope and zoom marks around
+    /// it) `crosshair` of half the view's height below the middle, where
+    /// the view is aimed (`Lens::crosshair`).
+    pub fn with_crosshair(self, crosshair: f32) -> Self {
+        HudBuilder { crosshair, ..self }
     }
 
     pub fn scale(&self) -> f32 {
@@ -109,9 +125,8 @@ impl HudBuilder {
             Anchor::WeaponHud => [mx, my],
             Anchor::MotionSensor => [mx, self.h - my],
             Anchor::Scoreboard => [self.w - mx, self.h - my],
-            Anchor::Crosshair | Anchor::LockOnTarget | Anchor::Other(_) => {
-                [self.w * 0.5, self.h * 0.5]
-            }
+            Anchor::Crosshair => [self.w * 0.5, self.h * 0.5 * (1.0 + self.crosshair)],
+            Anchor::LockOnTarget | Anchor::Other(_) => [self.w * 0.5, self.h * 0.5],
         }
     }
 
@@ -291,6 +306,7 @@ mod tests {
             texture: 0,
             anchor,
             flags: 0,
+            state: Default::default(),
             offset,
             registration,
             size,
@@ -303,6 +319,18 @@ mod tests {
         let h = HudBuilder::new(1280.0, 960.0);
         let r = h.widget_rect(&widget(Anchor::Crosshair, [0.0, 0.0], [0.5, 0.5]));
         assert_eq!(r, [605.0, 445.0, 675.0, 515.0]);
+    }
+
+    #[test]
+    fn the_crosshair_sits_where_the_view_is_aimed() {
+        // Halo 2's 0.165 of half the height below the middle: 59 pixels
+        // down at 720p, and in a two player view of its own height.
+        let h = HudBuilder::new(1280.0, 720.0).with_crosshair(0.165);
+        let r = h.widget_rect(&widget(Anchor::Crosshair, [0.0, 0.0], [0.5, 0.5]));
+        assert!(((r[1] + r[3]) * 0.5 - 360.0 * 1.165).abs() < 1e-3);
+        assert_eq!(h.anchor(Anchor::LockOnTarget), [640.0, 360.0]);
+        let half = HudBuilder::for_view(1280.0, 360.0, ScreenSplit::Half).with_crosshair(0.165);
+        assert!((half.anchor(Anchor::Crosshair)[1] - 180.0 * 1.165).abs() < 1e-3);
     }
 
     #[test]

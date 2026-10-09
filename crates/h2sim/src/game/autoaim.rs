@@ -1,5 +1,6 @@
 //! Halo 2's autoaim: a round fired close enough to an enemy goes at them,
-//! and the crosshair turns red while one is in reach.
+//! and the crosshair turns red while one is in reach; and magnetism, which
+//! draws a controller's aim to them.
 
 use super::{ray_capsule, Game, HEAD_HEIGHT};
 use crate::collision::World;
@@ -41,19 +42,79 @@ impl Game {
         def: &WeaponDef,
         zoom: u32,
     ) -> Option<(usize, Option<Vec3>)> {
-        if def.autoaim_zoomed_only && zoom == 0 {
-            return None;
-        }
-        let zoom = def.magnification(zoom);
-        let (angle, range) = (def.autoaim_angle / zoom, def.autoaim_range * zoom);
-        if range <= 0.0 {
-            return None;
-        }
+        let cone = aim_cone(def, zoom, def.autoaim_angle, def.autoaim_range)?;
+        self.pick(world, shooter, eye, dir, cone, |j| {
+            self.is_enemy(shooter, j)
+        })
+        .map(|p| (p.player, p.steer))
+    }
+
+    /// Who the crosshair is on, as Halo 2's HUD shows it: the player
+    /// autoaim picks, teammates included, and whether they're a teammate.
+    /// Over a teammate the crosshair turns green (each weapon's HUD tag
+    /// has a green "crosshair_friendly" for an autoaim on a friend). Only
+    /// enemies have rounds steered at them (`autoaim`).
+    pub fn autoaim_target(
+        &self,
+        world: &World,
+        shooter: usize,
+        eye: Vec3,
+        dir: Vec3,
+        def: &WeaponDef,
+        zoom: u32,
+    ) -> Option<(usize, bool)> {
+        let cone = aim_cone(def, zoom, def.autoaim_angle, def.autoaim_range)?;
+        self.pick(world, shooter, eye, dir, cone, |_| true)
+            .map(|p| (p.player, !self.is_enemy(shooter, p.player)))
+    }
+
+    /// The enemy a controller's aim is drawn to, aiming along `dir` from
+    /// `eye` with `def` zoomed to level `zoom`: one in sight within the
+    /// weapon's magnetism angle and range (its tags; wider and farther
+    /// than its autoaim's), picked as autoaim picks, and narrowing and
+    /// reaching farther zoomed in the same way. Halo 2's controller aim
+    /// slows on them and follows them (the globals' magnetism friction and
+    /// adhesion).
+    pub fn magnetism(
+        &self,
+        world: &World,
+        shooter: usize,
+        eye: Vec3,
+        dir: Vec3,
+        def: &WeaponDef,
+        zoom: u32,
+    ) -> Option<Magnet> {
+        let (angle, range) = aim_cone(def, zoom, def.magnetism_angle, def.magnetism_range)
+            .filter(|&(angle, _)| angle > 0.0)?;
+        let p = self.pick(world, shooter, eye, dir, (angle, range), |j| {
+            self.is_enemy(shooter, j)
+        })?;
+        let body = &self.players[p.player].body;
+        Some(Magnet {
+            player: p.player,
+            off: p.off,
+            angle,
+            centre: body.position + Vec3::Z * body.height() * 0.5,
+        })
+    }
+
+    /// The player among those `wanted` says that `shooter`'s aim assists
+    /// pick, aiming along `dir` from `eye` within an `(angle, range)`
+    /// cone.
+    fn pick(
+        &self,
+        world: &World,
+        shooter: usize,
+        eye: Vec3,
+        dir: Vec3,
+        (angle, range): (f32, f32),
+        wanted: impl Fn(usize) -> bool,
+    ) -> Option<Pick> {
         let own = self.riding(shooter).map(|(v, _)| v);
         // (angle off the crosshair, distance, player, where to steer).
         let mut best: Option<(f32, f32, usize, Option<Vec3>)> = None;
         for (j, q) in self.players.iter().enumerate() {
-            if !q.alive || !self.is_enemy(shooter, j) || !self.exposed(j) {
+            if j == shooter || !q.alive || !wanted(j) || !self.exposed(j) {
                 continue;
             }
             if own.is_some() && q.seat.map(|(v, _)| v) == own {
@@ -106,8 +167,41 @@ impl Game {
                 }
             }
         }
-        best.map(|(_, _, j, steer)| (j, steer))
+        best.map(|(off, _, player, steer)| Pick { player, off, steer })
     }
+}
+
+/// A player the aim assists pick.
+struct Pick {
+    player: usize,
+    /// Radians off the crosshair: 0 with the crosshair on them.
+    off: f32,
+    /// Where to steer rounds at them (`None`: where the crosshair is).
+    steer: Option<Vec3>,
+}
+
+/// The enemy a controller's aim is drawn to (`Game::magnetism`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Magnet {
+    pub player: usize,
+    /// Radians off the crosshair: 0 with the crosshair on them.
+    pub off: f32,
+    /// The weapon's magnetism angle as zoomed now: how far off the pull
+    /// reaches.
+    pub angle: f32,
+    /// Their middle, which moves with them.
+    pub centre: Vec3,
+}
+
+/// A weapon's aim assist `angle` and `range` zoomed to level `zoom`:
+/// narrower and farther by the magnification. None when it has none
+/// (no range, or unzoomed for a weapon that assists only zoomed).
+fn aim_cone(def: &WeaponDef, zoom: u32, angle: f32, range: f32) -> Option<(f32, f32)> {
+    if def.autoaim_zoomed_only && zoom == 0 {
+        return None;
+    }
+    let m = def.magnification(zoom);
+    (range > 0.0).then_some((angle / m, range * m))
 }
 
 #[cfg(test)]
@@ -115,6 +209,7 @@ mod tests {
     use crate::collision::World;
     use crate::game::{ray_capsule, Command, Event, Game, HEAD_HEIGHT};
     use crate::testing::{floor, game};
+    use crate::weapon::WeaponDef;
     use glam::Vec3;
 
     /// The Battle Rifle's autoaim: 3 degrees out to 17 world units (its
@@ -404,5 +499,108 @@ mod tests {
         let def = g.weapons[0].clone();
         let to = (g.players[1].eye() - eye).normalize();
         assert_eq!(g.autoaim(&world, 0, eye, to, &def, 0), None);
+        // But the crosshair over them knows they're a friend (green).
+        assert_eq!(
+            g.autoaim_target(&world, 0, eye, to, &def, 0),
+            Some((1, true))
+        );
+        g.players[1].team = 1 - g.players[0].team;
+        assert_eq!(
+            g.autoaim_target(&world, 0, eye, to, &def, 0),
+            Some((1, false))
+        );
+    }
+
+    /// Aiming from player 0's eye `off` radians to the side of player
+    /// 1's chest.
+    fn aim_beside(g: &Game, off: f32) -> (Vec3, Vec3) {
+        let eye = g.players[0].eye();
+        let q = &g.players[1];
+        let to = q.body.position + Vec3::Z * q.body.height() * 0.6 - eye;
+        let yaw = to.y.atan2(to.x) + off;
+        let pitch = (to.z / to.length()).asin();
+        let dir = Vec3::new(
+            yaw.cos() * pitch.cos(),
+            yaw.sin() * pitch.cos(),
+            pitch.sin(),
+        );
+        (eye, dir)
+    }
+
+    /// The Battle Rifle's magnetism: 6 degrees out to 21 world units.
+    fn magnetic(range: f32) -> Game {
+        let mut g = duel(range);
+        for w in &mut g.weapons {
+            w.magnetism_angle = 6f32.to_radians();
+            w.magnetism_range = 21.0;
+        }
+        g
+    }
+
+    #[test]
+    fn magnetism_draws_aim_to_an_enemy_in_its_cone() {
+        let world = floor();
+        let g = magnetic(15.0);
+        let def = g.weapons[0].clone();
+        let (eye, dir) = aim_beside(&g, 5f32.to_radians());
+        let m = g
+            .magnetism(&world, 0, eye, dir, &def, 0)
+            .expect("drawn to them");
+        assert_eq!(m.player, 1);
+        assert!(m.off > 4f32.to_radians() && m.off < m.angle, "{m:?}");
+        // Right on them: no angle off at all.
+        let (eye, on) = aim_beside(&g, 0.0);
+        assert_eq!(
+            g.magnetism(&world, 0, eye, on, &def, 0).map(|m| m.off),
+            Some(0.0)
+        );
+        // Wider than its autoaim's 3 degrees, but not beyond its own.
+        assert_eq!(g.autoaim(&world, 0, eye, dir, &def, 0), None);
+        let (eye, wide) = aim_beside(&g, 7f32.to_radians());
+        assert_eq!(g.magnetism(&world, 0, eye, wide, &def, 0), None);
+        // Not beyond its range.
+        let far = magnetic(25.0);
+        let (eye, dir) = aim_beside(&far, 2f32.to_radians());
+        assert_eq!(far.magnetism(&world, 0, eye, dir, &def, 0), None);
+    }
+
+    #[test]
+    fn magnetism_skips_teammates_walls_and_unzoomed_snipers() {
+        let g = magnetic(15.0);
+        let def = g.weapons[0].clone();
+        let (eye, dir) = aim_beside(&g, 2f32.to_radians());
+        // A wall between them.
+        let s = 50.0;
+        let walled = World::new(
+            &[
+                [-s, -s, 0.0],
+                [s, -s, 0.0],
+                [s, s, 0.0],
+                [-s, s, 0.0],
+                [7.0, -5.0, 0.0],
+                [7.0, 5.0, 0.0],
+                [7.0, 5.0, 3.0],
+                [7.0, -5.0, 3.0],
+            ],
+            &[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+        );
+        assert_eq!(g.magnetism(&walled, 0, eye, dir, &def, 0), None);
+        let world = floor();
+        let mut team = magnetic(15.0);
+        team.rules.game_type = crate::game::GameType::TeamSlayer;
+        team.players[1].team = team.players[0].team;
+        assert_eq!(team.magnetism(&world, 0, eye, dir, &def, 0), None);
+        // The Sniper Rifle (4 degrees to 14, zoomed only).
+        let sniper = WeaponDef {
+            magnetism_angle: 4f32.to_radians(),
+            magnetism_range: 14.0,
+            autoaim_zoomed_only: true,
+            zoom_levels: 2,
+            zoom_range: (3.5, 9.5),
+            ..def
+        };
+        let (eye, near) = aim_beside(&g, 0.5f32.to_radians());
+        assert_eq!(g.magnetism(&world, 0, eye, near, &sniper, 0), None);
+        assert!(g.magnetism(&world, 0, eye, near, &sniper, 1).is_some());
     }
 }

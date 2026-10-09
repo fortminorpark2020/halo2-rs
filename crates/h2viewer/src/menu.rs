@@ -7,8 +7,10 @@
 //! They're laid out and drawn as mainmenu.map's screens are (`menuart`),
 //! or as plainly without it.
 
+use crate::camera::Controls;
 use crate::gpu::{hud_mode, MENU_TEXTURES};
 use crate::hud::HudBuilder;
+use crate::input::{ButtonLayout, PadButton, StickLayout};
 use crate::menuart::{self, animate, peak, tag_color, MenuArt, Painter, Space, Style};
 use crate::messages::MenuText;
 use crate::online::{clock_text, OnlineView};
@@ -20,8 +22,8 @@ use blam_cache::ui::{self, ListSkin};
 use h2net::live::{self, Privacy};
 use h2net::{LanGame, Lobby};
 use h2sim::game::{
-    clean_name, name_char, Emblem, Look, EMBLEM_BACKGROUNDS, EMBLEM_FOREGROUNDS, MAX_NAME,
-    PROFILE_COLORS,
+    clean_name, guest_name, name_char, Emblem, Look, EMBLEM_BACKGROUNDS, EMBLEM_FOREGROUNDS,
+    MAX_NAME, PROFILE_COLORS,
 };
 use h2sim::GameType;
 use std::path::{Path, PathBuf};
@@ -37,6 +39,10 @@ pub enum Screen {
     Options,
     SystemLink,
     Profile,
+    /// Controller settings: the profile's CONTROLLER screen (player
+    /// one's), or CONTROLLER SETTINGS off a local player's pause menu
+    /// (theirs), as in Halo 2.
+    Controls,
     Pause,
     PostGame,
     /// Online: the party lobby (and signing in, until signed in).
@@ -474,6 +480,9 @@ pub struct Context<'a> {
     pub objectives: &'a [(String, bool)],
     /// The online service, when we went online.
     pub online: Option<&'a OnlineView<'a>>,
+    /// The local player whose pause menu is up (0 for player one, or
+    /// with no pause menu).
+    pub owner: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -494,6 +503,15 @@ enum Row {
     EmblemPrimary,
     EmblemSecondary,
     EmblemBackColor,
+    /// On to the profile's controller settings.
+    Controls,
+    ThumbstickLayout,
+    ButtonLayout,
+    LookSensitivity,
+    MouseSensitivity,
+    InvertLook,
+    /// The pause menu's way to a player's own controller settings.
+    ControllerSettings,
     GameType,
     Map,
     Score,
@@ -603,6 +621,11 @@ impl Row {
                 | Row::EmblemPrimary
                 | Row::EmblemSecondary
                 | Row::EmblemBackColor
+                | Row::ThumbstickLayout
+                | Row::ButtonLayout
+                | Row::LookSensitivity
+                | Row::MouseSensitivity
+                | Row::InvertLook
         )
     }
 }
@@ -655,6 +678,9 @@ pub struct Menu {
     guard: Option<[f32; 2]>,
     /// A controller was used last: the legends show its buttons, not keys.
     pub controller: bool,
+    /// Whose settings the controller screen changes: a local player's
+    /// from their pause menu, or (None) player one's from the profile.
+    controls_for: Option<usize>,
 }
 
 /// The carnage report's rows, in Halo 2's 640x480 screen units.
@@ -749,6 +775,20 @@ const PROFILE_PLACE: Place = Place {
     ..OPTIONS_PLACE
 };
 const PROFILE_WIDTH: f32 = 820.0;
+/// The controller screen's settings, as the profile's but narrower and
+/// lower (under whose they are, off a pause menu), and the panel beside
+/// them of what the buttons and sticks do (its left, top and right, and
+/// where what each does starts).
+const CONTROLS_PLACE: Place = Place {
+    corner: [-680.0, 380.0],
+    ..OPTIONS_PLACE
+};
+const CONTROLS_WIDTH: f32 = 760.0;
+const CONTROLS_PANEL: [f32; 3] = [170.0, 420.0, 740.0];
+const CONTROLS_COLUMN: f32 = 200.0;
+/// How much of the menus' overlay colour goes over a paused game behind
+/// the controller settings.
+const CONTROLS_VEIL: f32 = 0.85;
 const ONLINE_PLACE: Place = Place {
     corner: [-640.0, 380.0],
     step: 46.0,
@@ -873,6 +913,8 @@ const SUBHEADER_W: f32 = 1100.0;
 const NOTE: [f32; 4] = [-730.0, -380.0, 300.0, -490.0];
 const MAIN_NOTE: [f32; 4] = [-600.0, -370.0, 600.0, -480.0];
 const PROFILE_NOTE: [f32; 4] = [-680.0, -60.0, 120.0, -300.0];
+/// Under the controller screen's five settings.
+const CONTROLS_NOTE: [f32; 4] = [-665.0, 140.0, 95.0, -140.0];
 /// The start screen without the art: the logo's place and its line.
 const LOGO_BOX: [f32; 4] = [-500.0, 200.0, 500.0, 60.0];
 const PRESS_ANY_KEY: &str = "PRESS ANY KEY TO CONTINUE";
@@ -1072,7 +1114,29 @@ impl Menu {
             pointer: None,
             guard: None,
             controller: false,
+            controls_for: None,
         }
+    }
+
+    /// The game stands still behind it: the pause menu, a dialog asked
+    /// from it, or the controller settings opened from it.
+    pub fn pausing(&self) -> bool {
+        match self.screen {
+            Screen::Pause => true,
+            Screen::Controls => self.controls_for.is_some(),
+            _ => self.asking.is_some_and(|a| a.from == Screen::Pause),
+        }
+    }
+
+    /// The local player whose controller settings the controller screen
+    /// changes (player one is 0).
+    fn controls_player(&self) -> usize {
+        self.controls_for.unwrap_or(0)
+    }
+
+    /// The settings the controller screen shows.
+    fn controls(&self) -> Controls {
+        self.profile.controls_of(self.controls_player())
     }
 
     pub fn show(&mut self, screen: Screen) {
@@ -1082,6 +1146,7 @@ impl Menu {
         let chrome = match screen {
             Screen::Start | Screen::Main => 0,
             Screen::Pause | Screen::PostGame => 2,
+            Screen::Controls if self.controls_for.is_some() => 2,
             Screen::Confirm => self.chrome.0,
             _ => 1,
         };
@@ -1112,11 +1177,6 @@ impl Menu {
         if self.cursor != self.focus.0 {
             self.focus = (self.cursor, self.focus.0, self.clock);
         }
-    }
-
-    /// The pause menu is up, or a dialog asked from it.
-    pub fn pausing(&self) -> bool {
-        self.screen == Screen::Pause || self.asking.is_some_and(|a| a.from == Screen::Pause)
     }
 
     /// Ask before doing `ask`: its dialog comes up with the cursor on the
@@ -1199,6 +1259,9 @@ impl Menu {
             Screen::Options => "GAME OPTIONS",
             Screen::SystemLink => "SYSTEM LINK",
             Screen::Profile => "PLAYER PROFILE",
+            // Halo 2's names for it off the profile and in a game.
+            Screen::Controls if self.controls_for.is_some() => "CONTROLLER SETTINGS",
+            Screen::Controls => "CONTROLLER",
             Screen::Pause => "PAUSED",
             Screen::Live => "ONLINE",
             Screen::Players => "ONLINE PLAYERS",
@@ -1229,7 +1292,21 @@ impl Menu {
                 Row::EmblemPrimary,
                 Row::EmblemSecondary,
                 Row::EmblemBackColor,
+                Row::Controls,
             ],
+            // In Halo 2's order; the mouse is player one's alone.
+            Screen::Controls => {
+                let mut rows = vec![
+                    Row::ThumbstickLayout,
+                    Row::ButtonLayout,
+                    Row::LookSensitivity,
+                    Row::InvertLook,
+                ];
+                if self.controls_player() == 0 {
+                    rows.push(Row::MouseSensitivity);
+                }
+                rows
+            }
             Screen::Lobby if ctx.host_lobby.is_some() => vec![
                 Row::GameType,
                 Row::Map,
@@ -1261,7 +1338,12 @@ impl Menu {
             ],
             Screen::SystemLink if ctx.lan.is_empty() => vec![Row::Searching],
             Screen::SystemLink => (0..ctx.lan.len()).map(Row::Join).collect(),
-            Screen::Pause => vec![Row::Resume, Row::EndGame, Row::Quit],
+            Screen::Pause => vec![
+                Row::Resume,
+                Row::ControllerSettings,
+                Row::EndGame,
+                Row::Quit,
+            ],
             Screen::PostGame => vec![Row::Continue],
             Screen::Confirm => vec![Row::Yes, Row::No],
             Screen::Live => live_rows(ctx),
@@ -1398,6 +1480,28 @@ impl Menu {
                 "EMBLEM BACK COLOR".into(),
                 Some(color_name(self.profile.look.emblem.colors[2]).into()),
             ),
+            Row::Controls => ("CONTROLLER".into(), None),
+            Row::ThumbstickLayout => (
+                "THUMBSTICK LAYOUT".into(),
+                Some(self.controls().sticks.name().into()),
+            ),
+            Row::ButtonLayout => (
+                "BUTTON LAYOUT".into(),
+                Some(self.controls().buttons.name().into()),
+            ),
+            Row::LookSensitivity => (
+                "LOOK SENSITIVITY".into(),
+                Some(self.controls().look_sensitivity.to_string()),
+            ),
+            Row::MouseSensitivity => (
+                "MOUSE SENSITIVITY".into(),
+                Some(self.controls().mouse_sensitivity.to_string()),
+            ),
+            Row::InvertLook => (
+                "LOOK INVERSION".into(),
+                Some(on_off(self.controls().invert_look)),
+            ),
+            Row::ControllerSettings => ("CONTROLLER SETTINGS".into(), None),
             Row::GameType => (
                 "GAME TYPE".into(),
                 Some(GAME_TYPES[s.game_type.min(GAME_TYPES.len() - 1)].1.into()),
@@ -1761,6 +1865,35 @@ impl Menu {
                 let c = &mut self.profile.look.emblem.colors[k];
                 *c = cycle(*c as usize, PROFILE_COLORS as usize) as u8;
             }
+            Row::ThumbstickLayout => {
+                let c = self.profile.controls_of_mut(self.controls_for.unwrap_or(0));
+                let all = StickLayout::ALL;
+                let at = all.iter().position(|&l| l == c.sticks).unwrap_or(0);
+                c.sticks = all[cycle(at, all.len())];
+            }
+            Row::ButtonLayout => {
+                let c = self.profile.controls_of_mut(self.controls_for.unwrap_or(0));
+                let all = ButtonLayout::ALL;
+                let at = all.iter().position(|&l| l == c.buttons).unwrap_or(0);
+                c.buttons = all[cycle(at, all.len())];
+            }
+            // Sensitivity runs from 1 to 10.
+            Row::LookSensitivity | Row::MouseSensitivity => {
+                let c = self.profile.controls_of_mut(self.controls_for.unwrap_or(0));
+                let n = if row == Row::LookSensitivity {
+                    &mut c.look_sensitivity
+                } else {
+                    &mut c.mouse_sensitivity
+                };
+                *n = 1 + cycle(
+                    n.saturating_sub(1) as usize,
+                    Controls::MAX_SENSITIVITY as usize,
+                ) as u8;
+            }
+            Row::InvertLook => {
+                let c = self.profile.controls_of_mut(self.controls_for.unwrap_or(0));
+                c.invert_look ^= true;
+            }
             _ => return false,
         }
         true
@@ -1788,6 +1921,14 @@ impl Menu {
             Row::Multiplayer => forward(self, Screen::Lobby),
             Row::SystemLink => forward(self, Screen::SystemLink),
             Row::Profile => forward(self, Screen::Profile),
+            Row::Controls => {
+                self.controls_for = None;
+                forward(self, Screen::Controls)
+            }
+            Row::ControllerSettings => {
+                self.controls_for = Some(ctx.owner);
+                forward(self, Screen::Controls)
+            }
             Row::Quit => self.ask(Ask::Quit),
             Row::Name => {
                 self.editing = true;
@@ -1822,7 +1963,12 @@ impl Menu {
             | Row::EmblemBackground
             | Row::EmblemPrimary
             | Row::EmblemSecondary
-            | Row::EmblemBackColor => {
+            | Row::EmblemBackColor
+            | Row::ThumbstickLayout
+            | Row::ButtonLayout
+            | Row::LookSensitivity
+            | Row::MouseSensitivity
+            | Row::InvertLook => {
                 if self.adjust(row, 1, ctx) {
                     self.sound = Some(Sound::Cursor);
                 }
@@ -2093,6 +2239,14 @@ impl Menu {
                 self.back_to_main(Row::Profile);
                 Action::None
             }
+            // Back where it was opened from.
+            Screen::Controls => {
+                match self.controls_for.take() {
+                    Some(_) => self.back_to(Screen::Pause, Row::ControllerSettings, ctx),
+                    None => self.back_to(Screen::Profile, Row::Controls, ctx),
+                }
+                Action::None
+            }
             Screen::Campaign => {
                 self.back_to_main(Row::Multiplayer);
                 Action::None
@@ -2280,6 +2434,7 @@ impl Menu {
         }
         match (self.screen, ctx.online) {
             (Screen::Profile, _) => self.draw_profile(&mut p),
+            (Screen::Controls, _) => draw_layouts(&mut p, self.controls()),
             (Screen::Live, Some(o)) => draw_party(&mut p, o),
             (Screen::Player, Some(o)) => draw_player(&mut p, o, self.player),
             _ => {}
@@ -2345,13 +2500,15 @@ impl Menu {
     /// over the scene; the framing and moving tracks behind the screens
     /// past them (a navy veil without the art), with a window in it where
     /// the profile's model stands; and behind a dialog the screen it was
-    /// asked from (or the game), under the menus' overlay colour.
+    /// asked from (or the game), under the menus' overlay colour, as
+    /// behind the controller settings opened from the pause menu.
     fn draw_behind(&self, p: &mut Painter, [w, h]: [f32; 2]) {
         let under = match (self.screen, self.asking) {
             (Screen::Confirm, Some(a)) => a.from,
             (s, _) => s,
         };
         let age = self.clock - self.chrome.1;
+        let paused_controls = under == Screen::Controls && self.pausing();
         match under {
             Screen::Start | Screen::Main => {
                 if !self.backdrop {
@@ -2374,6 +2531,7 @@ impl Menu {
             }
             // The game is behind these.
             Screen::Pause | Screen::PostGame => {}
+            _ if paused_controls => {}
             _ if self.art.loaded() => {
                 let hole = (under == Screen::Profile).then_some(MODEL_WINDOW);
                 p.screen(menuart::BACKGROUND, age, |_| true, hole);
@@ -2393,18 +2551,19 @@ impl Menu {
                 );
             }
         }
-        if matches!(self.screen, Screen::Confirm | Screen::Pause) {
+        if matches!(self.screen, Screen::Confirm | Screen::Pause) || paused_controls {
             let g = &self.art.ui.globals;
             let [r, gr, b, a] = if self.art.loaded() {
                 g.overlay_color
             } else {
                 VEIL
             };
-            // Over a game the pause menu lets it show through.
-            let a = if under == Screen::Pause {
-                PAUSE_VEIL
-            } else {
-                a
+            // Over a game the pause menu lets it show through; the
+            // controller settings' lists and panel want more of it.
+            let a = match under {
+                Screen::Pause => PAUSE_VEIL,
+                Screen::Controls => CONTROLS_VEIL,
+                _ => a,
             };
             let veil = tag_color([r, gr, b], a);
             p.hb.quad(
@@ -2727,7 +2886,7 @@ impl Menu {
         // panels).
         let below = matches!(
             self.screen,
-            Screen::Live | Screen::Playlists | Screen::Matchmaking
+            Screen::Live | Screen::Playlists | Screen::Matchmaking | Screen::Controls
         );
         if let Some(header) = self.header(ctx).filter(|_| below) {
             let [l, t, _, b] = box_;
@@ -2750,6 +2909,7 @@ impl Menu {
             | Screen::PostGame => return,
             Screen::Main => MAIN_NOTE,
             Screen::Profile => PROFILE_NOTE,
+            Screen::Controls => CONTROLS_NOTE,
             _ => NOTE,
         };
         if let Some(n) = &self.notice {
@@ -3008,15 +3168,46 @@ impl Menu {
                 let o = o?;
                 Some(o.playlist_name(o.game?.playlist))
             }
+            // Off a pause menu: whose settings they are.
+            Screen::Controls => {
+                let k = self.controls_for?;
+                Some(format!("FOR {}", guest_name(&self.profile.name, k)))
+            }
             _ => None,
         }
+    }
+
+    /// What the controller screen's chosen row is for (Halo 2's words for
+    /// its own settings).
+    fn controls_note(&self, row: Row) -> Option<String> {
+        let c = self.controls();
+        let note = match row {
+            Row::ThumbstickLayout => c.sticks.help(),
+            Row::ButtonLayout => c.buttons.help(),
+            Row::LookSensitivity => {
+                "CHOOSE THE SPEED AT WHICH YOU LOOK AROUND. FASTER IS NOT ALWAYS BETTER."
+            }
+            Row::InvertLook if self.controls_player() == 0 => {
+                "IF THIS IS ENABLED, MOVING THE THUMBSTICK UP (OR THE MOUSE FORWARD) CAUSES YOU TO LOOK DOWN."
+            }
+            Row::InvertLook => "IF THIS IS ENABLED, MOVING THE THUMBSTICK UP CAUSES YOU TO LOOK DOWN.",
+            Row::MouseSensitivity => {
+                "CHOOSE THE SPEED AT WHICH THE MOUSE LOOKS AROUND, FOR WHOEVER PLAYS AT THE KEYBOARD."
+            }
+            _ => return None,
+        };
+        Some(note.into())
     }
 
     /// What shows where notices go when there's none: the chosen
     /// playlist's description (or who lacks which of its maps), what we
     /// last played with the chosen recent player and when, or the online
-    /// service's message of the day.
+    /// service's message of the day; or what a controller setting is for.
     fn note(&self, ctx: &Context) -> Option<String> {
+        if self.screen == Screen::Controls {
+            let row = *self.rows(ctx).get(self.cursor)?;
+            return self.controls_note(row);
+        }
         let o = ctx.online?;
         match self.screen {
             Screen::RecentPlayers => {
@@ -3046,7 +3237,9 @@ impl Menu {
     fn list_screen(&self) -> Option<&'static str> {
         match self.screen {
             Screen::Main => Some(menuart::MAIN_MENU),
-            Screen::Options | Screen::Profile => Some(menuart::OPTIONS),
+            // The settings lists (Halo 2's controller settings are laid out
+            // as its game options are).
+            Screen::Options | Screen::Profile | Screen::Controls => Some(menuart::OPTIONS),
             Screen::SystemLink => Some(menuart::BROWSER),
             Screen::Confirm => Some(menuart::DIALOG),
             Screen::Pause => Some(menuart::LARGE_DIALOG),
@@ -3065,13 +3258,15 @@ impl Menu {
     /// Where the screen's rows go: where its tag's list is, its items as
     /// far apart as its skin's are and each its skin's background; the
     /// tags' own numbers without the art. The profile's settings are
-    /// narrowed for the model beside them, and the online lists start
-    /// under the title.
+    /// narrowed for the model beside them (the controller's for the panel
+    /// of what the buttons do), and the online lists start under the
+    /// title.
     fn place(&self) -> Place {
         let (fallback, width) = match self.screen {
             Screen::Main => (MAIN_PLACE, None),
             Screen::Options => (OPTIONS_PLACE, None),
             Screen::Profile => (PROFILE_PLACE, Some(PROFILE_WIDTH)),
+            Screen::Controls => (CONTROLS_PLACE, Some(CONTROLS_WIDTH)),
             Screen::SystemLink => (BROWSER_PLACE, None),
             Screen::Confirm => (DIALOG_PLACE, None),
             Screen::Pause => (PAUSE_PLACE, None),
@@ -3092,7 +3287,8 @@ impl Menu {
             place.step = self.art.item_height(skin);
             place.item = item;
         }
-        if let Some(list) = list.filter(|_| self.screen != Screen::Profile) {
+        let own = matches!(self.screen, Screen::Profile | Screen::Controls);
+        if let Some(list) = list.filter(|_| !own) {
             place.corner = [list.corner[0] as f32, list.corner[1] as f32];
         }
         if let Some(w) = width {
@@ -3932,6 +4128,51 @@ fn gamma_color(c: [f32; 3]) -> [f32; 4] {
     [c[0].powf(2.2), c[1].powf(2.2), c[2].powf(2.2), 1.0]
 }
 
+/// The controller screen's panel beside its settings: what each button
+/// does in the button layout and each stick in the thumbstick layout, as
+/// Halo 2's BUTTON LAYOUT and THUMBSTICK LAYOUT screens label them.
+fn draw_layouts(p: &mut Painter, c: Controls) {
+    // The buttons that do something, and the two that do the same in
+    // every layout.
+    let buttons: Vec<(&str, &str)> = PadButton::ALL
+        .into_iter()
+        .filter(|&b| {
+            c.buttons.function(b).is_some() || matches!(b, PadButton::Back | PadButton::Start)
+        })
+        .map(|b| (b.label(), c.buttons.meaning(b)))
+        .collect();
+    let [left, right] = c.sticks.sticks();
+    let sticks = [("LEFT STICK", left), ("RIGHT STICK", right)];
+    let [l, t, r] = CONTROLS_PANEL;
+    let head = Style::new(Font::Body, ui::LEFT_JUSTIFY, DIM);
+    let name = Style::new(Font::LargeBody, ui::LEFT_JUSTIFY, BRIGHT);
+    let body = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
+    let (head_h, name_h) = (p.line_height(head.font), p.line_height(name.font));
+    let step = p.line_height(body.font);
+    let gap = step * 0.6;
+    let lines = (buttons.len() + sticks.len()) as f32;
+    let height = 2.0 * (head_h + name_h) + step * lines + gap * 3.0;
+    panel(p, [l - 20.0, t + 20.0, r + 20.0, t - height - 20.0]);
+    let mut y = t;
+    for (heading, layout, lines) in [
+        ("BUTTON LAYOUT", c.buttons.name(), &buttons[..]),
+        ("THUMBSTICK LAYOUT", c.sticks.name(), &sticks[..]),
+    ] {
+        p.line([l, y, r, y - head_h], head, heading);
+        y -= head_h;
+        p.line([l, y, r, y - name_h], name, layout);
+        y -= name_h + gap * 0.5;
+        let x = l + CONTROLS_COLUMN;
+        for &(what, does) in lines {
+            p.line([l, y, x, y - step], body, what);
+            let does = p.fit(body.font, does, r - x);
+            p.line([x, y, r, y - step], body, &does);
+            y -= step;
+        }
+        y -= gap;
+    }
+}
+
 /// A mission's objectives, in the pause menu's dialog: done ones dimmed.
 fn draw_objectives(p: &mut Painter, box_: [f32; 4], style: Style, objectives: &[(String, bool)]) {
     let [l, t, r, b] = box_;
@@ -4250,6 +4491,7 @@ mod tests {
             host_lobby: None,
             objectives: &[],
             online: None,
+            owner: 0,
         }
     }
 
@@ -4372,8 +4614,9 @@ mod tests {
         assert_eq!(m.input(Input::Back, &c), Action::None);
         assert_eq!(m.screen, Screen::Main);
 
-        // END GAME on the pause menu.
+        // END GAME on the pause menu (under CONTROLLER SETTINGS).
         m.show(Screen::Pause);
+        m.input(Input::Down, &c);
         m.input(Input::Down, &c);
         assert_eq!(m.input(Input::Select, &c), Action::None);
         assert_eq!(m.title(&c), "ARE YOU SURE ?");
@@ -4388,8 +4631,9 @@ mod tests {
         assert_eq!(m.input(Input::Select, &c), Action::EndGame);
         // QUIT from the pause menu.
         m.show(Screen::Pause);
-        m.input(Input::Down, &c);
-        m.input(Input::Down, &c);
+        for _ in 0..3 {
+            m.input(Input::Down, &c);
+        }
         m.input(Input::Select, &c);
         assert_eq!(m.title(&c), "EXIT HALO 2 ?");
         m.input(Input::Up, &c);
@@ -4402,6 +4646,7 @@ mod tests {
         };
         m.show(Screen::Pause);
         m.input(Input::Down, &joined);
+        m.input(Input::Down, &joined);
         assert_eq!(m.label(Row::EndGame, &joined).0, "LEAVE GAME");
         m.input(Input::Select, &joined);
         assert_eq!(m.title(&joined), "LEAVE GAME ?");
@@ -4410,6 +4655,7 @@ mod tests {
         assert_eq!(m.input(Input::Select, &joined), Action::Leave);
         // A dialog's text is readable over a small splitscreen view.
         m.show(Screen::Pause);
+        m.input(Input::Down, &c);
         m.input(Input::Down, &c);
         m.input(Input::Select, &c);
         assert_eq!(smallest_text(|hb| m.draw(hb, 0, 1, 320.0, 180.0, &c)), 8.0);
@@ -4701,6 +4947,263 @@ mod tests {
         m.input(Input::Back, &c);
         assert_eq!(m.screen, Screen::Main);
         assert_eq!(m.rows(&c)[m.cursor], Row::Profile);
+    }
+
+    #[test]
+    fn the_profile_sets_look_sensitivity_and_inversion() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Profile);
+        let to = |m: &mut Menu, row: Row| {
+            while m.rows(&c)[m.cursor] != row {
+                m.input(Input::Down, &c);
+            }
+        };
+        // They have a screen of their own, off the profile.
+        to(&mut m, Row::Controls);
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.screen, Screen::Controls);
+        // Halo 2's look sensitivity of 3 to start, from 1 to 10.
+        to(&mut m, Row::LookSensitivity);
+        assert_eq!(m.profile.controls.look_sensitivity, 3);
+        assert_eq!(m.input(Input::Right, &c), Action::SaveProfile);
+        assert_eq!(m.profile.controls.look_sensitivity, 4);
+        for _ in 0..3 {
+            m.input(Input::Left, &c);
+        }
+        assert_eq!(m.profile.controls.look_sensitivity, 1);
+        m.input(Input::Left, &c);
+        assert_eq!(m.profile.controls.look_sensitivity, 10);
+        assert_eq!(m.label(Row::LookSensitivity, &c).1.as_deref(), Some("10"));
+        to(&mut m, Row::MouseSensitivity);
+        m.input(Input::Right, &c);
+        assert_eq!(m.profile.controls.mouse_sensitivity, 4);
+        to(&mut m, Row::InvertLook);
+        assert_eq!(m.input(Input::Select, &c), Action::SaveProfile);
+        assert!(m.profile.controls.invert_look);
+        // Back to the profile, on CONTROLLER.
+        m.input(Input::Back, &c);
+        assert_eq!(m.screen, Screen::Profile);
+        assert_eq!(m.rows(&c)[m.cursor], Row::Controls);
+    }
+
+    #[test]
+    fn the_controller_screen_cycles_halo_2s_layouts() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Profile);
+        while m.rows(&c)[m.cursor] != Row::Controls {
+            m.input(Input::Down, &c);
+        }
+        assert_eq!(m.label(Row::Controls, &c).0, "CONTROLLER");
+        m.input(Input::Select, &c);
+        assert_eq!(m.screen, Screen::Controls);
+        assert_eq!(m.title(&c), "CONTROLLER");
+        assert!(!m.pausing());
+        // Halo 2's rows, in its order.
+        let names: Vec<String> = m.rows(&c).iter().map(|&r| m.label(r, &c).0).collect();
+        assert_eq!(
+            names,
+            [
+                "THUMBSTICK LAYOUT",
+                "BUTTON LAYOUT",
+                "LOOK SENSITIVITY",
+                "LOOK INVERSION",
+                "MOUSE SENSITIVITY"
+            ]
+        );
+        // Button layouts, right through and back.
+        m.input(Input::Down, &c);
+        let layout = |m: &Menu| m.label(Row::ButtonLayout, &c).1.unwrap();
+        assert_eq!(layout(&m), "DEFAULT");
+        for name in [
+            "SOUTHPAW",
+            "BOXER",
+            "GREEN THUMB",
+            "BUMPER JUMPER",
+            "RECON",
+            "DEFAULT",
+        ] {
+            assert_eq!(m.input(Input::Right, &c), Action::SaveProfile);
+            assert_eq!(layout(&m), name);
+        }
+        assert_eq!(m.input(Input::Left, &c), Action::SaveProfile);
+        assert_eq!(m.profile.controls.buttons, ButtonLayout::Recon);
+        // A steps on, as on other settings.
+        assert_eq!(m.input(Input::Select, &c), Action::SaveProfile);
+        assert_eq!(m.profile.controls.buttons, ButtonLayout::Default);
+        // Its help is Halo 2's.
+        m.input(Input::Left, &c);
+        m.input(Input::Left, &c);
+        assert_eq!(m.profile.controls.buttons, ButtonLayout::BumperJumper);
+        assert!(m.note(&c).unwrap().starts_with("JUMP AND MELEE"));
+        // Thumbstick layouts likewise.
+        m.input(Input::Up, &c);
+        let sticks = |m: &Menu| m.label(Row::ThumbstickLayout, &c).1.unwrap();
+        for name in ["SOUTHPAW", "LEGACY", "LEGACY SOUTHPAW", "DEFAULT"] {
+            assert_eq!(m.input(Input::Right, &c), Action::SaveProfile);
+            assert_eq!(sticks(&m), name);
+        }
+        m.input(Input::Left, &c);
+        assert_eq!(m.profile.controls.sticks, StickLayout::LegacySouthpaw);
+        assert!(m.note(&c).unwrap().contains("ANCIENT LEFTIES"));
+        // The guests are untouched.
+        assert_eq!(m.profile.guests, Profile::default().guests);
+    }
+
+    #[test]
+    fn a_guests_pause_menu_edits_their_own_controls() {
+        let maps = maps();
+        let c = Context {
+            owner: 2,
+            ..ctx(&maps, &[])
+        };
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.profile.name = "JOHN".into();
+        m.show(Screen::Pause);
+        assert_eq!(m.rows(&c)[1], Row::ControllerSettings);
+        m.input(Input::Down, &c);
+        assert_eq!(m.input(Input::Select, &c), Action::None);
+        assert_eq!(m.screen, Screen::Controls);
+        assert_eq!(m.title(&c), "CONTROLLER SETTINGS");
+        assert_eq!(m.header(&c).as_deref(), Some("FOR JOHN(2)"));
+        // The game stays paused.
+        assert!(m.pausing());
+        m.input(Input::Down, &c);
+        m.input(Input::Right, &c);
+        m.input(Input::Right, &c);
+        assert_eq!(m.profile.guests[1].buttons, ButtonLayout::Boxer);
+        assert_eq!(m.profile.controls.buttons, ButtonLayout::Default);
+        assert_eq!(m.label(Row::ButtonLayout, &c).1.as_deref(), Some("BOXER"));
+        m.input(Input::Down, &c);
+        m.input(Input::Down, &c);
+        assert_eq!(m.input(Input::Select, &c), Action::SaveProfile);
+        assert!(m.profile.guests[1].invert_look);
+        assert!(!m.profile.controls.invert_look);
+        // Back to the pause menu, on CONTROLLER SETTINGS.
+        assert_eq!(m.input(Input::Back, &c), Action::None);
+        assert_eq!(m.screen, Screen::Pause);
+        assert_eq!(m.rows(&c)[m.cursor], Row::ControllerSettings);
+        assert!(m.pausing());
+        // Off the profile again, it's player one's.
+        m.show(Screen::Profile);
+        m.choose(Row::Controls, &c);
+        assert_eq!(m.label(Row::ButtonLayout, &c).1.as_deref(), Some("DEFAULT"));
+        assert!(!m.pausing());
+    }
+
+    #[test]
+    fn mouse_sensitivity_is_only_player_ones() {
+        let maps = maps();
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        for owner in 0..crate::MAX_LOCAL {
+            let c = Context {
+                owner,
+                ..ctx(&maps, &[])
+            };
+            m.show(Screen::Pause);
+            m.choose(Row::ControllerSettings, &c);
+            let mouse = m.rows(&c).contains(&Row::MouseSensitivity);
+            assert_eq!(mouse, owner == 0, "player {owner}");
+            assert_eq!(m.rows(&c).len(), 4 + mouse as usize);
+        }
+    }
+
+    #[test]
+    fn every_screens_rows_end_above_its_notes_and_legend() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        // Where a screen's notes (or its legend, on screens without them)
+        // start, in the frame's units.
+        let floor = |m: &Menu| {
+            let top = match m.screen {
+                Screen::Main => MAIN_NOTE[1],
+                Screen::Profile => PROFILE_NOTE[1],
+                Screen::Controls => CONTROLS_NOTE[1],
+                Screen::Pause => LEGEND_BOUNDS[ui::DialogSize::Half as usize][1],
+                Screen::Lobby | Screen::Pregame => LEGEND_BOUNDS[0][1],
+                // The carnage report's hint.
+                Screen::PostGame => return 440.0,
+                _ => NOTE[1],
+            };
+            frame_box([0.0, top, 0.0, top])[1]
+        };
+        let screens = [
+            Screen::Main,
+            Screen::Lobby,
+            Screen::Options,
+            Screen::Profile,
+            Screen::Controls,
+            Screen::Pause,
+            Screen::PostGame,
+            Screen::Live,
+            Screen::Player,
+            Screen::Matchmaking,
+            Screen::Pregame,
+        ];
+        for screen in screens {
+            m.show(screen);
+            assert!(!m.lists(), "{screen:?} scrolls");
+            // Signed in, the online lobby has as many as eight.
+            let n = match screen {
+                Screen::Live => 8,
+                _ => m.rows(&c).len(),
+            };
+            let bottom = m.row_rect(n - 1)[3];
+            let floor = floor(&m);
+            assert!(
+                bottom < floor,
+                "{screen:?}'s {n} rows end at {bottom}, not {floor}"
+            );
+        }
+        m.show(Screen::Pause);
+        assert_eq!(m.rows(&c).len(), 4);
+        // The controller screen's five rows fit its longest setting beside
+        // its name, and end left of its panel.
+        m.show(Screen::Controls);
+        assert_eq!(m.rows(&c).len(), 5);
+        let mut hb = HudBuilder::new(1280.0, 960.0);
+        let p = Painter::new(
+            &mut hb,
+            &m.art,
+            space(&Frame::new(1280.0, 960.0)),
+            [0, 1],
+            0.0,
+        );
+        let place = m.place();
+        let [(label, style), (value, _)] = m.columns(None, &place);
+        let widest = p.width(style.font, "THUMBSTICK LAYOUT")
+            + 20.0
+            + p.width(style.font, "< LEGACY SOUTHPAW >");
+        assert!(widest <= value[2] - label[0], "{widest}");
+        let [_, _, right, _] = m.row_box(4);
+        let [left, _, panel_right] = CONTROLS_PANEL;
+        assert!(right + 20.0 < left - 20.0, "{right}");
+        // Its panel's longest button name and function fit, with a space
+        // between, and the panel is in the frame (800 units each side).
+        let body = Font::Body;
+        assert!(p.width(body, "D-PAD RIGHT") + 12.0 <= CONTROLS_COLUMN);
+        assert!(p.width(body, "RIGHT STICK") + 12.0 <= CONTROLS_COLUMN);
+        let does = p.width(body, "MELEE/USE LEFT WEAPON");
+        assert!(left + CONTROLS_COLUMN + does <= panel_right);
+        const { assert!(CONTROLS_PANEL[2] + 20.0 <= 800.0) };
+        // The lists show as many as fit, and scroll.
+        for screen in [
+            Screen::SystemLink,
+            Screen::Players,
+            Screen::RecentPlayers,
+            Screen::Playlists,
+        ] {
+            m.show(screen);
+            assert!(m.lists());
+            // Their place in the list goes under the last row shown.
+            let bottom = m.row_rect(MAX_LIST_ROWS)[1] + 9.0;
+            let floor = floor(&m);
+            assert!(bottom < floor, "{screen:?}: {bottom}");
+        }
     }
 
     #[test]
@@ -5825,9 +6328,9 @@ mod tests {
 
     /// A controller alone (the d-pad or stick, A and B, as `flow` turns its
     /// buttons into inputs) gets past the start screen, into every screen
-    /// off the main menu and back, changes settings, joins a game, and
-    /// pauses, resumes and answers the QUIT dialog; its legends show its
-    /// buttons.
+    /// off the main menu and back (the profile's CONTROLLER too), changes
+    /// settings, joins a game, and pauses, changes its CONTROLLER SETTINGS,
+    /// resumes and answers the QUIT dialog; its legends show its buttons.
     #[test]
     fn a_controller_works_every_screen() {
         use Input::{Back, Down, Left, Right, Select, Up};
@@ -5893,6 +6396,26 @@ mod tests {
         assert!(m.legend(&c).unwrap().contains('\u{e100}'));
         assert_eq!(m.input(Select, &c), Action::SaveProfile);
         assert!(!m.editing);
+        // CONTROLLER, at the bottom: its settings step with left and right
+        // (and A), B goes back to it.
+        m.input(Up, &c);
+        assert_eq!(row(&m), Row::Controls);
+        m.input(Select, &c);
+        assert_eq!(
+            (m.screen, row(&m)),
+            (Screen::Controls, Row::ThumbstickLayout)
+        );
+        assert_eq!(
+            m.legend(&c).as_deref(),
+            Some("\u{e100} SELECT \u{e101} BACK")
+        );
+        assert_eq!(m.input(Right, &c), Action::SaveProfile);
+        assert_eq!(m.profile.controls.sticks, StickLayout::Southpaw);
+        m.input(Down, &c);
+        assert_eq!(m.input(Select, &c), Action::SaveProfile);
+        assert_eq!(m.profile.controls.buttons, ButtonLayout::Southpaw);
+        m.input(Back, &c);
+        assert_eq!((m.screen, row(&m)), (Screen::Profile, Row::Controls));
         m.input(Back, &c);
         assert_eq!((m.screen, row(&m)), (Screen::Main, Row::Profile));
         // QUIT asks; B says no.
@@ -5920,9 +6443,33 @@ mod tests {
             Some("\u{e100} SELECT \u{e101} RESUME")
         );
         assert_eq!(m.input(Back, &c), Action::Resume);
+        // CONTROLLER SETTINGS, from the pause menu: the game stays
+        // paused, and B goes back to the pause menu.
         m.show(Screen::Pause);
         m.input(Down, &c);
+        m.input(Select, &c);
+        assert_eq!(
+            (m.screen, row(&m)),
+            (Screen::Controls, Row::ThumbstickLayout)
+        );
+        assert!(m.pausing());
+        assert_eq!(
+            m.legend(&c).as_deref(),
+            Some("\u{e100} SELECT \u{e101} BACK")
+        );
         m.input(Down, &c);
+        m.input(Down, &c);
+        assert_eq!(m.input(Left, &c), Action::SaveProfile);
+        assert_eq!(m.profile.controls.look_sensitivity, 2);
+        assert_eq!(m.input(Back, &c), Action::None);
+        assert_eq!(
+            (m.screen, row(&m)),
+            (Screen::Pause, Row::ControllerSettings)
+        );
+        m.show(Screen::Pause);
+        for _ in 0..3 {
+            m.input(Down, &c);
+        }
         m.input(Select, &c);
         assert_eq!(m.input(Select, &c), Action::None);
         assert_eq!((m.screen, row(&m)), (Screen::Pause, Row::Quit));
@@ -5936,7 +6483,7 @@ mod tests {
     /// whatever the window's size.
     fn quitting_twice_never_quits(m: &mut Menu, c: &Context, from: Screen) {
         let quit = match from {
-            Screen::Pause => 2,
+            Screen::Pause => 3,
             _ => MAIN_ROWS.len() - 1,
         };
         let sizes = [

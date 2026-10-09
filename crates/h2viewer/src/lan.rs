@@ -433,7 +433,7 @@ impl App {
                 if self.menu_for(k) {
                     return (l.player, l.command(&self.game, None, None));
                 }
-                let pad = l.pad.and_then(|id| self.pads.state(id));
+                let pad = l.pad_state(&self.pads);
                 let keyboard = l.keyboard.then_some(&keyboard);
                 (l.player, l.command(&self.game, keyboard, pad))
             })
