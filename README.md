@@ -99,13 +99,22 @@ your primary and secondary armour colours from Halo 2's 18, and build your
 emblem (one of Halo 2's 64 pictures in two colours over one of its 32
 backgrounds), with your model turning beside the menu. Your emblem shows in
 the lobby and on the scoreboard, Elites wear it on their back, and a team's
-Capture the Flag flag carries its first player's emblem. Its CONTROLS screen
-has the look settings: LOOK SENSITIVITY (the controller's right stick) and
-MOUSE SENSITIVITY run from 1 to 10, 3 by default as in Halo 2, and INVERT
-LOOK turns looking up and down around for both. It's saved in `%APPDATA%\halo2-rs\profile.txt` (the look settings as
-`look_sensitivity=`, `mouse_sensitivity=` and `invert_look=yes`/`no`) and
-sent to the other PCs in a System Link game (the look settings stay on your
-PC; splitscreen guests look at the defaults). In team games armour takes the
+Capture the Flag flag carries its first player's emblem. Its CONTROLLER
+screen has Halo 2's controller settings: THUMBSTICK LAYOUT and BUTTON LAYOUT
+(see Controllers below, with a list of what each button does), LOOK
+SENSITIVITY (a controller's look stick) from 1 to 10, 3 by default as in
+Halo 2, and LOOK INVERSION, which turns looking up and down around (the
+mouse's too). MOUSE SENSITIVITY, also 1 to 10, is player one's alone.
+Splitscreen guests have their own controller settings: CONTROLLER SETTINGS on
+a player's pause menu changes theirs (player one's too) mid-game. It's saved
+in `%APPDATA%\halo2-rs\profile.txt` (the controller settings as
+`look_sensitivity=`, `mouse_sensitivity=`, `invert_look=yes`/`no`,
+`button_layout=` (`default`, `southpaw`, `boxer`, `green_thumb`,
+`bumper_jumper` or `recon`) and `thumbstick_layout=` (`default`,
+`southpaw`, `legacy` or `legacy_southpaw`), the guests' with `guest1_` to
+`guest3_` in front; a profile from before has the defaults) and sent to the
+other PCs in a System Link game (the controller settings stay on your PC).
+In team games armour takes the
 team's colour. Splitscreen guests play the same model in other colours; bots
 each have their own look, about a third of them Elites. Spartans and Elites
 run, walk, strafe and crouch with the game's own animations played at the pace
@@ -122,7 +131,15 @@ Names show in the lobby, scoreboard, kill feed and announcements, over
 teammates in sight, and over whoever is under your crosshair, which turns red
 on an enemy and green on a teammate within your weapon's autoaim as in Halo 2
 (the colours of the game's HUD shaders). `H2_LIST_WEAPONS=1` lists each
-weapon's autoaim, aim assist and HUD pieces as a map loads.
+weapon's autoaim, aim assist and HUD pieces as a map loads. `H2_PADS=20`
+checks the controllers without the maps or a window: it lists those found
+(and how it reads them, XInput on Windows) with each player's layouts,
+buzzes each for half a second, prints every button, trigger and stick for
+20 seconds (each button with what it does in the layout of the player that
+controller's number would be, and in Halo 2's default), and quits.
+`H2_PADS=log` plays as usual and prints controllers coming and going, which
+window holds each, the window coming to the front or going behind, and each
+button pressed in a game with what it did.
 
 Capture the Flag: walk onto the enemy flag and press E (X on a controller) to
 take it, then carry it to your own flag's stand while yours is home to score; Q
@@ -220,10 +237,31 @@ they stay on foot to play the objective. `H2_DRIVE="<vehicle> <forward>
 <right> <look degrees> <seconds>"` drives one without a window for testing,
 and `H2_LIST_VEHICLES=1` lists them as a map loads.
 
-Controllers use Halo 2's layout (left stick move, right stick look, RT fire,
-LT grenade, A jump, B melee, X reload / hold to pick up, Y switch weapon, click
-sticks to crouch and zoom, Start pauses, hold Back for the scoreboard). The
-right stick turns as the game's player control tag sets it: its look curve
+Controllers use Halo 2's DEFAULT layouts to start with: left stick move,
+right stick look, RT fire, LT grenade (the left gun dual wielding), A jump, B
+melee, X reload / hold to pick up, Y switch weapon / hold to dual wield, LB
+the flashlight (the Arbiter's camouflage), RB swap grenades, click the sticks
+to crouch and zoom, Start pauses, hold Back for the scoreboard. Each player
+picks a BUTTON LAYOUT and a THUMBSTICK LAYOUT on the profile's CONTROLLER
+screen (or CONTROLLER SETTINGS on their pause menu), which lists what each
+button and stick does in the one picked:
+
+- SOUTHPAW: the triggers swapped.
+- BOXER: LT melees (fires the left gun dual wielding) and B throws grenades.
+- GREEN THUMB: click the right stick to melee; B zooms.
+- BUMPER JUMPER, Halo 3's, which Halo 2 never had: LB jumps, RB melees, B
+  reloads / hold to pick up, A swaps grenades, X the flashlight.
+- RECON, the Master Chief Collection's default: RB reloads / hold to pick
+  up, X or up on the d-pad the flashlight, left or right on the d-pad swaps
+  grenades.
+- Thumbsticks: SOUTHPAW swaps the sticks; LEGACY moves forward and back and
+  turns with the left stick, and looks up and down and strafes with the
+  right; LEGACY SOUTHPAW is Legacy swapped.
+
+Prompts name the button the player's layout uses (HOLD B TO DRIVE on Bumper
+Jumper). The menus keep the d-pad or left stick, A to choose, B to go back
+and X to change team whatever the layout. The look stick turns as the
+game's player control tag sets it: its look curve
 and turn rates (120 degrees a second across and 60 up and down at the default
 sensitivity, slower zoomed), speeding up to two and a half times that over
 0.8 s while the stick is pushed nearly all the way. Controllers also get
@@ -261,11 +299,17 @@ The host runs the game and its bots (fewer bots when more people join); if the
 host leaves, the joined PCs go back to System Link. A PC that leaves a game in
 progress leaves its Spartan to a bot, and takes it back, score and all, if it
 joins again (so does a member back in their party's custom game online).
-Two h2viewer windows on one PC can play System Link together, but the
-keyboard, mouse and controllers only reach the window in front (Windows gives
-controller input to the focused window), so two people at one PC should play
-splitscreen; two windows are for trying System Link on your own (set
-`H2_AUTOPILOT=1` for one of them and a bot plays it).
+Two h2viewer windows on one PC can play System Link together. On Windows the
+game reads controllers through XInput (Xbox Series X|S, Xbox One and Xbox 360
+controllers, wired or wireless; other controllers through Steam Input or
+DS4Windows), which reaches every window whichever is in front: a controller
+with a player in a window (after A or Start there) stays that window's, even
+while you're in the other one, until its player leaves the game (Back in the
+lobby, or quit), and one without works whichever window is in front. The
+keyboard and mouse only reach the window in front, so two people at one PC
+should play splitscreen or take a controller each; two windows are also for
+trying System Link on your own (set `H2_AUTOPILOT=1` for one of them and a
+bot plays it).
 
 Sound: weapons, reloads, grenades, footsteps, landings, shield recharge, the
 low shield alarm and rockets in flight play from the game's own sound files, placed left or right and

@@ -6,6 +6,7 @@
 use crate::effects;
 use crate::gpu::{hud_mode, DrawCall, Fx, SpriteVertex};
 use crate::hud::HudBuilder;
+use crate::input::Function;
 use crate::local::{armor_colors, LocalPlayer, TEAM_COLORS};
 use crate::scene::{FlagAssets, Scene, Vertex};
 use crate::App;
@@ -566,11 +567,8 @@ impl LocalPlayer {
             return None;
         }
         let kind = game.rules.game_type;
-        let (take, drop) = if self.pad_prompts() {
-            ("X", "Y")
-        } else {
-            ("E", "Q")
-        };
+        let take = self.prompt_button("E", Function::Reload);
+        let drop = self.prompt_button("Q", Function::SwitchWeapons);
         let feet = me.body.position;
         let near = |p: Vec3| (p - feet).truncate().length() < 1.0 && (p.z - feet.z).abs() < 1.0;
         let percent = |done: f32| (done / game.rules.bomb_arm_time * 100.0).min(99.0) as u32;

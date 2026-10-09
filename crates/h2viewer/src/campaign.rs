@@ -746,16 +746,15 @@ impl Mission {
             .map_or(Mat4::IDENTITY, |n| self.state.moved(n))
     }
 
-    /// What holding the action button would do here, for a player.
+    /// What the action `button` would do here, for a player.
     pub fn switch_prompt(
         &self,
         scene: &Scene,
         game: &Game,
         player: usize,
-        keyboard: bool,
+        button: &str,
     ) -> Option<String> {
         switch_near(&self.state, scene, game, player)?;
-        let button = if keyboard { "E" } else { "X" };
         Some(format!("PRESS {button} TO USE THE SWITCH"))
     }
 

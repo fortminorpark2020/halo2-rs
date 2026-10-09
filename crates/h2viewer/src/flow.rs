@@ -2,7 +2,7 @@
 //! ending games, and the menu music.
 
 use crate::campaign;
-use crate::input::PadPress;
+use crate::input::{Dir, PadButton, PadEvent};
 use crate::lan::Net;
 use crate::local::{player_colors, LocalPlayer, TEAM_COLORS, TEAM_NAMES};
 use crate::menu::{self, Action, Input, MapChoice, Menu, ScoreLine, Screen, SeatInfo};
@@ -42,6 +42,7 @@ pub struct Seat {
 }
 
 /// A controller press, as the menus see it.
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Press {
     Menu(Input),
     Join,
@@ -50,17 +51,20 @@ enum Press {
     None,
 }
 
-fn press(p: PadPress) -> Press {
-    match p {
-        PadPress::Up => Press::Menu(Input::Up),
-        PadPress::Down => Press::Menu(Input::Down),
-        PadPress::Left => Press::Menu(Input::Left),
-        PadPress::Right => Press::Menu(Input::Right),
-        PadPress::Claim => Press::Menu(Input::Select),
-        PadPress::Melee => Press::Menu(Input::Back),
-        PadPress::Join => Press::Join,
-        PadPress::Leave => Press::Leave,
-        PadPress::Reload => Press::Team,
+/// The menus go by the buttons themselves, whatever the player's layout
+/// (as Halo 2's do): the d-pad or left stick moves, A chooses, B goes
+/// back, X changes team, Start joins and Back leaves.
+fn press(e: PadEvent) -> Press {
+    match e {
+        PadEvent::Down(PadButton::Up) | PadEvent::Stick(Dir::Up) => Press::Menu(Input::Up),
+        PadEvent::Down(PadButton::Down) | PadEvent::Stick(Dir::Down) => Press::Menu(Input::Down),
+        PadEvent::Down(PadButton::Left) | PadEvent::Stick(Dir::Left) => Press::Menu(Input::Left),
+        PadEvent::Down(PadButton::Right) | PadEvent::Stick(Dir::Right) => Press::Menu(Input::Right),
+        PadEvent::Down(PadButton::A) => Press::Menu(Input::Select),
+        PadEvent::Down(PadButton::B) => Press::Menu(Input::Back),
+        PadEvent::Down(PadButton::Start) => Press::Join,
+        PadEvent::Down(PadButton::Back) => Press::Leave,
+        PadEvent::Down(PadButton::X) => Press::Team,
         _ => Press::None,
     }
 }
@@ -137,7 +141,7 @@ impl App {
             }
             Net::Joined { .. } => false,
         };
-        let pause = self.menu_open && self.menu.screen == Screen::Pause;
+        let pause = self.menu_open && self.menu.pausing();
         self.mode == Mode::Playing && pause && alone
     }
 
@@ -191,6 +195,7 @@ impl App {
             host_lobby,
             objectives: &objectives,
             online: online.as_ref(),
+            owner: self.menu_owner.unwrap_or(0),
         };
         f(&mut self.menu, &ctx)
     }
@@ -262,10 +267,10 @@ impl App {
     }
 
     /// A controller press while the menus are up.
-    pub(crate) fn menu_pad(&mut self, id: GamepadId, pad_press: PadPress) {
+    pub(crate) fn menu_pad(&mut self, id: GamepadId, event: PadEvent) {
         let seated = self.seats.iter().position(|s| s.pad == Some(id));
         let lobby = self.mode == Mode::Menu && self.menu.screen == Screen::Lobby;
-        match press(pad_press) {
+        match press(event) {
             // A guest's B takes only them out of the lobby.
             Press::Menu(Input::Back) if lobby && seated.is_some_and(|k| k > 0) => {
                 self.seats.retain(|s| s.pad != Some(id));
@@ -300,7 +305,9 @@ impl App {
                 }
                 self.sound.play_ui(&self.scene, menu::Sound::Forward);
             }
-            Press::Join if self.menu.screen == Screen::Pause => self.menu_input(Input::Back),
+            // Start on the pause menu (or its controller settings) goes
+            // back toward the game.
+            Press::Join if self.menu.pausing() => self.menu_input(Input::Back),
             Press::Join => self.menu_input(Input::Select),
             Press::Leave if lobby => match seated {
                 Some(0) => self.seats[0].pad = None,
@@ -1013,5 +1020,36 @@ mod tests {
         assert_eq!(bot_teams(&[0, h2net::ANY_TEAM], 2), [0, 1]);
         assert_eq!(bot_teams(&[1], 3), [0, 0, 1]);
         assert_eq!(bot_teams(&[], 2), [0, 1]);
+    }
+
+    #[test]
+    fn menus_use_the_controllers_own_buttons() {
+        use crate::input::{ButtonLayout, Function};
+        // B goes back and X picks a team even for a player whose layout
+        // has B reload (Bumper Jumper) or X light the flashlight (Recon).
+        assert_eq!(
+            ButtonLayout::BumperJumper.function(PadButton::B),
+            Some(Function::Reload)
+        );
+        assert_eq!(
+            ButtonLayout::Recon.function(PadButton::X),
+            Some(Function::Flashlight)
+        );
+        let down = |b| press(PadEvent::Down(b));
+        assert_eq!(down(PadButton::B), Press::Menu(Input::Back));
+        assert_eq!(down(PadButton::X), Press::Team);
+        assert_eq!(down(PadButton::A), Press::Menu(Input::Select));
+        assert_eq!(down(PadButton::Start), Press::Join);
+        assert_eq!(down(PadButton::Back), Press::Leave);
+        // The d-pad and the left stick move, whatever the layout gives the
+        // d-pad in a game.
+        assert_eq!(down(PadButton::Up), Press::Menu(Input::Up));
+        assert_eq!(press(PadEvent::Stick(Dir::Up)), Press::Menu(Input::Up));
+        assert_eq!(press(PadEvent::Stick(Dir::Left)), Press::Menu(Input::Left));
+        assert_eq!(down(PadButton::Right), Press::Menu(Input::Right));
+        // The rest do nothing there.
+        for b in [PadButton::RB, PadButton::LB, PadButton::RT, PadButton::Y] {
+            assert_eq!(down(b), Press::None);
+        }
     }
 }

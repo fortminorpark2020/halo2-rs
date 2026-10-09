@@ -19,9 +19,10 @@
 //! again to get out; the view follows the vehicle and it steers toward
 //! where you look. G (left trigger) boosts a Ghost or Banshee.
 //!
-//! Controllers (Halo 2's layout, see `input`): A takes over player one,
-//! Start joins as another splitscreen player (in a game: the pause menu),
-//! hold Back for the scoreboard.
+//! Controllers (Halo 2's button and thumbstick layouts, Bumper Jumper and
+//! Recon, chosen per player on the profile's CONTROLLER screen; see
+//! `input`): A takes over player one, Start joins as another splitscreen
+//! player (in a game: the pause menu), hold Back for the scoreboard.
 //!
 //! LAN: every game is open to other PCs on the network; System Link lists
 //! the games other PCs host (see `lan`).
@@ -70,7 +71,7 @@ use h2sim::{
     World,
 };
 use hud::HudBuilder;
-use input::{PadPress, Pads};
+use input::{PadButton, PadEvent, Pads};
 use lan::Net;
 use local::{display_name, kill_message, player_colors, Keyboard, LocalPlayer, Taps};
 use menu::{MapChoice, Menu, Screen, Settings};
@@ -1266,50 +1267,55 @@ impl App {
         self.announce(&format!("{guest} JOINED"));
     }
 
-    fn pad_pressed(&mut self, id: GamepadId, press: PadPress) {
-        match press {
-            PadPress::Disconnected => return self.pad_lost(id),
-            PadPress::Connected => return self.pad_back(id),
-            _ => {}
-        }
+    fn pad_pressed(&mut self, id: GamepadId, event: PadEvent) {
+        let button = match event {
+            PadEvent::Disconnected => return self.pad_lost(id),
+            PadEvent::Connected => return self.pad_back(id),
+            PadEvent::Down(b) => Some(b),
+            PadEvent::Stick(_) => None,
+        };
         if self.loading.is_some() {
             return;
         }
         if self.pad_in_menu(id) {
-            self.menu_pad(id, press);
+            self.menu_pad(id, event);
             return;
         }
+        // The left stick's pushes are only for menus.
+        let Some(button) = button else {
+            return;
+        };
         // A, Start or the trigger skip a cutscene.
-        let skip = matches!(press, PadPress::Claim | PadPress::Join | PadPress::Fire);
+        let skip = matches!(button, PadButton::A | PadButton::Start | PadButton::RT);
         if skip && self.mission.as_mut().is_some_and(|m| m.skip_cutscene()) {
             return;
         }
         let owner = self.locals.iter().position(|l| l.pad == Some(id));
-        match (owner, press) {
-            (None, PadPress::Claim) => {
-                if let Some(k) = local::new_pad_for(&self.locals, press) {
+        match (owner, button) {
+            (None, PadButton::A) => {
+                if let Some(k) = local::new_pad_for(&self.locals, button) {
                     self.take_pad(k, id);
                 }
             }
-            (None, PadPress::Join) => match local::new_pad_for(&self.locals, press) {
+            (None, PadButton::Start) => match local::new_pad_for(&self.locals, button) {
                 Some(k) => self.take_pad(k, id),
                 None => self.add_local(Some(id)),
             },
-            (Some(k), PadPress::Join) => self.pause(k),
-            (Some(k), p) => {
-                let dual = local::dual_wielding(&self.game, self.locals[k].player);
-                let t = &mut self.locals[k].taps;
-                match p {
-                    PadPress::Fire => t.fire = true,
-                    PadPress::Melee => t.melee = true,
-                    PadPress::Reload => t.reload = true,
-                    PadPress::SwitchWeapon => t.switch_weapon = true,
-                    PadPress::Grenade => t.throw_grenade = true,
-                    PadPress::SwitchGrenade => t.switch_grenade = true,
-                    PadPress::Vision => t.vision = true,
-                    // Dual wielding, the right stick's click does nothing.
-                    PadPress::Zoom if !dual => t.zoom = true,
-                    _ => {}
+            (Some(k), PadButton::Start) => self.pause(k),
+            // What it does in the game is up to the player's layout.
+            (Some(k), b) => {
+                let l = &mut self.locals[k];
+                let layout = l.controls.buttons;
+                if let Some(f) = layout.function(b) {
+                    l.taps.pad.insert(f);
+                }
+                if self.pads.log {
+                    let what = layout.meaning(b);
+                    let (name, label) = (layout.name(), b.label());
+                    println!(
+                        "controllers: pad {id} (player {}, {name}): {label} -> {what}",
+                        k + 1
+                    );
                 }
             }
             _ => {}
@@ -1354,6 +1360,26 @@ impl App {
         }
     }
 
+    /// The controllers people here play with, or lost and wait for, or
+    /// asked a host to play with: this window's, held against other
+    /// copies of the game on this PC.
+    fn pads_in_use(&self) -> Vec<GamepadId> {
+        let seats = self.seats.iter().map(|s| s.pad);
+        let locals = self.locals.iter().flat_map(|l| [l.pad, l.lost_pad]);
+        let waiting = match &self.net {
+            Net::Joined { waiting_pads, .. } => waiting_pads.as_slice(),
+            _ => &[],
+        };
+        let mut ids: Vec<GamepadId> = seats
+            .chain(locals)
+            .chain(waiting.iter().copied())
+            .flatten()
+            .collect();
+        ids.sort_by_key(|&id| usize::from(id));
+        ids.dedup();
+        ids
+    }
+
     /// A controller came back: to whoever lost it.
     fn pad_back(&mut self, id: GamepadId) {
         if let Some(k) = self.locals.iter().position(|l| l.lost_pad == Some(id)) {
@@ -1366,9 +1392,15 @@ impl App {
         self.poll_loading();
         self.poll_connect();
         self.update_music();
-        for (id, press) in self.pads.presses() {
-            self.pad_pressed(id, press);
+        // Each player's own look settings and controller layouts.
+        for (k, l) in self.locals.iter_mut().enumerate() {
+            l.controls = self.menu.profile.controls_of(k);
         }
+        for (id, event) in self.pads.events() {
+            self.pad_pressed(id, event);
+        }
+        let in_use = self.pads_in_use();
+        self.pads.keep_claimed(&in_use);
         // The game's sounds hold while it's paused, as in Halo 2.
         self.sound.audio.pause_game(self.paused());
         let games = self.browser.poll().to_vec();
@@ -1406,17 +1438,9 @@ impl App {
             .map(|k| paused || self.menu_for(k))
             .collect();
         for (l, frozen) in self.locals.iter_mut().zip(frozen) {
-            let pad = l.pad.and_then(|id| self.pads.state(id));
-            match pad.filter(|_| !frozen) {
+            match l.pad_state(&self.pads).filter(|_| !frozen) {
                 Some(state) => {
-                    // Player one's profile has their look settings;
-                    // guests play with Halo 2's.
-                    let controls = if l.keyboard {
-                        self.menu.profile.controls
-                    } else {
-                        camera::Controls::default()
-                    };
-                    l.look_with_stick(&self.scene, &self.game, &self.world, &state, controls, dt);
+                    l.look_with_stick(&self.scene, &self.game, &self.world, &state, dt);
                 }
                 None => l.stop_stick(),
             }
@@ -1551,7 +1575,7 @@ impl App {
                     // has the controls).
                     l.command(&self.game, None, None)
                 } else {
-                    let pad = l.pad.and_then(|id| self.pads.state(id));
+                    let pad = l.pad_state(&self.pads);
                     l.command(&self.game, l.keyboard.then_some(&keyboard), pad)
                 };
             }
@@ -2441,10 +2465,11 @@ impl App {
                     vh,
                 );
             }
+            let button = l.prompt_button("E", input::Function::Reload);
             let prompt = self
                 .mission
                 .as_ref()
-                .and_then(|m| m.switch_prompt(&self.scene, &self.game, l.player, !l.pad_prompts()));
+                .and_then(|m| m.switch_prompt(&self.scene, &self.game, l.player, button));
             if let Some(text) = prompt.filter(|_| !menu) {
                 let mut hb = HudBuilder::for_view(vw, vh, split);
                 let t = hb.text_scale();
@@ -2454,9 +2479,7 @@ impl App {
             }
             // The scoreboard while Tab or Back is held.
             let held = (l.keyboard && self.keys.contains(&KeyCode::Tab))
-                || l.pad
-                    .and_then(|id| self.pads.state(id))
-                    .is_some_and(|p| p.scores);
+                || l.pad_state(&self.pads).is_some_and(|p| p.scores);
             if held && !menu {
                 let mut hb = HudBuilder::new(vw, vh);
                 let (font, white) = (self.scene.hud_font, self.scene.hud_white);
@@ -2624,7 +2647,9 @@ impl ApplicationHandler for App {
                 self.keys.clear();
                 self.fire_held = false;
                 self.zoom_held = false;
+                self.pads.set_focused(false);
             }
+            WindowEvent::Focused(true) => self.pads.set_focused(true),
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else {
                     return;
@@ -2811,6 +2836,13 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // H2_PADS=<seconds>: list the controllers and print what they do for
+    // that long, then quit (no maps or window needed).
+    let pads = std::env::var("H2_PADS").ok();
+    if let Some(seconds) = pads.and_then(|v| v.parse::<f32>().ok()) {
+        input::probe(seconds, &profile::Profile::load());
+        return Ok(());
+    }
     let path = find_map()?;
     println!("loading {}", path.display());
     let level = load_level(&path)?;

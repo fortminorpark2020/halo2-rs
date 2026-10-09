@@ -2,6 +2,7 @@
 //! the player's view of the world through it, and looking around with
 //! the mouse and a controller as Halo 2 does.
 
+use crate::input::{ButtonLayout, StickLayout};
 use blam_cache::physics::PlayerControl;
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use std::collections::HashSet;
@@ -168,7 +169,8 @@ impl Lens {
     }
 }
 
-/// A player's look settings, kept in their profile.
+/// A player's look settings and controller layouts, kept in their
+/// profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Controls {
     /// A controller's look sensitivity, 1 to 10 (Halo 2's setting).
@@ -177,15 +179,21 @@ pub struct Controls {
     pub mouse_sensitivity: u8,
     /// Pushing the stick (or the mouse) forward looks down.
     pub invert_look: bool,
+    /// What the controller's buttons do.
+    pub buttons: ButtonLayout,
+    /// Which stick moves and which looks.
+    pub sticks: StickLayout,
 }
 
 impl Default for Controls {
-    /// Halo 2's: look sensitivity 3, not inverted.
+    /// Halo 2's: look sensitivity 3, not inverted, its default layouts.
     fn default() -> Controls {
         Controls {
             look_sensitivity: Controls::DEFAULT_SENSITIVITY,
             mouse_sensitivity: Controls::DEFAULT_SENSITIVITY,
             invert_look: false,
+            buttons: ButtonLayout::Default,
+            sticks: StickLayout::Default,
         }
     }
 }
@@ -455,7 +463,7 @@ mod tests {
         let at = |n| Controls {
             look_sensitivity: n,
             mouse_sensitivity: n,
-            invert_look: false,
+            ..Controls::default()
         };
         assert!((at(1).stick_scale() - 2.0 / 3.0).abs() < 1e-6);
         assert_eq!(at(3).stick_scale(), 1.0);

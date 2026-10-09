@@ -6,7 +6,7 @@ use crate::camera::{self, FlyCamera, StickLook};
 use crate::effects;
 use crate::gpu::{self, hud_mode, DrawCall, Fx, SpriteVertex};
 use crate::hud::{self, HudBuilder};
-use crate::input::{PadPress, PadState};
+use crate::input::{Function, FunctionSet, PadButton, PadState, Pads};
 use crate::rig;
 use crate::scene::{HudWidget, Scene, Vertex, WeaponAssets};
 use blam_cache::hud::{self as tags, Anchor, ScreenSplit};
@@ -312,6 +312,9 @@ pub struct Taps {
     pub throw_grenade: bool,
     pub switch_grenade: bool,
     pub vision: bool,
+    /// A controller's buttons pressed, by what they do under its player's
+    /// layout (done as the tick finds the game: dual wielding or not).
+    pub pad: FunctionSet,
 }
 
 /// What a player's first person view should react to this frame.
@@ -376,6 +379,9 @@ pub struct LocalPlayer {
     /// The controller they lost (unplugged, or out of battery): it coming
     /// back, or A on another, takes them back.
     pub lost_pad: Option<GamepadId>,
+    /// Their look settings and controller layouts (from the profile:
+    /// player one's, or this guest's).
+    pub controls: camera::Controls,
     /// Flying freely (Tab) instead of walking.
     pub flying: bool,
     pub camera: FlyCamera,
@@ -426,6 +432,7 @@ impl LocalPlayer {
             keyboard: false,
             pad: None,
             lost_pad: None,
+            controls: camera::Controls::default(),
             flying: false,
             camera: FlyCamera::looking_at(eye, eye + glam::vec3(p.yaw.cos(), p.yaw.sin(), 0.0)),
             taps: Taps::default(),
@@ -504,6 +511,25 @@ impl LocalPlayer {
         self.pad.is_some() || !self.keyboard
     }
 
+    /// What a prompt says to press for `f`: the `key` at the keyboard, or
+    /// the button the player's layout puts it on.
+    pub fn prompt_button(&self, key: &'static str, f: Function) -> &'static str {
+        if !self.pad_prompts() {
+            return key;
+        }
+        self.controls
+            .buttons
+            .button(f)
+            .map_or("?", PadButton::label)
+    }
+
+    /// This player's controller now, under their layouts, if it's
+    /// connected and this window takes its input.
+    pub fn pad_state(&self, pads: &Pads) -> Option<PadState> {
+        let reading = pads.reading(self.pad?)?;
+        Some(reading.state(self.controls.buttons, self.controls.sticks))
+    }
+
     pub fn message(&mut self, text: String) {
         self.messages.push((text, 5.0));
         if self.messages.len() > 4 {
@@ -554,21 +580,18 @@ impl LocalPlayer {
             cmd.switch_weapon |= held(KeyCode::KeyQ);
             cmd.throw_grenade |= held(KeyCode::KeyG) && k.captured;
         }
+        let dual = dual_wielding(game, self.player);
         if let Some(p) = pad {
-            if p.left != glam::Vec2::ZERO {
-                cmd.movement = p.left;
+            if p.movement != Vec2::ZERO {
+                cmd.movement = p.movement;
             }
-            cmd.jump |= p.jump;
-            cmd.crouch |= p.crouch;
-            cmd.fire |= p.fire;
-            // Dual wielding, the left trigger fires the left gun; clicking
-            // the right stick does nothing (zoom fires it from the mouse).
-            cmd.zoom |= p.zoom && !dual_wielding(game, self.player);
-            cmd.action |= p.action;
-            cmd.switch_weapon |= p.switch;
-            cmd.throw_grenade |= p.grenade;
-            // Halo 2's X both reloads and picks up.
-            cmd.reload |= p.action;
+            for f in p.held.iter() {
+                apply(&mut cmd, f, dual);
+            }
+        }
+        // And those pressed since the last tick, so a quick one counts.
+        for f in t.pad.iter() {
+            apply(&mut cmd, f, dual);
         }
         cmd
     }
@@ -669,27 +692,27 @@ impl LocalPlayer {
         Some((game.weapons.get(held.weapon)?, held.state.zoom))
     }
 
-    /// Look around with a controller's right stick, as Halo 2 does: the
-    /// globals' look rates, look function and speed-up when pegged,
-    /// scaled by the look sensitivity in `controls` (and slower zoomed
-    /// in). Its aim assist (the mouse has none, as in Halo 2 Vista) slows
-    /// the look near an enemy in the gun's magnetism (friction), and has
-    /// the crosshair follow the one it's on as they move across the view
-    /// while either stick is moved (adhesion). How strongly comes from
-    /// the globals; how adhesion follows (that share of the turn toward
-    /// them since the last frame) is the remake's reading of it.
+    /// Look around with a controller's look stick (the right one, but for
+    /// the thumbstick layouts that move it), as Halo 2 does: the globals'
+    /// look rates, look function and speed-up when pegged, scaled by the
+    /// player's look sensitivity (and slower zoomed in). Its aim assist
+    /// (the mouse has none, as in Halo 2 Vista) slows the look near an
+    /// enemy in the gun's magnetism (friction), and has the crosshair
+    /// follow the one it's on as they move across the view while either
+    /// stick is moved (adhesion). How strongly comes from the globals; how
+    /// adhesion follows (that share of the turn toward them since the last
+    /// frame) is the remake's reading of it.
     pub fn look_with_stick(
         &mut self,
         scene: &Scene,
         game: &Game,
         world: &World,
         pad: &PadState,
-        controls: camera::Controls,
         dt: f32,
     ) {
         let magnet = self.magnet(game, world);
         let magnification = self.magnification(scene, game);
-        let look = (controls, magnification);
+        let look = (self.controls, magnification);
         self.turn_with_stick(&scene.player_control, pad, look, magnet, dt);
     }
 
@@ -704,13 +727,13 @@ impl LocalPlayer {
         dt: f32,
     ) {
         let scale = controls.stick_scale() / magnification.max(1.0);
-        let mut turn = self.stick.turn(control, pad.right, scale, dt);
+        let mut turn = self.stick.turn(control, pad.look, scale, dt);
         turn.y *= controls.pitch_sign();
         if let Some(m) = magnet {
             turn *= camera::friction(m.off, m.angle, control.magnetism_friction);
         }
         let toward = magnet.map(|m| (m.player, camera::angles_to(self.camera.position, m.centre)));
-        let moving = pad.left != Vec2::ZERO || pad.right != Vec2::ZERO;
+        let moving = pad.movement != Vec2::ZERO || pad.look != Vec2::ZERO;
         if let (Some((j, now)), Some((was_on, was)), true) = (toward, self.adhesion, moving) {
             if j == was_on {
                 let adhesion = control.magnetism_adhesion.clamp(0.0, 1.0);
@@ -1275,12 +1298,17 @@ impl LocalPlayer {
             return hb.finish();
         }
         let riding = me.seat.is_some();
+        let action = self.prompt_button("E", Function::Reload);
         let prompts = [
-            (game.swap_prompt(self.player), ["E", "X"], "PICK UP"),
-            (game.dual_prompt(self.player), ["Q", "Y"], "DUAL WIELD"),
+            (game.swap_prompt(self.player), action, "PICK UP"),
+            (
+                game.dual_prompt(self.player),
+                self.prompt_button("Q", Function::SwitchWeapons),
+                "DUAL WIELD",
+            ),
         ];
         let mut y = under + 16.0 * t;
-        if let Some(text) = vehicle_prompt(scene, game, self.player, !self.pad_prompts()) {
+        if let Some(text) = vehicle_prompt(scene, game, self.player, action) {
             hb.text(font, [w * 0.5, y], 9.0 * t, &text, hud::BLUE);
             y += 12.0 * t;
         }
@@ -1294,9 +1322,8 @@ impl LocalPlayer {
             }
             return hb.finish();
         }
-        for (weapon, buttons, what) in prompts.into_iter().filter(|_| !riding) {
+        for (weapon, button, what) in prompts.into_iter().filter(|_| !riding) {
             if let Some(a) = weapon.and_then(|w| scene.weapons.get(w)) {
-                let button = buttons[self.pad_prompts() as usize];
                 let name = display_name(&a.def.name);
                 let text = format!("HOLD {button} TO {what} {name}");
                 hb.text(font, [w * 0.5, y], 9.0 * t, &text, hud::BLUE);
@@ -1335,9 +1362,8 @@ impl LocalPlayer {
     }
 }
 
-/// What holding the action button would do to a vehicle nearby.
-fn vehicle_prompt(scene: &Scene, game: &Game, i: usize, keyboard: bool) -> Option<String> {
-    let button = if keyboard { "E" } else { "X" };
+/// What holding the action `button` would do to a vehicle nearby.
+fn vehicle_prompt(scene: &Scene, game: &Game, i: usize, button: &str) -> Option<String> {
     let (v, what) = match game.vehicle_action(i)? {
         VehicleAction::Hijack { vehicle, .. } => (vehicle, "BOARD"),
         VehicleAction::Enter { vehicle, seat } => {
@@ -1470,17 +1496,17 @@ fn weapon_hud(
 /// A: someone whose controller went, else player one at the keyboard.
 /// Start: only a guest whose controller went (player one at the keyboard
 /// plays on without theirs), else no one, and Start brings in a new player.
-pub fn new_pad_for(locals: &[LocalPlayer], press: PadPress) -> Option<usize> {
+pub fn new_pad_for(locals: &[LocalPlayer], press: PadButton) -> Option<usize> {
     let lost = |l: &LocalPlayer| l.lost_pad.is_some();
     match press {
         // A guest whose controller went first: their view asks for A, and
         // player one can play on at the keyboard meanwhile.
-        PadPress::Claim => locals
+        PadButton::A => locals
             .iter()
             .position(|l| lost(l) && !l.keyboard)
             .or_else(|| locals.iter().position(lost))
             .or_else(|| locals.iter().position(|l| l.keyboard && l.pad.is_none())),
-        PadPress::Join => locals.iter().position(|l| lost(l) && !l.keyboard),
+        PadButton::Start => locals.iter().position(|l| lost(l) && !l.keyboard),
         _ => None,
     }
 }
@@ -1488,6 +1514,33 @@ pub fn new_pad_for(locals: &[LocalPlayer], press: PadPress) -> Option<usize> {
 /// Player `i` holds a gun in each hand.
 pub fn dual_wielding(game: &Game, i: usize) -> bool {
     game.players.get(i).is_some_and(|p| p.left.is_some())
+}
+
+/// Do what a controller's button does under its player's layout, as the
+/// game is now (`dual`: a gun in each hand).
+fn apply(cmd: &mut Command, f: Function, dual: bool) {
+    match f {
+        Function::RightWeapon => cmd.fire = true,
+        // The game's grenade button: a grenade, the left hand's gun dual
+        // wielding, or a vehicle's boost or second weapon.
+        Function::LeftWeapon => cmd.throw_grenade = true,
+        Function::ThrowGrenade => cmd.throw_grenade |= !dual,
+        Function::MeleeOrLeftWeapon if dual => cmd.throw_grenade = true,
+        Function::MeleeOrLeftWeapon | Function::Melee => cmd.melee = true,
+        // Halo 2's X both reloads and (held) picks up.
+        Function::Reload => {
+            cmd.reload = true;
+            cmd.action = true;
+        }
+        Function::SwitchWeapons => cmd.switch_weapon = true,
+        Function::Jump => cmd.jump = true,
+        Function::SwapGrenades => cmd.switch_grenade = true,
+        Function::Flashlight => cmd.vision = true,
+        // Dual wielding, zoom does nothing (the mouse's zoom fires the left
+        // gun).
+        Function::Zoom => cmd.zoom |= !dual,
+        Function::Crouch => cmd.crouch = true,
+    }
 }
 
 /// Where each of `n` splitscreen views goes in a `w` x `h` window: one fills
@@ -1526,6 +1579,7 @@ pub fn screen_split(k: usize, n: usize) -> ScreenSplit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::{ButtonLayout, ButtonSet, PadReading, StickLayout};
 
     /// A HUD widget named `name` that says yes to the `yes_unit` flags.
     fn widget(name: &str, yes_unit: u16) -> HudWidget {
@@ -1580,7 +1634,7 @@ mod tests {
         let i = game.add_player();
         let control = PlayerControl::default();
         let pad = PadState {
-            right: Vec2::new(0.6, 0.0),
+            look: Vec2::new(0.6, 0.0),
             ..PadState::default()
         };
         let look = (camera::Controls::default(), 1.0);
@@ -1622,7 +1676,7 @@ mod tests {
             l.camera.yaw - yaw
         };
         let strafing = PadState {
-            left: Vec2::X,
+            movement: Vec2::X,
             ..PadState::default()
         };
         let followed = follow(strafing);
@@ -1804,19 +1858,178 @@ mod tests {
         assert_eq!(kill(1, Some(2), 2, false), "SARGE COMMITTED SUICIDE");
     }
 
+    /// A controller with `buttons` held, under the button `layout`.
+    fn pressing(layout: ButtonLayout, buttons: &[PadButton]) -> PadState {
+        let mut held = ButtonSet::default();
+        for &b in buttons {
+            held.insert(b);
+        }
+        let reading = PadReading {
+            held,
+            ..PadReading::default()
+        };
+        reading.state(layout, StickLayout::Default)
+    }
+
+    /// Player `i` takes a second gun in their left hand.
+    fn dual_wield(game: &mut Game, i: usize) {
+        game.players[i].left = game.players[i].weapons.first().cloned();
+        assert!(dual_wielding(game, i));
+    }
+
     #[test]
     fn clicking_the_right_stick_dual_wielding_fires_nothing() {
         let mut game = h2sim::testing::game();
         let i = game.add_player();
         let l = LocalPlayer::new(i, &game);
-        let pad = PadState {
-            zoom: true,
-            ..PadState::default()
-        };
+        let pad = pressing(ButtonLayout::Default, &[PadButton::RightStick]);
         assert!(l.command(&game, None, Some(pad)).zoom);
         // Zoom fires the left gun, so the click doesn't count.
-        game.players[i].left = game.players[i].weapons.first().cloned();
+        dual_wield(&mut game, i);
         assert!(!l.command(&game, None, Some(pad)).zoom);
+    }
+
+    #[test]
+    fn bumper_jumper_jumps_with_lb_and_swaps_grenades_with_a() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let press = |layout, b| l.command(&game, None, Some(pressing(layout, &[b])));
+        let bj = |b| press(ButtonLayout::BumperJumper, b);
+        let c = bj(PadButton::LB);
+        assert!(c.jump && !c.vision);
+        let c = bj(PadButton::A);
+        assert!(c.switch_grenade && !c.jump);
+        let c = bj(PadButton::RB);
+        assert!(c.melee && !c.switch_grenade);
+        let c = bj(PadButton::B);
+        assert!(c.reload && c.action && !c.melee);
+        let c = bj(PadButton::X);
+        assert!(c.vision && !c.reload && !c.action);
+        assert!(bj(PadButton::Y).switch_weapon);
+        // Halo 2's default, for comparison: LB the flashlight, A jump.
+        assert!(press(ButtonLayout::Default, PadButton::LB).vision);
+        assert!(press(ButtonLayout::Default, PadButton::A).jump);
+        assert!(press(ButtonLayout::Default, PadButton::X).action);
+    }
+
+    #[test]
+    fn boxers_left_trigger_melees_or_fires_the_left_gun() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let pad = pressing(ButtonLayout::Boxer, &[PadButton::LT]);
+        let c = l.command(&game, None, Some(pad));
+        assert!(c.melee && !c.throw_grenade);
+        dual_wield(&mut game, i);
+        let c = l.command(&game, None, Some(pad));
+        assert!(c.throw_grenade && !c.melee);
+    }
+
+    #[test]
+    fn boxers_b_throws_grenades_but_never_fires_the_left_gun() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let pad = pressing(ButtonLayout::Boxer, &[PadButton::B]);
+        let c = l.command(&game, None, Some(pad));
+        assert!(c.throw_grenade && !c.melee);
+        dual_wield(&mut game, i);
+        let c = l.command(&game, None, Some(pad));
+        assert!(!c.throw_grenade && !c.melee);
+    }
+
+    #[test]
+    fn green_thumb_melees_with_the_right_stick_and_zooms_with_b() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let stick = pressing(ButtonLayout::GreenThumb, &[PadButton::RightStick]);
+        let c = l.command(&game, None, Some(stick));
+        assert!(c.melee && !c.zoom);
+        let b = pressing(ButtonLayout::GreenThumb, &[PadButton::B]);
+        let c = l.command(&game, None, Some(b));
+        assert!(c.zoom && !c.melee);
+        // Dual wielding, B does nothing.
+        dual_wield(&mut game, i);
+        let c = l.command(&game, None, Some(b));
+        assert!(!c.zoom && !c.melee && !c.throw_grenade);
+        assert!(l.command(&game, None, Some(stick)).melee);
+    }
+
+    #[test]
+    fn southpaw_fires_with_the_left_trigger() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let press = |b| l.command(&game, None, Some(pressing(ButtonLayout::Southpaw, &[b])));
+        let c = press(PadButton::LT);
+        assert!(c.fire && !c.throw_grenade);
+        let c = press(PadButton::RT);
+        assert!(c.throw_grenade && !c.fire);
+    }
+
+    #[test]
+    fn legacy_turns_with_the_left_stick() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let control = PlayerControl::default();
+        let look = (camera::Controls::default(), 1.0);
+        let reading = PadReading {
+            left: Vec2::new(0.6, 0.0),
+            ..PadReading::default()
+        };
+        let turned = |sticks| {
+            let pad = reading.state(ButtonLayout::Default, sticks);
+            let mut l = LocalPlayer::new(i, &game);
+            let yaw = l.camera.yaw;
+            l.turn_with_stick(&control, &pad, look, None, 0.1);
+            (l.camera.yaw - yaw, pad.movement)
+        };
+        // Legacy: the left stick turns, at the right stick's rate.
+        let (turn, movement) = turned(StickLayout::Legacy);
+        assert!((turn.to_degrees() + 3.0).abs() < 1e-3, "{turn}");
+        assert_eq!(movement, Vec2::ZERO);
+        // By default it strafes.
+        let (turn, movement) = turned(StickLayout::Default);
+        assert_eq!(turn, 0.0);
+        assert_eq!(movement, Vec2::new(0.6, 0.0));
+    }
+
+    #[test]
+    fn taps_resolve_when_the_tick_runs() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let mut l = LocalPlayer::new(i, &game);
+        // Boxer's left trigger tapped and let go between ticks, with one
+        // gun in hand...
+        let lt = ButtonLayout::Boxer.function(PadButton::LT).unwrap();
+        l.taps.pad.insert(lt);
+        let c = l.command(&game, None, None);
+        assert!(c.melee && !c.throw_grenade);
+        // ...but a second one by the tick: it fires that.
+        dual_wield(&mut game, i);
+        let c = l.command(&game, None, None);
+        assert!(c.throw_grenade && !c.melee);
+    }
+
+    #[test]
+    fn pick_up_and_vehicle_prompts_name_the_layouts_button() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let mut l = LocalPlayer::new(i, &game);
+        l.keyboard = true;
+        assert_eq!(l.prompt_button("E", Function::Reload), "E");
+        assert_eq!(l.prompt_button("Q", Function::SwitchWeapons), "Q");
+        // Once a controller's A takes player one over, its buttons.
+        l.pad = Some(pad(0));
+        assert_eq!(l.prompt_button("E", Function::Reload), "X");
+        assert_eq!(l.prompt_button("Q", Function::SwitchWeapons), "Y");
+        l.controls.buttons = ButtonLayout::BumperJumper;
+        assert_eq!(l.prompt_button("E", Function::Reload), "B");
+        l.controls.buttons = ButtonLayout::Recon;
+        assert_eq!(l.prompt_button("E", Function::Reload), "RB");
+        assert_eq!(l.prompt_button("Q", Function::SwitchWeapons), "Y");
     }
 
     /// A controller's id, which gilrs hands out only for controllers it
@@ -1839,23 +2052,23 @@ mod tests {
         locals[1].pad = Some(pad(1));
         // Player one's controller went: they play on at the keyboard.
         locals[0].lost_pad = Some(pad(0));
-        assert_eq!(new_pad_for(&locals, PadPress::Join), None);
-        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(0));
+        assert_eq!(new_pad_for(&locals, PadButton::Start), None);
+        assert_eq!(new_pad_for(&locals, PadButton::A), Some(0));
         // A guest whose controller went is the one Start (or A) is for.
         locals[1].pad = None;
         locals[1].lost_pad = Some(pad(1));
-        assert_eq!(new_pad_for(&locals, PadPress::Join), Some(1));
-        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(1));
+        assert_eq!(new_pad_for(&locals, PadButton::Start), Some(1));
+        assert_eq!(new_pad_for(&locals, PadButton::A), Some(1));
         locals[0].lost_pad = None;
-        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(1));
+        assert_eq!(new_pad_for(&locals, PadButton::A), Some(1));
         // No one lost theirs: A takes player one at the keyboard, unless
         // a controller already has them.
         locals[1].lost_pad = None;
         locals[1].pad = Some(pad(1));
-        assert_eq!(new_pad_for(&locals, PadPress::Claim), Some(0));
-        assert_eq!(new_pad_for(&locals, PadPress::Join), None);
+        assert_eq!(new_pad_for(&locals, PadButton::A), Some(0));
+        assert_eq!(new_pad_for(&locals, PadButton::Start), None);
         locals[0].pad = Some(pad(2));
-        assert_eq!(new_pad_for(&locals, PadPress::Claim), None);
+        assert_eq!(new_pad_for(&locals, PadButton::A), None);
     }
 
     #[test]
