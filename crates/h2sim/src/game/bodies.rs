@@ -53,10 +53,7 @@ impl Game {
                 continue;
             }
             if rise < side {
-                let body = &mut self.players[upper].body;
-                body.position.z = top;
-                body.velocity.z = body.velocity.z.max(lift);
-                body.grounded = true;
+                self.players[upper].body.stand_on(top, lift);
             } else {
                 // Right on top of each other: back the way they face.
                 let away = if d > 1e-4 {
@@ -156,6 +153,25 @@ mod tests {
         };
         g.step(&world, &[jump, Command::default()]);
         assert!(g.players[0].body.velocity.z > 1.0);
+    }
+
+    #[test]
+    fn a_long_drop_onto_a_head_hurts_like_one_onto_the_floor() {
+        let world = floor();
+        // 8 units above the head, and 8 above the floor beside them.
+        let mut g = pair(Vec3::new(0.0, 0.0, 8.725), Vec3::ZERO);
+        g.add_player();
+        g.players[2].body.position = Vec3::new(3.0, 0.0, 8.0);
+        let idle = [Command::default(); 3];
+        for _ in 0..240 {
+            g.step(&world, &idle);
+        }
+        let left = |p: &crate::game::Spartan| p.shield + p.health;
+        let (on_head, on_floor) = (left(&g.players[0]), left(&g.players[2]));
+        assert!(on_floor < 115.0, "{on_floor}");
+        assert!((on_head - on_floor).abs() < 5.0, "{on_head} vs {on_floor}");
+        // The one landed on isn't hurt.
+        assert_eq!(left(&g.players[1]), 115.0);
     }
 
     #[test]

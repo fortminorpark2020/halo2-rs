@@ -107,6 +107,21 @@ impl Player {
         (pos + Vec3::Z * r, pos + Vec3::Z * top)
     }
 
+    /// Set down on top of something with its top at `top`, moving up or
+    /// down at `lift` (another player's head): a landing like one on the
+    /// ground, so a long drop onto it still hurts (by the body's own
+    /// speed down, so being carried up by it doesn't).
+    pub fn stand_on(&mut self, top: f32, lift: f32) {
+        let falling = (-self.velocity.z).max(0.0);
+        let gravity = GRAVITY * self.movement.gravity_scale * self.gravity;
+        if gravity > 0.0 {
+            self.fell = self.fell.max(falling * falling / (2.0 * gravity));
+        }
+        self.position.z = top;
+        self.velocity.z = self.velocity.z.max(lift);
+        self.grounded = true;
+    }
+
     /// Advance by `dt` seconds of real time.
     pub fn update(&mut self, world: &World, input: Input, dt: f32) {
         self.accumulator = (self.accumulator + dt).min(0.25);
@@ -707,6 +722,55 @@ mod tests {
             "peak {peak} expected {expected}"
         );
         assert!(p.grounded);
+    }
+
+    /// The highest the feet get in a jump from the floor, crouching from
+    /// `crouch_at` ticks (of 60 a second) after take-off, if at all.
+    fn feet_apex(crouch_at: Option<usize>) -> f32 {
+        let w = room();
+        let mut p = player_at(0.0);
+        for _ in 0..30 {
+            p.update(&w, Input::default(), 1.0 / 60.0);
+        }
+        let mut top: f32 = 0.0;
+        for k in 0..120 {
+            let input = Input {
+                jump: k == 0,
+                crouch: crouch_at.is_some_and(|c| k >= c),
+                ..Default::default()
+            };
+            p.update(&w, input, 1.0 / 60.0);
+            top = top.max(p.position.z);
+        }
+        top
+    }
+
+    #[test]
+    fn crouching_in_the_air_pulls_the_feet_up() {
+        // A crouch jump clears the difference between the standing and
+        // crouching heights higher (0.725 - 0.5).
+        let plain = feet_apex(None);
+        let crouched = feet_apex(Some(1));
+        assert!(
+            (crouched - plain - 0.225).abs() < 0.01,
+            "{plain} then {crouched}"
+        );
+        // Crouching on the floor takes the biped's 0.2 s and keeps the
+        // feet down.
+        let w = room();
+        let mut p = player_at(0.0);
+        p.update(&w, Input::default(), 0.5);
+        let down = Input {
+            crouch: true,
+            ..Default::default()
+        };
+        let mut ticks = 0;
+        while p.crouch < 1.0 && ticks < 60 {
+            p.update(&w, down, 1.0 / 60.0);
+            ticks += 1;
+        }
+        assert_eq!(ticks, 12);
+        assert!(p.position.z.abs() < 0.01, "z = {}", p.position.z);
     }
 
     /// A strip 4 wide along +x of floor sections at the given heights

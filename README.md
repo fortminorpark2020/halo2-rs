@@ -21,10 +21,13 @@ install. No game files are included in this repository.
   deeper; it won't squeeze under anything lower than the body; crouching takes
   the biped tag's 0.2 s, and crouching in the air pulls the feet up, so a
   crouch jump clears a higher ledge; players are solid to each other and can
-  stand on each other's heads), the maps' gravity lifts, vents and jump pads
+  stand on each other's heads, and a long drop onto someone's head hurts as
+  much as one onto the floor), the maps' gravity lifts, vents and jump pads
   (Lockout, Midship, Ivory Tower, Coagulation, Headlong, Foundation, Warlock,
-  Gemini, Colossus, Backwash, Ascension) pushing players as their physics
-  models' phantoms say,
+  Gemini, Colossus, Backwash, Desolation, Tombstone) pushing players as their
+  physics models' phantoms say (Relic's watchtower lift and Ascension's jump
+  pad do nothing yet: read our way they stranded players in mid-air and threw
+  them off the level),
   vehicles (wheels with suspension, hovering, flight, seats, turrets, splatters
   and wrecks),
   weapons (fire rate, bursts, spread, magazines, reloads, zoom, autoaim) from the weapon tags,
@@ -177,12 +180,16 @@ that kills. Other Spartans bend at the waist to aim up and down.
 A melee lands at its animation's damage keyframe (a sixth of a second in with
 the Battle Rifle), not when the button goes down, and you can't fire, melee or
 throw again until the animation lets go (two thirds of a second with the
-Battle Rifle); a melee that lands from behind kills outright. A grenade leaves
-the hand 8 frames into the throw animation and you can't fire until the throw
-ends (1.23 s). Grenades fly at the biped tag's 10 world units a second; a frag
-goes off half a second after it first lands, a plasma grenade 1.5 s after it
-sticks or lands, neither before its tag's 1.5 s arming time, and a plasma
-grenade stuck to someone kills them.
+Battle Rifle); a melee that lands from behind kills outright (not someone
+sitting in a vehicle). As in Halo 2, pressing reload (or switching weapons)
+during a melee calls off the rest of it, so you can fire as soon as it has
+struck: that's the BXR (B, X, right trigger on a controller; F, R, left mouse
+on the keyboard). Another melee or a grenade still waits for the animation.
+A grenade leaves the hand 8 frames into the throw animation and you can't fire
+until the throw ends (1.23 s). Grenades fly at the biped tag's 10 world units a
+second; a frag goes off half a second after it first lands, a plasma grenade
+1.5 s after it sticks or lands, neither before its tag's 1.5 s arming time, and
+a plasma grenade stuck to someone kills them.
 `H2_START_WEAPONS=needler,smg` changes what everyone spawns with, for testing.
 
 Dual wielding: holding a one-handed gun (SMG, Magnum, Plasma Pistol, Plasma

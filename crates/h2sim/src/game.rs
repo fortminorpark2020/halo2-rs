@@ -610,6 +610,19 @@ pub struct Actor {
     pub gone: bool,
 }
 
+/// What a busy player's hands are in the middle of (`Spartan::busy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recovery {
+    /// A grenade throw (or nothing): it plays out.
+    Fixed,
+    /// A melee: reloading or switching weapons calls off the rest of it.
+    Melee,
+    /// A melee called off: from the strike on the gun can fire, though
+    /// another melee or a throw still waits for it to let go (Halo 2's
+    /// BXR).
+    CalledOff,
+}
+
 #[derive(Debug, Clone)]
 pub struct Spartan {
     /// The gamertag shown in the scoreboard and kill messages.
@@ -676,6 +689,8 @@ pub struct Spartan {
     /// Seconds until the melee or throw under way lets go: no firing,
     /// meleeing or throwing till then.
     busy: f32,
+    /// Whether what `busy` waits on can be, or has been, called off.
+    recovery: Recovery,
     action_held: f32,
     /// Seconds the switch button has been held (negative once acted on).
     switch_held: f32,
@@ -1216,6 +1231,7 @@ impl Game {
             striking: None,
             throwing: None,
             busy: 0.0,
+            recovery: Recovery::Fixed,
             action_held: 0.0,
             switch_held: f32::MIN,
             seat: None,
@@ -1436,11 +1452,19 @@ impl Game {
         if pressed(cmd.throw_grenade, last.throw_grenade) && free(self) && !dual && !riding {
             self.throw_grenade(i);
         }
+        // Reloading calls off the rest of a melee (so does switching
+        // weapons, in `switch_weapon`).
+        if pressed(cmd.reload, last.reload) {
+            self.call_off_melee(i);
+        }
 
         // The weapon in hand. The sword's trigger swings it. Neither gun
-        // fires while a melee or throw is under way.
+        // fires while a melee or throw is under way, unless the melee has
+        // struck and been called off.
         let (eye, (f, r, u)) = (self.players[i].eye(), self.players[i].basis());
-        let ready = self.players[i].readying <= 0.0 && free(self);
+        let p = &self.players[i];
+        let called_off = p.recovery == Recovery::CalledOff && p.striking.is_none();
+        let ready = p.readying <= 0.0 && (free(self) || called_off);
         let mut shots = Vec::new();
         let mut reloaded = Vec::new();
         // A flag in hand only melees.
@@ -1499,7 +1523,7 @@ impl Game {
                 reloaded.push((true, was.1));
             }
         }
-        if lunges && pressed(cmd.fire, last.fire) && ready {
+        if lunges && pressed(cmd.fire, last.fire) && ready && free(self) {
             self.swing(i, true);
         }
         for (left, empty) in reloaded {
@@ -1526,10 +1550,11 @@ impl Game {
     }
 
     fn switch_weapon(&mut self, i: usize) {
-        let p = &mut self.players[i];
-        if p.weapons.len() < 2 {
+        if self.players[i].weapons.len() < 2 {
             return;
         }
+        self.call_off_melee(i);
+        let p = &mut self.players[i];
         if let Some(h) = p.weapons.get_mut(p.current) {
             h.state.put_away();
         }
@@ -1661,8 +1686,23 @@ impl Game {
         let p = &mut self.players[i];
         p.striking = Some((hit, lunge));
         p.busy = recover.max(hit);
+        p.recovery = Recovery::Melee;
         self.reveal(i, powerups::FIRE_REVEAL);
         self.events.push(Event::Melee { player: i });
+    }
+
+    /// Reloading or switching weapons during a melee calls off the rest of
+    /// its animation, as in Halo 2 (where B, X, R strikes then fires at
+    /// once, and so does B, Y, Y): from the strike on, the gun can fire (a
+    /// switched-to gun once it's up). Another melee or a throw still waits
+    /// for the melee to let go. A press before the strike counts from the
+    /// strike on: how early Halo 2 takes it isn't known, so that's our
+    /// choice.
+    fn call_off_melee(&mut self, i: usize) {
+        let p = &mut self.players[i];
+        if p.recovery == Recovery::Melee && p.busy > ON_CUE {
+            p.recovery = Recovery::CalledOff;
+        }
     }
 
     /// The melee or throw under way: on cue, the strike lands or the
@@ -1739,9 +1779,13 @@ impl Game {
     }
 
     /// Player `i` stands behind player `j`, as `j` faces (within
-    /// `BACKSMACK_ANGLE` of straight behind).
+    /// `BACKSMACK_ANGLE` of straight behind), and `j` is on foot (a
+    /// gunner on a turret faces where they aim, not where the seat does).
     fn behind(&self, i: usize, j: usize) -> bool {
         let (a, b) = (&self.players[i], &self.players[j]);
+        if b.seat.is_some() {
+            return false;
+        }
         let facing = Vec2::from_angle(b.yaw);
         let away = (b.body.position - a.body.position).truncate();
         away.length() > 1e-4 && facing.dot(away.normalize()) > BACKSMACK_ANGLE.cos()
@@ -1761,6 +1805,7 @@ impl Game {
         }
         p.throwing = Some((release, p.grenade));
         p.busy = time.max(release);
+        p.recovery = Recovery::Fixed;
         self.events.push(Event::Thrown { player: i });
     }
 
@@ -2801,6 +2846,292 @@ pub(crate) mod tests {
                 || g.players[1].shield < 70.0
                 || !g.players[1].alive
         );
+    }
+
+    /// When things happened in `melee_test`, in ticks from its first.
+    #[derive(Debug, Default)]
+    struct Timeline {
+        /// Player 1 first lost shields or health.
+        struck: Option<usize>,
+        /// Player 0 swung a melee, and fired.
+        swings: Vec<usize>,
+        shots: Vec<usize>,
+    }
+
+    /// Player 1 just within reach of player 0's melee, standing still and
+    /// facing `yaw`, after `setup`; player 0 does `at(tick, aim)` at each
+    /// tick for 1.5 s, `aim` at player 1's chest.
+    fn melee_test(
+        yaw: f32,
+        setup: impl FnOnce(&mut Game),
+        at: impl Fn(usize, Command) -> Command,
+    ) -> (Timeline, Game) {
+        let world = floor();
+        let mut g = game();
+        duel(&mut g);
+        g.players[1].body.position = Vec3::new(0.6, 0.0, 0.0);
+        setup(&mut g);
+        let aim = aim_at(&g, 0, 1, 0.4);
+        let still = Command {
+            yaw,
+            ..Command::default()
+        };
+        let whole = g.players[1].shield + g.players[1].health;
+        let mut seen = Timeline::default();
+        for tick in 0..90 {
+            g.events.clear();
+            g.step(&world, &[at(tick, aim), still]);
+            if seen.struck.is_none() && g.players[1].shield + g.players[1].health < whole {
+                seen.struck = Some(tick);
+            }
+            for e in &g.events {
+                match *e {
+                    Event::Melee { player: 0 } => seen.swings.push(tick),
+                    Event::Shot { player: 0, .. } => seen.shots.push(tick),
+                    _ => {}
+                }
+            }
+        }
+        (seen, g)
+    }
+
+    /// Facing player 0 (who stands toward -x).
+    const FACING: f32 = std::f32::consts::PI;
+
+    #[test]
+    fn a_melee_strikes_on_cue_and_holds_the_gun_till_it_lets_go() {
+        // B, then R held: the strike lands 5 frames of 30 in, and the gun
+        // waits for the animation to let go at frame 20.
+        let (seen, g) = melee_test(
+            FACING,
+            |_| {},
+            |t, aim| Command {
+                melee: t == 0,
+                fire: t > 0,
+                ..aim
+            },
+        );
+        assert_eq!(seen.struck, Some(10), "{seen:?}");
+        assert_eq!(seen.shots.first(), Some(&40), "{seen:?}");
+        // From the front a melee takes 60 off the shields.
+        assert!(g.players[1].alive);
+        // B, B, B...: another melee waits as long.
+        let (seen, _) = melee_test(
+            FACING,
+            |_| {},
+            |t, aim| Command {
+                melee: t % 2 == 0,
+                ..aim
+            },
+        );
+        assert_eq!(seen.swings, [0, 40, 80], "{seen:?}");
+    }
+
+    #[test]
+    fn reloading_calls_off_the_rest_of_a_melee() {
+        // B, then X once the strike has landed (with nothing to reload),
+        // then R: the gun fires at once (Halo 2's BXR).
+        let (seen, g) = melee_test(
+            FACING,
+            |_| {},
+            |t, aim| Command {
+                melee: t == 0,
+                reload: t == 12,
+                fire: t == 13,
+                ..aim
+            },
+        );
+        assert_eq!(seen.struck, Some(10), "{seen:?}");
+        assert_eq!(seen.shots, [13], "{seen:?}");
+        assert!(g.players[0].weapons[0].state.reloading.is_none());
+        // X pressed straight after B, before the strike: the gun is free
+        // once the strike lands, not before.
+        let (seen, _) = melee_test(
+            FACING,
+            |_| {},
+            |t, aim| Command {
+                melee: t == 0,
+                reload: t == 2,
+                fire: t > 2,
+                ..aim
+            },
+        );
+        assert_eq!(seen.struck, Some(10), "{seen:?}");
+        assert_eq!(seen.shots.first(), Some(&10), "{seen:?}");
+        // Another melee (BXB) still waits for the first to let go.
+        let (seen, _) = melee_test(
+            FACING,
+            |_| {},
+            |t, aim| Command {
+                melee: t == 0 || t == 14,
+                reload: t == 12,
+                ..aim
+            },
+        );
+        assert_eq!(seen.swings, [0], "{seen:?}");
+        // With rounds to load, X reloads, and the reload (a second here)
+        // holds the gun.
+        let (seen, g) = melee_test(
+            FACING,
+            |g| g.players[0].weapons[0].state.loaded = 5,
+            |t, aim| Command {
+                melee: t == 0,
+                reload: t == 12,
+                fire: t == 13,
+                ..aim
+            },
+        );
+        assert!(seen.shots.is_empty(), "{seen:?}");
+        assert_eq!(g.players[0].weapons[0].state.loaded, 12);
+    }
+
+    #[test]
+    fn switching_weapons_calls_off_the_rest_of_a_melee() {
+        // Y, Y after a melee: the gun fires as soon as it's back up, not
+        // when the melee would have let go.
+        let quick = |g: &mut Game| {
+            for w in &mut g.weapons {
+                w.ready_time = 0.1;
+            }
+            let state = WeaponState::new(&g.weapons[1]);
+            g.players[0].weapons.push(HeldWeapon { weapon: 1, state });
+        };
+        let (seen, g) = melee_test(FACING, quick, |t, aim| Command {
+            melee: t == 0,
+            switch_weapon: t == 12 || t == 14,
+            fire: t > 14,
+            ..aim
+        });
+        assert_eq!(g.players[0].current, 0);
+        assert!(matches!(seen.shots.first(), Some(20 | 21)), "{seen:?}");
+    }
+
+    #[test]
+    fn a_throw_and_the_swords_swing_cant_be_called_off() {
+        let (seen, _) = melee_test(
+            FACING,
+            |_| {},
+            |t, aim| Command {
+                throw_grenade: t == 0,
+                reload: t == 20,
+                fire: t > 20,
+                ..aim
+            },
+        );
+        assert_eq!(seen.shots.first(), Some(&74), "{seen:?}");
+        // The sword's trigger swings it, after the last swing lets go.
+        let (seen, _) = melee_test(
+            FACING,
+            |g| g.rules.lunge_weapons = vec![0],
+            |t, aim| Command {
+                melee: t == 0,
+                reload: t == 12,
+                fire: t == 13 || t == 41,
+                ..aim
+            },
+        );
+        assert_eq!(seen.swings, [0, 41], "{seen:?}");
+    }
+
+    #[test]
+    fn a_melee_from_behind_kills() {
+        let (seen, g) = melee_test(
+            0.0,
+            |_| {},
+            |t, aim| Command {
+                melee: t == 0,
+                ..aim
+            },
+        );
+        assert_eq!(seen.struck, Some(10));
+        assert!(!g.players[1].alive);
+        // From the side it's an ordinary melee.
+        let (_, g) = melee_test(
+            std::f32::consts::FRAC_PI_2,
+            |_| {},
+            |t, aim| Command {
+                melee: t == 0,
+                ..aim
+            },
+        );
+        assert!(g.players[1].alive);
+        assert_eq!(g.players[1].shield, 10.0);
+    }
+
+    #[test]
+    fn only_someone_on_foot_can_be_hit_from_behind() {
+        let mut g = game();
+        duel(&mut g);
+        g.players[1].body.position = Vec3::new(0.6, 0.0, 0.0);
+        g.players[1].yaw = 0.0;
+        assert!(g.behind(0, 1));
+        g.players[1].seat = Some((0, 0));
+        assert!(!g.behind(0, 1));
+    }
+
+    #[test]
+    fn no_melee_while_dual_wielding() {
+        let (seen, g) = melee_test(
+            FACING,
+            |g| {
+                let state = WeaponState::new(&g.weapons[0]);
+                g.players[0].left = Some(HeldWeapon { weapon: 0, state });
+            },
+            |t, aim| Command {
+                melee: t == 0,
+                ..aim
+            },
+        );
+        assert!(seen.swings.is_empty() && seen.struck.is_none(), "{seen:?}");
+        assert_eq!(g.players[1].shield, 70.0);
+    }
+
+    #[test]
+    fn health_comes_back_after_a_while() {
+        let world = floor();
+        let mut g = game();
+        g.add_player();
+        g.damage(0, None, 100.0, false);
+        assert_eq!((g.players[0].shield, g.players[0].health), (0.0, 15.0));
+        let wait = |g: &mut Game, seconds: f32| {
+            for _ in 0..(seconds / TICK).round() as usize {
+                g.step(&world, &[Command::default()]);
+            }
+        };
+        // Shields are back after 7 s; health waits 10 s, then takes 5 s
+        // to fill from none (here 3.3 s from a third).
+        wait(&mut g, 9.9);
+        assert_eq!((g.players[0].shield, g.players[0].health), (70.0, 15.0));
+        wait(&mut g, 2.0);
+        let mid = g.players[0].health;
+        assert!(mid > 15.0 && mid < 45.0, "{mid}");
+        wait(&mut g, 1.5);
+        assert_eq!(g.players[0].health, 45.0);
+    }
+
+    #[test]
+    fn a_stuck_plasma_grenade_kills() {
+        let world = floor();
+        let mut g = game();
+        duel(&mut g);
+        g.players[1].body.position = Vec3::new(3.0, 0.0, 0.0);
+        g.add_player();
+        // A bystander a little way off.
+        g.players[2].body.position = Vec3::new(3.0, 1.2, 0.0);
+        g.grenades.push(Grenade {
+            kind: GrenadeKind::Plasma,
+            owner: 0,
+            position: g.players[1].body.position + Vec3::Z * 0.5,
+            velocity: Vec3::ZERO,
+            fuse: Some(TICK * 0.5),
+            stuck: Some(1),
+            stuck_offset: Vec3::Z * 0.5,
+            age: 2.0,
+        });
+        g.step(&world, &[Command::default(); 3]);
+        assert!(g.grenades.is_empty());
+        assert!(!g.players[1].alive);
+        assert!(g.players[2].alive);
     }
 
     /// Player 0 dropped from `height` onto the floor; their health after.
