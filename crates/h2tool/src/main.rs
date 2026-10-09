@@ -1108,7 +1108,11 @@ fn ui_skin(s: &blam_cache::ui::ListSkin) {
             .iter()
             .map(|f| format!("{:.2}@{:.0?}", f.alpha, f.position))
             .collect();
-        println!("  item animation {k}: {} ms {}", a.period_ms, alphas.join(" "));
+        println!(
+            "  item animation {k}: {} ms {}",
+            a.period_ms,
+            alphas.join(" ")
+        );
     }
     for t in &s.texts {
         ui_text("  ", t);

@@ -616,6 +616,8 @@ pub struct Menu {
     /// A line to show (why a game ended, a join that failed).
     pub notice: Option<String>,
     pub sound: Option<Sound>,
+    /// Seconds the game has been running, for what pulses.
+    pub time: f32,
     pub profile: Profile,
     /// Typing a new gamertag.
     pub editing: bool,
@@ -904,7 +906,12 @@ fn button_bitmap(t: &ui::TagRef) -> ui::Bitmap {
 
 /// An item lit to `alpha` without the art: Halo 2's blue.
 fn glow(alpha: f32) -> [f32; 4] {
-    [HIGHLIGHT[0], HIGHLIGHT[1], HIGHLIGHT[2], HIGHLIGHT[3] * alpha]
+    [
+        HIGHLIGHT[0],
+        HIGHLIGHT[1],
+        HIGHLIGHT[2],
+        HIGHLIGHT[3] * alpha,
+    ]
 }
 
 /// A box of menu units in the frame's 640x480 units (x0, y0, x1, y1).
@@ -1037,6 +1044,7 @@ impl Menu {
             settings,
             notice: None,
             sound: None,
+            time: 0.0,
             profile,
             editing: false,
             difficulty: 1,
@@ -2274,8 +2282,21 @@ impl Menu {
         ctx: &Context,
     ) {
         let veil = [0.0, 0.0, 0.02, 0.8];
-        hb.quad(white, [0.0, 0.0, w, h], [0.0; 4], veil, hud_mode::PLAIN, 0.0);
-        hb.text_left(font, f.at(ROW_X, 48.0), 26.0 * f.s, &self.title(ctx), BRIGHT);
+        hb.quad(
+            white,
+            [0.0, 0.0, w, h],
+            [0.0; 4],
+            veil,
+            hud_mode::PLAIN,
+            0.0,
+        );
+        hb.text_left(
+            font,
+            f.at(ROW_X, 48.0),
+            26.0 * f.s,
+            &self.title(ctx),
+            BRIGHT,
+        );
         let rule = f.rect([ROW_X, 84.0, ROW_X + 300.0, 86.0]);
         hb.quad(white, rule, [0.0; 4], HIGHLIGHT, hud_mode::PLAIN, 0.0);
         self.draw_report(hb, font, white, f, ctx);
@@ -2333,8 +2354,14 @@ impl Menu {
             }
             _ => {
                 let veil = [VEIL[0], VEIL[1], VEIL[2], 0.7];
-                p.hb
-                    .quad(p.white, [0.0, 0.0, w, h], [0.0; 4], veil, hud_mode::PLAIN, 0.0);
+                p.hb.quad(
+                    p.white,
+                    [0.0, 0.0, w, h],
+                    [0.0; 4],
+                    veil,
+                    hud_mode::PLAIN,
+                    0.0,
+                );
             }
         }
         if matches!(self.screen, Screen::Confirm | Screen::Pause) {
@@ -2345,10 +2372,20 @@ impl Menu {
                 VEIL
             };
             // Over a game the pause menu lets it show through.
-            let a = if under == Screen::Pause { PAUSE_VEIL } else { a };
+            let a = if under == Screen::Pause {
+                PAUSE_VEIL
+            } else {
+                a
+            };
             let veil = tag_color([r, gr, b], a);
-            p.hb
-                .quad(p.white, [0.0, 0.0, w, h], [0.0; 4], veil, hud_mode::PLAIN, 0.0);
+            p.hb.quad(
+                p.white,
+                [0.0, 0.0, w, h],
+                [0.0; 4],
+                veil,
+                hud_mode::PLAIN,
+                0.0,
+            );
         }
     }
 
@@ -2469,12 +2506,18 @@ impl Menu {
             if selectable {
                 match skin {
                     Some(skin) => {
-                        let plain = |b: &ui::Bitmap| !is(b, "\\hilite") && !is(b, "\\hilite_bracket");
+                        let plain =
+                            |b: &ui::Bitmap| !is(b, "\\hilite") && !is(b, "\\hilite_bracket");
                         p.item(skin, corner, look * fade, stretch, plain);
                         if focused {
                             let hilite = skin.bitmaps.iter().find(|b| is(b, "\\hilite"));
-                            if let Some((b, [_, h])) = hilite.and_then(|b| Some((b, self.art.size(b)?))) {
-                                let at = [corner[0] + b.corner[0] as f32, corner[1] + b.corner[1] as f32 + h];
+                            if let Some((b, [_, h])) =
+                                hilite.and_then(|b| Some((b, self.art.size(b)?)))
+                            {
+                                let at = [
+                                    corner[0] + b.corner[0] as f32,
+                                    corner[1] + b.corner[1] as f32 + h,
+                                ];
                                 p.bitmap(b, at, fade, stretch);
                             }
                         }
@@ -2499,8 +2542,14 @@ impl Menu {
             }
             let bright = matches!(row, Row::SearchStatus | Row::Starting);
             let lstyle = match (selectable, bright) {
-                (false, true) => Style { color: BRIGHT, ..lstyle },
-                (false, false) => Style { color: DIM, ..lstyle },
+                (false, true) => Style {
+                    color: BRIGHT,
+                    ..lstyle
+                },
+                (false, false) => Style {
+                    color: DIM,
+                    ..lstyle
+                },
                 _ => lstyle,
             }
             .alpha(alpha);
@@ -2541,7 +2590,9 @@ impl Menu {
                 };
                 // What players are doing is long: smaller.
                 let font = match row {
-                    Row::Player(_) | Row::RecentPlayer(_) | Row::Playlist(_) => Font::SplitHudMessage,
+                    Row::Player(_) | Row::RecentPlayer(_) | Row::Playlist(_) => {
+                        Font::SplitHudMessage
+                    }
                     _ => vstyle.font,
                 };
                 let vstyle = Style {
@@ -2611,7 +2662,12 @@ impl Menu {
             }
             _ if !ctx.objectives.is_empty() => {
                 let box_ = text.map_or(OBJECTIVES_BOX, |t| bounds(t.bounds));
-                draw_objectives(p, [box_[0], box_[1] + 40.0, box_[2], box_[3] - 120.0], style, ctx.objectives);
+                draw_objectives(
+                    p,
+                    [box_[0], box_[1] + 40.0, box_[2], box_[3] - 120.0],
+                    style,
+                    ctx.objectives,
+                );
             }
             _ => {}
         }
@@ -2691,7 +2747,10 @@ impl Menu {
         } as usize;
         let g = &self.art.ui.globals;
         let (box_, color) = if self.art.loaded() {
-            (bounds(g.button_key_bounds[size]), tag_color(g.text_color, 1.0))
+            (
+                bounds(g.button_key_bounds[size]),
+                tag_color(g.text_color, 1.0),
+            )
         } else {
             (LEGEND_BOUNDS[size], DIM)
         };
@@ -3021,7 +3080,10 @@ impl Menu {
                 ([l + 10.0, t, r - 10.0, b], style)
             }
         };
-        let value = match texts.get(1).filter(|_| self.list_screen() == Some(menuart::OPTIONS)) {
+        let value = match texts
+            .get(1)
+            .filter(|_| self.list_screen() == Some(menuart::OPTIONS))
+        {
             Some(t) => (bounds(t.bounds), Style::of(t, 1.0)),
             None => {
                 let [l, t, _, b] = label.0;
@@ -3136,7 +3198,10 @@ impl Menu {
     /// The map the lobby is on, if it's here.
     fn lobby_map<'c>(&self, ctx: &Context<'c>) -> Option<&'c MapChoice> {
         match ctx.host_lobby {
-            Some(l) => ctx.maps.iter().find(|m| m.name.eq_ignore_ascii_case(&l.map)),
+            Some(l) => ctx
+                .maps
+                .iter()
+                .find(|m| m.name.eq_ignore_ascii_case(&l.map)),
             None => ctx.maps.get(self.settings.map),
         }
     }
@@ -3158,7 +3223,14 @@ impl Menu {
             let ([x, y], [w, h]) = size;
             let rect = p.sp.rect([x, y, x + w, y - h]);
             let full = [0.0, 0.0, 1.0, 1.0];
-            p.hb.quad(MENU_TEXTURES + pic, rect, full, [1.0; 4], hud_mode::PLAIN, 0.0);
+            p.hb.quad(
+                MENU_TEXTURES + pic,
+                rect,
+                full,
+                [1.0; 4],
+                hud_mode::PLAIN,
+                0.0,
+            );
         }
         let keep = |b: &ui::Bitmap| {
             LOBBY_ART.iter().any(|n| is(b, n)) || is(b, "\\unknown_map") && picture.is_none()
@@ -3172,21 +3244,27 @@ impl Menu {
         let rows = self.rows(ctx);
         let cursor = self.settled(&rows, ctx);
         let white = Style::new(Font::Body, ui::LEFT_JUSTIFY, BRIGHT);
-        let style = |name: &str| {
-            self.lobby_text(name)
-                .map_or(white, |t| Style::of(t, 1.0))
-        };
+        let style = |name: &str| self.lobby_text(name).map_or(white, |t| Style::of(t, 1.0));
         let place = |name: &str, otherwise: [f32; 4]| {
-            self.lobby_text(name).map_or(otherwise, |t| bounds(t.bounds))
+            self.lobby_text(name)
+                .map_or(otherwise, |t| bounds(t.bounds))
         };
         // The game type, and the map, over the quick options.
         let game_type = self.label(Row::GameType, ctx).1.unwrap_or_default();
         let gt = place("gametype_format", GAME_TYPE_LINE);
-        p.line(gt, style("gametype_format"), &p.fit(white.font, &game_type, gt[2] - gt[0]));
+        p.line(
+            gt,
+            style("gametype_format"),
+            &p.fit(white.font, &game_type, gt[2] - gt[0]),
+        );
         let map_name = self.label(Row::Map, ctx).1.unwrap_or_default();
         let on = format!("ON {map_name}");
         let ml = place("mapname_format", MAP_LINE);
-        p.line(ml, style("mapname_format"), &p.fit(white.font, &on, ml[2] - ml[0]));
+        p.line(
+            ml,
+            style("mapname_format"),
+            &p.fit(white.font, &on, ml[2] - ml[0]),
+        );
         let quick = self
             .lobby_text("gametype_options_format")
             .and_then(|t| t.text.clone())
@@ -3212,7 +3290,9 @@ impl Menu {
                         .and_then(|s| s.panes.first())
                         .and_then(|p| p.buttons.get(b));
                     match button.and_then(|b| b.bitmap.as_ref()) {
-                        Some(t) => p.bitmap(&button_bitmap(t), [picture[0], picture[1]], alpha, 1.0),
+                        Some(t) => {
+                            p.bitmap(&button_bitmap(t), [picture[0], picture[1]], alpha, 1.0)
+                        }
                         None => p.quad(picture, glow(alpha * 0.6)),
                     }
                     let style = button.map_or(Style::new(Font::LargeBody, 0, BRIGHT), |b| {
@@ -3236,9 +3316,10 @@ impl Menu {
                     };
                     let color = if lit { BRIGHT } else { TEXT };
                     let style = Style::new(Font::Body, ui::LEFT_JUSTIFY, color);
-                    let style = self
-                        .lobby_text("gametype_format")
-                        .map_or(style, |t| Style { font: t.font, ..style });
+                    let style = self.lobby_text("gametype_format").map_or(style, |t| Style {
+                        font: t.font,
+                        ..style
+                    });
                     let text = p.fit(style.font, &text, line[2] - line[0]);
                     p.line(line, style, &text);
                 }
@@ -3262,7 +3343,14 @@ impl Menu {
         let body = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
         match (&self.notice, map) {
             (Some(n), _) => {
-                p.paragraph(about, Style { color: WARNING, ..body }, n);
+                p.paragraph(
+                    about,
+                    Style {
+                        color: WARNING,
+                        ..body
+                    },
+                    n,
+                );
             }
             (None, Some(m)) if !m.description.is_empty() => {
                 p.paragraph(about, body, &m.description.to_uppercase());
@@ -3370,7 +3458,10 @@ impl Menu {
                 .find(|m| m.name.eq_ignore_ascii_case(&g.map))
         });
         let picture = map.and_then(|m| m.picture);
-        let pane = self.art.screen(menuart::BROWSER).and_then(|s| s.panes.first());
+        let pane = self
+            .art
+            .screen(menuart::BROWSER)
+            .and_then(|s| s.panes.first());
         let keep = |b: &ui::Bitmap| {
             !is(b, "\\live_icons_sm") && !(is(b, "\\unknown_map") && picture.is_some())
         };
@@ -3382,14 +3473,24 @@ impl Menu {
             let ([x, y], [w, h]) = place.unwrap_or((BROWSER_PICTURE_AT, BROWSER_PICTURE_SIZE));
             let rect = p.sp.rect([x, y, x + w, y - h]);
             let full = [0.0, 0.0, 1.0, 1.0];
-            p.hb.quad(MENU_TEXTURES + pic, rect, full, [1.0; 4], hud_mode::PLAIN, 0.0);
+            p.hb.quad(
+                MENU_TEXTURES + pic,
+                rect,
+                full,
+                [1.0; 4],
+                hud_mode::PLAIN,
+                0.0,
+            );
         }
         let text = |name: &str| pane.and_then(|p| p.texts.iter().find(|t| t.string == name));
         // The columns' heads (there's no game type or variant to show).
         for (name, head, at) in BROWSER_HEADS {
             let (box_, style) = match text(name) {
                 Some(t) => (bounds(t.bounds), Style::of(t, 1.0)),
-                None => (at, Style::new(Font::SplitHudMessage, ui::LEFT_JUSTIFY, TEXT)),
+                None => (
+                    at,
+                    Style::new(Font::SplitHudMessage, ui::LEFT_JUSTIFY, TEXT),
+                ),
             };
             p.line(box_, style, head);
         }
@@ -3399,12 +3500,28 @@ impl Menu {
                     let line = t.text.clone().unwrap_or_default().to_uppercase();
                     (bounds(t.bounds), Style::of(t, 1.0), line)
                 }
-                None => (NO_GAMES, Style::new(Font::SplitHudMessage, 0, TEXT), NO_GAMES_TEXT.into()),
+                None => (
+                    NO_GAMES,
+                    Style::new(Font::SplitHudMessage, 0, TEXT),
+                    NO_GAMES_TEXT.into(),
+                ),
             };
             p.line(box_, style, &line);
             let searching = self.label(Row::Searching, ctx).0;
-            let below = [box_[0], box_[3] - 10.0, box_[2], box_[3] - 10.0 - (box_[1] - box_[3])];
-            p.line(below, Style { color: DIM, ..style }, &searching);
+            let below = [
+                box_[0],
+                box_[3] - 10.0,
+                box_[2],
+                box_[3] - 10.0 - (box_[1] - box_[3]),
+            ];
+            p.line(
+                below,
+                Style {
+                    color: DIM,
+                    ..style
+                },
+                &searching,
+            );
         } else {
             self.draw_games(p, ctx, &rows, cursor);
         }
@@ -3412,7 +3529,14 @@ impl Menu {
         let help = text("help_create_game").map_or(BROWSER_HELP, |t| bounds(t.bounds));
         let body = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
         if let Some(n) = &self.notice {
-            p.paragraph(help, Style { color: WARNING, ..body }, n);
+            p.paragraph(
+                help,
+                Style {
+                    color: WARNING,
+                    ..body
+                },
+                n,
+            );
         } else if let Some(g) = chosen {
             let about = match map {
                 Some(m) if !m.description.is_empty() => m.description.to_uppercase(),
@@ -3421,7 +3545,14 @@ impl Menu {
             let title = format!("{} ON {}", g.computer.to_uppercase(), map_title(&g.map));
             let step = p.line_height(body.font);
             let [l, t, r, b] = help;
-            p.line([l, t, r, t - step], Style { color: BRIGHT, ..body }, &p.fit(body.font, &title, r - l));
+            p.line(
+                [l, t, r, t - step],
+                Style {
+                    color: BRIGHT,
+                    ..body
+                },
+                &p.fit(body.font, &title, r - l),
+            );
             p.paragraph([l, t - step, r, b], body, &about);
         } else {
             p.paragraph(help, body, &self.header(ctx).unwrap_or_default());
@@ -3464,7 +3595,10 @@ impl Menu {
                 let column = BROWSER_COLUMNS[k];
                 let (box_, style) = match texts.get(column.0) {
                     Some(t) => (bounds(t.bounds), Style::of(t, 1.0)),
-                    None => (column.1, Style::new(Font::SplitHudMessage, ui::LEFT_JUSTIFY, TEXT)),
+                    None => (
+                        column.1,
+                        Style::new(Font::SplitHudMessage, ui::LEFT_JUSTIFY, TEXT),
+                    ),
                 };
                 let style = style.alpha(look.max(TEXT_FLOOR) * fade);
                 let cell = p.fit(style.font, cell, box_[2] - box_[0]);
@@ -3718,12 +3852,15 @@ fn draw_icons(p: &mut Painter, row: Row, item: [f32; 4], label_end: f32, o: &Onl
                 },
                 _ => return,
             };
-            let at = p.sp.rect([x0 + 20.0, mid + half, x0 + 20.0 + ICON, mid - half]);
+            let at =
+                p.sp.rect([x0 + 20.0, mid + half, x0 + 20.0 + ICON, mid - half]);
             rank::draw(p.hb, at, level);
             let Some(player) = player else {
                 return;
             };
-            let leads = o.party().is_some_and(|party| party.leader == player.account);
+            let leads = o
+                .party()
+                .is_some_and(|party| party.leader == player.account);
             let icon = if leads {
                 LiveIcon::Leader
             } else if player.size > 1 {
@@ -3738,7 +3875,8 @@ fn draw_icons(p: &mut Painter, row: Row, item: [f32; 4], label_end: f32, o: &Onl
             let Some(pl) = o.playlists().get(i) else {
                 return;
             };
-            let rect = p.sp.rect([x1 - ICON - 16.0, mid + half, x1 - 16.0, mid - half]);
+            let rect =
+                p.sp.rect([x1 - ICON - 16.0, mid + half, x1 - 16.0, mid - half]);
             if !o.missing_maps(pl).is_empty() {
                 rank::draw_live(p.hb, rect, LiveIcon::Download);
             } else if pl.level > 0 {
@@ -5609,9 +5747,8 @@ mod tests {
             let [x0, y0, x1, y1] = f.rect(r);
             [(x0 + x1) * 0.5, (y0 + y1) * 0.5]
         };
-        let overlap = |a: [f32; 4], b: [f32; 4]| {
-            a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
-        };
+        let overlap =
+            |a: [f32; 4], b: [f32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
         // QUIT clicked on the main menu, and on the pause menu.
         for (from, quit) in [(Screen::Main, MAIN_ROWS.len() - 1), (Screen::Pause, 2)] {
             m.show(from);

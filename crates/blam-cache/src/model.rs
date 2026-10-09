@@ -252,6 +252,81 @@ pub fn sky_render_model(set: &mut MapSet, sky: DatumIndex) -> Result<DatumIndex>
     Ok(mode)
 }
 
+/// `sky ` tag fields, from Assembly's Halo 2 plugin.
+const SKY_FLAGS: usize = 0x10;
+/// The screen is cleared to the sky's own colour behind its model.
+const SKY_USE_CLEAR_COLOR: u32 = 1 << 5;
+const SKY_ATMOSPHERIC_FOG: usize = 0x48;
+const ATMOSPHERIC_FOG_SIZE: usize = 0x18;
+const SKY_SKY_FOG: usize = 0x58;
+const SKY_FOG_SIZE: usize = 0x10;
+const SKY_CLEAR_COLOR: usize = 0xA0;
+const SKY_SIZE: usize = 0xAC;
+
+/// Fog that thickens with distance: none nearer than `start`, rising to
+/// `max_density` at `opaque` and beyond.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fog {
+    pub color: [f32; 3],
+    pub max_density: f32,
+    pub start: f32,
+    pub opaque: f32,
+}
+
+/// The air a sky gives its level: fog over the level and over the sky
+/// itself, and the colour behind the sky's model.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Atmosphere {
+    pub fog: Option<Fog>,
+    /// Fog over the sky's model: its colour and density.
+    pub sky_fog: Option<([f32; 3], f32)>,
+    /// What the screen is cleared to, when the sky sets it.
+    pub clear_color: Option<[f32; 3]>,
+}
+
+fn color_at(b: &[u8], o: usize) -> [f32; 3] {
+    [f32_at(b, o), f32_at(b, o + 4), f32_at(b, o + 8)]
+}
+
+/// An atmospheric fog block element, unless it has no density.
+fn atmospheric_fog(e: &[u8]) -> Option<Fog> {
+    let fog = Fog {
+        color: color_at(e, 0),
+        max_density: f32_at(e, 0xC),
+        start: f32_at(e, 0x10),
+        opaque: f32_at(e, 0x14),
+    };
+    (fog.max_density > 0.0).then_some(fog)
+}
+
+/// A sky fog block element (colour, density), unless it has no density.
+fn sky_fog(e: &[u8]) -> Option<([f32; 3], f32)> {
+    let density = f32_at(e, 0xC);
+    (density > 0.0).then(|| (color_at(e, 0), density))
+}
+
+/// The sky's clear colour, if its flags say to use it.
+fn clear_color(sky: &[u8]) -> Option<[f32; 3]> {
+    (u32_at(sky, SKY_FLAGS) & SKY_USE_CLEAR_COLOR != 0).then(|| color_at(sky, SKY_CLEAR_COLOR))
+}
+
+/// A `sky ` tag's fog and clear colour.
+pub fn sky_atmosphere(set: &mut MapSet, sky: DatumIndex) -> Result<Atmosphere> {
+    let (src, tag, data) = set.tag_data(sky)?;
+    if data.len() < SKY_SIZE {
+        return Err(Error::Corrupt(format!("sky {} too short", tag.name)));
+    }
+    let file = set.get(src);
+    let region = file.meta_region();
+    let fog = file.read_block(region, &data, SKY_ATMOSPHERIC_FOG, ATMOSPHERIC_FOG_SIZE)?;
+    let sky_fogs = file.read_block(region, &data, SKY_SKY_FOG, SKY_FOG_SIZE)?;
+    Ok(Atmosphere {
+        fog: fog.get(..ATMOSPHERIC_FOG_SIZE).and_then(atmospheric_fog),
+        sky_fog: sky_fogs.get(..SKY_FOG_SIZE).and_then(sky_fog),
+        clear_color: clear_color(&data),
+    })
+}
+
 pub fn read_render_model(set: &mut MapSet, mode: DatumIndex) -> Result<RenderModel> {
     read_render_model_variant(set, mode, None)
 }
@@ -442,4 +517,36 @@ pub fn read_cloth(set: &mut MapSet, clwd: DatumIndex) -> Result<Cloth> {
         )));
     }
     Ok(Cloth { grid, vertices })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn floats(v: &[f32]) -> Vec<u8> {
+        v.iter().flat_map(|f| f.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn atmospheric_fog_reads_colour_density_and_distances() {
+        // A brown haze, like the main menu's.
+        let fog = atmospheric_fog(&floats(&[0.361, 0.322, 0.263, 0.5, 0.0, 150.0])).unwrap();
+        assert_eq!(fog.color, [0.361, 0.322, 0.263]);
+        assert_eq!((fog.max_density, fog.start, fog.opaque), (0.5, 0.0, 150.0));
+        // No density is no fog.
+        let none = floats(&[0.5, 0.5, 0.5, 0.0, 10.0, 100.0]);
+        assert_eq!(atmospheric_fog(&none), None);
+        let sky = floats(&[0.2, 0.3, 0.4, 1.0]);
+        assert_eq!(sky_fog(&sky), Some(([0.2, 0.3, 0.4], 1.0)));
+    }
+
+    #[test]
+    fn clear_colour_only_when_flagged() {
+        let mut sky = vec![0u8; SKY_SIZE];
+        sky[SKY_CLEAR_COLOR..SKY_CLEAR_COLOR + 12].copy_from_slice(&floats(&[0.137; 3]));
+        assert_eq!(clear_color(&sky), None);
+        // The main menu's flags.
+        sky[SKY_FLAGS] = 0x22;
+        assert_eq!(clear_color(&sky), Some([0.137; 3]));
+    }
 }

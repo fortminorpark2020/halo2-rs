@@ -332,7 +332,12 @@ impl MenuArt {
                 Some([x, y + h, x + w, y])
             });
         let union = |a: [f32; 4], b: [f32; 4]| {
-            [a[0].min(b[0]), a[1].max(b[1]), a[2].max(b[2]), a[3].min(b[3])]
+            [
+                a[0].min(b[0]),
+                a[1].max(b[1]),
+                a[2].max(b[2]),
+                a[3].min(b[3]),
+            ]
         };
         backgrounds.reduce(union).or_else(|| {
             let r = skin.texts.first()?.bounds;
@@ -546,7 +551,8 @@ impl<'a> Painter<'a> {
             }
             let rect = self.sp.rect([x0, y0, x1, y1]);
             let uv = [u(x0), v(y0), u(x1), v(y1)];
-            self.hb.quad(p.texture, rect, uv, [1.0, 1.0, 1.0, alpha], mode, 0.0);
+            self.hb
+                .quad(p.texture, rect, uv, [1.0, 1.0, 1.0, alpha], mode, 0.0);
         }
     }
 
@@ -854,7 +860,10 @@ mod tests {
             origin: [640.0, 360.0],
         };
         assert_eq!(sp.at([0.0, 600.0]), [640.0, 0.0]);
-        assert_eq!(sp.rect([-100.0, 50.0, 100.0, -50.0]), [580.0, 330.0, 700.0, 390.0]);
+        assert_eq!(
+            sp.rect([-100.0, 50.0, 100.0, -50.0]),
+            [580.0, 330.0, 700.0, 390.0]
+        );
     }
 
     #[test]

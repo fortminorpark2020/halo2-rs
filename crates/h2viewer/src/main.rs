@@ -33,16 +33,19 @@ mod campaign;
 mod effects;
 mod emblem;
 mod flow;
+mod flythrough;
 mod font;
 mod gpu;
 mod hud;
 mod input;
+mod intro;
 mod lan;
 mod local;
 mod mapinfo;
 mod memory;
 mod menu;
 mod menuart;
+mod menuscene;
 mod messages;
 mod netprobe;
 mod objective;
@@ -63,7 +66,7 @@ use camera::FlyCamera;
 use effects::Effects;
 use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
-use gpu::{hud_mode, DrawCall, Frame, Fx, HudBatch};
+use gpu::{hud_mode, DrawCall, Frame, Fx, HudBatch, SceneSlot};
 use h2sim::bot::{bot_look, bot_name};
 use h2sim::game::{guest_name, Event, GrenadeKind, HeldWeapon, Powerup, TICK};
 use h2sim::vehicle::SeatRole;
@@ -1125,6 +1128,12 @@ struct App {
     loading: Option<Loading>,
     /// Seconds the menus have been up, for the camera circling the map.
     menu_time: f32,
+    /// mainmenu.map's scene, behind the menus.
+    menu_scene: menuscene::MenuScene,
+    /// The intro movie, while it plays.
+    intro: Option<intro::Intro>,
+    /// Play the intro when the window opens.
+    intro_wanted: bool,
     /// Seconds since someone won.
     game_over: Option<f32>,
     /// The game's clock when it ended (a joined PC's keeps following the
@@ -1265,6 +1274,9 @@ impl App {
             PadPress::Connected => return self.pad_back(id),
             _ => {}
         }
+        if self.skip_intro() {
+            return;
+        }
         if self.loading.is_some() {
             return;
         }
@@ -1377,6 +1389,11 @@ impl App {
         self.lan_games = games;
         self.menu_time += dt;
         self.menu.tick(dt);
+        self.menu.time = self.menu_time;
+        self.menu_scene.poll(self.gpu.as_mut());
+        let hidden = self.mode == Mode::Playing || self.intro.is_some();
+        self.menu_scene.advance(dt, hidden);
+        self.update_intro();
         if self.mode == Mode::Menu || self.loading.is_some() {
             // An online host (a match's, or the party's custom game's) lets
             // PCs into its lobby while its map loads.
@@ -2349,6 +2366,13 @@ impl App {
     fn render(&mut self) {
         let Some(g) = &self.gpu else { return };
         let (w, h) = g.size();
+        if let Some(movie) = self.intro_overlay(w, h) {
+            let frame = Frame::overlay([0, 0, w as u32, h as u32], &movie);
+            if let Some(g) = &mut self.gpu {
+                g.render(&[frame]);
+            }
+            return;
+        }
         let loading = self.loading.as_ref().is_some_and(Loading::shown);
         // The loading screen fills the window; a pause menu, the view of
         // the player who paused.
@@ -2408,6 +2432,10 @@ impl App {
             aspect: f32,
             magnification: f32,
             camera: FlyCamera,
+            /// The camera's up (it banks in the menus' flythrough).
+            up: Vec3,
+            scene: SceneSlot,
+            sky: Option<usize>,
             world: Vec<DrawCall>,
             sprites: Vec<gpu::SpriteVertex>,
             draws: local::ViewDraws,
@@ -2415,7 +2443,36 @@ impl App {
             view_model_proj: Mat4,
         }
         let mut views = Vec::new();
-        if !in_game {
+        let menu_view = self.menu_scene.view().filter(|_| !in_game);
+        if let Some(m) = menu_view {
+            // Halo 2's own scene behind the menus, flown through; the
+            // profile's model stands in front of it like a view model,
+            // seen from a camera of its own.
+            let viewport = ports[0];
+            let aspect = viewport[2] as f32 / viewport[3].max(1) as f32;
+            let (at, forward, up) = m.camera;
+            let stand = FlyCamera::looking_at(Vec3::ZERO, Vec3::X);
+            let (preview, posed) = self.preview_draws(&stand, (w, h));
+            body_meshes.extend(posed);
+            views.push(View {
+                viewport,
+                aspect,
+                magnification: camera::fov_magnification(aspect, flythrough::FOV),
+                camera: FlyCamera::looking_at(at, at + forward),
+                up,
+                scene: SceneSlot::Backdrop,
+                sky: m.sky,
+                world: m.world.to_vec(),
+                sprites: Vec::new(),
+                draws: local::ViewDraws {
+                    view_models: preview,
+                    view_sprites: Vec::new(),
+                    posed: std::mem::take(&mut body_meshes),
+                },
+                hud: Vec::new(),
+                view_model_proj: stand.view_proj(aspect, 1.0),
+            });
+        } else if !in_game {
             // The level behind the menus.
             let camera = self.menu_camera();
             let (_, r, u) = camera.basis();
@@ -2429,6 +2486,9 @@ impl App {
                 aspect: viewport[2] as f32 / viewport[3].max(1) as f32,
                 magnification: 1.0,
                 camera,
+                up: Vec3::Z,
+                scene: SceneSlot::Level,
+                sky: self.scene.sky,
                 world,
                 sprites: self.effects.sprites(r, u),
                 draws: local::ViewDraws {
@@ -2539,10 +2599,7 @@ impl App {
                 hud.extend(hb.finish());
             }
             let magnification = match cutscene_camera {
-                Some((_, _, fov)) => {
-                    let half_x = (camera::half_height(aspect) * aspect).atan();
-                    half_x.tan() / (fov.to_radians() * 0.5).tan().max(1e-3)
-                }
+                Some((_, _, fov)) => camera::fov_magnification(aspect, fov),
                 None => l.magnification(&self.scene, &self.game),
             };
             views.push(View {
@@ -2550,6 +2607,9 @@ impl App {
                 aspect,
                 magnification,
                 camera,
+                up: Vec3::Z,
+                scene: SceneSlot::Level,
+                sky: self.scene.sky,
                 world,
                 sprites: {
                     let mut sprites = self.effects.sprites(r, u);
@@ -2564,12 +2624,12 @@ impl App {
         let mut frames: Vec<Frame> = views
             .iter()
             .map(|v| {
-                let sky_view =
-                    glam::camera::rh::view::look_to_mat4(Vec3::ZERO, v.camera.forward(), Vec3::Z);
+                let look = |at| glam::camera::rh::view::look_to_mat4(at, v.camera.forward(), v.up);
                 Frame {
                     viewport: v.viewport,
+                    scene: v.scene,
                     posed: &v.draws.posed,
-                    sky: self.scene.sky.map(|mesh| DrawCall {
+                    sky: v.sky.map(|mesh| DrawCall {
                         mesh,
                         model: Mat4::IDENTITY,
                         light: None,
@@ -2578,8 +2638,9 @@ impl App {
                         fx: Fx::default(),
                     }),
                     sky_proj: camera::projection(v.aspect, v.magnification, 1.0, 10000.0)
-                        * sky_view,
-                    view_proj: v.camera.view_proj(v.aspect, v.magnification),
+                        * look(Vec3::ZERO),
+                    view_proj: camera::projection(v.aspect, v.magnification, 0.05, 2000.0)
+                        * look(v.camera.position),
                     camera: v.camera.position,
                     world: &v.world,
                     sprites: &v.sprites,
@@ -2615,6 +2676,7 @@ impl ApplicationHandler for App {
                 g.set_rank_textures(&self.rank_art);
                 g.set_ui_textures(&std::mem::take(&mut self.menu.art.images));
                 self.gpu = Some(g);
+                self.start_intro(window.inner_size().height);
             }
             Err(e) => {
                 eprintln!("graphics init failed: {e}");
@@ -2627,6 +2689,15 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let pressed = match &event {
+            WindowEvent::KeyboardInput { event, .. } => event.state == ElementState::Pressed,
+            WindowEvent::MouseInput { state, .. } => *state == ElementState::Pressed,
+            _ => false,
+        };
+        // Any key or mouse button skips the intro.
+        if pressed && self.skip_intro() {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -2643,8 +2714,10 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. }
                 if self.keyboard_in_menu() || self.loading.is_some() =>
             {
+                // Any button goes on from the start screen.
+                let start = self.menu.screen == Screen::Start;
                 if state == ElementState::Pressed
-                    && button == MouseButton::Left
+                    && (button == MouseButton::Left || start)
                     && self.loading.is_none()
                 {
                     self.keyboard_used = true;
@@ -2789,6 +2862,11 @@ impl App {
         }
         if self.mode == Mode::Menu && self.menu.screen == Screen::Lobby && code == KeyCode::KeyT {
             self.change_team(0);
+            return;
+        }
+        if self.keyboard_in_menu() && self.menu.screen == Screen::Start {
+            // Any key goes on from the start screen.
+            self.menu_input(menu::Input::Select);
             return;
         }
         if self.keyboard_in_menu() {
@@ -2965,6 +3043,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         simulate(&level, &settings, seconds);
         return Ok(());
     }
+    // mainmenu.map's scene is read in the background too. H2_MENU_TIME=<s>
+    // holds its camera that far into the flythrough (for screenshots).
+    let held = env("H2_MENU_TIME").and_then(|v| v.parse().ok());
+    let menu_scene = dir.map_or_else(menuscene::MenuScene::default, |d| {
+        menuscene::MenuScene::load(d, held)
+    });
     // The menu music is read in the background.
     let (tx, music) = mpsc::channel();
     let music_map = path;
@@ -3026,6 +3110,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         rank_art,
         loading: None,
         menu_time: 0.0,
+        menu_scene,
+        intro: None,
+        intro_wanted: false,
         game_over: None,
         ended_at: None,
         warnings: messages::Warnings::default(),
@@ -3044,6 +3131,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     app.menu.text = menu_text;
     app.menu.art = menu_art;
     app.level_changed();
+    // Halo 2 opens with its intro movie, then its start screen (unless
+    // testing goes straight into a game). H2_SKIP_INTRO=1 skips the movie.
+    let straight_in = ["H2_JOIN", "H2_PLAY", "H2_LIVE_AUTO"]
+        .iter()
+        .any(|v| env(v).is_some());
+    if !straight_in && !headless {
+        app.menu.show(Screen::Start);
+        app.intro_wanted = env("H2_SKIP_INTRO").is_none();
+    }
     // H2_SPLIT=<n> starts with n people in splitscreen (for testing).
     let split = env("H2_SPLIT")
         .and_then(|v| v.parse::<usize>().ok())

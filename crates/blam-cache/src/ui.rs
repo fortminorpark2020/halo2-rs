@@ -327,7 +327,9 @@ impl ListSkin {
             .map(|b| (b.corner[1] as f32, b.corner[1] as f32 + bitmap_height(b)));
         let (bottom, top) = texts
             .chain(bitmaps)
-            .fold((f32::MAX, f32::MIN), |(lo, hi), (b, t)| (lo.min(b), hi.max(t)));
+            .fold((f32::MAX, f32::MIN), |(lo, hi), (b, t)| {
+                (lo.min(b), hi.max(t))
+            });
         (top - bottom).max(1.0)
     }
 }
@@ -354,7 +356,9 @@ impl Reader for MapReader<'_> {
         }
         let file = self.set.get(self.source);
         let region = file.meta_region();
-        let raw = file.read_block(region, parent, at, size).unwrap_or_default();
+        let raw = file
+            .read_block(region, parent, at, size)
+            .unwrap_or_default();
         raw.chunks_exact(size).map(<[u8]>::to_vec).collect()
     }
 
@@ -624,8 +628,16 @@ pub fn parse_globals(
             }
         })
         .collect();
-    let argb = |o: usize| [f32_at(d, o + 4), f32_at(d, o + 8), f32_at(d, o + 12), f32_at(d, o)];
-    let font = |k: usize| Font::from_index(u16_at(d, WIGL_HEADER_FONTS + 2 * k)).unwrap_or(Font::Title);
+    let argb = |o: usize| {
+        [
+            f32_at(d, o + 4),
+            f32_at(d, o + 8),
+            f32_at(d, o + 12),
+            f32_at(d, o),
+        ]
+    };
+    let font =
+        |k: usize| Font::from_index(u16_at(d, WIGL_HEADER_FONTS + 2 * k)).unwrap_or(Font::Title);
     let bounds = |k: usize| rect(d, WIGL_BOUNDS + 8 * k);
     let mut keys: Vec<(String, String)> = button_keys
         .iter()
@@ -700,9 +712,8 @@ pub fn read(set: &mut MapSet) -> Result<Ui> {
             .tag(datum)
             .map(|t| t.name)
             .unwrap_or_default();
-        let skin = tag(set, DatumIndex(datum)).and_then(|(source, d)| {
-            parse_skin(&mut MapReader { set, source }, &name, &d)
-        });
+        let skin = tag(set, DatumIndex(datum))
+            .and_then(|(source, d)| parse_skin(&mut MapReader { set, source }, &name, &d));
         // An empty skin keeps the others at their indices.
         skins.push(skin.unwrap_or_else(|_| ListSkin {
             name,
@@ -772,7 +783,10 @@ mod tests {
             let count = u32_at(parent, at) as usize;
             let address = u32_at(parent, at + 4);
             let data = self.blocks.get(&address).cloned().unwrap_or_default();
-            data.chunks_exact(size).take(count).map(<[u8]>::to_vec).collect()
+            data.chunks_exact(size)
+                .take(count)
+                .map(<[u8]>::to_vec)
+                .collect()
         }
 
         fn string_id(&self, id: u32) -> String {

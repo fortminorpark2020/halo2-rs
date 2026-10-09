@@ -17,3 +17,11 @@ gilrs = "0.11.2"
 cpal = "0.16"
 h2net = { path = "../h2net" }
 h2live = { path = "../h2live" }
+
+# The intro movie, through Media Foundation.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
