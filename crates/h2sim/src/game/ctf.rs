@@ -564,6 +564,8 @@ mod tests {
             ..Command::default()
         };
         run(&mut g, &world, &[switch, Command::default()], 2);
+        // Let go (a switch is on the release).
+        run(&mut g, &world, &[Command::default(), Command::default()], 1);
         // Dropped, and not picked straight back up.
         assert!(g.flags[1].carrier.is_none());
         assert!(g.players[0].objective.is_none());

@@ -108,18 +108,16 @@ impl Game {
     }
 
     /// The switch button: a tap switches weapons (dropping the left one
-    /// first, or the flag); held by a one-handed weapon it takes that
-    /// weapon into the left hand.
+    /// first, or the flag) as it's let go; held by a one-handed weapon it
+    /// takes that weapon into the left hand, and switches nothing. (Halo 2
+    /// switches on the button's release unless the hold was used, the CC0
+    /// decompilation's player control update.)
     pub(super) fn press_switch(&mut self, i: usize, down: bool, was_down: bool, dt: f32) {
         let could_dual = self.left_hand_pickup(i).is_some();
         let hold = self.movement.action_hold;
         let p = &mut self.players[i];
         if down && !was_down {
             p.switch_held = 0.0;
-            if !could_dual {
-                p.switch_held = f32::MIN;
-                self.tap_switch(i);
-            }
         } else if down {
             if p.switch_held >= 0.0 {
                 p.switch_held += dt;
@@ -129,7 +127,7 @@ impl Game {
                 }
             }
         } else if was_down && p.switch_held >= 0.0 {
-            // Let go before the hold finished: an ordinary switch.
+            // Let go before a hold took a gun: an ordinary switch.
             p.switch_held = f32::MIN;
             self.tap_switch(i);
         }

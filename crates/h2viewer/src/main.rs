@@ -1357,6 +1357,23 @@ impl App {
         false
     }
 
+    /// A player whose second gun just went (dropped, or out of ammo)
+    /// still holding its trigger: as in Halo 2, that trigger throws no
+    /// grenade (and Boxer's no melee) until it's let go (the CC0
+    /// decompilation's player control update).
+    pub(crate) fn latch_left_hands(&mut self) {
+        for l in &mut self.locals {
+            let dual = l.two_guns(&self.game);
+            let gone = std::mem::replace(&mut l.was_dual, dual) && !dual;
+            let (Some(id), Some(b), true) = (l.pad, l.left_hand_button(), gone) else {
+                continue;
+            };
+            if self.pads.reading(id).is_some_and(|r| r.held.contains(b)) {
+                self.pads.hold_off(id, b);
+            }
+        }
+    }
+
     /// Local player `k` plays with controller `id` from now on.
     fn take_pad(&mut self, k: usize, id: PadId) {
         let l = &mut self.locals[k];
@@ -1603,6 +1620,7 @@ impl App {
         let mut ticked = false;
         while self.pending >= TICK {
             self.pending -= TICK;
+            self.latch_left_hands();
             let mut commands = vec![Command::default(); self.game.players.len()];
             let keyboard = Keyboard {
                 keys: &self.keys,

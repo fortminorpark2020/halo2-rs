@@ -393,6 +393,8 @@ pub struct LocalPlayer {
     /// They played with the keyboard and mouse last (and not their
     /// controller): prompts name keys.
     pub typing: bool,
+    /// They had a gun in each hand last tick (`App::latch_left_hands`).
+    pub was_dual: bool,
     /// Flying freely (Tab) instead of walking.
     pub flying: bool,
     pub camera: FlyCamera,
@@ -448,6 +450,7 @@ impl LocalPlayer {
             rumble: crate::rumble::Rumbler::default(),
             level_time: 0.0,
             typing: false,
+            was_dual: false,
             flying: false,
             camera: FlyCamera::looking_at(eye, eye + glam::vec3(p.yaw.cos(), p.yaw.sin(), 0.0)),
             taps: Taps::default(),
@@ -606,25 +609,47 @@ impl LocalPlayer {
             cmd.switch_weapon |= held(KeyCode::KeyQ);
             cmd.throw_grenade |= held(KeyCode::KeyG) && k.captured;
         }
-        // Riding, the buttons are the seat's: as with one gun.
-        let riding = game.players.get(self.player).is_some_and(|p| p.seat.is_some());
         let hands = Hands {
-            dual: dual_wielding(game, self.player) && !riding,
+            dual: self.two_guns(game),
             inverted: self.controls.dual_wield_inversion,
+        };
+        // Halo 2 doesn't zoom in with either trigger past half (the CC0
+        // decompilation's player control update); zooming out it does.
+        let zoomed = self.gun(game).is_some_and(|(_, zoom)| zoom > 0);
+        let no_zoom = pad.is_some_and(|p| p.trigger_down) && !zoomed;
+        let press = |cmd: &mut Command, f, pressed| {
+            if !(f == Function::Zoom && no_zoom) {
+                apply(cmd, f, hands, pressed);
+            }
         };
         if let Some(p) = pad {
             if p.movement != Vec2::ZERO {
                 cmd.movement = p.movement;
             }
             for f in p.held.iter() {
-                apply(&mut cmd, f, hands, false);
+                press(&mut cmd, f, false);
             }
         }
         // And those pressed since the last tick, so a quick one counts.
         for f in t.pad.iter() {
-            apply(&mut cmd, f, hands, true);
+            press(&mut cmd, f, true);
         }
         cmd
+    }
+
+    /// A gun in each hand, on foot (riding, the buttons are the seat's: as
+    /// with one gun).
+    pub fn two_guns(&self, game: &Game) -> bool {
+        let riding = game.players.get(self.player).is_some_and(|p| p.seat.is_some());
+        dual_wielding(game, self.player) && !riding
+    }
+
+    /// The controller button that fires the left gun dual wielding, under
+    /// their layout (the grenade's, or Boxer's melee): Halo 2 keeps it from
+    /// throwing or meleeing as the second gun goes, until it's let go.
+    pub fn left_hand_button(&self) -> Option<PadButton> {
+        let layout = self.controls.buttons;
+        (layout.button(Function::LeftWeapon)).or(layout.button(Function::MeleeOrLeftWeapon))
     }
 
     /// Follow the player's eye between ticks, or watch their body while dead.
@@ -723,10 +748,10 @@ impl LocalPlayer {
         Some((game.weapons.get(held.weapon)?, held.state.zoom))
     }
 
-    /// Halo 2's dialog while their controller is gone (the game stands
-    /// still for it, unless others play over the network): at the
-    /// keyboard, Enter plays on there, as on Halo 2 PC; a guest
-    /// reconnects it (or takes another) and presses A.
+    /// Halo 2's dialog while their controller is gone (they stand still;
+    /// a mission played alone stands still for it too): at the keyboard,
+    /// Enter plays on there, as on Halo 2 PC; a guest reconnects it (or
+    /// takes another) and presses A.
     fn lost_pad_dialog(&self, hb: &mut HudBuilder, scene: &Scene, (w, h): (f32, f32), t: f32) {
         if self.lost_pad.is_none() {
             return;
@@ -753,9 +778,10 @@ impl LocalPlayer {
     /// (the mouse has none, as in Halo 2 Vista) slows the look near an
     /// enemy in the gun's magnetism (friction), and has the crosshair
     /// follow the one it's on as they move across the view while either
-    /// stick is moved (adhesion). How strongly comes from the globals; how
-    /// adhesion follows (that share of the turn toward them since the last
-    /// frame) is the remake's reading of it.
+    /// stick is moved (adhesion): that share of how fast they cross the
+    /// view, at most half a turn a second, weaker toward the edge of the
+    /// magnetism as friction is (Halo 2's, from the CC0 decompilation).
+    /// How strongly comes from the globals.
     pub fn look_with_stick(
         &mut self,
         scene: &Scene,
@@ -832,10 +858,21 @@ impl LocalPlayer {
         }
         let toward = magnet.map(|m| (m.player, camera::angles_to(self.camera.position, m.centre)));
         let moving = pad.movement != Vec2::ZERO || pad.look != Vec2::ZERO;
-        if let (Some((j, now)), Some((was_on, was)), true) = (toward, self.adhesion, moving) {
-            if j == was_on {
-                let adhesion = control.magnetism_adhesion.clamp(0.0, 1.0);
-                turn += camera::angle_change(was, now) * adhesion;
+        if let (Some((j, now)), Some((was_on, was)), true, Some(m)) =
+            (toward, self.adhesion, moving, magnet)
+        {
+            if j == was_on && dt > 0.0 {
+                // Halo 2 follows the enemy at up to half a turn a second
+                // across and a quarter up and down, by its adhesion times
+                // the same strength its friction has (the CC0
+                // decompilation's player control update; how that strength
+                // falls off is the remake's, `camera::friction`).
+                let strength = 1.0 - camera::friction(m.off, m.angle, 1.0);
+                let adhesion = control.magnetism_adhesion.clamp(0.0, 1.0) * strength;
+                let (pi, half_pi) = (std::f32::consts::PI, std::f32::consts::FRAC_PI_2);
+                let rate = camera::angle_change(was, now) / dt;
+                let rate = Vec2::new(rate.x.clamp(-pi, pi), rate.y.clamp(-half_pi, half_pi));
+                turn += rate * dt * adhesion;
             }
         }
         self.adhesion = toward;
@@ -1643,9 +1680,11 @@ fn apply(cmd: &mut Command, f: Function, hands: Hands, pressed: bool) {
         // The game's grenade button: a grenade, the left hand's gun dual
         // wielding, or a vehicle's boost or second weapon.
         Function::LeftWeapon => cmd.throw_grenade = true,
-        // Boxer's B: no grenades dual wielding, so it melees then (its
-        // left trigger fires the left gun).
-        Function::ThrowGrenade if dual => cmd.melee = true,
+        // Boxer's B: no grenades dual wielding, and no melee either: in
+        // Halo 2's multiplayer only campaign gets B's own action then (the
+        // CC0 decompilation's player control update), so Boxer's melee is
+        // its left trigger's, which fires the left gun.
+        Function::ThrowGrenade if dual => {}
         Function::ThrowGrenade => cmd.throw_grenade = true,
         Function::MeleeOrLeftWeapon if swap => cmd.fire = true,
         Function::MeleeOrLeftWeapon if dual => cmd.throw_grenade = true,
@@ -2058,11 +2097,58 @@ mod tests {
         let pad = pressing(ButtonLayout::Boxer, &[PadButton::B]);
         let c = l.command(&game, None, Some(pad));
         assert!(c.throw_grenade && !c.melee);
-        // Dual wielding there are no grenades: B melees, as Halo 2's
-        // Boxer does (its left trigger fires the left gun).
+        // Dual wielding there are no grenades, and in Halo 2's multiplayer
+        // B doesn't melee either (its left trigger fires the left gun).
         dual_wield(&mut game, i);
         let c = l.command(&game, None, Some(pad));
-        assert!(!c.throw_grenade && c.melee);
+        assert!(!c.throw_grenade && !c.melee);
+    }
+
+    #[test]
+    fn dual_wielding_every_layout_fires_both_guns_and_throws_nothing() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        dual_wield(&mut game, i);
+        for layout in ButtonLayout::ALL {
+            let press = |b| l.command(&game, None, Some(pressing(layout, &[b])));
+            let (mut right, mut left, mut melee) = (0, 0, 0);
+            for &(b, _) in layout.table() {
+                let c = press(b);
+                right += c.fire as usize;
+                left += c.throw_grenade as usize;
+                melee += c.melee as usize;
+                // Zoom would fire the left gun with the mouse: not here.
+                assert!(!c.zoom, "{layout:?} {b:?}");
+            }
+            // One button each for the right gun and the left (the
+            // grenade's), and every layout but Boxer still melees.
+            assert_eq!((right, left), (1, 1), "{layout:?}");
+            let melees = if layout == ButtonLayout::Boxer { 0 } else { 1 };
+            assert_eq!(melee, melees, "{layout:?}");
+            // The left gun's button is the one Halo 2 latches as it goes.
+            let mut theirs = LocalPlayer::new(i, &game);
+            theirs.controls.buttons = layout;
+            let b = theirs.left_hand_button().unwrap();
+            assert!(press(b).throw_grenade, "{layout:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn no_zooming_in_with_a_trigger_past_half() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let l = LocalPlayer::new(i, &game);
+        let mut pad = pressing(ButtonLayout::Default, &[PadButton::RightStick]);
+        assert!(l.command(&game, None, Some(pad)).zoom);
+        pad.trigger_down = true;
+        assert!(!l.command(&game, None, Some(pad)).zoom);
+        // Zoomed in already, it zooms (out) all the same.
+        if let Some(h) = game.players[i].weapons.get_mut(0) {
+            h.state.zoom = 1;
+        }
+        let zoomed = l.gun(&game).is_some_and(|(_, z)| z > 0);
+        assert_eq!(l.command(&game, None, Some(pad)).zoom, zoomed);
     }
 
     #[test]
@@ -2112,9 +2198,12 @@ mod tests {
         pads.script("down 0 B");
         pads.events();
         assert!(l.command(&game, None, l.pad_state(&pads)).melee);
-        // A controller taking a player over: all it holds is spent.
+        // A controller taking a player over: all it holds is spent (the
+        // trigger counted a reading later).
         pads.script("down 0 RT");
         pads.events();
+        pads.events();
+        assert!(l.command(&game, None, l.pad_state(&pads)).fire);
         pads.hold_off_all(pad(0));
         let c = l.command(&game, None, l.pad_state(&pads));
         assert!(!c.fire && !c.melee);
@@ -2334,6 +2423,7 @@ mod tests {
         let mut l = LocalPlayer::new(i, &game);
         let mut pads = Pads::scripted();
         pads.script("down 0 RT");
+        pads.events();
         pads.events();
         l.pad = Some(pad(0));
         assert!(l.pad_state(&pads).is_some());

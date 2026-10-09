@@ -166,9 +166,12 @@ impl App {
         self.mode == Mode::Playing && self.locals.iter().any(|l| l.lost_pad.is_some())
     }
 
-    /// The game stands still: someone here paused it, or waits for their
-    /// controller to come back, and no one on another PC plays in it (Halo
-    /// 2 pauses a game at one console, but not one over System Link).
+    /// The game stands still: someone here paused it, and no one on
+    /// another PC plays in it (Halo 2 pauses a game at one console, but not
+    /// one over System Link). Waiting for a controller to come back stands
+    /// a mission still, but not a multiplayer game: its player stands
+    /// still in it with the dialog up (Halo 2's reconnect dialog, from the
+    /// CC0 decompilation).
     pub(crate) fn paused(&self) -> bool {
         let alone = match &self.net {
             Net::Offline | Net::Connecting { .. } => true,
@@ -177,7 +180,8 @@ impl App {
             }
             Net::Joined { .. } => false,
         };
-        let pause = self.menu_open && self.menu.pausing() || self.reconnecting();
+        let mission = self.game.rules.game_type == h2sim::game::GameType::Campaign;
+        let pause = self.menu_open && self.menu.pausing() || mission && self.reconnecting();
         self.mode == Mode::Playing && pause && alone
     }
 

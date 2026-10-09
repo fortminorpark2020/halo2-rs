@@ -257,25 +257,30 @@ impl StickLook {
     /// the left, y up. `scale` scales the turn rates (the sensitivity,
     /// and slower zoomed in).
     ///
-    /// How the globals' fields combine isn't in the tags; this is the
-    /// plain reading of them: the look function's samples are evenly
-    /// spaced over the stick's travel, with straight lines between, for
-    /// each axis on its own; held past the peg threshold the rate grows
-    /// steadily to `scale` times over the acceleration time, and starts
-    /// over once the stick comes back under it.
+    /// As Halo 2 does it (its player control update, re-implemented from
+    /// the CC0 decompilation): pushed both across and up or down, the
+    /// stick is squared off again so a diagonal turns as fast as along an
+    /// axis (`diagonal`); each axis goes through the look function (its
+    /// samples evenly spaced over the stick's travel, straight lines
+    /// between) to a share of its turn rate; and held past the peg
+    /// threshold, the rate grows steadily to the acceleration's scale
+    /// over its time, counted from the frame before, and starts over once
+    /// the stick comes back under it.
     pub fn turn(&mut self, control: &PlayerControl, stick: Vec2, scale: f32, dt: f32) -> Vec2 {
+        let stick = diagonal(stick);
         let axis = |v: f32, held: &mut f32, rate: f32, (time, most): (f32, f32)| {
+            let mut speed_up = 1.0;
             if v.abs() >= control.look_peg_threshold {
+                let ramp = if time > 0.0 {
+                    (*held / time).min(1.0)
+                } else {
+                    1.0
+                };
+                speed_up += (most - 1.0).max(0.0) * ramp;
                 *held += dt;
             } else {
                 *held = 0.0;
             }
-            let ramp = if time > 0.0 {
-                (*held / time).min(1.0)
-            } else {
-                1.0
-            };
-            let speed_up = 1.0 + (most - 1.0).max(0.0) * ramp;
             look_function(&control.look_function, v) * rate * speed_up * scale * dt
         };
         let [across, up] = &mut self.pegged;
@@ -293,6 +298,19 @@ impl StickLook {
         );
         Vec2::new(-yaw, pitch)
     }
+}
+
+/// The look stick pushed both across and up or down (each more than a
+/// tenth): both axes scaled up by the length of the push with the larger
+/// counted as 1, so a diagonal turns at the full rate both ways (Halo 2's,
+/// from the CC0 decompilation's player control update).
+pub fn diagonal(stick: Vec2) -> Vec2 {
+    let (x, y) = (stick.x.abs(), stick.y.abs());
+    if x <= 0.1 || y <= 0.1 {
+        return stick;
+    }
+    let minor = x.min(y) / x.max(y);
+    (stick * (1.0 + minor * minor).sqrt()).clamp(Vec2::NEG_ONE, Vec2::ONE)
 }
 
 /// The share of the look rate for a stick at `v` (-1..1): the look
@@ -432,18 +450,26 @@ mod tests {
     #[test]
     fn the_stick_turns_at_halo_2s_rates() {
         // Halo 2's 120 degrees a second across and 60 up at full stick
-        // (just pegged), and the look function's share of them.
-        let first = rates_after(Vec2::new(0.6, 0.6), DT);
+        // (just pegged: the speed-up counts from the frame before), and
+        // the look function's share of them.
+        let across = rates_after(Vec2::new(0.6, 0.0), DT);
+        let up = rates_after(Vec2::new(0.0, 0.6), DT);
         assert!(
-            (first.x - 30.0).abs() < 0.01 && (first.y - 15.0).abs() < 0.01,
-            "{first}"
+            (across.x - 30.0).abs() < 0.01 && (up.y - 15.0).abs() < 0.01,
+            "{across} {up}"
         );
+        assert_eq!((across.y, up.x), (0.0, 0.0));
         let full = rates_after(Vec2::ONE, DT);
-        assert!(
-            (full.x - 120.0 * (1.0 + 1.5 * DT / 0.8)).abs() < 0.01,
-            "{full}"
-        );
+        assert!((full.x - 120.0).abs() < 0.01, "{full}");
         assert!((full.y * 2.0 - full.x).abs() < 0.01);
+        // A diagonal is squared off again: 0.6 both ways turns as 0.85
+        // would along one (the look function's 0.682 of the rate).
+        let both = rates_after(Vec2::new(0.6, 0.6), DT);
+        let share = 0.58 + 0.42 * (0.6 * 2f32.sqrt() * 5.0 - 4.0);
+        assert!(
+            (both.x - 120.0 * share).abs() < 0.01 && (both.y - 60.0 * share).abs() < 0.01,
+            "{both}"
+        );
         // Held pegged, 2.5 times as fast after 0.8 seconds.
         let held = rates_after(Vec2::X, 1.0);
         assert!((held.x - 300.0).abs() < 0.01, "{held}");
@@ -456,6 +482,16 @@ mod tests {
         look.turn(&control, Vec2::new(0.5, 0.0), 1.0, DT);
         let again = -look.turn(&control, Vec2::X, 1.0, DT).x / DT;
         assert!(again.to_degrees() < 125.0);
+    }
+
+    #[test]
+    fn diagonals_are_squared_off_only_both_ways() {
+        assert_eq!(diagonal(Vec2::new(0.6, 0.05)), Vec2::new(0.6, 0.05));
+        assert_eq!(diagonal(Vec2::new(-0.1, 0.9)), Vec2::new(-0.1, 0.9));
+        let d = diagonal(Vec2::new(0.5, -0.25));
+        let k = 1.25f32.sqrt();
+        assert!((d - Vec2::new(0.5 * k, -0.25 * k)).length() < 1e-6, "{d}");
+        assert_eq!(diagonal(Vec2::new(0.9, 0.9)), Vec2::ONE);
     }
 
     #[test]

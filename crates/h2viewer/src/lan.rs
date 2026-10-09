@@ -414,6 +414,7 @@ impl App {
 
     /// Joined: our players' controls now.
     fn joined_commands(&mut self) -> Vec<(usize, Command)> {
+        self.latch_left_hands();
         let keyboard = Keyboard {
             keys: &self.keys,
             captured: self.captured,
