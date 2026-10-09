@@ -207,6 +207,7 @@ impl App {
     }
 
     pub(crate) fn menu_click(&mut self) {
+        self.menu.controller = false;
         let (pos, w, h) = self.menu_mouse();
         let action = self.with_menu(|m, ctx| m.click(pos, w, h, ctx));
         self.after_menu(action);
@@ -263,6 +264,7 @@ impl App {
 
     /// A controller press while the menus are up.
     pub(crate) fn menu_pad(&mut self, id: GamepadId, pad_press: PadPress) {
+        self.menu.controller = true;
         let seated = self.seats.iter().position(|s| s.pad == Some(id));
         let lobby = self.mode == Mode::Menu && self.menu.screen == Screen::Lobby;
         match press(pad_press) {

@@ -1,17 +1,22 @@
-//! Halo 2 style menus, drawn over the map: the main menu, the campaign's
-//! missions, the multiplayer lobby, the system link browser, the player
-//! profile, the online screens (the party lobby, who's online, the
-//! matchmaking playlists and searching them), the pause menu, the dialogs
-//! that ask before quitting or leaving a game, and the post-game carnage
-//! report. Keyboard, mouse and controllers all work them.
+//! Halo 2 style menus, drawn over the map: the start screen, the main
+//! menu, the campaign's missions, the multiplayer lobby, the system link
+//! browser, the player profile, the online screens (the party lobby, who's
+//! online, the matchmaking playlists and searching them), the pause menu,
+//! the dialogs that ask before quitting or leaving a game, and the
+//! post-game carnage report. Keyboard, mouse and controllers all work them.
+//! They're laid out and drawn as mainmenu.map's screens are (`menuart`),
+//! or as plainly without it.
 
-use crate::gpu::hud_mode;
+use crate::gpu::{hud_mode, MENU_TEXTURES};
 use crate::hud::HudBuilder;
+use crate::menuart::{self, animate, peak, tag_color, MenuArt, Painter, Space, Style};
 use crate::messages::MenuText;
 use crate::online::{clock_text, OnlineView};
 use crate::options::{presets, GameOptions, RESPAWN_TIMES, TIME_LIMITS};
 use crate::profile::{color_name, Profile};
 use crate::rank::{self, LiveIcon};
+use blam_cache::font::Font;
+use blam_cache::ui::{self, ListSkin};
 use h2net::live::{self, Privacy};
 use h2net::{LanGame, Lobby};
 use h2sim::game::{
@@ -23,6 +28,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
+    /// Halo 2's start screen: any key or button goes on to the main menu.
+    Start,
     Main,
     Campaign,
     Lobby,
@@ -443,6 +450,8 @@ pub enum Sound {
     Forward,
     Back,
     Advance,
+    /// A choice that can't be made (Halo 2's flag_fail).
+    Error,
 }
 
 /// What the game knows that the menus show.
@@ -622,23 +631,33 @@ pub struct Menu {
     asking: Option<Asking>,
     /// The carnage report's pane shown, in `panes`.
     pane: usize,
+    /// Halo 2's menu art and fonts, as read from mainmenu.map and the
+    /// fonts folder (none without them).
+    pub art: MenuArt,
+    /// Seconds the menus have been up (the art moves by it), and when the
+    /// screen came up.
+    clock: f32,
+    opened: f32,
+    /// What's behind the screens (the start screen and main menu's art,
+    /// the framing behind the screens past them, or the game), and since
+    /// when, so it comes in once and not with each screen.
+    chrome: (u8, f32),
+    /// The row the cursor was last seen on, the one before, and when it
+    /// moved: the list skins animate the move.
+    focus: (usize, usize, f32),
+    /// Where the mouse is (window pixels), and where it was when a dialog
+    /// came up: the dialog ignores it until it moves away from there.
+    pointer: Option<[f32; 2]>,
+    guard: Option<[f32; 2]>,
+    /// A controller was used last: the legends show its buttons, not keys.
+    pub controller: bool,
 }
 
-/// Layout, in Halo 2's 640x480 screen units.
+/// The carnage report's rows, in Halo 2's 640x480 screen units.
 const ROW_X: f32 = 48.0;
-const ROW_Y: f32 = 128.0;
 const ROW_W: f32 = 300.0;
 const ROW_H: f32 = 26.0;
 const ROW_STEP: f32 = 32.0;
-/// A dialog's question's width, over its answers.
-const QUESTION_W: f32 = 540.0;
-/// The lobby's right-hand panels (map, players).
-const PANEL_X: f32 = 372.0;
-const PANEL_W: f32 = 228.0;
-/// The profile's emblem: left, top and size.
-const PROFILE_EMBLEM: [f32; 3] = [530.0, 104.0, 64.0];
-/// The map's picture (Halo 2's are 440 by 414).
-const PICTURE: [f32; 2] = [104.0, 98.0];
 const TEXT: [f32; 4] = [0.72, 0.84, 1.0, 1.0];
 const BRIGHT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const DIM: [f32; 4] = [0.5, 0.62, 0.8, 0.9];
@@ -647,6 +666,264 @@ const HIGHLIGHT: [f32; 4] = [0.2, 0.45, 0.85, 0.9];
 const WARNING: [f32; 4] = [1.0, 0.55, 0.3, 1.0];
 /// The lobby's mark for someone in a team game with no team yet.
 const UNPICKED: [f32; 3] = [0.5, 0.5, 0.5];
+
+/// The menus' navy (the overlay colour of mainmenu.map's menu globals),
+/// without the art.
+const VEIL: [f32; 4] = [0.0, 0.08, 0.17, 0.85];
+/// How much of the menus' overlay colour goes over a paused game, which
+/// shows through.
+const PAUSE_VEIL: f32 = 0.55;
+/// Text in a list is never fainter than this, however far its item has
+/// faded (Halo 2 fades whole items to a third), so it stays readable.
+const TEXT_FLOOR: f32 = 0.6;
+/// Long enough for any of the menus' animations to be over (seconds).
+const SETTLED: f32 = 10.0;
+/// How far the mouse moves (window pixels) from where it was when a dialog
+/// came up under it before it works the dialog.
+const GUARD: f32 = 8.0;
+/// Halo 2's menu units to the pixel of the menus' 640x480 frame: 1200 to
+/// its 480 lines (see `menuart`).
+const UNITS: f32 = 2.5;
+
+/// Where a screen's list goes (menu units): its first item's corner, the
+/// step down to each next one, and an item's box from its corner (left,
+/// top, right, bottom).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Place {
+    corner: [f32; 2],
+    step: f32,
+    item: [f32; 4],
+}
+
+impl Place {
+    /// Item `k`'s corner.
+    fn corner(&self, k: usize) -> [f32; 2] {
+        [self.corner[0], self.corner[1] - self.step * k as f32]
+    }
+}
+
+/// The lists' places as mainmenu.map's tags have them, for without the
+/// art: the main menu's (main_menu, its items its skin's text), the game
+/// options' (top_level_settings, each item a settings_list_bkd), System
+/// Link's (network_squad_browser, game_browser_list's item_background) and
+/// the dialogs' (error_dialog_ok_cancel and error_dialog_large, the
+/// default skin's item_background).
+const MAIN_PLACE: Place = Place {
+    corner: [-178.0, -80.0],
+    step: 50.0,
+    item: [-62.0, 10.0, 418.0, -40.0],
+};
+const OPTIONS_PLACE: Place = Place {
+    corner: [-500.0, 300.0],
+    step: 52.0,
+    item: [15.0, 62.0, 1031.0, 10.0],
+};
+const BROWSER_PLACE: Place = Place {
+    corner: [-670.0, 412.0],
+    step: 32.0,
+    item: [8.0, 32.0, 1358.0, 0.0],
+};
+const DIALOG_PLACE: Place = Place {
+    corner: [-255.0, -140.0],
+    step: 46.0,
+    item: [40.0, 38.0, 440.0, -4.0],
+};
+const PAUSE_PLACE: Place = Place {
+    corner: [-500.0, 40.0],
+    step: 46.0,
+    item: [40.0, 38.0, 440.0, -4.0],
+};
+/// The remake's own: the profile's settings in the setting lists' skin,
+/// narrowed for the model beside them, and the online lists in the wide
+/// default skin (default_wide) under the title, narrowed beside a panel.
+const PROFILE_PLACE: Place = Place {
+    corner: [-680.0, 420.0],
+    ..OPTIONS_PLACE
+};
+const PROFILE_WIDTH: f32 = 820.0;
+const ONLINE_PLACE: Place = Place {
+    corner: [-640.0, 380.0],
+    step: 46.0,
+    item: [40.0, 38.0, 960.0, -4.0],
+};
+const ONLINE_NARROW: f32 = 700.0;
+/// The panel beside the narrowed online lists (the party, or the player
+/// picked), and the step between its rows.
+const SIDE_PANEL: [f32; 4] = [160.0, 400.0, 700.0, -200.0];
+const SIDE_STEP: f32 = 44.0;
+/// The online lists' icons (menu units square).
+const ICON: f32 = 34.0;
+
+/// The pregame lobby's places as pregame_lobby has them, for without the
+/// art: "Quick Options:" (gametype_options_format), whose lines below it
+/// reach as far right as the tag's own lines (-50); the game type's and
+/// map's lines (gametype_format, mapname_format); and its first two
+/// buttons' text (START GAME's and GAME SETUP's places: GAME OPTIONS takes
+/// the first, so the cursor reads on from the last line, left to right),
+/// their pictures' offset and size.
+const QUICK_OPTIONS: [f32; 4] = [-675.0, -195.0, -300.0, -235.0];
+const LINE_RIGHT: f32 = -50.0;
+const GAME_TYPE_LINE: [f32; 4] = [-580.0, -95.0, -150.0, -135.0];
+const MAP_LINE: [f32; 4] = [-580.0, -130.0, -150.0, -170.0];
+const LOBBY_BUTTONS: [[f32; 4]; 2] = [[-690.0, 480.0, -360.0, 440.0], [-320.0, 480.0, 8.0, 440.0]];
+const BUTTON_OFFSET: [f32; 2] = [-15.0, -12.0];
+const BUTTON_SIZE: [f32; 2] = [358.0, 64.0];
+/// The map's picture (unknown_map's place and size).
+const MAP_PICTURE_AT: [f32; 2] = [-448.0, -30.0];
+const MAP_PICTURE_SIZE: [f32; 2] = [440.0, 414.0];
+/// The lobby display's lines (game_cant_start_no_session's box, and the
+/// display's lower edge for the description under them).
+const LOBBY_STATUS: [f32; 4] = [-650.0, 320.0, -30.0, 280.0];
+const LOBBY_ABOUT_BOTTOM: f32 = 60.0;
+/// pregame_lobby's art the lobby draws (its display, the panel and bar
+/// behind the quick options, the game type's icon and the lines under
+/// them).
+const LOBBY_ART: [&str; 5] = [
+    "\\lobby_display",
+    "\\divider",
+    "\\game_settings",
+    "\\mp_games2",
+    "\\settings_framing",
+];
+/// Without the art: panels behind the lobby's left side and its players.
+const LOBBY_PANEL: [f32; 4] = [-705.0, 350.0, -8.0, -480.0];
+const PLAYERS_PANEL: [f32; 4] = [80.0, 560.0, 700.0, 60.0];
+/// The players down the lobby's right: from pregame_lobby's player count
+/// (player_count2, 540) across its speakers (100) to its download bars
+/// (654, and their width), each row as far down as the speakers (39), or
+/// up to ROSTER_STEP in the pregame's roster when there are few; and the
+/// gap between its columns when there are many.
+const ROSTER: [f32; 4] = [100.0, 540.0, 680.0, 100.0];
+const ROSTER_HEAD: f32 = 47.0;
+const PLAYER_STEP: f32 = 39.0;
+const ROSTER_STEP: f32 = 56.0;
+const ROSTER_GAP: f32 = 20.0;
+/// A player's emblem and rank are at most this big (a lobby row's height).
+const SEAT_ICON: f32 = PLAYER_STEP - 3.0;
+
+/// System Link's columns: the game_browser_list skin's texts (host, map,
+/// players, status) and their boxes without the art.
+const BROWSER_COLUMNS: [(usize, [f32; 4]); 4] = [
+    (0, [66.0, 30.0, 418.0, 0.0]),
+    (1, [422.0, 30.0, 608.0, 0.0]),
+    (4, [1002.0, 30.0, 1102.0, 0.0]),
+    (5, [1107.0, 30.0, 1355.0, 0.0]),
+];
+/// Its heads (network_squad_browser's texts, and their boxes).
+const BROWSER_HEADS: [(&str, &str, [f32; 4]); 4] = [
+    ("host_gamename", "HOST", [-604.0, 495.0, -250.0, 460.0]),
+    ("map_head", "MAP", [-250.0, 495.0, -60.0, 460.0]),
+    ("player_head", "PLAYERS", [330.0, 495.0, 435.0, 460.0]),
+    ("status_head", "STATUS", [435.0, 495.0, 680.0, 460.0]),
+];
+/// Where it says there are no games (no_games), its help (help_create_game)
+/// and the chosen game's map (unknown_map's place, at 0.68).
+const NO_GAMES: [f32; 4] = [-300.0, 410.0, 300.0, 370.0];
+const NO_GAMES_TEXT: &str = "THERE ARE NO OTHER GAMES ON THE NETWORK AT THIS TIME";
+const BROWSER_HELP: [f32; 4] = [-610.0, -235.0, -200.0, -380.0];
+const BROWSER_PICTURE_AT: [f32; 2] = [410.0, -175.0];
+const BROWSER_PICTURE_SIZE: [f32; 2] = [299.0, 282.0];
+
+/// How much of the menus' overlay colour goes behind a dialog's art.
+const DIALOG_BACKING: f32 = 0.9;
+/// Dialogs without the art: behind their questions and answers.
+const DIALOG_BOX: [f32; 4] = [-290.0, 200.0, 300.0, -260.0];
+const PAUSE_BOX: [f32; 4] = [-540.0, 180.0, 560.0, -260.0];
+/// A dialog's question (error_dialog_ok_cancel's text), and the large
+/// dialog's help (error_dialog_large's), where a mission's objectives go.
+const QUESTION_BOX: [f32; 4] = [-250.0, 140.0, 240.0, -80.0];
+const OBJECTIVES_BOX: [f32; 4] = [0.0, 100.0, 520.0, -80.0];
+/// mainmenu.map's header and button legend bounds by dialog size, for
+/// without the art.
+const HEADER_BOUNDS: [[f32; 4]; 4] = [
+    [-730.0, 567.0, 50.0, 520.0],
+    [-500.0, 390.0, 55.0, 310.0],
+    [-500.0, 158.0, 255.0, 73.0],
+    [-252.0, 182.0, 350.0, 142.0],
+];
+const LEGEND_BOUNDS: [[f32; 4]; 4] = [
+    [100.0, -500.0, 730.0, -540.0],
+    [0.0, -354.0, 535.0, -394.0],
+    [-400.0, -225.0, 480.0, -270.0],
+    [-175.0, -225.0, 235.0, -265.0],
+];
+/// The legends the menus use, as mainmenu.map words them.
+const LEGENDS: [(&str, &str); 3] = [
+    ("a_select", "\u{e100} SELECT"),
+    ("a_select_b_back", "\u{e100} SELECT \u{e101} BACK"),
+    ("a_select_b_cancel", "\u{e100} SELECT \u{e101} CANCEL"),
+];
+/// How wide the line under a title goes.
+const SUBHEADER_W: f32 = 1100.0;
+/// Where notices and notes go: on most screens above the legend; on the
+/// main menu under its list; on the profile under its settings.
+const NOTE: [f32; 4] = [-730.0, -380.0, 300.0, -490.0];
+const MAIN_NOTE: [f32; 4] = [-600.0, -370.0, 600.0, -480.0];
+const PROFILE_NOTE: [f32; 4] = [-680.0, -60.0, 120.0, -300.0];
+/// The start screen without the art: the logo's place and its line.
+const LOGO_BOX: [f32; 4] = [-500.0, 200.0, 500.0, 60.0];
+const PRESS_ANY_KEY: &str = "PRESS ANY KEY TO CONTINUE";
+const PRESS_ANY_KEY_BOX: [f32; 4] = [-400.0, -65.0, 400.0, -105.0];
+/// The main menu's gamertag (main_menu's text at its bottom right).
+const GAMERTAG_BOX: [f32; 4] = [376.0, -562.0, 610.0, -600.0];
+/// The profile's model stands in a window in the framing (main.rs puts it
+/// at 470, 290 of the frame: 375, -125 here), its emblem above it.
+const MODEL_WINDOW: [f32; 4] = [210.0, 300.0, 560.0, -470.0];
+const EMBLEM_BOX: [f32; 4] = [320.0, 520.0, 450.0, 390.0];
+
+/// A tag's box (left, top, right, bottom).
+fn bounds(r: ui::Rect) -> [f32; 4] {
+    [r.left as f32, r.top as f32, r.right as f32, r.bottom as f32]
+}
+
+/// A box moved by `[x, y]`.
+fn offset([l, t, r, b]: [f32; 4], [x, y]: [f32; 2]) -> [f32; 4] {
+    [l + x, t + y, r + x, b + y]
+}
+
+/// Whether a bitmap widget's tag's name ends with `name`.
+fn is(b: &ui::Bitmap, name: &str) -> bool {
+    b.bitmap.as_ref().is_some_and(|t| t.name.ends_with(name))
+}
+
+/// A button's picture as a bitmap widget.
+fn button_bitmap(t: &ui::TagRef) -> ui::Bitmap {
+    ui::Bitmap {
+        flags: 0,
+        animation: None,
+        delay_ms: 0,
+        multiply: false,
+        frame: 0,
+        corner: [0, 0],
+        wraps_per_second: [0.0, 0.0],
+        bitmap: Some(t.clone()),
+        depth: 0,
+        scale: [0.0, 0.0],
+    }
+}
+
+/// An item lit to `alpha` without the art: Halo 2's blue.
+fn glow(alpha: f32) -> [f32; 4] {
+    [HIGHLIGHT[0], HIGHLIGHT[1], HIGHLIGHT[2], HIGHLIGHT[3] * alpha]
+}
+
+/// A box of menu units in the frame's 640x480 units (x0, y0, x1, y1).
+fn frame_box([l, t, r, b]: [f32; 4]) -> [f32; 4] {
+    [
+        320.0 + l / UNITS,
+        240.0 - t / UNITS,
+        320.0 + r / UNITS,
+        240.0 - b / UNITS,
+    ]
+}
+
+/// Menu units in a frame: its middle the origin.
+fn space(f: &Frame) -> Space {
+    Space {
+        k: f.s / UNITS,
+        origin: f.at(320.0, 240.0),
+    }
+}
 
 /// The lobby's score to win, as it shows it.
 pub fn score_label(settings: &Settings) -> String {
@@ -768,15 +1045,47 @@ impl Menu {
             text: MenuText::default(),
             asking: None,
             pane: 0,
+            art: MenuArt::default(),
+            clock: 0.0,
+            opened: 0.0,
+            chrome: (0, 0.0),
+            focus: (0, usize::MAX, 0.0),
+            pointer: None,
+            guard: None,
+            controller: false,
         }
     }
 
     pub fn show(&mut self, screen: Screen) {
+        // What's behind: the start screen's and main menu's art, the
+        // framing behind the rest, or the game; a dialog keeps what it's
+        // over.
+        let chrome = match screen {
+            Screen::Start | Screen::Main => 0,
+            Screen::Pause | Screen::PostGame => 2,
+            Screen::Confirm => self.chrome.0,
+            _ => 1,
+        };
+        if chrome != self.chrome.0 {
+            self.chrome = (chrome, self.clock);
+        }
         self.screen = screen;
         self.cursor = 0;
         self.scroll = 0;
         self.asking = None;
         self.pane = 0;
+        self.opened = self.clock;
+        self.focus = (0, usize::MAX, self.clock);
+        self.guard = None;
+    }
+
+    /// Time passes in the menus: their art moves, and a list's items light
+    /// and dim as the cursor comes and goes.
+    pub fn tick(&mut self, dt: f32) {
+        self.clock += dt;
+        if self.cursor != self.focus.0 {
+            self.focus = (self.cursor, self.focus.0, self.clock);
+        }
     }
 
     /// The pause menu is up, or a dialog asked from it.
@@ -796,6 +1105,8 @@ impl Menu {
         self.asking = Some(asking);
         self.cursor = 1;
         self.sound = Some(Sound::Forward);
+        // Whatever comes up under the mouse waits for it to move.
+        self.guard = self.pointer;
         Action::None
     }
 
@@ -855,7 +1166,7 @@ impl Menu {
                 return self.text.get(ask.lines()[0]);
             }
             Screen::PostGame => return self.text.get("werds/postgame_header"),
-            Screen::Main => "HALO 2",
+            Screen::Start | Screen::Main => "HALO 2",
             Screen::Campaign => "CAMPAIGN",
             Screen::Lobby if in_custom(ctx) => "CUSTOM GAME",
             Screen::Lobby => "MULTIPLAYER",
@@ -876,6 +1187,7 @@ impl Menu {
 
     fn rows(&self, ctx: &Context) -> Vec<Row> {
         match self.screen {
+            Screen::Start => Vec::new(),
             Screen::Main => MAIN_ROWS.to_vec(),
             Screen::Campaign if ctx.missions.is_empty() => vec![Row::Difficulty, Row::NoMissions],
             Screen::Campaign => std::iter::once(Row::Difficulty)
@@ -1260,6 +1572,12 @@ impl Menu {
     }
 
     pub fn input(&mut self, input: Input, ctx: &Context) -> Action {
+        if self.screen == Screen::Start {
+            // Any key or button goes on.
+            self.show(Screen::Main);
+            self.sound = Some(Sound::Forward);
+            return Action::None;
+        }
         if self.editing {
             return match input {
                 Input::Select | Input::Back => self.typed(Typed::Done),
@@ -1312,6 +1630,22 @@ impl Menu {
                 let step = if input == Input::Left { n - 1 } else { 1 };
                 self.pane = (self.pane + step) % n;
                 self.sound = Some(Sound::Cursor);
+                Action::None
+            }
+            // The lobby's GAME OPTIONS and START GAME are side by side.
+            Input::Left | Input::Right
+                if self.screen == Screen::Lobby
+                    && matches!(row, Some(Row::GameOptions | Row::StartGame)) =>
+            {
+                let other = if row == Some(Row::GameOptions) {
+                    Row::StartGame
+                } else {
+                    Row::GameOptions
+                };
+                if let Some(k) = rows.iter().position(|&r| r == other) {
+                    self.cursor = k;
+                    self.sound = Some(Sound::Cursor);
+                }
                 Action::None
             }
             Input::Left | Input::Right => {
@@ -1470,6 +1804,7 @@ impl Menu {
             }
             Row::StartGame if ctx.maps.is_empty() => {
                 self.notice = Some("NO MULTIPLAYER MAPS FOUND".into());
+                self.sound = Some(Sound::Error);
                 Action::None
             }
             Row::StartGame => {
@@ -1482,6 +1817,7 @@ impl Menu {
                         "{} RUNS ANOTHER VERSION, UPDATE BOTH PCS",
                         g.computer.to_uppercase()
                     ));
+                    self.sound = Some(Sound::Error);
                     Action::None
                 }
                 Some(g) => {
@@ -1605,6 +1941,7 @@ impl Menu {
         };
         if let Some(why) = o.cant_search(p) {
             self.notice = Some(why);
+            self.sound = Some(Sound::Error);
             return Action::None;
         }
         self.show(Screen::Matchmaking);
@@ -1627,6 +1964,7 @@ impl Menu {
         match (ctx.joined && !in_match(ctx), self.screen) {
             (true, Screen::PostGame) => {
                 self.notice = Some("WAITING FOR THE HOST".into());
+                self.sound = Some(Sound::Error);
                 Action::None
             }
             (true, _) => Action::Leave,
@@ -1724,7 +2062,7 @@ impl Menu {
             }
             Screen::Lobby if ctx.joined => self.ask(Ask::LeaveLobby),
             Screen::Confirm => self.answer(false, ctx),
-            Screen::Main => Action::None,
+            Screen::Start | Screen::Main => Action::None,
             Screen::Profile => {
                 self.back_to_main(Row::Profile);
                 Action::None
@@ -1784,36 +2122,15 @@ impl Menu {
         }
     }
 
+    /// Where row `k` (of those shown) is, in the frame's 640x480 units:
+    /// on the carnage report under its stats, elsewhere where it's drawn.
     fn row_rect(&self, k: usize) -> [f32; 4] {
-        let wide = matches!(self.screen, Screen::SystemLink | Screen::Options);
-        // The online lists are wider still, for players' doings.
-        let players = matches!(self.screen, Screen::Players | Screen::RecentPlayers);
-        let list = players || matches!(self.screen, Screen::Playlists | Screen::Matchmaking);
-        // The game options' eleven rows (and the lists of players) sit
-        // closer to fit above the hint.
-        let step = if self.screen == Screen::Options || players {
-            ROW_STEP - 4.0
-        } else {
-            ROW_STEP
-        };
-        let y = ROW_Y + k as f32 * step + self.rows_offset();
-        let w = if list {
-            480.0
-        } else if wide {
-            400.0
-        } else {
-            ROW_W
-        };
-        [ROW_X, y, ROW_X + w, y + ROW_H]
-    }
-
-    /// The carnage report pushes its rows below its stats, and a dialog
-    /// below its question.
-    fn rows_offset(&self) -> f32 {
         match self.screen {
-            Screen::PostGame => REPORT_BOTTOM - ROW_Y,
-            Screen::Confirm => 64.0,
-            _ => 0.0,
+            Screen::PostGame => {
+                let y = REPORT_BOTTOM + k as f32 * ROW_STEP;
+                [ROW_X, y, ROW_X + ROW_W, y + ROW_H]
+            }
+            _ => frame_box(self.row_box(k)),
         }
     }
 
@@ -1829,8 +2146,24 @@ impl Menu {
         })
     }
 
+    /// Whether the mouse, now at `pos` (window pixels), is to be ignored:
+    /// a dialog came up under it, and it hasn't moved away yet.
+    fn guarded(&mut self, pos: [f32; 2]) -> bool {
+        self.pointer = Some(pos);
+        match self.guard {
+            Some(g) if (pos[0] - g[0]).hypot(pos[1] - g[1]) <= GUARD => true,
+            _ => {
+                self.guard = None;
+                false
+            }
+        }
+    }
+
     /// The mouse moved to `pos` (window pixels).
     pub fn hover(&mut self, pos: [f32; 2], w: f32, h: f32, ctx: &Context) {
+        if self.guarded(pos) {
+            return;
+        }
         if let Some((k, _)) = self.row_at(pos, w, h, ctx) {
             if k != self.cursor {
                 self.cursor = k;
@@ -1842,6 +2175,12 @@ impl Menu {
     /// A click at `pos`: settings step down on their left part and up
     /// elsewhere; other rows are chosen.
     pub fn click(&mut self, pos: [f32; 2], w: f32, h: f32, ctx: &Context) -> Action {
+        if self.guarded(pos) {
+            return Action::None;
+        }
+        if self.screen == Screen::Start {
+            return self.input(Input::Select, ctx);
+        }
         if self.screen == Screen::PostGame {
             // The carnage report's tabs show their panes.
             let f = Frame::new(w, h);
@@ -1899,92 +2238,221 @@ impl Menu {
         ctx: &Context,
     ) {
         let f = Frame::new(w, h);
-        let s = f.s;
-        // Darken behind the menu so it reads over any map.
-        match self.screen {
-            Screen::Main
-            | Screen::Campaign
-            | Screen::Lobby
-            | Screen::Options
-            | Screen::SystemLink
-            | Screen::Profile
-            | Screen::Live
-            | Screen::Players
-            | Screen::RecentPlayers
-            | Screen::Player
-            | Screen::Playlists
-            | Screen::Matchmaking
-            | Screen::Pregame => {
-                hb.quad(
-                    white,
-                    [0.0, 0.0, w, h],
-                    [0.0; 4],
-                    [0.0, 0.0, 0.0, 0.35],
-                    hud_mode::PLAIN,
-                    0.0,
-                );
-            }
-            Screen::Pause => {
-                hb.quad(
-                    white,
-                    [0.0, 0.0, w, h],
-                    [0.0; 4],
-                    [0.0, 0.0, 0.0, 0.55],
-                    hud_mode::PLAIN,
-                    0.0,
-                );
-            }
-            Screen::PostGame | Screen::Confirm => {
-                hb.quad(
-                    white,
-                    [0.0, 0.0, w, h],
-                    [0.0; 4],
-                    [0.0, 0.0, 0.02, 0.8],
-                    hud_mode::PLAIN,
-                    0.0,
-                );
-            }
+        if self.screen == Screen::PostGame {
+            self.draw_postgame(hb, [font, white], &f, [w, h], ctx);
+            return;
         }
-        hb.text_left(font, f.at(ROW_X, 48.0), 26.0 * s, &self.title(ctx), BRIGHT);
+        let mut p = Painter::new(hb, &self.art, space(&f), [font, white], self.clock);
+        self.draw_behind(&mut p, [w, h]);
+        match self.screen {
+            Screen::Start => self.draw_start(&mut p),
+            Screen::Main => self.draw_main(&mut p, ctx),
+            Screen::Lobby | Screen::Pregame => self.draw_lobby(&mut p, ctx),
+            Screen::SystemLink => self.draw_browser(&mut p, ctx),
+            Screen::Confirm | Screen::Pause => self.draw_dialog(&mut p, ctx),
+            _ => self.draw_list(&mut p, ctx),
+        }
+        match (self.screen, ctx.online) {
+            (Screen::Profile, _) => self.draw_profile(&mut p),
+            (Screen::Live, Some(o)) => draw_party(&mut p, o),
+            (Screen::Player, Some(o)) => draw_player(&mut p, o, self.player),
+            _ => {}
+        }
+        self.draw_header(&mut p, ctx);
+        self.draw_note(&mut p, ctx);
+        self.draw_legend(&mut p, ctx);
+    }
+
+    /// The carnage report, as the game's flow drew it: over a dark veil,
+    /// its title, tabs and stats, then CONTINUE and any notice under them.
+    fn draw_postgame(
+        &self,
+        hb: &mut HudBuilder,
+        [font, white]: [usize; 2],
+        f: &Frame,
+        [w, h]: [f32; 2],
+        ctx: &Context,
+    ) {
+        let veil = [0.0, 0.0, 0.02, 0.8];
+        hb.quad(white, [0.0, 0.0, w, h], [0.0; 4], veil, hud_mode::PLAIN, 0.0);
+        hb.text_left(font, f.at(ROW_X, 48.0), 26.0 * f.s, &self.title(ctx), BRIGHT);
         let rule = f.rect([ROW_X, 84.0, ROW_X + 300.0, 86.0]);
         hb.quad(white, rule, [0.0; 4], HIGHLIGHT, hud_mode::PLAIN, 0.0);
-
-        if self.screen == Screen::PostGame {
-            self.draw_report(hb, font, white, &f, ctx);
+        self.draw_report(hb, font, white, f, ctx);
+        let rows = self.rows(ctx);
+        let cursor = self.settled(&rows, ctx);
+        for (k, &row) in rows.iter().enumerate() {
+            let rect = self.row_rect(k);
+            let (bg, fg) = if k == cursor {
+                (HIGHLIGHT, BRIGHT)
+            } else {
+                (PANEL, TEXT)
+            };
+            hb.quad(white, f.rect(rect), [0.0; 4], bg, hud_mode::PLAIN, 0.0);
+            let size = f.text(11.0);
+            let middle = f.at(0.0, rect[1] + ROW_H * 0.5)[1] - size * 0.5;
+            let at = [f.at(rect[0] + 10.0, 0.0)[0], middle];
+            hb.text_left(font, at, size, &self.label(row, ctx).0, fg);
         }
-        if let Some(a) = self.asking.filter(|_| self.screen == Screen::Confirm) {
-            // The question, over its answers.
-            // Wide, so it takes three lines at most in the smallest view.
-            let question = self.text.get(a.ask.lines()[1]);
-            let size = f.text(10.0) / s;
-            let per_line = ((QUESTION_W - 20.0) / (size * crate::font::ASPECT)) as usize;
-            let lines = wrap(&question, per_line.max(1));
-            let (top, step) = (ROW_Y - 26.0, size + 4.0);
-            let bottom = top + step * lines.len() as f32 + 4.0;
-            let back = f.rect([ROW_X, top - 8.0, ROW_X + QUESTION_W, bottom]);
-            hb.quad(white, back, [0.0; 4], PANEL, hud_mode::PLAIN, 0.0);
-            for (k, line) in lines.iter().enumerate() {
-                let at = f.at(ROW_X + 10.0, top + step * k as f32);
-                hb.text_left(font, at, size * s, line, TEXT);
+        if let Some(n) = &self.notice {
+            let at = f.at(ROW_X, REPORT_BOTTOM + ROW_H + 8.0);
+            hb.text_left(font, at, f.text(10.0), n, WARNING);
+        }
+        let hint = "ENTER OR A: CONTINUE   LEFT OR RIGHT: MORE STATS";
+        hb.text_left(font, f.at(ROW_X, 440.0), f.text(8.0), hint, DIM);
+    }
+
+    /// What's behind a screen: the start screen's and main menu's own art
+    /// over the scene; the framing and moving tracks behind the screens
+    /// past them (a navy veil without the art), with a window in it where
+    /// the profile's model stands; and behind a dialog the screen it was
+    /// asked from (or the game), under the menus' overlay colour.
+    fn draw_behind(&self, p: &mut Painter, [w, h]: [f32; 2]) {
+        let under = match (self.screen, self.asking) {
+            (Screen::Confirm, Some(a)) => a.from,
+            (s, _) => s,
+        };
+        let age = self.clock - self.chrome.1;
+        match under {
+            Screen::Start | Screen::Main => {
+                let name = if under == Screen::Start {
+                    menuart::START_SCREEN
+                } else {
+                    menuart::MAIN_MENU
+                };
+                p.screen(name, age, |_| true, None);
+            }
+            // The game is behind these.
+            Screen::Pause | Screen::PostGame => {}
+            _ if self.art.loaded() => {
+                let hole = (under == Screen::Profile).then_some(MODEL_WINDOW);
+                p.screen(menuart::BACKGROUND, age, |_| true, hole);
+                if let Some(hole) = hole {
+                    p.rim(hole, 1.0);
+                }
+            }
+            _ => {
+                let veil = [VEIL[0], VEIL[1], VEIL[2], 0.7];
+                p.hb
+                    .quad(p.white, [0.0, 0.0, w, h], [0.0; 4], veil, hud_mode::PLAIN, 0.0);
             }
         }
+        if matches!(self.screen, Screen::Confirm | Screen::Pause) {
+            let g = &self.art.ui.globals;
+            let [r, gr, b, a] = if self.art.loaded() {
+                g.overlay_color
+            } else {
+                VEIL
+            };
+            // Over a game the pause menu lets it show through.
+            let a = if under == Screen::Pause { PAUSE_VEIL } else { a };
+            let veil = tag_color([r, gr, b], a);
+            p.hb
+                .quad(p.white, [0.0, 0.0, w, h], [0.0; 4], veil, hud_mode::PLAIN, 0.0);
+        }
+    }
+
+    /// Halo 2's start screen: its logo and tracks (`draw_behind`), and
+    /// "PRESS ANY KEY TO CONTINUE" breathing under them.
+    fn draw_start(&self, p: &mut Painter) {
+        let texts = self
+            .art
+            .screen(menuart::START_SCREEN)
+            .and_then(|s| s.panes.first())
+            .map_or(&[][..], |pane| &pane.texts[..]);
+        match texts.iter().find(|t| t.string == "start_screen_0") {
+            Some(t) => {
+                let text = t.text.as_deref().unwrap_or(PRESS_ANY_KEY).to_uppercase();
+                p.line(bounds(t.bounds), Style::of(t, 1.0), &text);
+            }
+            None => {
+                self.draw_logo(p);
+                let style = Style::new(Font::Title, ui::PULSATING, TEXT);
+                p.line(PRESS_ANY_KEY_BOX, style, PRESS_ANY_KEY);
+            }
+        }
+    }
+
+    /// "HALO 2" where the logo goes, without the art.
+    fn draw_logo(&self, p: &mut Painter) {
+        if !self.art.loaded() {
+            let style = Style::new(Font::SuperLarge, 0, BRIGHT);
+            p.line(LOGO_BOX, style, "HALO 2");
+        }
+    }
+
+    /// The main menu: its items on their glow bars down the middle (the one
+    /// chosen lit, the rest at half), and the gamertag at the bottom right.
+    fn draw_main(&self, p: &mut Painter, ctx: &Context) {
+        self.draw_logo(p);
+        let skin = self.art.list_skin(menuart::MAIN_MENU);
+        let place = self.place();
+        let (fade, [fx, fy]) = self.list_fade(Some(menuart::MAIN_MENU));
+        let rows = self.rows(ctx);
+        let cursor = self.settled(&rows, ctx);
+        for (k, &row) in rows.iter().enumerate() {
+            let (look, dx) = self.item_look(k, cursor, skin);
+            let [x, y] = place.corner(k);
+            let corner = [x + dx + fx, y + fy];
+            let label = self.label(row, ctx).0;
+            let text_alpha = look.max(TEXT_FLOOR) * fade;
+            match skin {
+                Some(skin) => {
+                    p.item(skin, corner, look * fade, 1.0, |_| true);
+                    // The shadow (listed second) under the label.
+                    for t in skin.texts.iter().rev() {
+                        let style = Style::of(t, text_alpha);
+                        p.line(offset(bounds(t.bounds), corner), style, &label);
+                    }
+                }
+                None => {
+                    let item = offset(place.item, corner);
+                    p.quad(item, glow(look * fade));
+                    let style = Style::new(Font::MainMenu, 0, TEXT).alpha(text_alpha);
+                    p.line(item, style, &label);
+                }
+            }
+        }
+        // The gamertag, at the bottom right.
+        let tag = self
+            .art
+            .screen(menuart::MAIN_MENU)
+            .and_then(|s| s.panes.first())
+            .and_then(|pane| pane.texts.iter().find(|t| t.string.is_empty()));
+        let (box_, style) = match tag {
+            Some(t) => (bounds(t.bounds), Style::of(t, fade)),
+            None => (GAMERTAG_BOX, Style::new(Font::SplitHudMessage, 1, DIM)),
+        };
+        p.line(box_, style, &self.profile.name);
+    }
+
+    /// A screen's list of rows in its skin: each item's background (lit
+    /// as the cursor comes to it), its name and its value, and the online
+    /// lists' icons; and on a long list, which of its rows show.
+    fn draw_list(&self, p: &mut Painter, ctx: &Context) {
         let rows = self.rows(ctx);
         let cursor = self.settled(&rows, ctx);
         let shown = self.shown(rows.len());
-        if shown.len() < rows.len() {
-            // Where in a long list the rows shown are.
-            let at = f.at(ROW_X + 10.0, self.row_rect(shown.len())[1] + 1.0);
-            let place = format!("{}-{} OF {}", shown.start + 1, shown.end, rows.len());
-            hb.text_left(font, at, f.text(8.0), &place, DIM);
-        }
+        let place = self.place();
+        let skin = self.list_skin();
+        let (fade, [fx, fy]) = self.list_fade(self.list_screen());
+        let columns = self.columns(skin, &place);
+        let skin_width = skin
+            .and_then(|s| self.art.item_box(s))
+            .map_or(place.item[2] - place.item[0], |b| b[2] - b[0]);
+        let stretch = (place.item[2] - place.item[0]) / skin_width.max(1.0);
         let first = shown.start;
         for (k, &row) in rows.iter().enumerate().take(shown.end).skip(first) {
-            let rect = self.row_rect(k - first);
-            let fixed = self.screen == Screen::Pregame
-                || self.screen == Screen::Lobby && ctx.host_lobby.is_some();
             let selectable = row.selectable(ctx);
-            let selected = k == cursor && selectable && !fixed;
-            let (label, value) = self.label(row, ctx);
+            let focused = k == cursor && selectable;
+            let (look, dx) = if selectable {
+                self.item_look(k, cursor, skin)
+            } else {
+                (1.0, 0.0)
+            };
+            let [x, y] = place.corner(k - first);
+            let corner = [x + dx + fx, y + fy];
+            let item = offset(place.item, corner);
             // Playlists the party lacks maps for are marked, as Halo 2 did,
             // and recent players who are offline dimmed.
             let dimmed = match (row, ctx.online) {
@@ -1998,29 +2466,47 @@ impl Menu {
                     .is_some_and(|r| o.player(r.account).is_none()),
                 _ => false,
             };
-            let (bg, fg) = if selected {
-                (HIGHLIGHT, BRIGHT)
-            } else if selectable && !dimmed {
-                (PANEL, TEXT)
-            } else if selectable {
-                (PANEL, DIM)
-            } else if matches!(row, Row::SearchStatus | Row::Starting) {
-                ([0.0; 4], BRIGHT)
+            if selectable {
+                match skin {
+                    Some(skin) => {
+                        let plain = |b: &ui::Bitmap| !is(b, "\\hilite") && !is(b, "\\hilite_bracket");
+                        p.item(skin, corner, look * fade, stretch, plain);
+                        if focused {
+                            let hilite = skin.bitmaps.iter().find(|b| is(b, "\\hilite"));
+                            if let Some((b, [_, h])) = hilite.and_then(|b| Some((b, self.art.size(b)?))) {
+                                let at = [corner[0] + b.corner[0] as f32, corner[1] + b.corner[1] as f32 + h];
+                                p.bitmap(b, at, fade, stretch);
+                            }
+                        }
+                    }
+                    None => p.quad(item, glow(look * fade * 0.6)),
+                }
+            }
+            let (label, value) = self.label(row, ctx);
+            let alpha = if !selectable {
+                fade
+            } else if dimmed {
+                look.max(TEXT_FLOOR) * fade * 0.6
             } else {
-                ([0.0; 4], DIM)
+                look.max(TEXT_FLOOR) * fade
             };
-            hb.quad(white, f.rect(rect), [0.0; 4], bg, hud_mode::PLAIN, 0.0);
-            // Text centred on the row, however small the window.
-            let middle = |size: f32| f.at(0.0, rect[1] + ROW_H * 0.5)[1] - size * 0.5;
+            let [(mut lbox, lstyle), (mut vbox, vstyle)] = columns;
             // Players have icons on the left; playlists, on the right.
-            let (left, right) = match row {
-                Row::Player(_) | Row::RecentPlayer(_) => (30.0, 10.0),
-                Row::Playlist(_) => (10.0, 30.0),
-                _ => (10.0, 10.0),
-            };
-            let size = f.text(11.0);
-            let at = [f.at(rect[0] + left, 0.0)[0], middle(size)];
-            hb.text_left(font, at, size, &label, fg);
+            match row {
+                Row::Player(_) | Row::RecentPlayer(_) => lbox[0] += ICON + 16.0,
+                Row::Playlist(_) => vbox[2] -= ICON + 16.0,
+                _ => {}
+            }
+            let bright = matches!(row, Row::SearchStatus | Row::Starting);
+            let lstyle = match (selectable, bright) {
+                (false, true) => Style { color: BRIGHT, ..lstyle },
+                (false, false) => Style { color: DIM, ..lstyle },
+                _ => lstyle,
+            }
+            .alpha(alpha);
+            let lbox = offset(lbox, corner);
+            p.line(lbox, lstyle, &label);
+            let label_right = lbox[0] + p.width(lstyle.font, &label);
             if let Some(v) = value {
                 let steps = !matches!(
                     row,
@@ -2033,79 +2519,244 @@ impl Menu {
                         | Row::Playlist(_)
                         | Row::SearchStatus
                 );
-                let v = if selected && steps {
-                    format!("< {v} >")
-                } else {
-                    v
+                let vbox = offset(vbox, corner);
+                let brackets = skin.and_then(|s| {
+                    let mut b = s.bitmaps.iter().filter(|b| is(b, "\\hilite_bracket"));
+                    Some((b.next()?, b.next()?))
+                });
+                let v = match brackets {
+                    // Halo 2's brackets above and below a setting's value.
+                    Some((top, bottom)) if focused && steps => {
+                        let middle = (vbox[0] + vbox[2]) * 0.5;
+                        for b in [top, bottom] {
+                            if let Some([w, h]) = self.art.size(b) {
+                                let at = [middle - w * 0.5, corner[1] + b.corner[1] as f32 + h];
+                                p.bitmap(b, at, fade, 1.0);
+                            }
+                        }
+                        v
+                    }
+                    _ if focused && steps => format!("< {v} >"),
+                    _ => v,
                 };
                 // What players are doing is long: smaller.
-                let size = f.text(if left + right > 20.0 { 9.0 } else { 11.0 });
-                let width = v.chars().count() as f32 * size * crate::font::ASPECT;
-                let at = [f.at(rect[2] - right, 0.0)[0] - width, middle(size)];
-                hb.text_left(font, at, size, &v, fg);
+                let font = match row {
+                    Row::Player(_) | Row::RecentPlayer(_) | Row::Playlist(_) => Font::SplitHudMessage,
+                    _ => vstyle.font,
+                };
+                let vstyle = Style {
+                    font,
+                    color: lstyle.color,
+                    ..vstyle
+                };
+                let room = vbox[2] - vbox[0].max(label_right + 20.0);
+                p.line(vbox, vstyle, &p.fit(font, &v, room.max(0.0)));
             }
             if let Some(o) = ctx.online {
-                draw_icons(hb, &f, row, rect, &label, o);
+                draw_icons(p, row, item, label_right, o);
             }
         }
-        if self.screen == Screen::Lobby {
-            let top = self.draw_map(hb, font, &f, ctx, white);
-            self.draw_players(hb, font, white, &f, ctx, top);
+        if shown.len() < rows.len() {
+            // Where in a long list the rows shown are.
+            let [x, y] = place.corner(shown.len());
+            let at = offset(place.item, [x, y + place.step * 0.25]);
+            let text = format!("{}-{} OF {}", shown.start + 1, shown.end, rows.len());
+            let style = Style::new(Font::SplitHudMessage, ui::RIGHT_JUSTIFY, DIM);
+            p.line(at, style, &text);
         }
-        if self.screen == Screen::Pregame {
-            let top = self.draw_map(hb, font, &f, ctx, white);
-            draw_roster(hb, font, white, &f, ctx, top);
-        }
-        if self.screen == Screen::Profile {
-            self.draw_profile(hb, font, white, &f);
-        }
-        if let Some(o) = ctx.online {
-            match self.screen {
-                Screen::Live => draw_party(hb, font, white, &f, o),
-                Screen::Player => draw_player(hb, font, white, &f, o, self.player),
-                _ => {}
+    }
+
+    /// A dialog: Halo 2's corners and gradients, its question (or, over a
+    /// mission, its objectives), then its answers.
+    fn draw_dialog(&self, p: &mut Painter, ctx: &Context) {
+        let name = self.list_screen().unwrap_or(menuart::DIALOG);
+        let age = self.clock - self.opened;
+        // The menus' overlay colour between the dialog's corners (ul_07's
+        // top left, br_07's bottom right), so what's behind doesn't show
+        // through its words; its own box, without the art.
+        let pane = self.art.screen(name).and_then(|s| s.panes.first());
+        let corners = pane.and_then(|pane| {
+            let ul = pane.bitmaps.iter().find(|b| is(b, "\\ul_07"))?;
+            let br = pane.bitmaps.iter().find(|b| is(b, "\\br_07"))?;
+            let [w, h] = self.art.size(br)?;
+            let [l, t] = ul.corner.map(f32::from);
+            let [x, y] = br.corner.map(f32::from);
+            Some([l, t, x + w, y - h])
+        });
+        match corners {
+            Some(back) => {
+                let [r, g, b, _] = self.art.ui.globals.overlay_color;
+                p.quad(back, tag_color([r, g, b], DIALOG_BACKING));
             }
+            None if self.screen == Screen::Confirm => p.quad(DIALOG_BOX, PANEL),
+            None => p.quad(PAUSE_BOX, PANEL),
         }
-        if self.screen == Screen::Pause && !ctx.objectives.is_empty() {
-            draw_objectives(hb, font, white, &f, ctx.objectives);
+        p.screen(name, age, |_| true, None);
+        let text = self
+            .art
+            .screen(name)
+            .and_then(|s| s.panes.first())
+            .and_then(|pane| pane.texts.first());
+        let (fade, _) = animate(text.and_then(|t| self.art.intro(t.animation)), age);
+        let fade = fade / peak(text.and_then(|t| self.art.intro(t.animation)));
+        let style = match text {
+            Some(t) => Style::of(t, fade),
+            None => Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT),
+        };
+        match (self.screen, self.asking) {
+            (Screen::Confirm, Some(a)) => {
+                let question = self.text.get(a.ask.lines()[1]);
+                let box_ = text.map_or(QUESTION_BOX, |t| bounds(t.bounds));
+                p.paragraph(box_, style, &question);
+            }
+            _ if !ctx.objectives.is_empty() => {
+                let box_ = text.map_or(OBJECTIVES_BOX, |t| bounds(t.bounds));
+                draw_objectives(p, [box_[0], box_[1] + 40.0, box_[2], box_[3] - 120.0], style, ctx.objectives);
+            }
+            _ => {}
         }
-        if let Some(header) = self.header(ctx) {
-            // System Link's says only what's below, so it's quieter.
-            let color = if self.screen == Screen::SystemLink {
-                DIM
-            } else {
-                TEXT
-            };
-            hb.text_left(font, f.at(ROW_X, ROW_Y - 22.0), f.text(9.0), &header, color);
-        }
-        // Under the carnage report's CONTINUE.
-        let notice_y = if self.screen == Screen::PostGame {
-            REPORT_BOTTOM + ROW_H + 8.0
+        self.draw_list(p, ctx);
+    }
+
+    /// The screen's title at the top left, as Halo 2's headers are (a
+    /// dialog's over it), and a line under it saying what's below.
+    fn draw_header(&self, p: &mut Painter, ctx: &Context) {
+        let size = match self.screen {
+            Screen::Start | Screen::Main => return,
+            Screen::Confirm => self.dialog_size(menuart::DIALOG, ui::DialogSize::Quarter),
+            Screen::Pause => self.dialog_size(menuart::LARGE_DIALOG, ui::DialogSize::Half),
+            _ => ui::DialogSize::Full,
+        } as usize;
+        let g = &self.art.ui.globals;
+        let (box_, font, color) = if self.art.loaded() {
+            let c = tag_color(g.text_color, 1.0);
+            (bounds(g.header_bounds[size]), g.header_fonts[size], c)
         } else {
-            400.0
+            (HEADER_BOUNDS[size], Font::Title, BRIGHT)
+        };
+        let title = self.title(ctx).to_uppercase();
+        p.line(box_, Style::new(font, ui::LEFT_JUSTIFY, color), &title);
+        // Under the title (the lobby and System Link say it in their own
+        // panels).
+        let below = matches!(
+            self.screen,
+            Screen::Live | Screen::Playlists | Screen::Matchmaking
+        );
+        if let Some(header) = self.header(ctx).filter(|_| below) {
+            let [l, t, _, b] = box_;
+            let style = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
+            let under = [l, b - 10.0, l + SUBHEADER_W, b - 10.0 - (t - b)];
+            p.line(under, style, &p.fit(Font::Body, &header, SUBHEADER_W));
+        }
+    }
+
+    /// A notice (why something can't be done), or else a note on what's
+    /// chosen, where the screen has room for it.
+    fn draw_note(&self, p: &mut Painter, ctx: &Context) {
+        let box_ = match self.screen {
+            Screen::Start
+            | Screen::Confirm
+            | Screen::Pause
+            | Screen::SystemLink
+            | Screen::Lobby
+            | Screen::Pregame
+            | Screen::PostGame => return,
+            Screen::Main => MAIN_NOTE,
+            Screen::Profile => PROFILE_NOTE,
+            _ => NOTE,
         };
         if let Some(n) = &self.notice {
-            hb.text_left(font, f.at(ROW_X, notice_y), f.text(10.0), n, WARNING);
+            let style = Style::new(Font::Body, ui::LEFT_JUSTIFY, WARNING);
+            let style = if self.screen == Screen::Main {
+                Style { flags: 0, ..style }
+            } else {
+                style
+            };
+            p.paragraph(box_, style, n);
         } else if let Some(note) = self.note(ctx) {
-            let size = f.text(9.0);
-            let per_line = (540.0 * s / (size * crate::font::ASPECT)) as usize;
-            for (k, line) in wrap(&note, per_line.max(1)).iter().take(3).enumerate() {
-                let at = f.at(ROW_X, 400.0 + 12.0 * k as f32);
-                hb.text_left(font, at, size, line, TEXT);
-            }
+            let style = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
+            p.paragraph(box_, style, &note);
         }
-        let hint = match self.screen {
-            _ if self.editing => "TYPE A GAMERTAG, THEN PRESS ENTER",
-            Screen::Main => "ENTER OR A: SELECT",
-            Screen::PostGame => "ENTER OR A: CONTINUE   LEFT OR RIGHT: MORE STATS",
-            Screen::Pregame => "",
-            Screen::Live if ctx.online.is_some_and(|o| o.live.is_some()) => {
-                "ENTER OR A: SELECT   ESC OR B: SIGN OUT"
-            }
-            Screen::Lobby if in_custom(ctx) => "ENTER OR A: SELECT   ESC OR B: BACK TO THE PARTY",
-            _ => "ENTER OR A: SELECT   ESC OR B: BACK",
+    }
+
+    /// The buttons to press, at the bottom right as Halo 2's legends are.
+    fn draw_legend(&self, p: &mut Painter, ctx: &Context) {
+        let Some(legend) = self.legend(ctx) else {
+            return;
         };
-        hb.text_left(font, f.at(ROW_X, 440.0), f.text(8.0), hint, DIM);
+        let size = match self.screen {
+            Screen::Confirm => self.dialog_size(menuart::DIALOG, ui::DialogSize::Quarter),
+            Screen::Pause => self.dialog_size(menuart::LARGE_DIALOG, ui::DialogSize::Half),
+            _ => ui::DialogSize::Full,
+        } as usize;
+        let g = &self.art.ui.globals;
+        let (box_, color) = if self.art.loaded() {
+            (bounds(g.button_key_bounds[size]), tag_color(g.text_color, 1.0))
+        } else {
+            (LEGEND_BOUNDS[size], DIM)
+        };
+        let style = Style::new(Font::Body, ui::RIGHT_JUSTIFY, color);
+        p.line(box_, style, &legend);
+    }
+
+    /// The legend for this screen: Halo 2's own (mainmenu.map's, with its
+    /// button glyphs) for a controller, its keys for the keyboard.
+    fn legend(&self, ctx: &Context) -> Option<String> {
+        if self.editing {
+            return Some("TYPE A GAMERTAG, THEN PRESS ENTER".into());
+        }
+        let signed_in = ctx.online.is_some_and(|o| o.live.is_some());
+        let line = match self.screen {
+            Screen::Start | Screen::Pregame | Screen::PostGame => return None,
+            Screen::Main => self.button_key("a_select"),
+            Screen::Confirm => self.button_key("a_select_b_cancel"),
+            Screen::Pause => format!("{} \u{e101} RESUME", self.button_key("a_select")),
+            Screen::Live if signed_in => {
+                format!("{} \u{e101} SIGN OUT", self.button_key("a_select"))
+            }
+            Screen::Lobby if in_custom(ctx) => {
+                format!("{} \u{e101} BACK TO THE PARTY", self.button_key("a_select"))
+            }
+            Screen::Lobby if ctx.host_lobby.is_some() => "\u{e101} LEAVE".into(),
+            _ => self.button_key("a_select_b_back"),
+        };
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if self.controller {
+            return Some(line);
+        }
+        // The keys that do what the buttons do.
+        let mut keys = String::new();
+        for word in line.split(' ') {
+            let key = match word {
+                "\u{e100}" => "ENTER",
+                "\u{e101}" => "ESC",
+                w => w,
+            };
+            if key != word && !keys.is_empty() {
+                keys.push_str("   ");
+            } else if !keys.is_empty() {
+                keys.push(' ');
+            }
+            keys.push_str(key);
+        }
+        Some(keys)
+    }
+
+    /// A button legend of mainmenu.map's, by name, or the remake's words
+    /// for it.
+    fn button_key(&self, name: &str) -> String {
+        let ours = LEGENDS.iter().find(|l| l.0 == name).map_or("", |l| l.1);
+        self.art
+            .ui
+            .globals
+            .button_key(name)
+            .unwrap_or(ours)
+            .to_string()
+    }
+
+    /// A dialog screen's size, from its tag.
+    fn dialog_size(&self, name: &str, otherwise: ui::DialogSize) -> ui::DialogSize {
+        self.art.screen(name).map_or(otherwise, |s| s.dialog_size())
     }
 
     /// The carnage report's tabs, left to right: each pane's name and
@@ -2296,112 +2947,357 @@ impl Menu {
         .filter(|note| !note.is_empty())
     }
 
-    /// The chosen map's picture and description over the player list.
-    /// Returns where the player list goes.
-    fn draw_map(
-        &self,
-        hb: &mut HudBuilder,
-        font: usize,
-        f: &Frame,
-        ctx: &Context,
-        white: usize,
-    ) -> f32 {
-        let Some(map) = ctx.maps.get(self.settings.map) else {
-            return ROW_Y;
-        };
-        // In another PC's lobby on a map not here, there's none to show.
-        let theirs = ctx
-            .host_lobby
-            .is_some_and(|l| !l.map.eq_ignore_ascii_case(&map.name));
-        if theirs || map.picture.is_none() && map.description.is_empty() {
-            return ROW_Y;
+    /// The screen's tag in mainmenu.map whose list this screen's rows are
+    /// laid out by, if any.
+    fn list_screen(&self) -> Option<&'static str> {
+        match self.screen {
+            Screen::Main => Some(menuart::MAIN_MENU),
+            Screen::Options | Screen::Profile => Some(menuart::OPTIONS),
+            Screen::SystemLink => Some(menuart::BROWSER),
+            Screen::Confirm => Some(menuart::DIALOG),
+            Screen::Pause => Some(menuart::LARGE_DIALOG),
+            _ => None,
         }
-        let s = f.s;
-        let (x, y) = (PANEL_X, ROW_Y);
-        let text_x = if map.picture.is_some() {
-            x + PICTURE[0] + 10.0
+    }
+
+    /// The skin the screen's list is drawn in.
+    fn list_skin(&self) -> Option<&ListSkin> {
+        match self.list_screen() {
+            Some(name) => self.art.list_skin(name),
+            None => self.art.online_skin(),
+        }
+    }
+
+    /// Where the screen's rows go: where its tag's list is, its items as
+    /// far apart as its skin's are and each its skin's background; the
+    /// tags' own numbers without the art. The profile's settings are
+    /// narrowed for the model beside them, and the online lists start
+    /// under the title.
+    fn place(&self) -> Place {
+        let (fallback, width) = match self.screen {
+            Screen::Main => (MAIN_PLACE, None),
+            Screen::Options => (OPTIONS_PLACE, None),
+            Screen::Profile => (PROFILE_PLACE, Some(PROFILE_WIDTH)),
+            Screen::SystemLink => (BROWSER_PLACE, None),
+            Screen::Confirm => (DIALOG_PLACE, None),
+            Screen::Pause => (PAUSE_PLACE, None),
+            // Beside the party, or the player picked.
+            Screen::Live | Screen::Player | Screen::Matchmaking => {
+                (ONLINE_PLACE, Some(ONLINE_NARROW))
+            }
+            _ => (ONLINE_PLACE, None),
+        };
+        let skin = self.list_skin();
+        let list = self
+            .list_screen()
+            .and_then(|n| self.art.screen(n))
+            .and_then(|s| s.panes.first())
+            .and_then(|p| p.lists.first());
+        let mut place = fallback;
+        if let (Some(skin), Some(item)) = (skin, skin.and_then(|s| self.art.item_box(s))) {
+            place.step = self.art.item_height(skin);
+            place.item = item;
+        }
+        if let Some(list) = list.filter(|_| self.screen != Screen::Profile) {
+            place.corner = [list.corner[0] as f32, list.corner[1] as f32];
+        }
+        if let Some(w) = width {
+            place.item[2] = place.item[0] + w;
+        }
+        place
+    }
+
+    /// Where a list's names and values go in its items (from an item's
+    /// corner), and in what: its skin's first text for the name, and its
+    /// second (the setting lists') for the value; otherwise the value is
+    /// right-justified in the name's box. Narrowed items narrow them too.
+    fn columns(&self, skin: Option<&ListSkin>, place: &Place) -> [([f32; 4], Style); 2] {
+        let texts = skin.map_or(&[][..], |s| &s.texts[..]);
+        let [l, t, r, b] = place.item;
+        let label = match texts.first() {
+            Some(t) => (bounds(t.bounds), Style::of(t, 1.0)),
+            None => {
+                let style = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
+                ([l + 10.0, t, r - 10.0, b], style)
+            }
+        };
+        let value = match texts.get(1).filter(|_| self.list_screen() == Some(menuart::OPTIONS)) {
+            Some(t) => (bounds(t.bounds), Style::of(t, 1.0)),
+            None => {
+                let [l, t, _, b] = label.0;
+                let style = Style {
+                    flags: ui::RIGHT_JUSTIFY,
+                    ..label.1
+                };
+                ([l, t, r - 10.0, b], style)
+            }
+        };
+        // Squeezed to the item's width.
+        let full = skin
+            .and_then(|s| self.art.item_box(s))
+            .map_or(r - l, |b| b[2] - b[0]);
+        let squeeze = (r - l) / full.max(1.0);
+        let squeezed = |([bl, bt, br, bb], style): ([f32; 4], Style)| {
+            let x = |v: f32| l + (v - l) * squeeze;
+            ([x(bl), bt, x(br).min(r - 10.0), bb], style)
+        };
+        [squeezed(label), squeezed(value)]
+    }
+
+    /// How lit list item `k` is, and how far it has slid: its skin's
+    /// animations as the cursor comes to it or leaves it, at rest
+    /// otherwise; without a skin, lit or at half.
+    fn item_look(&self, k: usize, cursor: usize, skin: Option<&ListSkin>) -> (f32, f32) {
+        let Some(anims) = skin.map(|s| &s.item_animations).filter(|a| !a.is_empty()) else {
+            return (if k == cursor { 1.0 } else { 0.5 }, 0.0);
+        };
+        let (seen, previous, at) = self.focus;
+        let t = self.clock - at;
+        let (alpha, [dx, _]) = if k == cursor {
+            animate(anims.first(), if seen == cursor { t } else { SETTLED })
+        } else if k == previous && seen == cursor {
+            animate(anims.get(1), t)
         } else {
-            x
+            animate(anims.get(2), SETTLED)
         };
-        let per_line = ((PANEL_X + PANEL_W - text_x) / (7.0 * crate::font::ASPECT)) as usize;
-        let lines = wrap(&map.description.to_uppercase(), per_line);
-        let mut height = 18.0 + 10.0 * lines.len() as f32;
-        if map.picture.is_some() {
-            height = height.max(PICTURE[1]);
-        }
-        let back = f.rect([x - 8.0, y - 8.0, x + PANEL_W + 8.0, y + height + 8.0]);
-        hb.quad(white, back, [0.0; 4], PANEL, hud_mode::PLAIN, 0.0);
-        if let Some(p) = map.picture {
-            hb.quad(
-                crate::gpu::MENU_TEXTURES + p,
-                f.rect([x, y, x + PICTURE[0], y + PICTURE[1]]),
-                [0.0, 0.0, 1.0, 1.0],
-                [1.0; 4],
-                hud_mode::PLAIN,
-                0.0,
-            );
-        }
-        hb.text_left(font, f.at(text_x, y), 11.0 * s, &map.title, BRIGHT);
-        for (k, line) in lines.iter().enumerate() {
-            let at = f.at(text_x, y + 18.0 + 10.0 * k as f32);
-            hb.text_left(font, at, 7.0 * s, line, TEXT);
-        }
-        y + height + 20.0
+        (alpha, dx)
     }
 
-    /// The profile's emblem, at the top right (the model stands below it,
-    /// drawn with the level).
-    fn draw_profile(&self, hb: &mut HudBuilder, font: usize, white: usize, f: &Frame) {
-        let (x, y) = (PROFILE_EMBLEM[0], PROFILE_EMBLEM[1]);
-        let size = PROFILE_EMBLEM[2];
-        hb.quad(
-            white,
-            f.rect([x - 6.0, y - 6.0, x + size + 6.0, y + size + 20.0]),
-            [0.0; 4],
-            PANEL,
-            hud_mode::PLAIN,
-            0.0,
-        );
-        crate::emblem::draw(
-            hb,
-            f.rect([x, y, x + size, y + size]),
-            self.profile.look.emblem,
-        );
-        let label = "EMBLEM";
-        let width = label.len() as f32 * 7.0 * crate::font::ASPECT;
-        let at = f.at(x + (size - width) * 0.5, y + size + 6.0);
-        hb.text_left(font, at, 7.0 * f.s, label, DIM);
+    /// How far a screen's list has come in (its alpha, up to 1, and how far
+    /// it has yet to slide): its intro animation, from when the screen came up.
+    fn list_fade(&self, screen: Option<&str>) -> (f32, [f32; 2]) {
+        let list = screen
+            .and_then(|n| self.art.screen(n))
+            .and_then(|s| s.panes.first())
+            .and_then(|p| p.lists.first());
+        let Some(list) = list else {
+            return (1.0, [0.0, 0.0]);
+        };
+        let anim = self.art.intro(list.animation);
+        let t = self.clock - self.opened - list.delay_ms as f32 / 1000.0;
+        let (alpha, slide) = animate(anim, t);
+        (alpha / peak(anim), slide)
     }
 
-    fn draw_players(
-        &self,
-        hb: &mut HudBuilder,
-        font: usize,
-        white: usize,
-        f: &Frame,
-        ctx: &Context,
-        top: f32,
-    ) {
-        let s = f.s;
-        let (x, mut y) = (PANEL_X, top);
+    /// Where row `k` (of those shown) is, in menu units.
+    fn row_box(&self, k: usize) -> [f32; 4] {
+        match (self.screen, k) {
+            (Screen::Lobby, 4) => self.lobby_button(0).0,
+            (Screen::Lobby, 5) => self.lobby_button(1).0,
+            (Screen::Lobby | Screen::Pregame, _) => self.lobby_line(k),
+            _ => {
+                let place = self.place();
+                offset(place.item, place.corner(k))
+            }
+        }
+    }
+
+    /// One of pregame_lobby's texts, by name.
+    fn lobby_text(&self, name: &str) -> Option<&ui::Text> {
+        let pane = self.art.screen(menuart::LOBBY)?.panes.first()?;
+        pane.texts.iter().find(|t| t.string == name)
+    }
+
+    /// The lobby's quick option line `k`: under "Quick Options:", each as
+    /// tall as it.
+    fn lobby_line(&self, k: usize) -> [f32; 4] {
+        let [l, t, _, b] = self
+            .lobby_text("gametype_options_format")
+            .map_or(QUICK_OPTIONS, |t| bounds(t.bounds));
+        let h = t - b;
+        let top = b - h * k as f32;
+        [l, top, LINE_RIGHT, top - h]
+    }
+
+    /// The lobby's button `k` (GAME OPTIONS, then START GAME), in two of
+    /// pregame_lobby's buttons' places: the box of its picture, and of its
+    /// text.
+    fn lobby_button(&self, k: usize) -> ([f32; 4], [f32; 4]) {
+        let tagged = self
+            .art
+            .screen(menuart::LOBBY)
+            .and_then(|s| s.panes.first())
+            .and_then(|p| p.buttons.get(k))
+            .map(|b| {
+                let size = b
+                    .bitmap
+                    .as_ref()
+                    .and_then(|t| self.art.size(&button_bitmap(t)))
+                    .unwrap_or(BUTTON_SIZE);
+                let offset = [b.bitmap_offset[0] as f32, b.bitmap_offset[1] as f32];
+                (bounds(b.text.bounds), offset, size)
+            });
+        let (text, [ox, oy], [w, h]) =
+            tagged.unwrap_or((LOBBY_BUTTONS[k.min(1)], BUTTON_OFFSET, BUTTON_SIZE));
+        let (x, y) = (text[0] + ox, text[1] - oy);
+        ([x, y, x + w, y - h], text)
+    }
+
+    /// The map the lobby is on, if it's here.
+    fn lobby_map<'c>(&self, ctx: &Context<'c>) -> Option<&'c MapChoice> {
+        match ctx.host_lobby {
+            Some(l) => ctx.maps.iter().find(|m| m.name.eq_ignore_ascii_case(&l.map)),
+            None => ctx.maps.get(self.settings.map),
+        }
+    }
+
+    /// The lobby, as Halo 2's pregame lobby: GAME OPTIONS and START GAME
+    /// at the top left over its display (what's happening, and the map's
+    /// description), the game type and map over the map's picture with the
+    /// quick options under them, and everyone in the lobby down the right.
+    /// In another PC's lobby, or a match's, it's all the host's to change.
+    fn draw_lobby(&self, p: &mut Painter, ctx: &Context) {
+        let age = self.clock - self.opened;
+        let map = self.lobby_map(ctx);
+        let picture = map.and_then(|m| m.picture);
+        if let Some(pic) = picture {
+            let size = self
+                .lobby_bitmap("\\unknown_map")
+                .and_then(|b| Some(([b.corner[0] as f32, b.corner[1] as f32], self.art.size(b)?)))
+                .unwrap_or((MAP_PICTURE_AT, MAP_PICTURE_SIZE));
+            let ([x, y], [w, h]) = size;
+            let rect = p.sp.rect([x, y, x + w, y - h]);
+            let full = [0.0, 0.0, 1.0, 1.0];
+            p.hb.quad(MENU_TEXTURES + pic, rect, full, [1.0; 4], hud_mode::PLAIN, 0.0);
+        }
+        let keep = |b: &ui::Bitmap| {
+            LOBBY_ART.iter().any(|n| is(b, n)) || is(b, "\\unknown_map") && picture.is_none()
+        };
+        p.screen(menuart::LOBBY, age, keep, None);
+        if !self.art.loaded() {
+            p.quad(LOBBY_PANEL, PANEL);
+            p.quad(PLAYERS_PANEL, PANEL);
+        }
+        let fixed = self.screen == Screen::Pregame || ctx.host_lobby.is_some();
+        let rows = self.rows(ctx);
+        let cursor = self.settled(&rows, ctx);
+        let white = Style::new(Font::Body, ui::LEFT_JUSTIFY, BRIGHT);
+        let style = |name: &str| {
+            self.lobby_text(name)
+                .map_or(white, |t| Style::of(t, 1.0))
+        };
+        let place = |name: &str, otherwise: [f32; 4]| {
+            self.lobby_text(name).map_or(otherwise, |t| bounds(t.bounds))
+        };
+        // The game type, and the map, over the quick options.
+        let game_type = self.label(Row::GameType, ctx).1.unwrap_or_default();
+        let gt = place("gametype_format", GAME_TYPE_LINE);
+        p.line(gt, style("gametype_format"), &p.fit(white.font, &game_type, gt[2] - gt[0]));
+        let map_name = self.label(Row::Map, ctx).1.unwrap_or_default();
+        let on = format!("ON {map_name}");
+        let ml = place("mapname_format", MAP_LINE);
+        p.line(ml, style("mapname_format"), &p.fit(white.font, &on, ml[2] - ml[0]));
+        let quick = self
+            .lobby_text("gametype_options_format")
+            .and_then(|t| t.text.clone())
+            .unwrap_or("QUICK OPTIONS:".into())
+            .to_uppercase();
+        let quick_box = place("gametype_options_format", QUICK_OPTIONS);
+        p.line(quick_box, style("gametype_options_format"), &quick);
+        let mut status: Vec<(String, Option<String>)> = Vec::new();
+        if self.screen == Screen::Pregame {
+            status.extend(self.header(ctx).map(|h| (h, None)));
+        }
+        for (k, &row) in rows.iter().enumerate() {
+            match row {
+                Row::Waiting | Row::Starting => status.push(self.label(row, ctx)),
+                Row::GameOptions | Row::StartGame if !fixed => {
+                    let b = if row == Row::GameOptions { 0 } else { 1 };
+                    let (picture, text) = self.lobby_button(b);
+                    let lit = k == cursor;
+                    let alpha = if lit { 1.0 } else { 0.55 };
+                    let button = self
+                        .art
+                        .screen(menuart::LOBBY)
+                        .and_then(|s| s.panes.first())
+                        .and_then(|p| p.buttons.get(b));
+                    match button.and_then(|b| b.bitmap.as_ref()) {
+                        Some(t) => p.bitmap(&button_bitmap(t), [picture[0], picture[1]], alpha, 1.0),
+                        None => p.quad(picture, glow(alpha * 0.6)),
+                    }
+                    let style = button.map_or(Style::new(Font::LargeBody, 0, BRIGHT), |b| {
+                        Style::of(&b.text, 1.0)
+                    });
+                    let label = self.label(row, ctx).0;
+                    p.line(text, style.alpha(alpha.max(TEXT_FLOOR)), &label);
+                }
+                _ => {
+                    let line = self.lobby_line(k);
+                    let lit = k == cursor && !fixed;
+                    if lit {
+                        p.quad([line[0] - 10.0, line[1], line[2], line[3]], glow(0.45));
+                    }
+                    // Each option and its value together, as Halo 2's quick
+                    // options read, clear of the map's picture.
+                    let text = match self.label(row, ctx) {
+                        (label, Some(v)) if lit => format!("{label}: < {v} >"),
+                        (label, Some(v)) => format!("{label}: {v}"),
+                        (label, None) => label,
+                    };
+                    let color = if lit { BRIGHT } else { TEXT };
+                    let style = Style::new(Font::Body, ui::LEFT_JUSTIFY, color);
+                    let style = self
+                        .lobby_text("gametype_format")
+                        .map_or(style, |t| Style { font: t.font, ..style });
+                    let text = p.fit(style.font, &text, line[2] - line[0]);
+                    p.line(line, style, &text);
+                }
+            }
+        }
+        // The display: what's happening, then a notice or the map's
+        // description.
+        let mut top = LOBBY_STATUS[1];
+        let [l, _, r, bottom] = LOBBY_STATUS;
+        let big = Style::new(Font::LargeBody, ui::LEFT_JUSTIFY, BRIGHT);
+        let step = p.line_height(big.font);
+        for (name, value) in &status {
+            let text = match value {
+                Some(v) => format!("{name}  {v}"),
+                None => name.clone(),
+            };
+            p.line([l, top, r, top - step], big, &p.fit(big.font, &text, r - l));
+            top -= step;
+        }
+        let about = [l, top.min(bottom) - 10.0, r, LOBBY_ABOUT_BOTTOM];
+        let body = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
+        match (&self.notice, map) {
+            (Some(n), _) => {
+                p.paragraph(about, Style { color: WARNING, ..body }, n);
+            }
+            (None, Some(m)) if !m.description.is_empty() => {
+                p.paragraph(about, body, &m.description.to_uppercase());
+            }
+            _ => {}
+        }
+        if self.screen == Screen::Pregame {
+            draw_roster(p, ctx);
+        } else {
+            self.draw_players(p, ctx);
+        }
+    }
+
+    /// One of pregame_lobby's bitmaps, by the end of its tag's name.
+    fn lobby_bitmap(&self, name: &str) -> Option<&ui::Bitmap> {
+        let pane = self.art.screen(menuart::LOBBY)?.panes.first()?;
+        pane.bitmaps.iter().find(|b| is(b, name))
+    }
+
+    /// Everyone in the lobby, down its right as Halo 2's pregame lobby
+    /// lists them: their team's colour (or their own), emblem, gamertag,
+    /// how they play and rank; then the bots, and how to join in.
+    fn draw_players(&self, p: &mut Painter, ctx: &Context) {
         let (teams, bots) = match ctx.host_lobby {
             Some(l) => (l.teams, l.bots as usize),
             None => (self.settings.game_type().teams(), self.settings.bots),
         };
-        let lines = ctx.seats.len() + (bots > 0) as usize;
-        let invite = ctx.local < crate::MAX_LOCAL;
-        let hints = invite as usize * 2 + teams as usize;
-        let height = 34.0 + 16.0 * lines as f32 + 6.0 + 11.0 * hints as f32;
-        hb.quad(
-            white,
-            f.rect([x - 8.0, y - 8.0, x + PANEL_W + 8.0, y + height]),
-            [0.0; 4],
-            PANEL,
-            hud_mode::PLAIN,
-            0.0,
-        );
-        hb.text_left(font, f.at(x, y), 11.0 * s, "PLAYERS", BRIGHT);
-        y += 24.0;
+        let [l, t, r, _] = ROSTER;
+        let count = match ctx.seats.len() {
+            1 => "1 PLAYER".to_string(),
+            n => format!("{n} PLAYERS"),
+        };
+        let head = Style::new(Font::LargeBody, ui::LEFT_JUSTIFY, BRIGHT);
+        p.line([l, t, r, t - ROSTER_HEAD], head, &count);
+        let mut y = t - ROSTER_HEAD;
         for seat in ctx.seats {
             let c = match (teams, seat.team) {
                 // The host puts them on a team when the game starts.
@@ -2409,45 +3305,178 @@ impl Menu {
                 (true, t) => crate::local::TEAM_COLORS[t.min(1) as usize],
                 (false, _) => crate::local::armor_colors(seat.look)[0],
             };
-            let how = seat.how;
-            // Their colour (or team's) beside their emblem.
-            let bar = f.rect([x, y - 1.0, x + 3.0, y + 10.0]);
-            hb.quad(white, bar, [0.0; 4], gamma_color(c), hud_mode::PLAIN, 0.0);
-            let badge = f.rect([x + 5.0, y - 1.0, x + 16.0, y + 10.0]);
-            crate::emblem::draw(hb, badge, seat.look.emblem);
-            let line = format!("{}  {how}", seat.name);
-            hb.text_left(font, f.at(x + 21.0, y), 9.0 * s, &line, TEXT);
-            // Their rank, at the end of the line.
-            if let Some(level) = seat.level {
-                let icon = f.rect([x + PANEL_W - 13.0, y - 2.0, x + PANEL_W, y + 11.0]);
-                crate::rank::draw(hb, icon, level);
-            }
-            y += 16.0;
+            seat_row(p, seat, c, [l, y, r, y - PLAYER_STEP + 3.0], Some(seat.how));
+            y -= PLAYER_STEP;
         }
+        let mut lines = Vec::new();
         if bots > 0 {
-            let line = format!("+ {bots} BOT{}", if bots == 1 { "" } else { "S" });
-            hb.text_left(font, f.at(x + 21.0, y), 9.0 * s, &line, DIM);
-            y += 16.0;
+            lines.push(format!("+ {bots} BOT{}", if bots == 1 { "" } else { "S" }));
         }
-        y += 6.0;
+        // Then, a little apart, how to join in.
+        let hints_from = lines.len();
         if teams {
-            hb.text_left(font, f.at(x, y), 7.0 * s, "T OR X: CHANGE TEAM", DIM);
-            y += 11.0;
+            lines.push("T OR X: CHANGE TEAM".into());
         }
         // Player one at the keyboard here: a controller can take over.
         let keyboard =
             ctx.host_lobby.is_none() && ctx.seats.first().is_some_and(|p| p.how == KEYBOARD);
-        let lines = match keyboard {
+        let hints = match keyboard {
             true => [
                 "A ON A CONTROLLER: PLAY AS PLAYER ONE",
                 "START ON ANOTHER: PLAY IN SPLITSCREEN",
             ],
             false => ["PRESS START ON A CONTROLLER", "TO PLAY IN SPLITSCREEN"],
         };
-        if invite {
-            for (k, line) in lines.iter().enumerate() {
-                hb.text_left(font, f.at(x, y + 11.0 * k as f32), 7.0 * s, line, DIM);
+        if ctx.local < crate::MAX_LOCAL {
+            lines.extend(hints.map(String::from));
+        }
+        let small = Style::new(Font::Body, ui::LEFT_JUSTIFY, DIM);
+        let step = p.line_height(small.font);
+        for (k, text) in lines.iter().enumerate() {
+            if k == hints_from {
+                y -= 10.0;
             }
+            p.line([l, y, r, y - step], small, text);
+            y -= step;
+        }
+    }
+
+    /// The profile's emblem, at the top right over the model (which stands
+    /// in the framing's window, drawn with the level).
+    fn draw_profile(&self, p: &mut Painter) {
+        let [l, t, r, b] = EMBLEM_BOX;
+        p.quad([l - 12.0, t + 12.0, r + 12.0, b - 50.0], PANEL);
+        let rect = p.sp.rect(EMBLEM_BOX);
+        crate::emblem::draw(p.hb, rect, self.profile.look.emblem);
+        let style = Style::new(Font::Body, 0, DIM);
+        p.line([l, b - 5.0, r, b - 45.0], style, "EMBLEM");
+    }
+
+    /// System Link's games, as Halo 2's network game browser: each one's
+    /// host, map, players and whether it can be joined in its columns, and
+    /// the chosen one's map, its picture and description; or that there are
+    /// none.
+    fn draw_browser(&self, p: &mut Painter, ctx: &Context) {
+        let age = self.clock - self.opened;
+        let rows = self.rows(ctx);
+        let cursor = self.settled(&rows, ctx);
+        let chosen = match rows.get(cursor) {
+            Some(&Row::Join(i)) => ctx.lan.get(i),
+            _ => None,
+        };
+        let map = chosen.and_then(|g| {
+            ctx.maps
+                .iter()
+                .find(|m| m.name.eq_ignore_ascii_case(&g.map))
+        });
+        let picture = map.and_then(|m| m.picture);
+        let pane = self.art.screen(menuart::BROWSER).and_then(|s| s.panes.first());
+        let keep = |b: &ui::Bitmap| {
+            !is(b, "\\live_icons_sm") && !(is(b, "\\unknown_map") && picture.is_some())
+        };
+        p.screen(menuart::BROWSER, age, keep, None);
+        if let Some(pic) = picture {
+            let place = pane
+                .and_then(|pane| pane.bitmaps.iter().find(|b| is(b, "\\unknown_map")))
+                .and_then(|b| Some(([b.corner[0] as f32, b.corner[1] as f32], self.art.size(b)?)));
+            let ([x, y], [w, h]) = place.unwrap_or((BROWSER_PICTURE_AT, BROWSER_PICTURE_SIZE));
+            let rect = p.sp.rect([x, y, x + w, y - h]);
+            let full = [0.0, 0.0, 1.0, 1.0];
+            p.hb.quad(MENU_TEXTURES + pic, rect, full, [1.0; 4], hud_mode::PLAIN, 0.0);
+        }
+        let text = |name: &str| pane.and_then(|p| p.texts.iter().find(|t| t.string == name));
+        // The columns' heads (there's no game type or variant to show).
+        for (name, head, at) in BROWSER_HEADS {
+            let (box_, style) = match text(name) {
+                Some(t) => (bounds(t.bounds), Style::of(t, 1.0)),
+                None => (at, Style::new(Font::SplitHudMessage, ui::LEFT_JUSTIFY, TEXT)),
+            };
+            p.line(box_, style, head);
+        }
+        if ctx.lan.is_empty() {
+            let (box_, style, line) = match text("no_games") {
+                Some(t) => {
+                    let line = t.text.clone().unwrap_or_default().to_uppercase();
+                    (bounds(t.bounds), Style::of(t, 1.0), line)
+                }
+                None => (NO_GAMES, Style::new(Font::SplitHudMessage, 0, TEXT), NO_GAMES_TEXT.into()),
+            };
+            p.line(box_, style, &line);
+            let searching = self.label(Row::Searching, ctx).0;
+            let below = [box_[0], box_[3] - 10.0, box_[2], box_[3] - 10.0 - (box_[1] - box_[3])];
+            p.line(below, Style { color: DIM, ..style }, &searching);
+        } else {
+            self.draw_games(p, ctx, &rows, cursor);
+        }
+        // The help display: a notice, or what's chosen.
+        let help = text("help_create_game").map_or(BROWSER_HELP, |t| bounds(t.bounds));
+        let body = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
+        if let Some(n) = &self.notice {
+            p.paragraph(help, Style { color: WARNING, ..body }, n);
+        } else if let Some(g) = chosen {
+            let about = match map {
+                Some(m) if !m.description.is_empty() => m.description.to_uppercase(),
+                _ => self.header(ctx).unwrap_or_default(),
+            };
+            let title = format!("{} ON {}", g.computer.to_uppercase(), map_title(&g.map));
+            let step = p.line_height(body.font);
+            let [l, t, r, b] = help;
+            p.line([l, t, r, t - step], Style { color: BRIGHT, ..body }, &p.fit(body.font, &title, r - l));
+            p.paragraph([l, t - step, r, b], body, &about);
+        } else {
+            p.paragraph(help, body, &self.header(ctx).unwrap_or_default());
+        }
+    }
+
+    /// System Link's games in the browser's list skin: each one's host,
+    /// map, players and whether it can be joined, in their columns.
+    fn draw_games(&self, p: &mut Painter, ctx: &Context, rows: &[Row], cursor: usize) {
+        let skin = self.list_skin();
+        let place = self.place();
+        let (fade, [fx, fy]) = self.list_fade(Some(menuart::BROWSER));
+        let shown = self.shown(rows.len());
+        let first = shown.start;
+        for (k, &row) in rows.iter().enumerate().take(shown.end).skip(first) {
+            let Row::Join(i) = row else {
+                continue;
+            };
+            let g = &ctx.lan[i];
+            let (look, dx) = self.item_look(k, cursor, skin);
+            let [x, y] = place.corner(k - first);
+            let corner = [x + dx + fx, y + fy];
+            match skin {
+                Some(skin) => p.item(skin, corner, look * fade, 1.0, |b| !is(b, "\\null")),
+                None => p.quad(offset(place.item, corner), glow(look * fade * 0.6)),
+            }
+            let status = if g.protocol != h2net::PROTOCOL {
+                "ANOTHER VERSION".to_string()
+            } else {
+                "JOIN GAME".to_string()
+            };
+            let cells = [
+                g.computer.to_uppercase(),
+                map_title(&g.map),
+                format!("{}/16", g.players),
+                status,
+            ];
+            let texts = skin.map_or(&[][..], |s| &s.texts[..]);
+            for (k, cell) in cells.iter().enumerate() {
+                let column = BROWSER_COLUMNS[k];
+                let (box_, style) = match texts.get(column.0) {
+                    Some(t) => (bounds(t.bounds), Style::of(t, 1.0)),
+                    None => (column.1, Style::new(Font::SplitHudMessage, ui::LEFT_JUSTIFY, TEXT)),
+                };
+                let style = style.alpha(look.max(TEXT_FLOOR) * fade);
+                let cell = p.fit(style.font, cell, box_[2] - box_[0]);
+                p.line(offset(box_, corner), style, &cell);
+            }
+        }
+        if shown.len() < rows.len() {
+            let [x, y] = place.corner(shown.len());
+            let at = offset(place.item, [x, y]);
+            let text = format!("{}-{} OF {}", shown.start + 1, shown.end, rows.len());
+            let style = Style::new(Font::SplitHudMessage, ui::RIGHT_JUSTIFY, DIM);
+            p.line(at, style, &text);
         }
     }
 }
@@ -2476,17 +3505,42 @@ fn next_map(k: usize, step: i32, ctx: &Context) -> usize {
         .unwrap_or(k)
 }
 
-/// The lowest the pregame's player list reaches (screen units), above the
-/// notice line.
-const ROSTER_BOTTOM: f32 = 392.0;
 /// Most players the pregame lists in one column; more go in two, a team
 /// in each in team games.
 const ROSTER_ROWS: usize = 8;
 
-/// Everyone in an online match, beside its pregame lobby: their team's
-/// colour (or their own), emblem, gamertag and rank, large.
-fn draw_roster(hb: &mut HudBuilder, font: usize, white: usize, f: &Frame, ctx: &Context, top: f32) {
-    let s = f.s;
+/// One of the lobby's players in a row (menu units): their colour,
+/// emblem, gamertag, how they play (if shown) and rank; long gamertags
+/// get smaller, then cut, to fit beside the rank.
+fn seat_row(p: &mut Painter, seat: &SeatInfo, color: [f32; 3], row: [f32; 4], how: Option<&str>) {
+    let [l, t, r, b] = row;
+    // The emblem and rank, in the middle of the row.
+    let h = (t - b).min(SEAT_ICON);
+    let [top, bottom] = [(t + b + h) * 0.5, (t + b - h) * 0.5];
+    p.quad(row, [PANEL[0], PANEL[1], PANEL[2], 0.45]);
+    p.quad([l, t, l + 8.0, b], gamma_color(color));
+    let badge = p.sp.rect([l + 14.0, top, l + 14.0 + h, bottom]);
+    crate::emblem::draw(p.hb, badge, seat.look.emblem);
+    let mut right = r - 6.0;
+    if let Some(level) = seat.level {
+        let icon = p.sp.rect([r - h - 2.0, top + 1.0, r - 2.0, bottom - 1.0]);
+        rank::draw(p.hb, icon, level);
+        right -= h + 4.0;
+    }
+    if let Some(how) = how {
+        let style = Style::new(Font::SplitHudMessage, ui::RIGHT_JUSTIFY, DIM);
+        p.line([l, t, right, b], style, how);
+        right -= p.width(style.font, how) + 16.0;
+    }
+    let x = l + 20.0 + h;
+    let style = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
+    p.line_to_fit([x, t, right.max(x), b], style, &seat.name, 0.5);
+}
+
+/// Everyone in an online match, down the right of its pregame lobby:
+/// their team's colour (or their own), emblem, gamertag and rank, large;
+/// in two columns (a team in each in team games) when there are many.
+fn draw_roster(p: &mut Painter, ctx: &Context) {
     let teams = ctx.host_lobby.is_some_and(|l| l.teams);
     let seats = ctx.seats;
     let columns: Vec<Vec<&SeatInfo>> = if seats.len() <= ROSTER_ROWS {
@@ -2498,42 +3552,26 @@ fn draw_roster(hb: &mut HudBuilder, font: usize, white: usize, f: &Frame, ctx: &
         let half = seats.len().div_ceil(2);
         seats.chunks(half).map(|c| c.iter().collect()).collect()
     };
-    let x = PANEL_X;
-    // Rows in two columns are as small as in a full one, so long gamertags
-    // fit beside the ranks.
+    let [l, t, r, b] = ROSTER;
+    let head = Style::new(Font::LargeBody, ui::LEFT_JUSTIFY, BRIGHT);
+    let count = format!("{} PLAYERS", seats.len());
+    p.line([l, t, r, t - ROSTER_HEAD], head, &count);
+    let top = t - ROSTER_HEAD;
+    // Rows in two columns are as tall as in a full one.
     let longest = columns.iter().map(Vec::len).max().unwrap_or(0);
     let n = longest.max(if columns.len() > 1 { ROSTER_ROWS } else { 1 }) as f32;
-    let step = ((ROSTER_BOTTOM - top - 30.0) / n).clamp(10.0, 22.0);
-    let back = f.rect([x - 8.0, top - 8.0, x + PANEL_W + 8.0, top + 30.0 + step * n]);
-    hb.quad(white, back, [0.0; 4], PANEL, hud_mode::PLAIN, 0.0);
-    hb.text_left(font, f.at(x, top), 11.0 * s, "PLAYERS", BRIGHT);
-    // Columns a little apart.
-    let width = (PANEL_W + 8.0) / columns.len() as f32 - 8.0;
+    let step = ((top - b) / n).clamp(PLAYER_STEP, ROSTER_STEP);
+    let width = (r - l + ROSTER_GAP) / columns.len() as f32 - ROSTER_GAP;
     for (k, column) in columns.iter().enumerate() {
-        let x = PANEL_X + (width + 8.0) * k as f32;
-        let mut y = top + 26.0;
-        for seat in column {
+        let x = l + (width + ROSTER_GAP) * k as f32;
+        for (i, seat) in column.iter().enumerate() {
             let c = if teams {
                 crate::local::TEAM_COLORS[seat.team.min(1) as usize]
             } else {
                 crate::local::armor_colors(seat.look)[0]
             };
-            let h = step - 4.0;
-            let bar = f.rect([x, y, x + 3.0, y + h]);
-            hb.quad(white, bar, [0.0; 4], gamma_color(c), hud_mode::PLAIN, 0.0);
-            let badge = f.rect([x + 6.0, y, x + 6.0 + h, y + h]);
-            crate::emblem::draw(hb, badge, seat.look.emblem);
-            // Long gamertags shrink to fit beside the rank.
-            let room = width - 18.0 - 2.0 * h;
-            let fits = room / (seat.name.chars().count().max(1) as f32 * crate::font::ASPECT);
-            let size = (h - 4.0).clamp(6.0, 10.0).min(fits);
-            let at = f.at(x + 12.0 + h, y + (h - size) * 0.5);
-            hb.text_left(font, at, size * s, &seat.name, TEXT);
-            if let Some(level) = seat.level {
-                let icon = f.rect([x + width - h - 2.0, y - 1.0, x + width, y + h + 1.0]);
-                rank::draw(hb, icon, level);
-            }
-            y += step;
+            let y = top - step * i as f32;
+            seat_row(p, seat, c, [x, y, x + width, y - step + 4.0], None);
         }
     }
 }
@@ -2577,115 +3615,96 @@ fn live_rows(ctx: &Context) -> Vec<Row> {
     rows
 }
 
+/// A panel of the remake's (menu units): Halo 2's navy, with a light rim.
+fn panel(p: &mut Painter, rect: [f32; 4]) {
+    p.quad(rect, PANEL);
+    p.rim(rect, 0.6);
+}
+
 /// The party beside the online lobby: the leader's crown, then each
 /// member's emblem, gamertag (with their splitscreen guests) and level: in
 /// the ranked playlist the party searches, plays or just played, as Halo 2
 /// showed new levels back in the lobby, otherwise their best.
-fn draw_party(hb: &mut HudBuilder, font: usize, white: usize, f: &Frame, o: &OnlineView) {
+fn draw_party(p: &mut Painter, o: &OnlineView) {
     let Some(party) = o.party() else {
         return;
     };
-    let s = f.s;
-    let (x, mut y) = (PANEL_X, ROW_Y);
-    let height = 30.0 + 16.0 * party.members.len() as f32;
-    hb.quad(
-        white,
-        f.rect([x - 8.0, y - 8.0, x + PANEL_W + 8.0, y + height]),
-        [0.0; 4],
-        PANEL,
-        hud_mode::PLAIN,
-        0.0,
-    );
-    hb.text_left(font, f.at(x, y), 11.0 * s, "PARTY", BRIGHT);
+    let [l, t, r, _] = SIDE_PANEL;
+    let head = Style::new(Font::LargeBody, ui::LEFT_JUSTIFY, BRIGHT);
+    let step = SIDE_STEP;
+    let bottom = t - ROSTER_HEAD - step * party.members.len() as f32 - 20.0;
+    panel(p, [l - 20.0, t + 20.0, r + 20.0, bottom]);
+    p.line([l, t, r, t - ROSTER_HEAD], head, "PARTY");
     let count = format!("{}/{}", o.party_size(), live::MAX_PARTY);
-    let width = count.len() as f32 * 9.0 * crate::font::ASPECT;
-    hb.text_left(
-        font,
-        f.at(x + PANEL_W - width, y + 1.0),
-        9.0 * s,
-        &count,
-        DIM,
-    );
-    y += 24.0;
+    let dim = Style::new(Font::Body, ui::RIGHT_JUSTIFY, DIM);
+    p.line([l, t, r, t - ROSTER_HEAD], dim, &count);
+    let mut y = t - ROSTER_HEAD;
     for m in &party.members {
+        let h = step - 6.0;
         if m.account == party.leader {
-            let crown = f.rect([x - 2.0, y - 3.0, x + 12.0, y + 11.0]);
-            rank::draw_live(hb, crown, LiveIcon::Leader);
+            let crown = p.sp.rect([l, y, l + h, y - h]);
+            rank::draw_live(p.hb, crown, LiveIcon::Leader);
         }
-        let badge = f.rect([x + 15.0, y - 1.0, x + 26.0, y + 10.0]);
-        crate::emblem::draw(hb, badge, m.look.emblem);
+        let badge = p.sp.rect([l + h + 8.0, y, l + 2.0 * h + 8.0, y - h]);
+        crate::emblem::draw(p.hb, badge, m.look.emblem);
         let name = match m.guests {
             0 => m.gamertag.clone(),
             n => format!("{} +{n}", m.gamertag),
         };
         let fg = if m.account == o.me() { BRIGHT } else { TEXT };
-        hb.text_left(font, f.at(x + 31.0, y), 9.0 * s, &name, fg);
-        let icon = f.rect([x + PANEL_W - 13.0, y - 2.0, x + PANEL_W, y + 11.0]);
-        rank::draw(hb, icon, m.level);
-        y += 16.0;
+        let x = l + 2.0 * h + 24.0;
+        let style = Style::new(Font::Body, ui::LEFT_JUSTIFY, fg);
+        let name = p.fit(style.font, &name, r - h - 12.0 - x);
+        p.line([x, y, r - h - 12.0, y - h], style, &name);
+        let icon = p.sp.rect([r - h, y + 1.0, r, y - h - 1.0]);
+        rank::draw(p.hb, icon, m.level);
+        y -= step;
     }
 }
 
 /// The player picked (by account), beside what can be done about them:
 /// their level, gamertag and what they're doing (or that they're offline),
 /// and what we last played with them if we have lately.
-fn draw_player(
-    hb: &mut HudBuilder,
-    font: usize,
-    white: usize,
-    f: &Frame,
-    o: &OnlineView,
-    account: u64,
-) {
+fn draw_player(p: &mut Painter, o: &OnlineView, account: u64) {
     let recent = o.recent_player(account);
     let (level, gamertag) = match (o.player(account), recent) {
         (Some(p), _) => (p.best, &p.gamertag),
         (None, Some(r)) => (r.level, &r.gamertag),
         (None, None) => return,
     };
-    let s = f.s;
-    let (x, y) = (PANEL_X, ROW_Y);
-    let text_x = x + 38.0;
-    let per_line = ((PANEL_X + PANEL_W - text_x) / (9.0 * crate::font::ASPECT)) as usize;
-    let mut lines = wrap(&o.status(account), per_line);
+    let [l, t, r, _] = SIDE_PANEL;
+    let icon = 70.0;
+    let x = l + icon + 20.0;
+    let body = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
+    let mut lines = p.wrap(body.font, &o.status(account), r - x);
     if let Some(r) = recent {
         let played = format!("LAST PLAYED {}", o.last_played(r));
-        lines.extend(wrap(&played, per_line));
+        lines.extend(p.wrap(body.font, &played, SIDE_PANEL[2] - x));
     }
-    let height = (20.0 + 12.0 * lines.len() as f32).max(26.0);
-    hb.quad(
-        white,
-        f.rect([x - 8.0, y - 8.0, x + PANEL_W + 8.0, y + height + 8.0]),
-        [0.0; 4],
-        PANEL,
-        hud_mode::PLAIN,
-        0.0,
-    );
-    rank::draw(hb, f.rect([x, y, x + 28.0, y + 26.0]), level);
-    hb.text_left(font, f.at(text_x, y), 11.0 * s, gamertag, BRIGHT);
+    let step = p.line_height(body.font);
+    let head = Style::new(Font::LargeBody, ui::LEFT_JUSTIFY, BRIGHT);
+    let height = (p.line_height(head.font) + step * lines.len() as f32).max(icon);
+    panel(p, [l - 20.0, t + 20.0, r + 20.0, t - height - 20.0]);
+    rank::draw(p.hb, p.sp.rect([l, t, l + icon, t - icon]), level);
+    let top = t - p.line_height(head.font);
+    p.line([x, t, r, top], head, &p.fit(head.font, gamertag, r - x));
     for (k, line) in lines.iter().enumerate() {
-        let at = f.at(text_x, y + 18.0 + 12.0 * k as f32);
-        hb.text_left(font, at, 9.0 * s, line, TEXT);
+        let y = top - step * k as f32;
+        p.line([x, y, r, y - step], body, line);
     }
 }
 
-/// The icons on the online lists' rows: a player's level (as it was when
-/// we played, for recent players offline), then their party's if they're
-/// online (a crown for our party's leader); the level we have in a
-/// playlist.
-fn draw_icons(
-    hb: &mut HudBuilder,
-    f: &Frame,
-    row: Row,
-    rect: [f32; 4],
-    label: &str,
-    o: &OnlineView,
-) {
-    let [x0, y0, x1, _] = rect;
-    let mid = y0 + ROW_H * 0.5;
+/// The icons on the online lists' rows (an item's box, and where its name
+/// ends): a player's level (as it was when we played, for recent players
+/// offline), then their party's if they're online (a crown for our
+/// party's leader); the level we have in a playlist.
+fn draw_icons(p: &mut Painter, row: Row, item: [f32; 4], label_end: f32, o: &OnlineView) {
+    let [x0, y0, x1, y1] = item;
+    let mid = (y0 + y1) * 0.5;
+    let half = ICON * 0.5;
     match row {
         Row::Player(_) | Row::RecentPlayer(_) => {
-            let (level, p) = match row {
+            let (level, player) = match row {
                 Row::Player(i) => match o.others().get(i).copied() {
                     Some(p) => (p.best, Some(p)),
                     None => return,
@@ -2699,31 +3718,31 @@ fn draw_icons(
                 },
                 _ => return,
             };
-            let at = f.rect([x0 + 9.0, mid - 7.0, x0 + 23.0, mid + 7.0]);
-            rank::draw(hb, at, level);
-            let Some(p) = p else {
+            let at = p.sp.rect([x0 + 20.0, mid + half, x0 + 20.0 + ICON, mid - half]);
+            rank::draw(p.hb, at, level);
+            let Some(player) = player else {
                 return;
             };
-            let leads = o.party().is_some_and(|party| party.leader == p.account);
+            let leads = o.party().is_some_and(|party| party.leader == player.account);
             let icon = if leads {
                 LiveIcon::Leader
-            } else if p.size > 1 {
+            } else if player.size > 1 {
                 LiveIcon::Party
             } else {
                 return;
             };
-            let x = x0 + 34.0 + label.chars().count() as f32 * 11.0 * crate::font::ASPECT;
-            rank::draw_live(hb, f.rect([x, mid - 7.0, x + 14.0, mid + 7.0]), icon);
+            let x = label_end + 12.0;
+            rank::draw_live(p.hb, p.sp.rect([x, mid + half, x + ICON, mid - half]), icon);
         }
         Row::Playlist(i) => {
-            let Some(p) = o.playlists().get(i) else {
+            let Some(pl) = o.playlists().get(i) else {
                 return;
             };
-            let rect = f.rect([x1 - 24.0, mid - 7.0, x1 - 10.0, mid + 7.0]);
-            if !o.missing_maps(p).is_empty() {
-                rank::draw_live(hb, rect, LiveIcon::Download);
-            } else if p.level > 0 {
-                rank::draw(hb, rect, p.level);
+            let rect = p.sp.rect([x1 - ICON - 16.0, mid + half, x1 - 16.0, mid - half]);
+            if !o.missing_maps(pl).is_empty() {
+                rank::draw_live(p.hb, rect, LiveIcon::Download);
+            } else if pl.level > 0 {
+                rank::draw(p.hb, rect, pl.level);
             }
         }
         _ => {}
@@ -2736,61 +3755,35 @@ fn gamma_color(c: [f32; 3]) -> [f32; 4] {
     [c[0].powf(2.2), c[1].powf(2.2), c[2].powf(2.2), 1.0]
 }
 
-/// Break `text` into lines of at most `width` characters, at spaces.
-/// A mission's objectives, beside the pause menu: done ones dimmed.
-fn draw_objectives(
-    hb: &mut HudBuilder,
-    font: usize,
-    white: usize,
-    f: &Frame,
-    objectives: &[(String, bool)],
-) {
-    let s = f.s;
-    let (x, mut y) = (PANEL_X, ROW_Y);
-    let per_line = (PANEL_W / (9.0 * crate::font::ASPECT)) as usize;
-    let lines: Vec<(String, bool)> = objectives
-        .iter()
-        .flat_map(|(text, done)| {
-            let mut lines = wrap(&text.to_uppercase(), per_line.saturating_sub(2));
-            for (k, l) in lines.iter_mut().enumerate() {
-                *l = format!(
-                    "{} {l}",
-                    if k > 0 {
-                        " "
-                    } else if *done {
-                        "+"
-                    } else {
-                        "-"
-                    }
-                );
+/// A mission's objectives, in the pause menu's dialog: done ones dimmed.
+fn draw_objectives(p: &mut Painter, box_: [f32; 4], style: Style, objectives: &[(String, bool)]) {
+    let [l, t, r, b] = box_;
+    let head = Style {
+        font: Font::LargeBody,
+        color: BRIGHT,
+        ..style
+    };
+    let mut y = t;
+    let step = p.line_height(head.font);
+    p.line([l, y, r, y - step], head, "OBJECTIVES");
+    y -= step;
+    let step = p.line_height(style.font);
+    for (text, done) in objectives {
+        let mark = if *done { "+" } else { "-" };
+        let color = if *done { DIM } else { TEXT };
+        let lines = p.wrap(style.font, &text.to_uppercase(), r - l - 30.0);
+        for (k, line) in lines.iter().enumerate() {
+            if y - step < b {
+                return;
             }
-            lines.into_iter().map(move |l| (l, *done))
-        })
-        .collect();
-    let height = 22.0 + 13.0 * lines.len() as f32;
-    let back = f.rect([x - 8.0, y - 8.0, x + PANEL_W + 8.0, y + height + 4.0]);
-    hb.quad(white, back, [0.0; 4], PANEL, hud_mode::PLAIN, 0.0);
-    hb.text_left(font, f.at(x, y), 10.0 * s, "OBJECTIVES", BRIGHT);
-    y += 22.0;
-    for (line, done) in lines {
-        let color = if done { DIM } else { TEXT };
-        hb.text_left(font, f.at(x, y), 9.0 * s, &line, color);
-        y += 13.0;
-    }
-}
-
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        match lines.last_mut() {
-            Some(line) if line.len() + 1 + word.len() <= width => {
-                line.push(' ');
-                line.push_str(word);
+            let row = Style { color, ..style };
+            if k == 0 {
+                p.line([l, y, l + 30.0, y - step], row, mark);
             }
-            _ => lines.push(word.to_string()),
+            p.line([l + 30.0, y, r, y - step], row, line);
+            y -= step;
         }
     }
-    lines
 }
 
 /// Most lines the scoreboard shows: 16 players and two team totals.
@@ -4148,7 +5141,8 @@ mod tests {
         assert_eq!(m.shown(15), 7..15);
         // The mouse finds the rows where they're shown: the top one is
         // the eighth.
-        m.hover([300.0, 200.0], 1280.0, 720.0, &c);
+        let [x0, y0, x1, y1] = Frame::new(1280.0, 720.0).rect(m.row_rect(0));
+        m.hover([(x0 + x1) * 0.5, (y0 + y1) * 0.5], 1280.0, 720.0, &c);
         assert_eq!(m.cursor, 7);
         m.wheel(true, &c);
         assert_eq!((m.cursor, m.shown(15)), (6, 6..14));
@@ -4452,25 +5446,21 @@ mod tests {
                 t == crate::gpu::RANK_TEXTURES || t == crate::gpu::RANK_TEXTURES + 1
             });
             assert_eq!(ranks.len(), n, "everyone's rank");
-            // The roster's text: the panel's, below the map.
-            let panel = f.at(PANEL_X, ROW_Y + PICTURE[1] + 20.0);
+            // The roster's text: in its place down the right.
+            let [left, top, right, bottom] = space(&f).rect(ROSTER);
             let text: Vec<_> = quads(&batches, |t| t == 0)
                 .into_iter()
-                .filter(|q| q[0] >= panel[0] && q[1] >= panel[1])
+                .filter(|q| q[0] >= left && q[1] >= top)
                 .collect();
             let lowest = text.iter().map(|q| q[3]).fold(0.0, f32::max);
-            assert!(
-                lowest <= f.at(0.0, ROSTER_BOTTOM)[1],
-                "{n}: above the notice line"
-            );
+            assert!(lowest <= bottom, "{n}: above the bottom of its place");
             let smallest = text.iter().map(|q| q[3] - q[1]).fold(f32::MAX, f32::min);
             assert!(smallest >= 6.0 * f.s, "{n}: glyphs {smallest} px tall");
-            let right = f.at(PANEL_X + PANEL_W, 0.0)[0];
             let overlap = |a: &[f32; 4], b: &[f32; 4]| {
                 a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
             };
             for q in &text {
-                assert!(q[2] <= right + 0.01, "{n}: in the panel");
+                assert!(q[2] <= right + 0.01, "{n}: in its place");
                 assert!(
                     !ranks.iter().any(|r| overlap(q, r)),
                     "{n}: clear of the ranks"
@@ -4584,5 +5574,121 @@ mod tests {
         assert_eq!(m.label(Row::Continue, &c).0, "RETURNING TO PARTY IN 12");
         assert_eq!(m.input(Input::Select, &c), Action::EndGame);
         assert_eq!(m.label(Row::EndGame, &c).0, "LEAVE GAME");
+    }
+
+    #[test]
+    fn the_start_screen_goes_on_to_the_main_menu() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        // Any key or button.
+        for input in [Input::Back, Input::Down, Input::Select] {
+            m.show(Screen::Start);
+            assert_eq!(m.input(input, &c), Action::None);
+            assert_eq!(m.screen, Screen::Main);
+            assert_eq!(m.rows(&c)[m.cursor], Row::Online);
+            assert_eq!(m.sound.take(), Some(Sound::Forward));
+        }
+        // Or a click anywhere.
+        m.show(Screen::Start);
+        assert_eq!(m.click([5.0, 5.0], 1280.0, 720.0, &c), Action::None);
+        assert_eq!(m.screen, Screen::Main);
+        // Readable without the art, however small the window.
+        m.show(Screen::Start);
+        assert_eq!(m.legend(&c), None);
+        assert!(smallest_text(|hb| m.draw(hb, 0, 1, 640.0, 360.0, &c)) >= 8.0);
+    }
+
+    #[test]
+    fn the_quit_dialog_never_comes_up_under_the_mouse() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        let f = Frame::new(1280.0, 720.0);
+        let middle = |r: [f32; 4]| {
+            let [x0, y0, x1, y1] = f.rect(r);
+            [(x0 + x1) * 0.5, (y0 + y1) * 0.5]
+        };
+        let overlap = |a: [f32; 4], b: [f32; 4]| {
+            a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+        };
+        // QUIT clicked on the main menu, and on the pause menu.
+        for (from, quit) in [(Screen::Main, MAIN_ROWS.len() - 1), (Screen::Pause, 2)] {
+            m.show(from);
+            let clicked = m.row_rect(quit);
+            let at = middle(clicked);
+            m.hover(at, 1280.0, 720.0, &c);
+            assert_eq!(m.click(at, 1280.0, 720.0, &c), Action::None);
+            assert_eq!(m.screen, Screen::Confirm);
+            assert_eq!(m.rows(&c)[m.cursor], Row::No);
+            // Its answers are elsewhere.
+            for k in 0..2 {
+                assert!(!overlap(clicked, m.row_rect(k)), "{from:?}");
+            }
+            // And until the mouse moves away, it's ignored there.
+            let yes = middle(m.row_rect(0));
+            for pos in [at, [at[0] + 3.0, at[1] - 3.0]] {
+                assert_eq!(m.click(pos, 1280.0, 720.0, &c), Action::None);
+                assert_eq!(m.screen, Screen::Confirm);
+                assert_eq!(m.rows(&c)[m.cursor], Row::No);
+            }
+            m.hover(yes, 1280.0, 720.0, &c);
+            assert_eq!(m.rows(&c)[m.cursor], Row::Yes);
+            m.input(Input::Back, &c);
+            assert_eq!(m.screen, from);
+        }
+        // Asked from the keyboard, the mouse works the dialog as soon as
+        // it moves.
+        m.show(Screen::Main);
+        m.hover([1.0, 1.0], 1280.0, 720.0, &c);
+        m.cursor = MAIN_ROWS.len() - 1;
+        m.input(Input::Select, &c);
+        let yes = middle(m.row_rect(0));
+        assert_eq!(m.click(yes, 1280.0, 720.0, &c), Action::Quit);
+    }
+
+    #[test]
+    fn the_lobbys_buttons_are_side_by_side() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Lobby);
+        m.cursor = 4;
+        assert_eq!(m.rows(&c)[m.cursor], Row::GameOptions);
+        m.input(Input::Right, &c);
+        assert_eq!(m.rows(&c)[m.cursor], Row::StartGame);
+        assert_eq!(m.sound, Some(Sound::Cursor));
+        m.input(Input::Left, &c);
+        assert_eq!(m.rows(&c)[m.cursor], Row::GameOptions);
+        assert_eq!(m.label(Row::Variant, &c).1.as_deref(), Some("DEFAULT"));
+        // At the top left, GAME OPTIONS first.
+        let [a, b] = [m.row_rect(4), m.row_rect(5)];
+        assert!(a[2] <= b[0] && a[1] == b[1] && a[1] < m.row_rect(0)[1]);
+        // Without maps, a game can't start: the menus say why, with
+        // Halo 2's sound for it.
+        let none = ctx(&[], &[]);
+        m.cursor = 5;
+        assert_eq!(m.input(Input::Select, &none), Action::None);
+        assert_eq!(m.notice.as_deref(), Some("NO MULTIPLAYER MAPS FOUND"));
+        assert_eq!(m.sound, Some(Sound::Error));
+    }
+
+    #[test]
+    fn legends_show_the_controllers_buttons_or_the_keys() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Lobby);
+        let keys = m.legend(&c);
+        assert_eq!(keys.as_deref(), Some("ENTER SELECT   ESC BACK"));
+        m.controller = true;
+        let buttons = m.legend(&c);
+        assert_eq!(buttons.as_deref(), Some("\u{e100} SELECT \u{e101} BACK"));
+        m.show(Screen::Pause);
+        let pause = m.legend(&c);
+        assert_eq!(pause.as_deref(), Some("\u{e100} SELECT \u{e101} RESUME"));
+        // Without Halo 2's fonts, the buttons are drawn as coloured
+        // squares, as readable as the rest.
+        assert!(smallest_text(|hb| m.draw(hb, 0, 1, 640.0, 360.0, &c)) >= 8.0);
     }
 }

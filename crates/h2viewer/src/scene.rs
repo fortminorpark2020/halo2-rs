@@ -410,6 +410,8 @@ pub struct UiSounds {
     pub back: Option<usize>,
     /// Starting a game.
     pub advance: Option<usize>,
+    /// A choice that can't be made.
+    pub error: Option<usize>,
 }
 
 /// Halo 2's main menu music: an opening, then loops picked at random.
@@ -2062,6 +2064,7 @@ impl Scene {
                 forward: named(&mut loader, "sound\\ui\\forward1"),
                 back: named(&mut loader, "sound\\ui\\back1"),
                 advance: named(&mut loader, "sound\\ui\\advance"),
+                error: named(&mut loader, "sound\\ui\\flag_fail"),
             },
             announcer: {
                 let flag_grabbed =

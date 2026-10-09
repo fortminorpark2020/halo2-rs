@@ -248,6 +248,7 @@ impl Soundscape {
             Sound::Forward => ui.forward,
             Sound::Back => ui.back,
             Sound::Advance => ui.advance,
+            Sound::Error => ui.error,
         };
         let Some(asset) = s.and_then(|s| scene.sounds.get(s)) else {
             return;

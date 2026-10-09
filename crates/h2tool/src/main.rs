@@ -18,6 +18,11 @@
 //!   h2tool objects <file.map>            scenery and multiplayer item spawns
 //!   h2tool sound <file.map> <name> [out.wav]  a sound's format (optionally written as WAV)
 //!   h2tool soundscan <file.map>          decode every sound the map can see
+//!   h2tool ui    <mainmenu.map> [globals|screens|<filter>|strings <filter>]
+//!                                        the menus: their globals and list skins, the
+//!                                        screens (those whose names contain a filter),
+//!                                        or the string lists whose names contain one
+//!   h2tool fonts <maps\fonts folder>     each font slot's file, metrics and glyphs
 //!   h2tool hex   <file.map> <datum|group:name> [path]
 //!                                        hex dump of a tag, or of a block inside it;
 //!                                        path = `offset:size[@index]/...` (hex), e.g. 8:c/0:10
@@ -55,6 +60,8 @@ fn main() -> ExitCode {
         Some("scripts") if args.len() >= 2 => scripts(&args[1]),
         Some("mission") if args.len() >= 2 => mission(&args[1]),
         Some("text") if args.len() >= 2 => text(&args[1], args.get(2).map(String::as_str)),
+        Some("ui") if args.len() >= 2 => ui(&args[1], &args[2..]),
+        Some("fonts") if args.len() >= 2 => fonts(&args[1]),
         Some("paths") if args.len() >= 2 => paths(&args[1]),
         Some("orders") if args.len() >= 2 => orders(&args[1]),
         Some("sound") if args.len() >= 3 => {
@@ -969,6 +976,203 @@ fn text(path: &str, unic: Option<&str>) -> Res {
     for (id, s) in &strings {
         let name = set.map.string_id(*id).unwrap_or("?").to_string();
         println!("  {name}: {s:?}");
+    }
+    Ok(())
+}
+
+/// Halo 2's menus in mainmenu.map: the globals and list skins, the
+/// screens (or only those whose names contain `what`), or (`strings
+/// <filter>`) the string lists whose names contain the filter.
+fn ui(path: &str, what: &[String]) -> Res {
+    use blam_cache::{text, ui, MapSet};
+    let mut set = MapSet::open(path)?;
+    let filter = what.get(1).cloned().unwrap_or_default();
+    let what = what.first().map(String::as_str);
+    if what == Some("strings") {
+        let table = text::language_table(&mut set)?;
+        let unic = GroupTag::parse("unic").expect("a group tag");
+        let lists: Vec<_> = set
+            .map
+            .tags
+            .iter()
+            .filter(|t| t.group == unic && t.name.contains(&filter))
+            .cloned()
+            .collect();
+        for t in lists {
+            println!("unic {}", t.name);
+            for (id, s) in text::unicode_strings(&mut set, &table, t.datum)? {
+                println!("  {} = {s:?}", set.map.string_id(id).unwrap_or("?"));
+            }
+        }
+        return Ok(());
+    }
+    let menus = ui::read(&mut set)?;
+    let g = &menus.globals;
+    if what.is_none() || what == Some("globals") {
+        println!(
+            "overlay {:.2?} (alpha mod {:.2}), text {:.2?}, music {:?} (fade {} ms)",
+            g.overlay_color, g.overlay_alpha_mod, g.text_color, g.music, g.music_fade_ms
+        );
+        println!("sounds {:?}", g.sounds);
+        let sizes = ["full", "large", "half", "quarter"];
+        for (k, size) in sizes.iter().enumerate() {
+            println!(
+                "{size}: header {} {:?}, button key {:?}",
+                g.header_fonts[k].name(),
+                g.header_bounds[k],
+                g.button_key_bounds[k]
+            );
+        }
+        for (name, text) in &g.button_keys {
+            println!("button key {name} = {text:?}");
+        }
+        for (k, a) in g.animations.iter().enumerate() {
+            let frames = |a: &ui::Animation| -> String {
+                let keys: Vec<String> = a
+                    .keyframes
+                    .iter()
+                    .map(|f| format!("{:.2}@{:.0?}", f.alpha, f.position))
+                    .collect();
+                format!("{} ms [{}]", a.period_ms, keys.join(" "))
+            };
+            println!(
+                "animation {k:02}: in {}, out {}, ambient {}",
+                frames(&a.intro),
+                frames(&a.outro),
+                frames(&a.ambient)
+            );
+        }
+        for (k, s) in g.skins.iter().enumerate() {
+            println!("skin {k} {}", s.name);
+            ui_skin(s);
+        }
+    }
+    if what == Some("globals") {
+        return Ok(());
+    }
+    for s in &menus.screens {
+        if what.is_some_and(|f| f != "screens" && !s.name.contains(f)) {
+            continue;
+        }
+        println!(
+            "screen {} id {:#x} flags {:#x} {:?} button key {} header {} {:?}",
+            s.name,
+            s.screen_id,
+            s.flags,
+            s.dialog_size(),
+            s.button_key,
+            s.header,
+            s.header_text
+        );
+        for (k, p) in s.panes.iter().enumerate() {
+            println!("  pane {k} animation {:?}", p.animation);
+            for b in &p.buttons {
+                println!(
+                    "    button {:?} bitmap {:?} at {:?}",
+                    b.text.text,
+                    b.bitmap.as_ref().map(|t| &t.name),
+                    b.bitmap_offset
+                );
+                ui_text("      ", &b.text);
+            }
+            for l in &p.lists {
+                println!("    list {l:?}");
+            }
+            for t in &p.texts {
+                ui_text("    ", t);
+            }
+            for b in &p.bitmaps {
+                ui_bitmap("    ", b);
+            }
+            for m in &p.model_scenes {
+                println!("    model scene {m:?}");
+            }
+            for l in &p.players {
+                println!("    players {l:?}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ui_skin(s: &blam_cache::ui::ListSkin) {
+    println!(
+        "  arrows {:?} up {:?} down {:?}",
+        s.arrows.as_ref().map(|t| &t.name),
+        s.arrow_up,
+        s.arrow_down
+    );
+    for (k, a) in s.item_animations.iter().enumerate() {
+        let alphas: Vec<String> = a
+            .keyframes
+            .iter()
+            .map(|f| format!("{:.2}@{:.0?}", f.alpha, f.position))
+            .collect();
+        println!("  item animation {k}: {} ms {}", a.period_ms, alphas.join(" "));
+    }
+    for t in &s.texts {
+        ui_text("  ", t);
+    }
+    for b in &s.bitmaps {
+        ui_bitmap("  ", b);
+    }
+}
+
+fn ui_text(indent: &str, t: &blam_cache::ui::Text) {
+    println!(
+        "{indent}text {} {:?} delay {} {} {:.2?} {:?} flags {:#x} depth {} {:?}",
+        t.string,
+        t.animation,
+        t.delay_ms,
+        t.font.name(),
+        t.color,
+        t.bounds,
+        t.flags,
+        t.depth,
+        t.text
+    );
+}
+
+fn ui_bitmap(indent: &str, b: &blam_cache::ui::Bitmap) {
+    println!(
+        "{indent}bitmap {} frame {} at {:?} scale {:?} {:?} delay {} depth {} wraps/s {:?}{} flags {:#x}",
+        b.bitmap.as_ref().map_or("-", |t| t.name.as_str()),
+        b.frame,
+        b.corner,
+        b.scale,
+        b.animation,
+        b.delay_ms,
+        b.depth,
+        b.wraps_per_second,
+        if b.multiply { " multiply" } else { "" },
+        b.flags
+    );
+}
+
+/// Halo 2 Vista's fonts (`maps\fonts`): each slot's metrics and glyphs.
+fn fonts(dir: &str) -> Res {
+    use blam_cache::font::{self, Font};
+    let fonts = font::read_table(std::path::Path::new(dir), |_| true);
+    for (slot, f) in Font::ALL.iter().zip(&fonts) {
+        match f {
+            Some(f) => {
+                let tallest = f.glyphs.iter().map(|g| g.height).max().unwrap_or(0);
+                let buttons = f
+                    .glyphs
+                    .iter()
+                    .filter(|g| ('\u{e100}'..='\u{e1ff}').contains(&g.code))
+                    .count();
+                println!(
+                    "{}: ascent {} descent {}, {} glyphs (tallest {tallest}, {buttons} button glyphs), {} kerning pairs",
+                    slot.name(),
+                    f.ascent,
+                    f.descent,
+                    f.glyphs.len(),
+                    f.kerning.len()
+                );
+            }
+            None => println!("{}: none", slot.name()),
+        }
     }
     Ok(())
 }

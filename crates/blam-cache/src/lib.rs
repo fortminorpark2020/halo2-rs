@@ -615,6 +615,7 @@ pub mod ai;
 pub mod animation;
 pub mod bitmap;
 pub mod colors;
+pub mod font;
 pub mod geometry;
 pub mod hud;
 pub mod lightmap;
@@ -629,6 +630,7 @@ pub mod script;
 pub mod shader;
 pub mod sound;
 pub mod text;
+pub mod ui;
 pub mod vehicle;
 pub mod weapon;
 

@@ -69,6 +69,10 @@ pub mod hud_mode {
     /// faint backing, alpha 0x40) blue orders the fill left to right and
     /// green shades it top to bottom.
     pub const SCORE_METER: f32 = 4.0;
+    /// Menu art multiplied over what's behind it: what's behind darkens
+    /// as the art is dark (black over it, as opaque as the art is dark;
+    /// the art's own alpha is for other ways of drawing it).
+    pub const MULTIPLY: f32 = 5.0;
 }
 
 #[derive(Clone, Copy)]
@@ -100,6 +104,9 @@ pub const MENU_TEXTURES: usize = 1 << 16;
 pub const EMBLEM_TEXTURES: usize = 1 << 17;
 /// And the rank icon atlases from here (see `rank::load`).
 pub const RANK_TEXTURES: usize = 1 << 18;
+/// And mainmenu.map's menu art and the fonts' glyphs from here (see
+/// `menuart::MenuArt`).
+pub const UI_TEXTURES: usize = 1 << 19;
 
 pub struct HudBatch {
     pub texture: usize,
@@ -446,6 +453,10 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         let alpha = max(frame * t.a, max(on, t.a * inside));
         return vec4<f32>(i.color.rgb * t.g * on, alpha * i.color.a);
     }
+    if (mode == 5) {
+        let light = dot(t.rgb, vec3<f32>(0.299, 0.587, 0.114));
+        return vec4<f32>(0.0, 0.0, 0.0, (1.0 - light) * i.color.a);
+    }
     return t * i.color;
 }
 "#;
@@ -496,6 +507,7 @@ pub struct Gpu {
     menu_textures: Vec<wgpu::BindGroup>,
     emblem_textures: Vec<wgpu::BindGroup>,
     rank_textures: Vec<wgpu::BindGroup>,
+    ui_textures: Vec<wgpu::BindGroup>,
     effects_texture: wgpu::BindGroup,
     meshes: Vec<GpuMesh>,
     depth: wgpu::TextureView,
@@ -953,6 +965,7 @@ impl Gpu {
             menu_textures: Vec::new(),
             emblem_textures: Vec::new(),
             rank_textures: Vec::new(),
+            ui_textures: Vec::new(),
             effects_texture,
             meshes: Vec::new(),
             depth,
@@ -1097,6 +1110,18 @@ impl Gpu {
             .collect();
     }
 
+    /// The menu art and font glyphs, in their own colours; they repeat, for
+    /// the art that scrolls.
+    pub fn set_ui_textures(&mut self, images: &[Image]) {
+        self.ui_textures = images
+            .iter()
+            .map(|img| {
+                let (device, queue) = (&self.device, &self.queue);
+                upload_texture(device, queue, &self.texture_layout, &self.repeat, img, true)
+            })
+            .collect();
+    }
+
     /// The emblem pictures armour shows, or a stand-in until they load.
     fn armour_emblems(&self) -> &wgpu::BindGroup {
         self.emblem_textures
@@ -1105,6 +1130,9 @@ impl Gpu {
     }
 
     fn hud_texture(&self, texture: usize) -> Option<&wgpu::BindGroup> {
+        if let Some(k) = texture.checked_sub(UI_TEXTURES) {
+            return self.ui_textures.get(k);
+        }
         if let Some(k) = texture.checked_sub(RANK_TEXTURES) {
             return self.rank_textures.get(k);
         }

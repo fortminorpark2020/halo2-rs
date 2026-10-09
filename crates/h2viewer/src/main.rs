@@ -42,6 +42,7 @@ mod local;
 mod mapinfo;
 mod memory;
 mod menu;
+mod menuart;
 mod messages;
 mod netprobe;
 mod objective;
@@ -1375,6 +1376,7 @@ impl App {
         }
         self.lan_games = games;
         self.menu_time += dt;
+        self.menu.tick(dt);
         if self.mode == Mode::Menu || self.loading.is_some() {
             // An online host (a match's, or the party's custom game's) lets
             // PCs into its lobby while its map loads.
@@ -2611,6 +2613,7 @@ impl ApplicationHandler for App {
                 g.set_menu_textures(&self.map_pictures);
                 g.set_emblem_textures(&self.emblem_art);
                 g.set_rank_textures(&self.rank_art);
+                g.set_ui_textures(&std::mem::take(&mut self.menu.art.images));
                 self.gpu = Some(g);
             }
             Err(e) => {
@@ -2789,6 +2792,7 @@ impl App {
             return;
         }
         if self.keyboard_in_menu() {
+            self.menu.controller = false;
             let input = match code {
                 KeyCode::ArrowUp | KeyCode::KeyW => menu::Input::Up,
                 KeyCode::ArrowDown | KeyCode::KeyS => menu::Input::Down,
@@ -2798,6 +2802,8 @@ impl App {
                     menu::Input::Select
                 }
                 KeyCode::Escape | KeyCode::Backspace => menu::Input::Back,
+                // Any key goes on from the start screen.
+                _ if self.menu.screen == Screen::Start => menu::Input::Select,
                 _ => return,
             };
             self.menu_input(input);
@@ -2907,6 +2913,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
     let emblem_art = dir.and_then(emblem::load).unwrap_or_default();
     let rank_art = dir.and_then(rank::load).unwrap_or_default();
+    // Halo 2's menu art (mainmenu.map's) and its fonts folder.
+    let menu_art = dir.map(menuart::MenuArt::load).unwrap_or_default();
     let live_text = path
         .parent()
         .map(online::LiveText::load)
@@ -3034,6 +3042,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         headless,
     };
     app.menu.text = menu_text;
+    app.menu.art = menu_art;
     app.level_changed();
     // H2_SPLIT=<n> starts with n people in splitscreen (for testing).
     let split = env("H2_SPLIT")
@@ -3057,6 +3066,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if env("H2_LIVE_AUTO").is_some() || headless {
         app.menu.show(Screen::Live);
         app.go_online();
+    }
+    // Halo 2's start screen first (H2_SKIP_INTRO=1 goes straight to the
+    // main menu, for testing).
+    let menus = app.mode == Mode::Menu && app.loading.is_none();
+    if env("H2_SKIP_INTRO").is_none() && menus && app.menu.screen == Screen::Main {
+        app.menu.show(Screen::Start);
     }
     // H2_CAM="x y z yaw pitch" (degrees): look from there with a free
     // camera (for testing).
