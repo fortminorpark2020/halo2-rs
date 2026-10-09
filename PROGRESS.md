@@ -46,37 +46,72 @@ Halo 2.
    splitscreen and LAN problems), Halo 2's 70 degree view, lowered crosshair,
    aim assist, and XInput controllers with Halo 2's layouts (`fcec0f4`).
 
-## In progress (branches, being merged into `main`)
+## In progress (branches on GitHub; stopped cleanly on 2026-10-09 ~19:00 UTC)
 
-- `controller-wip`: everything a controller-only player needs. On-screen
-  keyboard for gamertags, presses that close a menu no longer act in the game,
-  vibration from the game's tags, Automatic Look Centering, Dual Wield
-  Inversion, Use Default Settings, reconnect dialog, menu auto-repeat, guest
-  limits, Warthog e-brake, and a fake-pad hook (`H2_PAD_SCRIPT`) for testing
-  without a real pad. Values are being checked against the decompilation.
-  Next: finish the fake-pad play sessions, review, fix, merge, ship.
-- `menu-preview`: Halo 2's main menu from `mainmenu.map` (UI tags, Halo 2's
-  fonts from `maps\fonts`), the intro movie (Windows Media Foundation), the
-  start screen and the flythrough, Halo 2 dialogs, scoreboard and carnage
-  report. Finished and checked; being merged with `main` and the feel branches.
-- `feel-weapons`, `feel-combat`, `feel-bots`: shotgun shell reloads, view
-  kick, BXR, lift fixes, better bots. Reviewed and rechecked. They set the
-  network `PROTOCOL` to 27, so the online server must be updated when they land.
+All work is pushed. Nothing is left only on a local machine.
+
+### `controller-wip` (top priority; based on `main` fcec0f4)
+
+Done: Halo 2's controller settings (Controller Vibration driven by the
+weapons' and damage's jpt! player-response tags, Automatic Look Centering,
+Dual Wield Inversion, Use Default Settings), an on-screen keyboard for
+gamertags, presses that close a menu or claim a pad no longer act in the game
+(hold-off mask), a reconnect dialog when a pad drops, menu auto-repeat,
+guests can't quit the program, guest settings follow the pad, Boxer melee
+while dual wielding, Warthog e-brake, reload vs pick-up hold, swap hold time
+from the tags, and Halo 2's dead zone, square sticks, trigger hysteresis,
+look acceleration, seat look rates and pitch limits from the decompilation
+(`docs/notes/decomp/controller.md`). A fake pad for testing without hardware:
+`H2_PAD_SCRIPT` (see README).
+
+Left to do:
+1. Play whole sessions with the fake pad on Xvfb (menus, Slayer on Lockout,
+   a vehicle map, splitscreen join, Bumper Jumper) and fix what fails.
+2. Finish README's controller section (partly written in the last commit).
+3. Review the whole diff (`git diff fcec0f4..controller-wip`) for keyboard
+   and mouse regressions, splitscreen, LAN, rumble stopping, profile.txt
+   compatibility; fix; gate; merge into `main`; ship a Windows build.
+
+### `menu-preview` (Halo 2 main menu; 896a83d)
+
+Contains: the finished main menu (1919492: intro movie, start screen,
+flythrough, menus from Halo 2's UI tags and fonts, QUIT double-click safety,
+controller legends), the game-flow branch (Halo 2 dialogs, scoreboard,
+carnage report; sets `PROTOCOL` 27), and a merge of `main` fcec0f4
+(controllers). Left to do: check that the CONTROLLER and CONTROLLER SETTINGS
+screens are drawn in the Halo 2 menu look, run the gate, then merge in order:
+`feel-weapons`, `feel-combat`, `feel-bots` (all reviewed and rechecked; expect
+conflicts in camera.rs, local.rs, physics.rs (keep one
+`camera_field_of_view`, the one that falls back to 70 degrees) and README),
+then `controller-wip` once it is done. Review, gate, then merge to `main`.
+
+### `feel-weapons`, `feel-combat`, `feel-bots`
+
+Shotgun shell-by-shell reload with queued shot, view kick clamp, BXR (melee
+recovery called off by reload or switch), lift phantoms (Relic's watchtower
+and Ascension's pad left out), bot perception, aim and navigation. Reviewed,
+fixed and rechecked; waiting to be merged as above.
+
+### Decompilation research (`docs/notes/decomp/`)
+
+Verified findings for controller, movement and combat, damage, and game
+engines. Menus/HUD and online are first-pass notes, not yet verified
+(`*-unverified.md`). Apply them after the merges above.
 
 ## Next steps
 
-1. Merge the branches above into `main`, run the gate, build the Windows exe
-   and give it to the owner.
-2. Update the h2live server on the Proxmox host to the new protocol (steps in
-   `deploy/proxmox/` and `docs/ONLINE.md`).
-3. Apply the confirmed findings from the decompilation research
-   (`docs/notes/`) for movement, damage, game rules, menus and online play.
-4. Owner's own steps when he wants friends online: router port forward and an
+1. Finish and ship `controller-wip` (see above).
+2. Merge `menu-preview` + the three feel branches + controllers into `main`,
+   gate, ship a Windows build.
+3. Update the h2live server on the Proxmox host to `PROTOCOL` 27 (steps in
+   `deploy/proxmox/` and `docs/ONLINE.md`); game and server must match.
+4. Apply the confirmed decompilation findings, area by area.
+5. Owner's own steps when he wants friends online: router port forward and an
    address reservation for the server.
 
 ## Where things are
 
 - Code: https://github.com/fortminorpark2020/halo2-rs (private).
-- Design notes: `docs/notes/` (controller plan, main menu plan, decompilation findings).
+- Design notes: `docs/notes/` (controller plan, main menu plan) and `docs/notes/decomp/` (decompilation findings).
 - Online server: `crates/h2live`, `deploy/proxmox/`, `docs/ONLINE.md`.
 - The owner runs builds from `C:\Games\Halo 2 Project Cartographer\halo2-rs`.
