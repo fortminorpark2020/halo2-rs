@@ -138,8 +138,19 @@ buzzes each for half a second, prints every button, trigger and stick for
 20 seconds (each button with what it does in the layout of the player that
 controller's number would be, and in Halo 2's default), and quits.
 `H2_PADS=log` plays as usual and prints controllers coming and going, which
-window holds each, the window coming to the front or going behind, and each
-button pressed in a game with what it did.
+window holds each, the window coming to the front or going behind, each
+button pressed in a game with what it did, presses spent on a menu (so they
+don't also act in the game), and the vibration each controller's motors are
+told. For testing without a controller, `H2_PAD_SCRIPT=<file>` plays fake
+controllers from a text file the test writes as the game runs (the game reads
+new lines every frame, through the same code a real controller's presses go
+through): `connect 0`, `disconnect 0`, `down 0 A B`, `up 0 A`, `press 0 RT
+1500` (down, and up again that many milliseconds later; 100 if left out) and
+`stick 0 left 0 1` (or `right`, from -1 to 1, up and right positive), the
+number being the controller's; buttons by their labels (A, B, X, Y, LB, RB,
+LT, RT, BACK, START) or LS, RS, UP, DOWN, LEFT and RIGHT; lines starting #
+are notes. `h2tool rumble <map>` lists each damage effect's vibration and
+each weapon's firing one.
 
 Capture the Flag: walk onto the enemy flag and press E (on a controller, the
 button the prompt names: X in Halo 2's own layouts) to take it, then carry it
@@ -262,9 +273,36 @@ button and stick does in the one picked:
   turns with the left stick, and looks up and down and strafes with the
   right; LEGACY SOUTHPAW is Legacy swapped.
 
+The profile's CONTROLLER screen and the pause menu's CONTROLLER SETTINGS
+also have Halo 2's other controller settings, kept for each player in the
+profile: CONTROLLER VIBRATION (on to start with): the controller rumbles as
+Halo 2's damage effects say, firing (the SMG, shotgun and rocket launcher
+have no firing rumble in the PC maps, so theirs is a guess), being hit or
+meleed, landing a melee and nearby blasts, and stops while paused;
+AUTOMATIC LOOK CENTERING (off to start with): walking forward on foot
+without looking up or down for half a second levels your view again, faster
+the more it's tilted and the faster you go; DUAL WIELD INVERSION: with two
+guns, the right trigger fires the left gun and the left trigger the right
+one; and RESTORE DEFAULTS, which asks first and puts the controller's
+settings back as they started (the mouse's stay).
+
+Holding X picks up a gun without reloading again and again (a tap
+reloads). Boxer's B melees while dual wielding. In a Warthog, the grenade
+button (LT) is an e-brake: it stops the throttle and locks the back wheels,
+so they slide round in a turn. A press that closes a menu, takes over a
+player or skips a cutscene isn't also held in the game until let go (B that
+closes the pause menu doesn't melee), and the same goes for keys. Prompts
+name the controller's button, or the key once the keyboard is used again.
+
 Prompts name the button the player's layout uses (HOLD B TO DRIVE on Bumper
 Jumper). The menus keep the d-pad or left stick, A to choose, B to go back
-and X to change team whatever the layout. The look stick turns as the
+and X to change team whatever the layout; holding a direction moves again
+every quarter second, and the stick counts once pushed nine tenths of the
+way, as in Halo 2. Start chooses like A, and on the pause menu (or its
+controller settings) goes straight back to the game. A gamertag can be typed
+with a controller too, on the on-screen keyboard that comes up with the
+keyboard's: A types the key picked, X erases, Y types a space, Start is done
+and B puts the old gamertag back (the mouse clicks its keys). The look stick turns as the
 game's player control tag sets it: its look curve
 and turn rates (120 degrees a second across and 60 up and down at the default
 sensitivity, slower zoomed), speeding up to two and a half times that over
@@ -276,16 +314,24 @@ the view follows an enemy it's on (adhesion). The mouse gets none, and nor
 does a Warthog's or Spectre's driver, who has no gun. A on a new controller
 takes over player one (the keyboard and mouse still work for them too); in
 the lobby, Start on another controller adds a splitscreen player (up to
-four) and Back or B takes them out again. Start on a new
+four) and Back or B takes them out again (player one's Back does nothing),
+and Y on anyone's controller opens their own CONTROLLER SETTINGS. A guest's
+name, look and settings follow their controller: the same controller gets
+the same guest's from game to game, even if others join or leave first. A
+guest can't end the game for everyone or quit (their pause menu has RESUME
+and CONTROLLER SETTINGS), and nor can a controller that isn't player one's
+in the menus. Start on a new
 controller during a game drops them straight in. As in Halo 2, two players
 split the screen top and bottom, three give the first player the top half
 and the others a quarter each, and four take a quarter each; each view uses
 the HUD tags' own half or quarter screen layout (quarter views have no ammo
 meter). A player who pauses gets the pause menu in their own view, and only
 their controller (or the keyboard, for Esc) works it. If a controller is
-unplugged or its battery runs out, its player stands still until it comes
-back or A on another controller takes over (a guest before player one,
-who plays on at the keyboard). Start on a new controller also takes over a
+unplugged or its battery runs out, the game stands still (unless others
+play in it over the network, when its player stands still) with Halo 2's
+CONTROLLER DISCONNECTED in their view, until it's plugged back in and A
+pressed on it, or A on another controller takes over (a guest before player
+one); player one can press Enter to play on at the keyboard instead. Start on a new controller also takes over a
 guest whose controller went, and otherwise drops a new player in. A
 guest's pause menu goes with their controller: player one gets it while the
 game stands still, and over a System Link game that plays on it closes.

@@ -579,6 +579,9 @@ pub struct Menu {
     /// The screen the controller screen goes back to: the profile, the
     /// pause menu or the lobby.
     controls_from: Screen,
+    /// The lobby's row when a player opened their settings from it, to
+    /// go back to.
+    controls_row: usize,
     /// The controller screen asks whether to restore its defaults.
     restoring: bool,
 }
@@ -705,6 +708,7 @@ impl Menu {
             list: Screen::Players,
             controls_for: None,
             controls_from: Screen::Profile,
+            controls_row: 0,
             restoring: false,
         }
     }
@@ -722,6 +726,7 @@ impl Menu {
     /// A player's controller settings from the lobby (Y on their
     /// controller): `slot`'s in the profile.
     pub fn open_controls(&mut self, slot: usize) {
+        self.controls_row = self.cursor;
         self.show(Screen::Controls);
         self.controls_for = Some(slot);
         self.controls_from = Screen::Lobby;
@@ -1886,7 +1891,10 @@ impl Menu {
                 self.controls_for = None;
                 match self.controls_from {
                     Screen::Pause => self.back_to(Screen::Pause, Row::ControllerSettings, ctx),
-                    Screen::Lobby => self.back_to(Screen::Lobby, Row::StartGame, ctx),
+                    Screen::Lobby => {
+                        self.back_to(Screen::Lobby, Row::StartGame, ctx);
+                        self.cursor = self.controls_row;
+                    }
                     _ => self.back_to(Screen::Profile, Row::Controls, ctx),
                 }
                 Action::None
@@ -2106,6 +2114,11 @@ impl Menu {
         }
         let first = shown.start;
         for (k, &row) in rows.iter().enumerate().take(shown.end).skip(first) {
+            // The on-screen keyboard covers the rows under the gamertag
+            // (text draws over every panel, so they'd show through it).
+            if self.editing && row != Row::Name {
+                continue;
+            }
             let rect = self.row_rect(k - first);
             let fixed = self.screen == Screen::Pregame
                 || self.screen == Screen::Lobby && ctx.host_lobby.is_some();
@@ -3433,6 +3446,7 @@ mod tests {
         let mut m = Menu::new(Settings::default(), Profile::default());
         m.profile.name = "JOHN".into();
         m.show(Screen::Lobby);
+        m.cursor = 2;
         m.open_controls(3);
         assert_eq!(m.screen, Screen::Controls);
         assert_eq!(m.title(&c), "CONTROLLER SETTINGS");
@@ -3444,9 +3458,10 @@ mod tests {
         m.input(Input::Right, &c);
         assert_eq!(m.profile.guests[2].buttons, ButtonLayout::Southpaw);
         assert_eq!(m.profile.controls, Controls::default());
-        // B goes back to the lobby.
+        // B goes back to the lobby, on the row it was on.
         assert_eq!(m.input(Input::Back, &c), Action::None);
         assert_eq!(m.screen, Screen::Lobby);
+        assert_eq!(m.cursor, 2);
         // The profile's CONTROLLER is player one's again, and goes back
         // there.
         m.show(Screen::Profile);

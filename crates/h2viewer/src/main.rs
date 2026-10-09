@@ -1086,6 +1086,10 @@ struct App {
     zoom_held: bool,
     /// The mouse pointer, in window pixels.
     mouse: [f32; 2],
+    /// Where the pointer is is known (it's been over the window): only a
+    /// move from there highlights a menu row, not a pointer that was
+    /// already where the window opened.
+    mouse_known: bool,
     last_frame: Instant,
     /// Time not yet simulated, less than a tick.
     pending: f32,
@@ -2628,11 +2632,15 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.mouse = [position.x as f32, position.y as f32];
-                if self.keyboard_in_menu() && self.loading.is_none() {
+                let at = [position.x as f32, position.y as f32];
+                let moved = self.mouse_known && at != self.mouse;
+                self.mouse = at;
+                self.mouse_known = true;
+                if moved && self.keyboard_in_menu() && self.loading.is_none() {
                     self.menu_hover();
                 }
             }
+            WindowEvent::CursorLeft { .. } => self.mouse_known = false,
             WindowEvent::MouseInput { state, button, .. }
                 if self.keyboard_in_menu() || self.loading.is_some() =>
             {
@@ -3016,6 +3024,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         fire_held: false,
         zoom_held: false,
         mouse: [0.0; 2],
+        mouse_known: false,
         last_frame: Instant::now(),
         pending: 0.0,
         effects: Effects::new(),

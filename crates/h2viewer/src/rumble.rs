@@ -109,15 +109,13 @@ impl App {
         let paused = self.paused();
         let menus: Vec<bool> = (0..self.locals.len()).map(|k| self.menu_for(k)).collect();
         for (l, menu) in self.locals.iter_mut().zip(menus) {
-            if !paused {
-                l.rumble.step(dt);
-            }
+            let level = l.rumble.frame(if paused { 0.0 } else { dt });
             let Some(pad) = l.pad else {
                 continue;
             };
             let [low, high] = match paused || menu || !l.controls.vibration {
                 true => [0.0; 2],
-                false => l.rumble.level(),
+                false => level,
             };
             self.pads.rumble(pad, low, high);
         }
@@ -180,6 +178,16 @@ impl Rumbler {
         level.map(|l| l.clamp(0.0, 1.0))
     }
 
+    /// The motors for the frame starting now, then `dt` on: what began
+    /// since the last frame reaches the motors for a frame at least, even
+    /// a firing rumble shorter than a frame (the battle rifle's 0.034 s
+    /// against a slow frame).
+    pub fn frame(&mut self, dt: f32) -> [f32; 2] {
+        let level = self.level();
+        self.step(dt);
+        level
+    }
+
     pub fn clear(&mut self) {
         self.playing.clear();
     }
@@ -239,6 +247,20 @@ mod tests {
         unshielded.kind = ResponseKind::Unshielded;
         unshielded.low.duration = 0.25;
         vec![shielded, unshielded]
+    }
+
+    #[test]
+    fn a_rumble_shorter_than_a_frame_still_reaches_the_motors() {
+        let mut r = Rumbler::default();
+        r.play(&br_trigger(), 1.0);
+        // A slow frame (a tenth of a second) after the shot.
+        let [low, high] = r.frame(0.1);
+        assert!((low - 0.8).abs() < 1e-5 && (high - 0.9).abs() < 1e-5);
+        assert_eq!(r.frame(0.1), [0.0, 0.0]);
+        // Paused: no time goes on, the rumble stays where it was.
+        r.play(&br_trigger(), 1.0);
+        r.frame(0.0);
+        assert_eq!(r.playing.len(), 1);
     }
 
     #[test]
