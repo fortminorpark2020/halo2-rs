@@ -141,11 +141,12 @@ controller's number would be, and in Halo 2's default), and quits.
 window holds each, the window coming to the front or going behind, and each
 button pressed in a game with what it did.
 
-Capture the Flag: walk onto the enemy flag and press E (X on a controller) to
-take it, then carry it to your own flag's stand while yours is home to score; Q
-(Y) drops it. Carriers can't pick up weapons. A dropped flag goes home after 30
-seconds. Arrows over the flags (and over home while carrying) show where to go,
-and the announcer calls every take, drop, return and capture. Long falls hurt
+Capture the Flag: walk onto the enemy flag and press E (on a controller, the
+button the prompt names: X in Halo 2's own layouts) to take it, then carry it
+to your own flag's stand while yours is home to score; Q (Y) drops it.
+Carriers can't pick up weapons. A dropped flag goes home after 30 seconds.
+Arrows over the flags (and over home while carrying) show where to go, and the
+announcer calls every take, drop, return and capture. Long falls hurt
 or kill, and so do the map's death pits.
 
 The other game types use each map's own hills, ball spawns, territories and
@@ -206,9 +207,10 @@ pressing the number of the one-handed gun in hand gives a second one, and
 Vehicles: each map's own Warthogs (chaingun and gauss), Ghosts, Banshees,
 Scorpions, Wraiths and turrets, where the map places them (Zanzibar,
 Ascension, Coagulation, Containment and Waterworks have them). Walk up
-to one and hold E (X on a controller) to drive it, man its gun or ride along,
-and hold it again to get out; an overturned vehicle can be flipped back over
-the same way. The view follows the vehicle from where Halo 2's own camera
+to one and hold E (on a controller, the button the prompt names: X in Halo 2's
+own layouts) to drive it, man its gun or ride along, and hold it again to get
+out; an overturned vehicle can be flipped back over the same way. The view
+follows the vehicle from where Halo 2's own camera
 tracks put it (higher and closer as you look down) and it steers toward where
 you look; W/S (the left stick) drive, and G (the left trigger) boosts a Ghost
 or Banshee. Scorpions and Wraiths drive like tanks, turning on the spot toward
@@ -248,6 +250,8 @@ button and stick does in the one picked:
 
 - SOUTHPAW: the triggers swapped.
 - BOXER: LT melees (fires the left gun dual wielding) and B throws grenades.
+  Dual wielding there's no melee, as Halo 2 Vista's Boxer screen has it (the
+  original Xbox's moves the left gun to B instead).
 - GREEN THUMB: click the right stick to melee; B zooms.
 - BUMPER JUMPER, Halo 3's, which Halo 2 never had: LB jumps, RB melees, B
   reloads / hold to pick up, A swaps grenades, X the flashlight.
@@ -301,15 +305,16 @@ progress leaves its Spartan to a bot, and takes it back, score and all, if it
 joins again (so does a member back in their party's custom game online).
 Two h2viewer windows on one PC can play System Link together. On Windows the
 game reads controllers through XInput (Xbox Series X|S, Xbox One and Xbox 360
-controllers, wired or wireless; other controllers through Steam Input or
-DS4Windows), which reaches every window whichever is in front: a controller
-with a player in a window (after A or Start there) stays that window's, even
-while you're in the other one, until its player leaves the game (Back in the
-lobby, or quit), and one without works whichever window is in front. The
-keyboard and mouse only reach the window in front, so two people at one PC
-should play splitscreen or take a controller each; two windows are also for
-trying System Link on your own (set `H2_AUTOPILOT=1` for one of them and a
-bot plays it).
+controllers, wired or wireless; other controllers through DS4Windows, or Steam
+Input once h2viewer is added to Steam as a non-Steam game, since Steam running
+in the background isn't enough), which reaches every window whichever is in
+front: a controller with a player in a window (after A or Start there) stays
+that window's, even while you're in the other one, until its player leaves the
+game (Back in the lobby, or quit), and one without works whichever window is
+in front. The keyboard and mouse only reach the window in front, so two people
+at one PC should play splitscreen or take a controller each; two windows are
+also for trying System Link on your own (set `H2_AUTOPILOT=1` for one of them
+and a bot plays it).
 
 Sound: weapons, reloads, grenades, footsteps, landings, shield recharge, the
 low shield alarm and rockets in flight play from the game's own sound files, placed left or right and

@@ -1841,8 +1841,11 @@ impl Menu {
             hud_mode::PLAIN,
             0.0,
         );
-        hb.text_left(font, f.at(ROW_X, 48.0), 26.0 * s, self.title(ctx), BRIGHT);
-        let rule = f.rect([ROW_X, 84.0, ROW_X + 300.0, 86.0]);
+        let title = self.title(ctx);
+        hb.text_left(font, f.at(ROW_X, 48.0), 26.0 * s, title, BRIGHT);
+        // Under it all, if it's a long one (CONTROLLER SETTINGS).
+        let long = title.len() as f32 * 26.0 * crate::font::ASPECT;
+        let rule = f.rect([ROW_X, 84.0, ROW_X + long.max(300.0), 86.0]);
         hb.quad(white, rule, [0.0; 4], HIGHLIGHT, hud_mode::PLAIN, 0.0);
 
         if self.screen == Screen::PostGame {

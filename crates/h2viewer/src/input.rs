@@ -366,7 +366,7 @@ impl ButtonLayout {
                 "JUMP AND MELEE MOVE TO THE BUMPERS, SO YOUR THUMB NEVER LEAVES THE RIGHT THUMBSTICK."
             }
             ButtonLayout::Recon => {
-                "THE MASTER CHIEF COLLECTION'S DEFAULT: RELOAD ON RB, FLASHLIGHT ON X, GRENADES ON THE D-PAD."
+                "THE MASTER CHIEF COLLECTION'S DEFAULT: RELOAD ON RB, FLASHLIGHT ON X, SWAP GRENADES ON THE D-PAD."
             }
         }
     }
@@ -627,7 +627,8 @@ pub struct Pads {
     sticks: Vec<(GamepadId, [i8; 2])>,
     /// The controllers this window plays with.
     claims: Claims,
-    /// The window has focus: controllers no window claimed work it.
+    /// The window has focus (not before it's made): controllers no window
+    /// claimed work it.
     focused: bool,
     /// H2_PADS=log: say what the controllers do.
     pub log: bool,
@@ -657,8 +658,20 @@ impl Pads {
             gilrs,
             sticks: Vec::new(),
             claims: Claims::new(),
-            focused: true,
+            focused: false,
             log,
+        }
+    }
+
+    /// No controllers, for a copy of the game with no window: XInput
+    /// would give it the player's, which are for the windows on this PC.
+    pub fn none() -> Pads {
+        Pads {
+            gilrs: None,
+            sticks: Vec::new(),
+            claims: Claims::in_dir(None),
+            focused: false,
+            log: false,
         }
     }
 
@@ -750,10 +763,12 @@ impl Pads {
             let presses = matches!(event, PadEvent::Down(_) | PadEvent::Stick(_));
             if presses && !claims.accepts(ev.id, *focused) {
                 if *log && matches!(event, PadEvent::Down(_)) {
-                    println!(
-                        "controllers: pad {} belongs to another window: ignored",
-                        ev.id
-                    );
+                    let why = if claims.taken_elsewhere(ev.id) {
+                        "belongs to another window"
+                    } else {
+                        "is free, but this window isn't in front"
+                    };
+                    println!("controllers: pad {} {why}: ignored", ev.id);
                 }
                 continue;
             }
@@ -773,19 +788,13 @@ impl Pads {
     }
 }
 
-/// A controller's sticks and buttons now.
+/// A controller's sticks and buttons now (a trigger held from `TRIGGER`
+/// down to `TRIGGER_RELEASE`, as gilrs' presses go).
 fn read(pad: &gilrs::Gamepad) -> PadReading {
     let stick = |x: Axis, y: Axis| dead_zone(Vec2::new(pad.value(x), pad.value(y)));
     let mut held = ButtonSet::default();
     for b in PadButton::ALL {
-        let g = b.to_gilrs();
-        let down = match b {
-            PadButton::LT | PadButton::RT => pad
-                .button_data(g)
-                .map_or(pad.is_pressed(g), |d| d.value() > TRIGGER),
-            _ => pad.is_pressed(g),
-        };
-        if down {
+        if pad.is_pressed(b.to_gilrs()) {
             held.insert(b);
         }
     }
@@ -875,9 +884,15 @@ impl Claims {
     /// Another copy of the game on this PC claimed controller `id`.
     pub fn taken_elsewhere(&self, id: GamepadId) -> bool {
         !self.ours(id)
-            && self
-                .open(id)
-                .is_some_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+            && self.open(id).is_some_and(|f| match f.try_lock() {
+                // Let go at once: closing the file lets go only when
+                // Windows gets round to it.
+                Ok(()) => {
+                    let _ = f.unlock();
+                    false
+                }
+                Err(e) => matches!(e, std::fs::TryLockError::WouldBlock),
+            })
     }
 
     /// Take controller `id` for this window; false if another has it.
@@ -893,8 +908,13 @@ impl Claims {
         true
     }
 
-    /// Let controller `id` go.
+    /// Let controller `id` go (at once, as `taken_elsewhere`).
     pub fn release(&mut self, id: GamepadId) {
+        for (_, file) in self.held.iter().filter(|h| h.0 == id) {
+            if let Some(f) = file {
+                let _ = f.unlock();
+            }
+        }
         self.held.retain(|h| h.0 != id);
     }
 
@@ -941,7 +961,7 @@ impl Claims {
 /// layouts. Needs no maps or window: on Windows XInput reports to any
 /// program, focused or not.
 pub fn probe(seconds: f32, profile: &Profile) {
-    use gilrs::ff::{BaseEffect, BaseEffectType, EffectBuilder, Replay, Ticks};
+    use gilrs::ff::{BaseEffect, BaseEffectType, EffectBuilder, Repeat, Replay, Ticks};
     println!("controllers: {BACKEND} (gilrs 0.11.2)");
     for k in 0..crate::MAX_LOCAL {
         let c = profile.controls_of(k);
@@ -973,8 +993,10 @@ pub fn probe(seconds: f32, profile: &Profile) {
         .filter(|(_, p)| p.is_ff_supported())
         .map(|(id, _)| id)
         .collect();
+    // Kept to the end: dropped, the buzz would stop there and then.
+    let mut buzz = None;
     if !ids.is_empty() {
-        let buzz = EffectBuilder::new()
+        let effect = EffectBuilder::new()
             .add_effect(BaseEffect {
                 kind: BaseEffectType::Strong { magnitude: 40_000 },
                 scheduling: Replay {
@@ -983,20 +1005,27 @@ pub fn probe(seconds: f32, profile: &Profile) {
                 },
                 envelope: Default::default(),
             })
+            // Once: gilrs repeats an effect for good unless told.
+            .repeat(Repeat::For(Ticks::from_ms(500)))
             .gamepads(&ids)
             .finish(&mut g);
-        match buzz.map(|e| e.play().map(|_| e)) {
+        match effect.map(|e| e.play().map(|_| e)) {
             Ok(Ok(effect)) => {
                 println!("a half second buzz on each");
-                // Played out on its own.
-                std::mem::forget(effect);
+                buzz = Some(effect);
             }
             Ok(Err(e)) => println!("rumble failed: {e}"),
             Err(e) => println!("rumble failed: {e}"),
         }
     }
+    // At least until the buzz is over and gilrs has turned the motors
+    // off (a tick or two of 50 ms later): XInput leaves them running if
+    // the program ends first. At most a day (infinity is a day, and NaN
+    // no time).
+    let least = if buzz.is_some() { 1.0 } else { 0.0 };
+    let seconds = seconds.max(least).min(86_400.0);
     println!("press buttons, pull the triggers and move the sticks for {seconds} s...");
-    let end = Instant::now() + Duration::from_secs_f32(seconds.max(0.0));
+    let end = Instant::now() + Duration::from_secs_f32(seconds);
     let mut shown = Instant::now();
     while Instant::now() < end {
         let Some(ev) = g.next_event_blocking(Some(Duration::from_millis(50))) else {
@@ -1406,6 +1435,15 @@ mod tests {
         // A window's own controllers don't ask about the others.
         assert!(accepts(true, || panic!("asked"), false));
         assert!(!accepts(false, || panic!("asked"), false));
+    }
+
+    #[test]
+    fn a_copy_with_no_window_has_no_controllers() {
+        let mut none = Pads::none();
+        assert!(none.events().is_empty());
+        assert!(none.reading(pad(0)).is_none());
+        // Nor does a window before it has focus take free ones.
+        assert!(!none.focused);
     }
 
     #[test]

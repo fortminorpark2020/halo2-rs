@@ -1392,12 +1392,13 @@ impl App {
         self.poll_loading();
         self.poll_connect();
         self.update_music();
-        // Each player's own look settings and controller layouts.
-        for (k, l) in self.locals.iter_mut().enumerate() {
-            l.controls = self.menu.profile.controls_of(k);
-        }
         for (id, event) in self.pads.events() {
             self.pad_pressed(id, event);
+        }
+        // Each player's own look settings and controller layouts (a
+        // controller's Start or A may just have added a player).
+        for (k, l) in self.locals.iter_mut().enumerate() {
+            l.controls = self.menu.profile.controls_of(k);
         }
         let in_use = self.pads_in_use();
         self.pads.keep_claimed(&in_use);
@@ -2574,6 +2575,8 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        // Until it has focus, controllers no window claimed aren't its.
+        self.pads.set_focused(window.has_focus());
         self.window = Some(window);
         self.last_frame = Instant::now();
     }
@@ -2719,6 +2722,14 @@ impl ApplicationHandler for App {
         if self.last_frame.elapsed() > NOT_DRAWING {
             self.keep_alive();
             self.update_live();
+            // Controllers still come and go, but what's pressed meanwhile
+            // (minimized, say) would all work the game at once when it's
+            // back.
+            for (id, event) in self.pads.events() {
+                if matches!(event, PadEvent::Connected | PadEvent::Disconnected) {
+                    self.pad_pressed(id, event);
+                }
+            }
         }
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -2940,7 +2951,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         focus: (Vec3::ZERO, 1.0),
         locals: Vec::new(),
         seats: vec![flow::Seat::default()],
-        pads: Pads::new(),
+        pads: if headless { Pads::none() } else { Pads::new() },
         window: None,
         gpu: None,
         keys: HashSet::new(),
