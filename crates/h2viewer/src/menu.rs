@@ -616,8 +616,10 @@ pub struct Menu {
     /// A line to show (why a game ended, a join that failed).
     pub notice: Option<String>,
     pub sound: Option<Sound>,
-    /// Seconds the game has been running, for what pulses.
-    pub time: f32,
+    /// Halo 2's own scene (mainmenu.map's flythrough) is behind the menus;
+    /// otherwise it's the level, darkened behind the start screen and the
+    /// main menu as the menus always had it.
+    pub backdrop: bool,
     pub profile: Profile,
     /// Typing a new gamertag.
     pub editing: bool,
@@ -675,6 +677,10 @@ const VEIL: [f32; 4] = [0.0, 0.08, 0.17, 0.85];
 /// How much of the menus' overlay colour goes over a paused game, which
 /// shows through.
 const PAUSE_VEIL: f32 = 0.55;
+/// How dark the level behind the start screen and main menu is made when
+/// Halo 2's own scene isn't there to show instead (the remake's menus'
+/// own shade).
+const LEVEL_SHADE: f32 = 0.35;
 /// Text in a list is never fainter than this, however far its item has
 /// faded (Halo 2 fades whole items to a third), so it stays readable.
 const TEXT_FLOOR: f32 = 0.6;
@@ -823,6 +829,11 @@ const BROWSER_HEADS: [(&str, &str, [f32; 4]); 4] = [
 const NO_GAMES: [f32; 4] = [-300.0, 410.0, 300.0, 370.0];
 const NO_GAMES_TEXT: &str = "THERE ARE NO OTHER GAMES ON THE NETWORK AT THIS TIME";
 const BROWSER_HELP: [f32; 4] = [-610.0, -235.0, -200.0, -380.0];
+/// The chosen game's box, right of the help: its name over the divider
+/// (the tag's "unknown" text), and below it, left of the map's picture,
+/// what the map is (where Halo 2 lists the game's players).
+const BROWSER_GAME: [f32; 4] = [-50.0, -180.0, 550.0, -210.0];
+const BROWSER_ABOUT: [f32; 4] = [-70.0, -235.0, 390.0, -440.0];
 const BROWSER_PICTURE_AT: [f32; 2] = [410.0, -175.0];
 const BROWSER_PICTURE_SIZE: [f32; 2] = [299.0, 282.0];
 
@@ -1044,7 +1055,7 @@ impl Menu {
             settings,
             notice: None,
             sound: None,
-            time: 0.0,
+            backdrop: false,
             profile,
             editing: false,
             difficulty: 1,
@@ -1085,6 +1096,13 @@ impl Menu {
         self.opened = self.clock;
         self.focus = (0, usize::MAX, self.clock);
         self.guard = None;
+    }
+
+    /// The screen comes up afresh, its art coming in again (the start
+    /// screen once the intro is over).
+    pub fn reveal(&mut self) {
+        self.chrome.1 = self.clock;
+        self.opened = self.clock;
     }
 
     /// Time passes in the menus: their art moves, and a list's items light
@@ -2336,6 +2354,17 @@ impl Menu {
         let age = self.clock - self.chrome.1;
         match under {
             Screen::Start | Screen::Main => {
+                if !self.backdrop {
+                    let shade = [0.0, 0.0, 0.0, LEVEL_SHADE];
+                    p.hb.quad(
+                        p.white,
+                        [0.0, 0.0, w, h],
+                        [0.0; 4],
+                        shade,
+                        hud_mode::PLAIN,
+                        0.0,
+                    );
+                }
                 let name = if under == Screen::Start {
                     menuart::START_SCREEN
                 } else {
@@ -2623,16 +2652,18 @@ impl Menu {
         let name = self.list_screen().unwrap_or(menuart::DIALOG);
         let age = self.clock - self.opened;
         // The menus' overlay colour between the dialog's corners (ul_07's
-        // top left, br_07's bottom right), so what's behind doesn't show
+        // top left, br_07's bottom right: where their pixels show, as the
+        // pictures are mostly clear), so what's behind doesn't show
         // through its words; its own box, without the art.
         let pane = self.art.screen(name).and_then(|s| s.panes.first());
         let corners = pane.and_then(|pane| {
             let ul = pane.bitmaps.iter().find(|b| is(b, "\\ul_07"))?;
             let br = pane.bitmaps.iter().find(|b| is(b, "\\br_07"))?;
-            let [w, h] = self.art.size(br)?;
+            let [il, it, _, _] = self.art.ink(ul)?;
+            let [_, _, ir, ib] = self.art.ink(br)?;
             let [l, t] = ul.corner.map(f32::from);
             let [x, y] = br.corner.map(f32::from);
-            Some([l, t, x + w, y - h])
+            Some([l + il, t - it, x + ir, y - ib])
         });
         match corners {
             Some(back) => {
@@ -2761,6 +2792,10 @@ impl Menu {
     /// The legend for this screen: Halo 2's own (mainmenu.map's, with its
     /// button glyphs) for a controller, its keys for the keyboard.
     fn legend(&self, ctx: &Context) -> Option<String> {
+        if self.editing && self.controller {
+            // Typed at the keyboard; A (or B) is done.
+            return Some("TYPE A GAMERTAG ON THE KEYBOARD \u{e100} DONE".into());
+        }
         if self.editing {
             return Some("TYPE A GAMERTAG, THEN PRESS ENTER".into());
         }
@@ -3525,37 +3560,41 @@ impl Menu {
         } else {
             self.draw_games(p, ctx, &rows, cursor);
         }
-        // The help display: a notice, or what's chosen.
+        // The help display: a notice, or what the screen's for.
         let help = text("help_create_game").map_or(BROWSER_HELP, |t| bounds(t.bounds));
         let body = Style::new(Font::Body, ui::LEFT_JUSTIFY, TEXT);
-        if let Some(n) = &self.notice {
-            p.paragraph(
+        match &self.notice {
+            Some(n) => p.paragraph(
                 help,
                 Style {
                     color: WARNING,
                     ..body
                 },
                 n,
-            );
-        } else if let Some(g) = chosen {
-            let about = match map {
-                Some(m) if !m.description.is_empty() => m.description.to_uppercase(),
-                _ => self.header(ctx).unwrap_or_default(),
+            ),
+            None => p.paragraph(help, body, &self.header(ctx).unwrap_or_default()),
+        };
+        // The chosen game's box: whose game on which map, and what the
+        // map is, left of its picture.
+        if let Some(g) = chosen {
+            let (game, style) = match text("unknown") {
+                Some(t) => (bounds(t.bounds), Style::of(t, 1.0)),
+                None => (
+                    BROWSER_GAME,
+                    Style::new(Font::SplitHudMessage, ui::LEFT_JUSTIFY, TEXT),
+                ),
             };
+            let [l, t, _, b] = game;
+            let r = BROWSER_ABOUT[2];
             let title = format!("{} ON {}", g.computer.to_uppercase(), map_title(&g.map));
-            let step = p.line_height(body.font);
-            let [l, t, r, b] = help;
-            p.line(
-                [l, t, r, t - step],
-                Style {
-                    color: BRIGHT,
-                    ..body
-                },
-                &p.fit(body.font, &title, r - l),
-            );
-            p.paragraph([l, t - step, r, b], body, &about);
-        } else {
-            p.paragraph(help, body, &self.header(ctx).unwrap_or_default());
+            let bright = Style {
+                color: BRIGHT,
+                ..style
+            };
+            p.line([l, t, r, b], bright, &p.fit(style.font, &title, r - l));
+            if let Some(m) = map.filter(|m| !m.description.is_empty()) {
+                p.paragraph(BROWSER_ABOUT, body, &m.description.to_uppercase());
+            }
         }
     }
 
@@ -5782,6 +5821,185 @@ mod tests {
         m.input(Input::Select, &c);
         let yes = middle(m.row_rect(0));
         assert_eq!(m.click(yes, 1280.0, 720.0, &c), Action::Quit);
+    }
+
+    /// A controller alone (the d-pad or stick, A and B, as `flow` turns its
+    /// buttons into inputs) gets past the start screen, into every screen
+    /// off the main menu and back, changes settings, joins a game, and
+    /// pauses, resumes and answers the QUIT dialog; its legends show its
+    /// buttons.
+    #[test]
+    fn a_controller_works_every_screen() {
+        use Input::{Back, Down, Left, Right, Select, Up};
+        let maps = maps();
+        let game = LanGame::at("10.0.0.2:4000".parse().unwrap(), "midship");
+        let lan = [game.clone()];
+        let c = ctx(&maps, &lan);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.controller = true;
+        let row = |m: &Menu| m.rows(&c)[m.cursor];
+        m.show(Screen::Start);
+        // A (or any button) goes on; the main menu starts on its first row.
+        assert_eq!(m.input(Select, &c), Action::None);
+        assert_eq!((m.screen, row(&m)), (Screen::Main, Row::Online));
+        assert_eq!(m.legend(&c).as_deref(), Some("\u{e100} SELECT"));
+        // Down to MULTIPLAYER: the lobby, its settings changed with left
+        // and right, GAME OPTIONS beside START GAME.
+        m.input(Down, &c);
+        m.input(Select, &c);
+        assert_eq!(m.screen, Screen::Lobby);
+        assert_eq!(
+            m.legend(&c).as_deref(),
+            Some("\u{e100} SELECT \u{e101} BACK")
+        );
+        m.input(Down, &c);
+        m.input(Right, &c);
+        assert_eq!(m.settings.map, 1);
+        for _ in 0..3 {
+            m.input(Down, &c);
+        }
+        assert_eq!(row(&m), Row::GameOptions);
+        m.input(Right, &c);
+        assert_eq!(row(&m), Row::StartGame);
+        m.input(Left, &c);
+        m.input(Select, &c);
+        assert_eq!(m.screen, Screen::Options);
+        m.input(Right, &c);
+        assert_ne!(m.label(Row::Variant, &c).1.as_deref(), Some("DEFAULT"));
+        m.input(Back, &c);
+        assert_eq!((m.screen, row(&m)), (Screen::Lobby, Row::GameOptions));
+        m.input(Right, &c);
+        assert_eq!(m.input(Select, &c), Action::Start);
+        m.input(Back, &c);
+        assert_eq!((m.screen, row(&m)), (Screen::Main, Row::Multiplayer));
+        // SYSTEM LINK: A joins the game found.
+        m.input(Down, &c);
+        m.input(Select, &c);
+        assert_eq!(m.screen, Screen::SystemLink);
+        assert_eq!(m.input(Select, &c), Action::Join(game.clone()));
+        m.input(Back, &c);
+        assert_eq!((m.screen, row(&m)), (Screen::Main, Row::SystemLink));
+        // PLAYER PROFILE: left and right change the look; B goes back.
+        m.input(Down, &c);
+        m.input(Select, &c);
+        assert_eq!(m.screen, Screen::Profile);
+        m.input(Down, &c);
+        assert_eq!(m.input(Right, &c), Action::SaveProfile);
+        assert!(m.profile.look.elite);
+        // A on the gamertag types at the keyboard; A again is done.
+        m.input(Up, &c);
+        m.input(Select, &c);
+        assert!(m.editing);
+        assert!(m.legend(&c).unwrap().contains('\u{e100}'));
+        assert_eq!(m.input(Select, &c), Action::SaveProfile);
+        assert!(!m.editing);
+        m.input(Back, &c);
+        assert_eq!((m.screen, row(&m)), (Screen::Main, Row::Profile));
+        // QUIT asks; B says no.
+        m.input(Down, &c);
+        m.input(Select, &c);
+        assert_eq!((m.screen, row(&m)), (Screen::Confirm, Row::No));
+        assert_eq!(
+            m.legend(&c).as_deref(),
+            Some("\u{e100} SELECT \u{e101} CANCEL")
+        );
+        assert_eq!(m.input(Back, &c), Action::None);
+        assert_eq!((m.screen, row(&m)), (Screen::Main, Row::Quit));
+        // ONLINE, and back (signing out).
+        for _ in 0..4 {
+            m.input(Up, &c);
+        }
+        assert_eq!(row(&m), Row::Online);
+        assert_eq!(m.input(Select, &c), Action::GoOnline);
+        assert_eq!(m.input(Back, &c), Action::SignOut);
+        assert_eq!((m.screen, row(&m)), (Screen::Main, Row::Online));
+        // The pause menu: B resumes, and QUIT's dialog starts on no.
+        m.show(Screen::Pause);
+        assert_eq!(
+            m.legend(&c).as_deref(),
+            Some("\u{e100} SELECT \u{e101} RESUME")
+        );
+        assert_eq!(m.input(Back, &c), Action::Resume);
+        m.show(Screen::Pause);
+        m.input(Down, &c);
+        m.input(Down, &c);
+        m.input(Select, &c);
+        assert_eq!(m.input(Select, &c), Action::None);
+        assert_eq!((m.screen, row(&m)), (Screen::Pause, Row::Quit));
+        assert_eq!(m.input(Select, &c), Action::None);
+        m.input(Up, &c);
+        assert_eq!(m.input(Select, &c), Action::Quit);
+    }
+
+    /// QUIT clicked on `from` (the pause menu or the main menu): a second
+    /// click, or Enter (or A) after the mouse moves a little, never quits,
+    /// whatever the window's size.
+    fn quitting_twice_never_quits(m: &mut Menu, c: &Context, from: Screen) {
+        let quit = match from {
+            Screen::Pause => 2,
+            _ => MAIN_ROWS.len() - 1,
+        };
+        let sizes = [
+            (640.0, 360.0),
+            (1280.0, 720.0),
+            (1920.0, 1080.0),
+            (1024.0, 768.0),
+        ];
+        let nudges = [
+            [0.0, 0.0],
+            [3.0, -2.0],
+            [-6.0, 5.0],
+            [12.0, 12.0],
+            [-20.0, 20.0],
+            [24.0, -18.0],
+            [0.0, 24.0],
+        ];
+        for (w, h) in sizes {
+            let f = Frame::new(w, h);
+            for [dx, dy] in nudges {
+                for enter in [false, true] {
+                    m.show(from);
+                    assert_eq!(m.rows(c)[quit], Row::Quit);
+                    let [x0, y0, x1, y1] = f.rect(m.row_rect(quit));
+                    let at = [(x0 + x1) * 0.5, (y0 + y1) * 0.5];
+                    m.hover(at, w, h, c);
+                    assert_eq!(m.click(at, w, h, c), Action::None);
+                    assert_eq!(m.screen, Screen::Confirm, "{from:?} {w}x{h}");
+                    let next = [at[0] + dx, at[1] + dy];
+                    m.hover(next, w, h, c);
+                    let action = match enter {
+                        true => m.input(Input::Select, c),
+                        false => m.click(next, w, h, c),
+                    };
+                    let how = if enter { "enter" } else { "click" };
+                    assert_ne!(action, Action::Quit, "{from:?} {w}x{h} {how} {dx},{dy}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_double_click_on_quit_never_quits() {
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        quitting_twice_never_quits(&mut m, &c, Screen::Pause);
+        quitting_twice_never_quits(&mut m, &c, Screen::Main);
+    }
+
+    /// The same with Halo 2's menu art, whose dialogs are where its tags
+    /// put them (needs H2_MAPS, the folder with mainmenu.map).
+    #[test]
+    #[ignore]
+    fn a_double_click_on_quit_never_quits_with_the_art() {
+        let dir = std::env::var("H2_MAPS").expect("H2_MAPS");
+        let maps = maps();
+        let c = ctx(&maps, &[]);
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.art = MenuArt::load(Path::new(&dir));
+        assert!(m.art.loaded());
+        quitting_twice_never_quits(&mut m, &c, Screen::Pause);
+        quitting_twice_never_quits(&mut m, &c, Screen::Main);
     }
 
     #[test]

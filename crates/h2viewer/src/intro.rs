@@ -453,6 +453,7 @@ impl App {
         if let Some(g) = &mut self.gpu {
             g.clear_movie();
         }
+        self.menu.reveal();
         true
     }
 

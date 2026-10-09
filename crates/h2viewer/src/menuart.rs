@@ -91,7 +91,30 @@ fn wanted(c: char) -> bool {
 pub struct Picture {
     pub texture: usize,
     pub size: [f32; 2],
+    /// The box of its pixels that show (left, top, right, bottom, pixels
+    /// from its top left): many of the dialogs' pieces are mostly clear.
+    pub ink: [f32; 4],
 }
+
+/// The box of an image's pixels that show (left, top, right, bottom,
+/// pixels from its top left); the whole image when none do.
+fn ink(image: &Image) -> [f32; 4] {
+    let (w, h) = (image.width as usize, image.height as usize);
+    let (mut l, mut t, mut r, mut b) = (w, h, 0, 0);
+    for (k, p) in image.rgba.chunks(4).enumerate() {
+        if p[3] > INK_ALPHA {
+            let (x, y) = (k % w.max(1), k / w.max(1));
+            (l, t, r, b) = (l.min(x), t.min(y), r.max(x + 1), b.max(y + 1));
+        }
+    }
+    if l >= r || t >= b {
+        return [0.0, 0.0, w as f32, h as f32];
+    }
+    [l, t, r, b].map(|v| v as f32)
+}
+
+/// How opaque a pixel has to be to count as showing (of 255).
+const INK_ALPHA: u8 = 8;
 
 /// A glyph's place in its font's atlas.
 #[derive(Clone, Copy, Debug)]
@@ -141,6 +164,9 @@ pub struct MenuArt {
     /// The pictures and font atlases, in texture order from `UI_TEXTURES`,
     /// until they're uploaded.
     pub images: Vec<Image>,
+    /// Which of `images` scroll, and so repeat; the others stop at their
+    /// edges, so a picture's last line doesn't pick up its first.
+    pub scrolls: Vec<bool>,
     /// By bitmap tag and frame; the all clear ones are left out.
     pictures: HashMap<(String, i16), Picture>,
     /// Each font slot's atlas, by `Font::index`.
@@ -176,9 +202,13 @@ impl MenuArt {
     /// The bitmaps of the screens drawn, and of their lists' skins.
     fn add_pictures(&mut self, set: &mut MapSet) {
         let mut wanted: Vec<(ui::TagRef, i16)> = Vec::new();
+        let mut scrolling: Vec<(String, i16)> = Vec::new();
         let mut want = |b: &ui::Bitmap| {
             if let Some(t) = &b.bitmap {
                 wanted.push((t.clone(), b.frame));
+                if b.wraps_per_second != [0.0, 0.0] {
+                    scrolling.push((t.name.clone(), b.frame));
+                }
             }
         };
         let mut skins = vec![self.wide_skin()];
@@ -219,7 +249,9 @@ impl MenuArt {
             let picture = Picture {
                 texture: UI_TEXTURES + self.images.len(),
                 size: [image.width as f32, image.height as f32],
+                ink: ink(&image),
             };
+            self.scrolls.push(scrolling.contains(&key));
             self.pictures.insert(key, picture);
             self.images.push(image);
         }
@@ -274,6 +306,7 @@ impl MenuArt {
             height: height as u32,
             rgba,
         });
+        self.scrolls.push(false);
         atlas
     }
 
@@ -311,6 +344,16 @@ impl MenuArt {
     pub fn size(&self, b: &ui::Bitmap) -> Option<[f32; 2]> {
         let p = self.picture(b)?;
         Some([0, 1].map(|k| p.size[k] * scale(b.scale[k])))
+    }
+
+    /// The box of a bitmap's pixels that show, from its corner (left, top,
+    /// right, bottom, menu units, +y down from the corner as its pixels
+    /// go).
+    pub fn ink(&self, b: &ui::Bitmap) -> Option<[f32; 4]> {
+        let p = self.picture(b)?;
+        let [sx, sy] = [0, 1].map(|k| scale(b.scale[k]));
+        let [l, t, r, bottom] = p.ink;
+        Some([l * sx, t * sy, r * sx, bottom * sy])
     }
 
     /// How far apart a list skin's items are (menu units).
@@ -850,6 +893,29 @@ mod tests {
         assert_eq!(animate(Some(&a), 0.15).0, 0.0);
         assert!((animate(Some(&a), 0.25).0 - 0.5).abs() < 1e-5);
         assert_eq!(animate(None, 0.0), (1.0, [0.0, 0.0]));
+    }
+
+    #[test]
+    fn a_pictures_ink_is_where_its_pixels_show() {
+        // 4x3, with two pixels that show (and a faint one that doesn't).
+        let mut rgba = vec![0u8; 4 * 3 * 4];
+        let mut show = |x: usize, y: usize, a: u8| rgba[(y * 4 + x) * 4 + 3] = a;
+        show(1, 0, 255);
+        show(2, 1, 128);
+        show(3, 2, INK_ALPHA);
+        let image = Image {
+            width: 4,
+            height: 3,
+            rgba,
+        };
+        assert_eq!(ink(&image), [1.0, 0.0, 3.0, 2.0]);
+        // All clear: the whole picture.
+        let clear = Image {
+            width: 4,
+            height: 3,
+            rgba: vec![0; 4 * 3 * 4],
+        };
+        assert_eq!(ink(&clear), [0.0, 0.0, 4.0, 3.0]);
     }
 
     #[test]

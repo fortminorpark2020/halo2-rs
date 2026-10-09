@@ -180,7 +180,19 @@ struct Fog {
     color: [f32; 4],
     /// Where it starts, and where it's thickest.
     range: [f32; 2],
+    /// It thickens with the square of the distance (the levels' fog).
+    squared: bool,
 }
+
+/// The levels' fog, as they've always had it: none at the camera,
+/// thickening with the square of the distance to the remake's pale blue
+/// at 400 units. (The menu scene's comes from its sky's tag, `set_air`;
+/// the levels keep this one until theirs is checked against Halo 2.)
+const LEVEL_FOG: Fog = Fog {
+    color: [0.62, 0.70, 0.80, 1.0],
+    range: [0.0, 400.0],
+    squared: true,
+};
 
 /// A tag's (gamma space) colour as the shaders take it.
 fn linear([r, g, b]: [f32; 3]) -> [f32; 3] {
@@ -204,7 +216,7 @@ impl GpuScene {
         GpuScene {
             meshes: Vec::new(),
             materials: Vec::new(),
-            fog: Fog::default(),
+            fog: LEVEL_FOG,
             sky_fog: Fog::default(),
             clear: SKY,
         }
@@ -218,6 +230,7 @@ impl GpuScene {
             Fog {
                 color: [r, g, b, f.max_density.min(1.0)],
                 range: [f.start, f.opaque],
+                squared: false,
             }
         });
         self.sky_fog = air.sky_fog.map_or(Fog::default(), |(c, density)| {
@@ -225,6 +238,7 @@ impl GpuScene {
             Fog {
                 color: [r, g, b, density.min(1.0)],
                 range: [0.0; 2],
+                squared: false,
             }
         });
         self.clear = air.clear_color.map_or(SKY, |c| {
@@ -297,7 +311,8 @@ struct U {
     emblem_secondary: vec4<f32>,
     // x: camouflage, y: overshield shell, z: seconds.
     fx: vec4<f32>,
-    // Colour and density; x: where it starts, y: where it's thickest.
+    // Colour and density; x: where it starts, y: where it's thickest,
+    // z: 1 when it thickens with the square of the distance.
     fog: vec4<f32>,
     fog_range: vec4<f32>,
 };
@@ -443,7 +458,10 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     // None nearer than where it starts, thickening to its density by where
     // it's thickest.
     let range = max(u.fog_range.y - u.fog_range.x, 0.001);
-    let fog = clamp((distance(i.world, u.camera.xyz) - u.fog_range.x) / range, 0.0, 1.0) * u.fog.a;
+    var fog = clamp((distance(i.world, u.camera.xyz) - u.fog_range.x) / range, 0.0, 1.0) * u.fog.a;
+    if (u.fog_range.z > 0.5) {
+        fog = fog * fog;
+    }
     let sky = u.fog.rgb;
     if (u.fx.y > 0.0 || u.fx.x > 0.0) {
         let n = normalize(i.normal);
@@ -1099,7 +1117,6 @@ impl Gpu {
     /// Upload a scene's meshes, materials and HUD art, replacing the last.
     pub fn load_scene(&mut self, scene: &Scene) {
         self.level = self.upload(&scene.textures, &scene.materials, &scene.meshes);
-        self.level.set_air(&scene.atmosphere);
         let clamp = &self.clamp;
         self.hud_textures = scene
             .hud_textures
@@ -1248,14 +1265,19 @@ impl Gpu {
             .collect();
     }
 
-    /// The menu art and font glyphs, in their own colours; they repeat, for
-    /// the art that scrolls.
-    pub fn set_ui_textures(&mut self, images: &[Image]) {
+    /// The menu art and font glyphs, in their own colours; those that
+    /// scroll (`scrolls`) repeat, the rest stop at their edges.
+    pub fn set_ui_textures(&mut self, images: &[Image], scrolls: &[bool]) {
         self.ui_textures = images
             .iter()
-            .map(|img| {
+            .enumerate()
+            .map(|(k, img)| {
                 let (device, queue) = (&self.device, &self.queue);
-                upload_texture(device, queue, &self.texture_layout, &self.repeat, img, true)
+                let sampler = match scrolls.get(k) {
+                    Some(true) => &self.repeat,
+                    _ => &self.clamp,
+                };
+                upload_texture(device, queue, &self.texture_layout, sampler, img, true)
             })
             .collect();
     }
@@ -1386,7 +1408,7 @@ impl Gpu {
             }),
             fx,
             fog: fog.color,
-            fog_range: [fog.range[0], fog.range[1], 0.0, 0.0],
+            fog_range: [fog.range[0], fog.range[1], fog.squared as u32 as f32, 0.0],
         };
         self.staging.extend_from_slice(bytemuck::bytes_of(&u));
         self.staging.resize((offset + SLOT) as usize, 0);

@@ -67,7 +67,14 @@ the carrier over New Mombasa, flown round by the map's own
 `mainmenu_flythrough` script between its camera points. The flight starts
 over after each game; `H2_MENU_TIME=<seconds>` holds the camera that far in,
 for screenshots. Without `mainmenu.map` the menus show the level from a
-circling camera. Multiplayer opens the lobby: pick the game
+circling camera, darkened behind the start screen and main menu. The menus
+are drawn from `mainmenu.map`'s own screens (their frames, lists, dialogs and
+animations) in Halo 2's fonts from the `fonts` folder in the maps folder;
+without that folder they use the remake's plain 5x7 font, and without
+`mainmenu.map` the remake's own simple boxes. The bottom of each screen says
+which buttons do what: Enter and Esc on the keyboard, or A and B as
+Halo 2's button pictures once a controller has been used (`H2_PAD_LEGENDS=1`
+shows the controller's for screenshots). Multiplayer opens the lobby: pick the game
 type (Slayer, Team Slayer, Capture the Flag, King of the Hill, Team King,
 Oddball, Team Oddball, Juggernaut, Territories or Assault), the map (every multiplayer map in the maps and dlc
 folders, with Halo 2's own picture and description from `mainmenu.map`), score to win and number of bots, then Start Game. Game Options holds
@@ -104,9 +111,14 @@ stays up 2 seconds and fades over 2 more, as the HUD globals say.
 In team games, T (or X on a controller) puts you on the red or blue team; bots
 fill the smaller team (counting the people on other PCs in the lobby).
 System Link lists games other PCs on the network are
-hosting.
+hosting; the chosen one's host, map, picture and description show below the
+list.
 Menus work with the arrow keys or WASD, Enter and Esc, the mouse, or a
-controller (d-pad or stick, A, B).
+controller (d-pad or stick, A, B; Start pauses a game). Every screen works
+with either, apart from typing a gamertag, which needs the keyboard. A
+double click on QUIT (or a click and then Enter) only brings up the question,
+never quits: the answer that quits is never under the pointer, and a second
+click where the question came up does nothing.
 
 In a game, click in the window to look around with the mouse, WASD to move,
 Space to jump, Ctrl or C to crouch, hold Tab for the scoreboard (Halo 2's

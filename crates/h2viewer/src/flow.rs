@@ -1036,6 +1036,7 @@ impl App {
             return hb.finish();
         }
         if self.in_menu() {
+            self.menu.controller |= self.pad_legends;
             self.with_menu(|m, ctx| m.draw(&mut hb, font, white, w, h, ctx));
         }
         hb.finish()
@@ -1045,6 +1046,31 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_controllers_buttons_work_the_menus() {
+        // The d-pad (and the stick, as presses), A to choose, B back.
+        let inputs = [
+            (PadPress::Up, Input::Up),
+            (PadPress::Down, Input::Down),
+            (PadPress::Left, Input::Left),
+            (PadPress::Right, Input::Right),
+            (PadPress::Claim, Input::Select),
+            (PadPress::Melee, Input::Back),
+        ];
+        for (pad, input) in inputs {
+            assert!(
+                matches!(press(pad), Press::Menu(i) if i == input),
+                "{pad:?}"
+            );
+        }
+        // Start joins (or resumes from the pause menu), Back leaves, X
+        // changes team; the rest do nothing in the menus.
+        assert!(matches!(press(PadPress::Join), Press::Join));
+        assert!(matches!(press(PadPress::Leave), Press::Leave));
+        assert!(matches!(press(PadPress::Reload), Press::Team));
+        assert!(matches!(press(PadPress::Fire), Press::None));
+    }
 
     #[test]
     fn bots_fill_the_smaller_team_counting_everyone() {

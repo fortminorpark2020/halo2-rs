@@ -1147,6 +1147,9 @@ struct App {
     quit: bool,
     /// Someone has used the keyboard or mouse (so player one plays with them).
     keyboard_used: bool,
+    /// For testing: the menus' legends show a controller's buttons even
+    /// when the keys work them (H2_PAD_LEGENDS=1, for screenshots).
+    pad_legends: bool,
     /// For testing: where player one starts (H2_POS) and a weapon to hold
     /// (H2_WEAPON).
     start_pos: Option<PlayerSpawn>,
@@ -1300,7 +1303,11 @@ impl App {
                 Some(k) => self.take_pad(k, id),
                 None => self.add_local(Some(id)),
             },
-            (Some(k), PadPress::Join) => self.pause(k),
+            (Some(k), PadPress::Join) => {
+                // Its legend shows the controller's buttons.
+                self.menu.controller |= !self.menu_open;
+                self.pause(k);
+            }
             (Some(k), p) => {
                 let dual = local::dual_wielding(&self.game, self.locals[k].player);
                 let t = &mut self.locals[k].taps;
@@ -1389,8 +1396,8 @@ impl App {
         self.lan_games = games;
         self.menu_time += dt;
         self.menu.tick(dt);
-        self.menu.time = self.menu_time;
         self.menu_scene.poll(self.gpu.as_mut());
+        self.menu.backdrop = self.menu_scene.view().is_some();
         let hidden = self.mode == Mode::Playing || self.intro.is_some();
         self.menu_scene.advance(dt, hidden);
         self.update_intro();
@@ -2674,7 +2681,8 @@ impl ApplicationHandler for App {
                 g.set_menu_textures(&self.map_pictures);
                 g.set_emblem_textures(&self.emblem_art);
                 g.set_rank_textures(&self.rank_art);
-                g.set_ui_textures(&std::mem::take(&mut self.menu.art.images));
+                let art = &mut self.menu.art;
+                g.set_ui_textures(&std::mem::take(&mut art.images), &art.scrolls);
                 self.gpu = Some(g);
                 self.start_intro(window.inner_size().height);
             }
@@ -2864,11 +2872,6 @@ impl App {
             self.change_team(0);
             return;
         }
-        if self.keyboard_in_menu() && self.menu.screen == Screen::Start {
-            // Any key goes on from the start screen.
-            self.menu_input(menu::Input::Select);
-            return;
-        }
         if self.keyboard_in_menu() {
             self.menu.controller = false;
             let input = match code {
@@ -2889,6 +2892,8 @@ impl App {
         }
         if code == KeyCode::Escape {
             if let Some(k) = self.locals.iter().position(|l| l.keyboard) {
+                // Its legend shows the keys.
+                self.menu.controller &= self.menu_open;
                 self.pause(k);
             }
             return;
@@ -3121,6 +3126,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         music_voice: None,
         quit: false,
         keyboard_used: false,
+        pad_legends: env("H2_PAD_LEGENDS").is_some(),
         start_pos,
         start_weapon: env("H2_WEAPON").and_then(|v| v.parse().ok()),
         // H2_AUTOPILOT=1: a bot plays player one (for testing).
@@ -3162,12 +3168,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if env("H2_LIVE_AUTO").is_some() || headless {
         app.menu.show(Screen::Live);
         app.go_online();
-    }
-    // Halo 2's start screen first (H2_SKIP_INTRO=1 goes straight to the
-    // main menu, for testing).
-    let menus = app.mode == Mode::Menu && app.loading.is_none();
-    if env("H2_SKIP_INTRO").is_none() && menus && app.menu.screen == Screen::Main {
-        app.menu.show(Screen::Start);
     }
     // H2_CAM="x y z yaw pitch" (degrees): look from there with a free
     // camera (for testing).

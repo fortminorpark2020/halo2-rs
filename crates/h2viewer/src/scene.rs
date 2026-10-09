@@ -676,8 +676,6 @@ pub struct Scene {
     pub elite: Option<Body>,
     /// The sky's model, drawn around the camera behind everything.
     pub sky: Option<usize>,
-    /// The sky's fog and clear colour.
-    pub atmosphere: Atmosphere,
     /// Frag and plasma grenades: their models, and throw speed from the
     /// projectile tags.
     pub grenades: [GrenadeAssets; 2],
@@ -935,6 +933,9 @@ struct Loader {
     sound_reader: sound::SoundReader,
     sounds: Vec<SoundAsset>,
     sound_of_tag: HashMap<DatumIndex, Option<usize>>,
+    /// Reading the main menu's scene, whose shaders are read its own way
+    /// (`shader::read_menu_shader`).
+    menu: bool,
 }
 
 /// How far sounds carry when their tag leaves it to the sound class.
@@ -1027,7 +1028,11 @@ impl Loader {
         if let Some(&m) = self.material_of_shader.get(&shader) {
             return m;
         }
-        let material = match shader::read_shader(&mut self.set, shader) {
+        let read = match self.menu {
+            true => shader::read_menu_shader(&mut self.set, shader),
+            false => shader::read_shader(&mut self.set, shader),
+        };
+        let material = match read {
             Ok(info) => {
                 let mut m = Material {
                     texture: info.diffuse.map_or(0, |b| self.bitmap_texture(b)),
@@ -1620,6 +1625,7 @@ impl Loader {
             sound_reader: sound::SoundReader::new(),
             sounds: Vec::new(),
             sound_of_tag: HashMap::new(),
+            menu: false,
         }
     }
 
@@ -1850,7 +1856,6 @@ impl Scene {
 
         let mut meshes = vec![level];
         let sky = loader.sky(&mut meshes);
-        let atmosphere = loader.atmosphere();
         let arms = loader.arms(SPARTAN_ARMS, &mut meshes);
         let elite_arms = loader
             .arms(ELITE_ARMS, &mut meshes)
@@ -2215,7 +2220,6 @@ impl Scene {
             body,
             elite,
             sky,
-            atmosphere,
             grenades,
             objects,
             doors,
@@ -2276,7 +2280,10 @@ impl Backdrop {
             (Ok(scripts), Ok(points)) => Flythrough::new(&scripts, &points),
             _ => None,
         };
-        let mut loader = Loader::new(set);
+        let mut loader = Loader {
+            menu: true,
+            ..Loader::new(set)
+        };
         let mut meshes = vec![loader.level(&bsps)];
         let sky = loader.sky(&mut meshes);
         let atmosphere = loader.atmosphere();

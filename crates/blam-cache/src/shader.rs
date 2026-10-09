@@ -73,7 +73,20 @@ fn color_alpha(c: &[u8]) -> f32 {
     c[3] as f32 / 255.0
 }
 
+/// A shader as the levels draw it.
 pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
+    read(set, shader, false)
+}
+
+/// A shader as the main menu's scene draws it: its sky's cloud templates
+/// multiply in their second map, and plain glows (`opaque\illum`) show.
+/// The levels keep their own look (`read_shader`) until they're checked
+/// against Halo 2 the same way.
+pub fn read_menu_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
+    read(set, shader, true)
+}
+
+fn read(set: &mut MapSet, shader: DatumIndex, menu: bool) -> Result<ShaderInfo> {
     let (src, _, data) = set.tag_data(shader)?;
     let file = set.get(src);
     let region = file.meta_region();
@@ -147,7 +160,7 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
             info.tint = [0.0; 3];
         }
         // Only a glow: its pass shows map 0 times the colour.
-        "opaque\\illum" => {
+        "opaque\\illum" if menu => {
             info.illum = own(0).map(|b| (b, slot_color(0)));
             info.tint = [0.0; 3];
         }
@@ -187,14 +200,20 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
             info.blend = Blend::Alpha;
         }
         // Their passes multiply the two maps, colour and alpha.
-        "transparent\\two_alpha_clouds" | "transparent\\sky_two_alpha_clouds" => {
+        "transparent\\two_alpha_clouds" | "transparent\\sky_two_alpha_clouds" if menu => {
             info.diffuse = own(0);
             info.multiply = own(1).map(|b| (b, 1.0));
             info.blend = Blend::Alpha;
         }
+        // The levels' clouds: the second map as a mask.
+        "transparent\\two_alpha_clouds" | "transparent\\sky_two_alpha_clouds" => {
+            info.diffuse = own(0);
+            info.mask = own(1);
+            info.blend = Blend::Alpha;
+        }
         // Twice the two maps' product, added, as bright as the colour's
         // alpha says (none for lightning that only flashes when animated).
-        "transparent\\two_add_clouds" | "transparent\\sky_two_add_clouds" => {
+        "transparent\\two_add_clouds" | "transparent\\sky_two_add_clouds" if menu => {
             info.diffuse = own(0);
             info.multiply = own(1).map(|b| (b, 2.0));
             info.opacity = slot_alpha(0);
