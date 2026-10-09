@@ -20,6 +20,11 @@ const TIRE_GRIP: f32 = 1.25;
 const COAST_DECELERATION: f32 = 0.8;
 /// How much faster a boosting Ghost or Banshee goes.
 pub const BOOST_SCALE: f32 = 1.75;
+/// The e-brake locks the back wheels: how hard they hold along, and how
+/// much of their sideways grip is left as they slide (of `TIRE_GRIP`).
+/// Estimates.
+const EBRAKE_HOLD: f32 = 0.9;
+const EBRAKE_SIDE_GRIP: f32 = 0.35;
 /// Bounce and slide off the level.
 const RESTITUTION: f32 = 0.1;
 const FRICTION: f32 = 0.5;
@@ -85,6 +90,45 @@ pub struct SeatDef {
     /// down to looking up: (pitch, offset from the eye with x along the
     /// look and z up). Empty if the seat has no camera track.
     pub camera: Vec<(f32, Vec3)>,
+    /// How fast a controller's look turns here, if the seat sets it.
+    pub look: SeatLook,
+}
+
+/// How fast a controller's look turns in a seat, from the seat's tag: in
+/// Halo 2 a seat may set its own turn rates, standing still and at speed,
+/// in place of the player's (the sensitivity then does nothing on that
+/// axis). A Warthog driver's look turns 60 degrees a second across at
+/// rest and 20 flat out (Halo 2's player control update, re-implemented
+/// from the CC0 decompilation; the numbers are the tags').
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SeatLook {
+    /// Radians a second across, and up or down, standing still and at
+    /// speed. Both zero keeps the player's rate on that axis.
+    pub yaw: [f32; 2],
+    pub pitch: [f32; 2],
+    /// The vehicle speeds the rates run between (world units a second),
+    /// and the curve's exponent (zero is a straight line).
+    pub speeds: [f32; 2],
+    pub exponent: f32,
+}
+
+impl SeatLook {
+    /// The turn rates (across, up or down) with the vehicle going `speed`;
+    /// `None` where the seat keeps the player's.
+    pub fn rates(&self, speed: f32) -> [Option<f32>; 2] {
+        let [slow, fast] = self.speeds;
+        let mut f = if fast > slow {
+            ((speed - slow) / (fast - slow)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if self.exponent != 0.0 {
+            f = f.powf(self.exponent);
+        }
+        let rate =
+            |[rest, top]: [f32; 2]| (rest > 0.0 || top > 0.0).then_some(rest + (top - rest) * f);
+        [rate(self.yaw), rate(self.pitch)]
+    }
 }
 
 impl SeatDef {
@@ -336,6 +380,8 @@ pub struct Controls {
     pub yaw: f32,
     pub pitch: f32,
     pub boost: bool,
+    /// The e-brake (the Warthog's): the back wheels lock, and it slides.
+    pub brake: bool,
     /// Sounding the horn (the Warthog's).
     pub horn: bool,
     /// Someone is driving.
@@ -731,6 +777,10 @@ impl Vehicle {
         let tank = def.drive == Drive::Tank;
         let mut target = 0.0;
         let mut accel = self.drive_acceleration(def, speed, dt);
+        let braking = c.driven && c.brake && def.drive == Drive::Wheels;
+        if braking {
+            accel = 0.0;
+        }
         if tank {
             if c.driven && c.throttle.y.abs() > 0.05 {
                 self.turn_toward(def, c.yaw, None, torque);
@@ -783,7 +833,13 @@ impl Vehicle {
             } else {
                 v.dot(side)
             };
-            let grip = TIRE_GRIP * load;
+            let mut grip = TIRE_GRIP * load;
+            if braking && !w.steers {
+                // Locked: they hold along, and slide sideways.
+                let hold = EBRAKE_HOLD * grip;
+                f += along * (-v.dot(along) * share / dt * 0.5).clamp(-hold, hold);
+                grip *= EBRAKE_SIDE_GRIP;
+            }
             f += side * (-slip * share / dt * 0.5).clamp(-grip, grip);
             if w.powered {
                 let drive = accel * m / powered;
@@ -1047,6 +1103,7 @@ pub(crate) mod tests {
                 pitch_range: [-0.8, 0.8],
                 animation: "warthog_d".into(),
                 ai_only: false,
+                look: SeatLook::default(),
             }],
             max_forward_speed: 7.65,
             max_reverse_speed: 3.0,
@@ -1167,6 +1224,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_seat_sets_its_own_look_rates_by_speed() {
+        // The Warthog driver's, from the tag: 60 degrees a second across
+        // at rest to 20 flat out, between 5.5 and 9 units a second on a
+        // curve of 1.6; 30 up and down at any speed.
+        let look = SeatLook {
+            yaw: [60f32.to_radians(), 20f32.to_radians()],
+            pitch: [30f32.to_radians(); 2],
+            speeds: [5.5, 9.0],
+            exponent: 1.6,
+        };
+        let deg = |speed| look.rates(speed).map(|r| r.map(f32::to_degrees));
+        let close = |a: Option<f32>, b: f32| (a.unwrap() - b).abs() < 1e-3;
+        let [yaw, pitch] = deg(3.0);
+        assert!(close(yaw, 60.0) && close(pitch, 30.0));
+        let half = 0.5f32.powf(1.6);
+        assert!(close(deg(7.25)[0], 60.0 - 40.0 * half));
+        assert!(close(deg(20.0)[0], 20.0));
+        // Unset rates keep the player's; a passenger's seat sets none.
+        let tank = SeatLook {
+            yaw: [40f32.to_radians(); 2],
+            ..SeatLook::default()
+        };
+        assert!(close(tank.rates(5.0)[0].map(f32::to_degrees), 40.0));
+        assert_eq!(tank.rates(5.0)[1], None);
+        assert_eq!(SeatLook::default().rates(5.0), [None, None]);
+    }
+
+    #[test]
     fn the_jeep_drives_up_to_top_speed_and_steers_toward_the_view() {
         let def = jeep();
         let mut v = Vehicle::new(0, &def, Vec3::new(0.0, 0.0, 0.05), 0.0);
@@ -1207,6 +1292,49 @@ pub(crate) mod tests {
         run(&mut v, &def, 4.0);
         let speed = v.velocity.dot(v.forward());
         assert!(speed > 4.0, "forward again at {speed}");
+    }
+
+    #[test]
+    fn the_jeeps_e_brake_stops_it_sooner_and_slides_it_round() {
+        let def = jeep();
+        let start = |brake: bool| {
+            let mut v = Vehicle::new(0, &def, Vec3::new(0.0, 0.0, 0.05), 0.0);
+            v.controls = Controls {
+                throttle: Vec2::new(0.0, 1.0),
+                driven: true,
+                ..Controls::default()
+            };
+            run(&mut v, &def, 4.0);
+            // Off the throttle, turning hard, the e-brake on or not.
+            v.controls.throttle = Vec2::ZERO;
+            v.controls.yaw = std::f32::consts::FRAC_PI_2;
+            v.controls.brake = brake;
+            v
+        };
+        let (mut coast, mut brake) = (start(false), start(true));
+        run(&mut coast, &def, 1.0);
+        run(&mut brake, &def, 1.0);
+        let speed = |v: &Vehicle| v.velocity.length();
+        assert!(
+            speed(&brake) < speed(&coast) - 1.0,
+            "braked to {} against {}",
+            speed(&brake),
+            speed(&coast)
+        );
+        // The back wheels let go sideways: it swings round further.
+        let sliding = |v: &Vehicle| v.velocity.normalize_or_zero().dot(v.forward());
+        assert!(
+            brake.yaw() > coast.yaw() || sliding(&brake) < sliding(&coast),
+            "yaw {} against {}",
+            brake.yaw(),
+            coast.yaw()
+        );
+        assert!(brake.up().z > 0.8, "stays on its wheels");
+        // Only a driven jeep's.
+        let mut parked = start(true);
+        parked.controls.driven = false;
+        run(&mut parked, &def, 1.0);
+        assert!(speed(&parked) > speed(&brake));
     }
 
     #[test]

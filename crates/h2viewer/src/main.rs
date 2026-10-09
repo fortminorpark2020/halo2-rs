@@ -51,6 +51,7 @@ mod probe;
 mod profile;
 mod rank;
 mod rig;
+mod rumble;
 mod scene;
 mod soundscape;
 mod vehicles;
@@ -60,7 +61,6 @@ use blam_cache::PlayerSpawn;
 use body::{BodyAnimator, BodyInput};
 use camera::FlyCamera;
 use effects::Effects;
-use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use gpu::{hud_mode, DrawCall, Frame, Fx, HudBatch};
 use h2sim::bot::{bot_look, bot_name};
@@ -71,7 +71,7 @@ use h2sim::{
     World,
 };
 use hud::HudBuilder;
-use input::{PadButton, PadEvent, Pads};
+use input::{PadButton, PadEvent, PadId, Pads};
 use lan::Net;
 use local::{display_name, kill_message, player_colors, Keyboard, LocalPlayer, Taps};
 use menu::{MapChoice, Menu, Screen, Settings};
@@ -90,8 +90,6 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// Most people sharing one screen.
 pub(crate) const MAX_LOCAL: usize = 4;
-/// What a guest whose controller went sees until they play on.
-const LOST_PAD: &str = "CONTROLLER DISCONNECTED: PRESS A TO PLAY ON";
 /// Seconds between someone winning and the carnage report.
 const GAME_OVER_DELAY: f32 = 4.0;
 /// Frames this far apart mean the window isn't being drawn (it's
@@ -1073,15 +1071,25 @@ struct App {
     /// The people at this computer between games: player one (keyboard and
     /// maybe a controller) and the others with controllers.
     seats: Vec<flow::Seat>,
+    /// The guest settings each controller played with last
+    /// (`flow::pick_slot`).
+    pad_slots: Vec<(PadId, usize)>,
     pads: Pads,
     window: Option<Arc<Window>>,
     gpu: Option<gpu::Gpu>,
     keys: HashSet<KeyCode>,
+    /// Keys held whose press was spent on a menu or skipping a cutscene:
+    /// not held in the game until pressed again.
+    keys_spent: HashSet<KeyCode>,
     captured: bool,
     fire_held: bool,
     zoom_held: bool,
     /// The mouse pointer, in window pixels.
     mouse: [f32; 2],
+    /// Where the pointer is is known (it's been over the window): only a
+    /// move from there highlights a menu row, not a pointer that was
+    /// already where the window opened.
+    mouse_known: bool,
     last_frame: Instant,
     /// Time not yet simulated, less than a tick.
     pending: f32,
@@ -1244,7 +1252,7 @@ impl App {
     }
 
     /// Another person joins in splitscreen.
-    fn add_local(&mut self, pad: Option<GamepadId>) {
+    fn add_local(&mut self, pad: Option<PadId>) {
         if self.joined() {
             self.request_local(pad);
             return;
@@ -1256,41 +1264,65 @@ impl App {
         if self.locals.len() >= MAX_LOCAL {
             return;
         }
+        let slot = self.guest_slot(pad);
         let i = self.game.add_player();
         let profile = &self.menu.profile;
-        let guest = guest_name(&profile.name, self.locals.len());
+        let guest = guest_name(&profile.name, slot);
         self.game.set_name(i, &guest);
-        self.game.set_look(i, profile.look.guest(self.locals.len()));
+        self.game.set_look(i, profile.look.guest(slot));
         let mut l = LocalPlayer::new(i, &self.game);
         l.pad = pad;
+        l.slot = slot;
         self.locals.push(l);
         self.announce(&format!("{guest} JOINED"));
     }
 
-    fn pad_pressed(&mut self, id: GamepadId, event: PadEvent) {
+    fn pad_pressed(&mut self, id: PadId, event: PadEvent) {
         let button = match event {
             PadEvent::Disconnected => return self.pad_lost(id),
             PadEvent::Connected => return self.pad_back(id),
             PadEvent::Down(b) => Some(b),
-            PadEvent::Stick(_) => None,
+            PadEvent::Stick(_) | PadEvent::Repeat(_) => None,
         };
+        // A press spent on anything but the game (a menu, taking the
+        // controller, skipping a cutscene) isn't held in it until it's
+        // let go: B that closes the pause menu doesn't melee as the game
+        // comes back.
+        let played = self.pad_press(id, event);
+        if let (Some(b), false) = (button, played) {
+            self.pads.hold_off(id, b);
+        }
+    }
+
+    /// What a controller's press does: true if it went to the game.
+    fn pad_press(&mut self, id: PadId, event: PadEvent) -> bool {
         if self.loading.is_some() {
-            return;
+            return false;
         }
         if self.pad_in_menu(id) {
             self.menu_pad(id, event);
-            return;
+            return false;
         }
         // The left stick's pushes are only for menus.
-        let Some(button) = button else {
-            return;
+        let PadEvent::Down(button) = event else {
+            return false;
         };
         // A, Start or the trigger skip a cutscene.
         let skip = matches!(button, PadButton::A | PadButton::Start | PadButton::RT);
         if skip && self.mission.as_mut().is_some_and(|m| m.skip_cutscene()) {
-            return;
+            return false;
         }
         let owner = self.locals.iter().position(|l| l.pad == Some(id));
+        // Halo 2's dialog for a controller that went: back, it's A to play
+        // on (and nothing else meanwhile).
+        if let Some(l) = owner.and_then(|k| self.locals.get_mut(k)) {
+            if l.lost_pad.is_some() {
+                if button == PadButton::A {
+                    l.lost_pad = None;
+                }
+                return false;
+            }
+        }
         match (owner, button) {
             (None, PadButton::A) => {
                 if let Some(k) = local::new_pad_for(&self.locals, button) {
@@ -1305,6 +1337,7 @@ impl App {
             // What it does in the game is up to the player's layout.
             (Some(k), b) => {
                 let l = &mut self.locals[k];
+                l.typing = false;
                 let layout = l.controls.buttons;
                 if let Some(f) = layout.function(b) {
                     l.taps.pad.insert(f);
@@ -1317,13 +1350,32 @@ impl App {
                         k + 1
                     );
                 }
+                return true;
             }
             _ => {}
+        }
+        false
+    }
+
+    /// A player whose second gun just went (dropped, or out of ammo)
+    /// still holding its trigger: as in Halo 2, that trigger throws no
+    /// grenade (and Boxer's no melee) until it's let go (the CC0
+    /// decompilation's player control update).
+    pub(crate) fn latch_left_hands(&mut self) {
+        for l in &mut self.locals {
+            let dual = l.two_guns(&self.game);
+            let gone = std::mem::replace(&mut l.was_dual, dual) && !dual;
+            let (Some(id), Some(b), true) = (l.pad, l.left_hand_button(), gone) else {
+                continue;
+            };
+            if self.pads.reading(id).is_some_and(|r| r.held.contains(b)) {
+                self.pads.hold_off(id, b);
+            }
         }
     }
 
     /// Local player `k` plays with controller `id` from now on.
-    fn take_pad(&mut self, k: usize, id: GamepadId) {
+    fn take_pad(&mut self, k: usize, id: PadId) {
         let l = &mut self.locals[k];
         l.pad = Some(id);
         l.lost_pad = None;
@@ -1335,7 +1387,7 @@ impl App {
     /// goes with it, and so does a guest's pause menu, which only that
     /// controller worked: to the keyboard while the game stands still for
     /// it (to resume or end it there), or away over a game that plays on.
-    fn pad_lost(&mut self, id: GamepadId) {
+    fn pad_lost(&mut self, id: PadId) {
         match self.seats.iter().position(|s| s.pad == Some(id)) {
             Some(0) => self.seats[0].pad = None,
             Some(k) => {
@@ -1363,27 +1415,37 @@ impl App {
     /// The controllers people here play with, or lost and wait for, or
     /// asked a host to play with: this window's, held against other
     /// copies of the game on this PC.
-    fn pads_in_use(&self) -> Vec<GamepadId> {
+    fn pads_in_use(&self) -> Vec<PadId> {
         let seats = self.seats.iter().map(|s| s.pad);
         let locals = self.locals.iter().flat_map(|l| [l.pad, l.lost_pad]);
         let waiting = match &self.net {
             Net::Joined { waiting_pads, .. } => waiting_pads.as_slice(),
             _ => &[],
         };
-        let mut ids: Vec<GamepadId> = seats
+        let mut ids: Vec<PadId> = seats
             .chain(locals)
             .chain(waiting.iter().copied())
             .flatten()
             .collect();
-        ids.sort_by_key(|&id| usize::from(id));
+        ids.sort();
         ids.dedup();
         ids
     }
 
-    /// A controller came back: to whoever lost it.
-    fn pad_back(&mut self, id: GamepadId) {
-        if let Some(k) = self.locals.iter().position(|l| l.lost_pad == Some(id)) {
-            self.take_pad(k, id);
+    /// A controller came back: to whoever lost it, who presses A on it to
+    /// play on (as in Halo 2); in the menus, player one's is theirs again.
+    fn pad_back(&mut self, id: PadId) {
+        // Whatever it comes back holding waits to be pressed again.
+        self.pads.hold_off_all(id);
+        if let Some(l) = self.locals.iter_mut().find(|l| l.lost_pad == Some(id)) {
+            l.pad = Some(id);
+            l.message("CONTROLLER CONNECTED".into());
+            return;
+        }
+        let player_one = self.pad_slots.contains(&(id, 0));
+        let seated = self.seats.iter().any(|s| s.pad == Some(id));
+        if self.mode == Mode::Menu && player_one && !seated && self.seats[0].pad.is_none() {
+            self.seats[0].pad = Some(id);
         }
     }
 
@@ -1397,11 +1459,12 @@ impl App {
         }
         // Each player's own look settings and controller layouts (a
         // controller's Start or A may just have added a player).
-        for (k, l) in self.locals.iter_mut().enumerate() {
-            l.controls = self.menu.profile.controls_of(k);
+        for l in &mut self.locals {
+            l.controls = self.menu.profile.controls_of(l.slot);
         }
         let in_use = self.pads_in_use();
         self.pads.keep_claimed(&in_use);
+        self.update_rumble(dt);
         // The game's sounds hold while it's paused, as in Halo 2.
         self.sound.audio.pause_game(self.paused());
         let games = self.browser.poll().to_vec();
@@ -1450,6 +1513,8 @@ impl App {
             }
             if l.flying {
                 l.camera.update(&self.keys, dt);
+            } else {
+                l.limit_pitch(&self.game, dt);
             }
         }
         self.check_game_over(dt);
@@ -1471,12 +1536,7 @@ impl App {
         }
         let notice = self.lan_notice();
         for l in &mut self.locals {
-            // A guest whose controller went is told how to play on.
-            let lost = l
-                .lost_pad
-                .filter(|_| !l.keyboard)
-                .map(|_| LOST_PAD.to_string());
-            l.notice = lost.or_else(|| notice.clone().filter(|_| l.keyboard));
+            l.notice = notice.clone().filter(|_| l.keyboard);
             l.update_camera(&self.game, &self.world, self.pending, dt);
         }
         self.watch_probe();
@@ -1562,6 +1622,7 @@ impl App {
         let mut ticked = false;
         while self.pending >= TICK {
             self.pending -= TICK;
+            self.latch_left_hands();
             let mut commands = vec![Command::default(); self.game.players.len()];
             let keyboard = Keyboard {
                 keys: &self.keys,
@@ -1604,7 +1665,7 @@ impl App {
                 self.body_gestures.extend(m.take_gestures());
                 for hint in m.take_hints() {
                     for l in &mut self.locals {
-                        l.message(hint.clone());
+                        l.hint(&hint);
                     }
                 }
                 let nav_points = m.nav_points(&self.scene, &self.game);
@@ -1702,6 +1763,7 @@ impl App {
         let listeners = self.listeners();
         for e in std::mem::take(&mut self.game.events) {
             self.sound.event(&self.scene, &self.game, &listeners, &e);
+            self.rumble_event(&e);
             match e {
                 Event::Shot {
                     player,
@@ -2210,7 +2272,7 @@ impl App {
             }
         }
         for g in &self.game.grenades {
-            let assets = scene.grenades[(g.kind == GrenadeKind::Plasma) as usize];
+            let assets = &scene.grenades[(g.kind == GrenadeKind::Plasma) as usize];
             if let Some(mesh) = assets.mesh {
                 // Tumbling through the air.
                 let spin = if g.velocity.length_squared() > 0.01 {
@@ -2590,11 +2652,15 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.mouse = [position.x as f32, position.y as f32];
-                if self.keyboard_in_menu() && self.loading.is_none() {
+                let at = [position.x as f32, position.y as f32];
+                let moved = self.mouse_known && at != self.mouse;
+                self.mouse = at;
+                self.mouse_known = true;
+                if moved && self.keyboard_in_menu() && self.loading.is_none() {
                     self.menu_hover();
                 }
             }
+            WindowEvent::CursorLeft { .. } => self.mouse_known = false,
             WindowEvent::MouseInput { state, button, .. }
                 if self.keyboard_in_menu() || self.loading.is_some() =>
             {
@@ -2624,6 +2690,7 @@ impl ApplicationHandler for App {
                         self.fire_held = down;
                         if let Some(l) = self.keyboard_local() {
                             l.taps.fire |= down;
+                            l.typing |= down;
                         }
                     }
                     MouseButton::Right => {
@@ -2648,6 +2715,7 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) => {
                 self.set_capture(false);
                 self.keys.clear();
+                self.keys_spent.clear();
                 self.fire_held = false;
                 self.zoom_held = false;
                 self.pads.set_focused(false);
@@ -2666,13 +2734,16 @@ impl ApplicationHandler for App {
                 }
                 match event.state {
                     ElementState::Pressed => {
-                        if !event.repeat {
-                            self.key_pressed(code);
+                        if !event.repeat && !self.key_pressed(code) {
+                            self.keys_spent.insert(code);
                         }
-                        self.keys.insert(code);
+                        if !self.keys_spent.contains(&code) {
+                            self.keys.insert(code);
+                        }
                     }
                     ElementState::Released => {
                         self.keys.remove(&code);
+                        self.keys_spent.remove(&code);
                     }
                 }
             }
@@ -2752,14 +2823,16 @@ impl App {
         self.after_menu(action);
     }
 
-    fn key_pressed(&mut self, code: KeyCode) {
+    /// A key went down: true if the press went to the game (not a menu,
+    /// a cutscene or the pause).
+    fn key_pressed(&mut self, code: KeyCode) -> bool {
         self.keyboard_used = true;
         if self.loading.is_some() {
-            return;
+            return true;
         }
         if self.mode == Mode::Menu && self.menu.screen == Screen::Lobby && code == KeyCode::KeyT {
             self.change_team(0);
-            return;
+            return false;
         }
         if self.keyboard_in_menu() {
             let input = match code {
@@ -2771,16 +2844,16 @@ impl App {
                     menu::Input::Select
                 }
                 KeyCode::Escape | KeyCode::Backspace => menu::Input::Back,
-                _ => return,
+                _ => return false,
             };
             self.menu_input(input);
-            return;
+            return false;
         }
         if code == KeyCode::Escape {
             if let Some(k) = self.locals.iter().position(|l| l.keyboard) {
                 self.pause(k);
             }
-            return;
+            return false;
         }
         // Space, Enter or E skip a cutscene.
         let skip = matches!(
@@ -2788,18 +2861,27 @@ impl App {
             KeyCode::Space | KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyE
         );
         if skip && self.mission.as_mut().is_some_and(|m| m.skip_cutscene()) {
-            return;
+            return false;
         }
         if code == KeyCode::KeyB {
             self.add_bot();
-            return;
+            return false;
         }
         let joined = self.joined();
         let Some(k) = self.locals.iter().position(|l| l.keyboard) else {
-            return;
+            return true;
         };
         let player = self.locals[k].player;
         let l = &mut self.locals[k];
+        l.typing = true;
+        // Their controller went: Enter plays on at the keyboard (Halo 2
+        // PC's "Controller disconnected. Press enter to continue.").
+        if l.lost_pad.is_some() {
+            if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
+                l.lost_pad = None;
+            }
+            return false;
+        }
         match code {
             KeyCode::Backquote => {
                 l.flying = !l.flying;
@@ -2833,6 +2915,7 @@ impl App {
             }
             _ => {}
         }
+        true
     }
 }
 
@@ -2951,14 +3034,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         focus: (Vec3::ZERO, 1.0),
         locals: Vec::new(),
         seats: vec![flow::Seat::default()],
+        pad_slots: Vec::new(),
         pads: if headless { Pads::none() } else { Pads::new() },
         window: None,
         gpu: None,
         keys: HashSet::new(),
+        keys_spent: HashSet::new(),
         captured: false,
         fire_held: false,
         zoom_held: false,
         mouse: [0.0; 2],
+        mouse_known: false,
         last_frame: Instant::now(),
         pending: 0.0,
         effects: Effects::new(),

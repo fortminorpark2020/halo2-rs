@@ -30,6 +30,8 @@ const WEAP_READY_TIME: usize = 0x13C;
 const WEAP_FLAGS: usize = 0x12C;
 /// The first hit of a melee combo (the player melee damage field is unused).
 const WEAP_MELEE_DAMAGE: usize = 0x1BC;
+/// What the one hitting feels of it (its vibration).
+const WEAP_MELEE_RESPONSE: usize = 0x1C4;
 const WEAP_FIRST_PERSON: usize = 0x2A8;
 const WEAP_HUD: usize = 0x2B0;
 const FIRST_PERSON_SIZE: usize = 0x10;
@@ -279,6 +281,8 @@ pub struct Weapon {
     pub magnetism_range: f32,
     /// The player's melee attack with this weapon (`jpt!`).
     pub melee_damage: Option<DatumIndex>,
+    /// What the one meleeing feels of a hit (`jpt!`: its vibration).
+    pub melee_response: Option<DatumIndex>,
     pub magazines: Vec<Magazine>,
     pub triggers: Vec<Trigger>,
     pub barrels: Vec<Barrel>,
@@ -403,6 +407,7 @@ pub fn read_weapon(set: &mut MapSet, weap: DatumIndex) -> Result<Weapon> {
         magnetism_angle: f32_at(&d, WEAP_MAGNETISM_ANGLE),
         magnetism_range: f32_at(&d, WEAP_MAGNETISM_RANGE),
         melee_damage: tag_ref(&d, WEAP_MELEE_DAMAGE),
+        melee_response: tag_ref(&d, WEAP_MELEE_RESPONSE),
         magazines,
         triggers,
         barrels,
@@ -590,4 +595,194 @@ pub fn read_damage(set: &mut MapSet, jpt: DatumIndex) -> Result<Damage> {
         vs_shield: against(SHIELD_ARMOR),
         vs_body: against(BODY_ARMOR),
     })
+}
+
+/// `jpt!` "player responses": what the player hit (or the one firing)
+/// feels, a block of these.
+const JPT_PLAYER_RESPONSES: usize = 0x6C;
+const PLAYER_RESPONSE_SIZE: usize = 0x4C;
+/// In a player response: each motor's vibration, its seconds and the
+/// function (a data reference) of how strong it is over them.
+const RESPONSE_LOW_DURATION: usize = 0x24;
+const RESPONSE_LOW_FUNCTION: usize = 0x28;
+const RESPONSE_HIGH_DURATION: usize = 0x30;
+const RESPONSE_HIGH_FUNCTION: usize = 0x34;
+/// In a barrel's firing effect: the damage effect firing deals the one
+/// firing (its kick, and the controller's rumble).
+const FIRING_DAMAGE: usize = 0x1C;
+
+/// Which players a damage effect's player response is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseKind {
+    Shielded,
+    Unshielded,
+    All,
+}
+
+/// One controller motor's rumble: how long, and its strength over that
+/// time (a tag function of the time gone, 0 to 1).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Rumble {
+    pub duration: f32,
+    pub function: TagFunction,
+}
+
+/// A damage effect's player response, as far as the controller goes: the
+/// low frequency (big, left) motor's rumble and the high frequency
+/// (small, right) one's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vibration {
+    pub kind: ResponseKind,
+    pub low: Rumble,
+    pub high: Rumble,
+}
+
+/// The vibrations of damage effect `jpt`'s player responses.
+pub fn read_vibration(set: &mut MapSet, jpt: DatumIndex) -> Result<Vec<Vibration>> {
+    let (src, tag, d) = set.tag_data(jpt)?;
+    if d.len() < JPT_PLAYER_RESPONSES + 8 {
+        return Err(Error::Corrupt(format!("damage tag {} too short", tag.name)));
+    }
+    let file = set.get(src);
+    let region = file.meta_region();
+    let responses = file.read_block(region, &d, JPT_PLAYER_RESPONSES, PLAYER_RESPONSE_SIZE)?;
+    let mut out = Vec::new();
+    for r in responses.as_chunks::<PLAYER_RESPONSE_SIZE>().0 {
+        let kind = match i16_at(r, 0) {
+            0 => ResponseKind::Shielded,
+            1 => ResponseKind::Unshielded,
+            _ => ResponseKind::All,
+        };
+        let mut rumble = |duration: usize, function: usize| -> Result<Rumble> {
+            let data = file.read_block(region, r, function, 1)?;
+            Ok(Rumble {
+                duration: f32_at(r, duration),
+                function: TagFunction::parse(&data),
+            })
+        };
+        let low = rumble(RESPONSE_LOW_DURATION, RESPONSE_LOW_FUNCTION)?;
+        let high = rumble(RESPONSE_HIGH_DURATION, RESPONSE_HIGH_FUNCTION)?;
+        out.push(Vibration { kind, low, high });
+    }
+    Ok(out)
+}
+
+/// The damage effect weapon `weap`'s barrel `barrel` deals the one firing
+/// it (its first firing effect's): Halo 2 rumbles the controller with it.
+pub fn firing_damage(
+    set: &mut MapSet,
+    weap: DatumIndex,
+    barrel: usize,
+) -> Result<Option<DatumIndex>> {
+    let (src, tag, d) = set.tag_data(weap)?;
+    if d.len() < WEAP_BARRELS + 8 {
+        return Err(Error::Corrupt(format!("weapon tag {} too short", tag.name)));
+    }
+    let file = set.get(src);
+    let region = file.meta_region();
+    let barrels = file.read_block(region, &d, WEAP_BARRELS, BARREL_SIZE)?;
+    let all = barrels.as_chunks::<BARREL_SIZE>().0;
+    let Some(b) = all.get(barrel).or(all.first()) else {
+        return Ok(None);
+    };
+    let firing = file.read_block(region, b, BARREL_FIRING_EFFECTS, FIRING_EFFECT_SIZE)?;
+    let first = firing.as_chunks::<FIRING_EFFECT_SIZE>().0.first();
+    Ok(first.and_then(|f| tag_ref(f, FIRING_DAMAGE)))
+}
+
+/// A tag function: a value over an input from 0 to 1 (here the time a
+/// rumble has gone, as a share of its duration). Only the kinds the
+/// damage effects' vibrations use are read; the rest keep their bytes.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum TagFunction {
+    /// No data: full strength throughout.
+    #[default]
+    None,
+    /// One value throughout.
+    Constant(f32),
+    /// From one value to another, along a transition shape.
+    Transition {
+        shape: Transition,
+        from: f32,
+        to: f32,
+    },
+    /// A kind not read here, its bytes as they are.
+    Other(Vec<u8>),
+}
+
+/// The shapes a transition function goes from one value to the other
+/// along (Halo's transition function list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transition {
+    Linear,
+    Early,
+    VeryEarly,
+    Late,
+    VeryLate,
+    Cosine,
+    One,
+    Zero,
+}
+
+/// A tag function's header: its kind, flags and two bytes of options,
+/// then four colours (for colour functions); the kind's own data follows.
+const FUNCTION_HEADER: usize = 0x14;
+const FUNCTION_CONSTANT: u8 = 1;
+const FUNCTION_TRANSITION: u8 = 2;
+
+impl TagFunction {
+    pub fn parse(data: &[u8]) -> TagFunction {
+        if data.is_empty() {
+            return TagFunction::None;
+        }
+        let value = |at: usize| (data.len() >= at + 4).then(|| f32_at(data, at));
+        match (data[0], value(FUNCTION_HEADER), value(FUNCTION_HEADER + 4)) {
+            (FUNCTION_CONSTANT, Some(v), _) => TagFunction::Constant(v),
+            (FUNCTION_TRANSITION, Some(from), Some(to)) => {
+                let shape = match data.get(2) {
+                    Some(0) => Transition::Linear,
+                    Some(1) => Transition::Early,
+                    Some(2) => Transition::VeryEarly,
+                    Some(3) => Transition::Late,
+                    Some(4) => Transition::VeryLate,
+                    Some(5) => Transition::Cosine,
+                    Some(6) => Transition::One,
+                    Some(7) => Transition::Zero,
+                    _ => Transition::Linear,
+                };
+                TagFunction::Transition { shape, from, to }
+            }
+            _ => TagFunction::Other(data.to_vec()),
+        }
+    }
+
+    /// Its value `t` (0 to 1) of the way along.
+    pub fn at(&self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            TagFunction::None => 1.0,
+            TagFunction::Constant(v) => *v,
+            TagFunction::Transition { shape, from, to } => from + (to - from) * shape.at(t),
+            // Not read: fading out evenly (an estimate).
+            TagFunction::Other(_) => 1.0 - t,
+        }
+    }
+}
+
+impl Transition {
+    /// How far from the first value to the second it is `t` of the way
+    /// along. The curves are the remake's reading of the names (an
+    /// estimate: the tags give only which one).
+    pub fn at(self, t: f32) -> f32 {
+        match self {
+            Transition::Linear => t,
+            Transition::Early => 1.0 - (1.0 - t) * (1.0 - t),
+            Transition::VeryEarly => 1.0 - (1.0 - t).powi(4),
+            Transition::Late => t * t,
+            Transition::VeryLate => t.powi(4),
+            Transition::Cosine => (1.0 - (t * std::f32::consts::PI).cos()) * 0.5,
+            Transition::One => 1.0,
+            Transition::Zero => 0.0,
+        }
+    }
 }

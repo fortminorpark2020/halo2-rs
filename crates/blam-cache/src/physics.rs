@@ -1,7 +1,7 @@
 //! Movement tuning read from the game's own tags, so the remake moves like Halo 2.
 
 use crate::mapset::MapSet;
-use crate::{f32_at, u32_at, DatumIndex, GroupTag, Result};
+use crate::{f32_at, i16_at, u32_at, DatumIndex, GroupTag, Result};
 
 /// `matg` "Player Information": movement speeds in world units per second.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -18,6 +18,10 @@ pub struct PlayerMovement {
     pub airborne_acceleration: f32,
     /// Multiplier on the engine's base gravity.
     pub gravity_scale: f32,
+    /// Seconds the action button is held to pick up or swap a weapon, or
+    /// get in or out of a vehicle (player control's minimum action hold
+    /// time).
+    pub action_hold: f32,
 }
 
 /// Biped (`bipd`) physics for the player character.
@@ -70,6 +74,7 @@ impl Default for PlayerMovement {
             sneak_acceleration: 9.6,
             airborne_acceleration: 1.05,
             gravity_scale: 1.0,
+            action_hold: 0.2333,
         }
     }
 }
@@ -105,6 +110,11 @@ const MATG_PLAYER_CONTROL: usize = 0xF0;
 const PLAYER_CONTROL_SIZE: usize = 0x80;
 /// The player control block's look function: a block of reals.
 const PLAYER_CONTROL_LOOK_FUNCTION: usize = 0x74;
+/// Its look autolevelling scale, minimum autolevelling ticks (a short)
+/// and minimum action hold time.
+const PLAYER_CONTROL_AUTOLEVEL_SCALE: usize = 0x5C;
+const PLAYER_CONTROL_AUTOLEVEL_TICKS: usize = 0x6E;
+const PLAYER_CONTROL_ACTION_HOLD: usize = 0x7C;
 const MATG_PLAYER_INFORMATION: usize = 0x130;
 const MATG_FALLING_DAMAGE: usize = 0x140;
 const FALLING_DAMAGE_SIZE: usize = 0x68;
@@ -125,11 +135,9 @@ pub fn player_movement(set: &mut MapSet) -> Result<PlayerMovement> {
     if info.len() < PLAYER_INFORMATION_SIZE {
         return Ok(PlayerMovement::default());
     }
-    let gravity_scale = if control.len() >= PLAYER_CONTROL_SIZE {
-        f32_at(&control, 0x68)
-    } else {
-        1.0
-    };
+    let whole = control.len() >= PLAYER_CONTROL_SIZE;
+    let gravity_scale = if whole { f32_at(&control, 0x68) } else { 1.0 };
+    let action_hold = action_hold_from(&control);
     Ok(PlayerMovement {
         walk: f32_at(&info, 0x24),
         run_forward: f32_at(&info, 0x2C),
@@ -146,7 +154,18 @@ pub fn player_movement(set: &mut MapSet) -> Result<PlayerMovement> {
         } else {
             1.0
         },
+        action_hold,
     })
+}
+
+/// The player control block's minimum action hold time (Halo 2's if
+/// the block is short or the time makes no sense).
+fn action_hold_from(control: &[u8]) -> f32 {
+    Some(control)
+        .filter(|c| c.len() >= PLAYER_CONTROL_SIZE)
+        .map(|c| f32_at(c, PLAYER_CONTROL_ACTION_HOLD))
+        .filter(|&t| t > 0.0 && t < 2.0)
+        .unwrap_or(PlayerMovement::default().action_hold)
 }
 
 /// `matg` "Player Control": where the crosshair sits, and how a
@@ -174,6 +193,11 @@ pub struct PlayerControl {
     /// The look speed (0..1 of the rate) at evenly spaced points of the
     /// stick's travel, from the middle to the edge.
     pub look_function: Vec<f32>,
+    /// Automatic Look Centering: how strongly the view levels out, and
+    /// how many game ticks (of 30 a second) the player moves forward
+    /// without looking up or down before it starts.
+    pub autolevel_scale: f32,
+    pub autolevel_ticks: u16,
 }
 
 impl Default for PlayerControl {
@@ -190,6 +214,8 @@ impl Default for PlayerControl {
             yaw_acceleration: (0.8, 2.5),
             pitch_acceleration: (0.8, 2.5),
             look_function: vec![0.0, 0.05, 0.1, 0.25, 0.58, 1.0],
+            autolevel_scale: 0.5,
+            autolevel_ticks: 15,
         }
     }
 }
@@ -229,6 +255,8 @@ fn player_control_from(control: &[u8], curve: &[u8]) -> PlayerControl {
         yaw_acceleration: (f(0x4C), f(0x50)),
         pitch_acceleration: (f(0x54), f(0x58)),
         look_function,
+        autolevel_scale: f(PLAYER_CONTROL_AUTOLEVEL_SCALE),
+        autolevel_ticks: i16_at(control, PLAYER_CONTROL_AUTOLEVEL_TICKS).max(0) as u16,
     }
 }
 
@@ -343,9 +371,13 @@ mod tests {
             (0x50, 2.5),
             (0x54, 0.8),
             (0x58, 2.5),
+            (0x5C, 0.5),
+            (0x7C, 0.2333),
         ] {
             block[at..at + 4].copy_from_slice(&v.to_le_bytes());
         }
+        // The minimum autolevelling ticks, a short.
+        block[0x6E..0x70].copy_from_slice(&15i16.to_le_bytes());
         let curve: Vec<u8> = [0.0f32, 0.05, 0.1, 0.25, 0.58, 1.0]
             .iter()
             .flat_map(|v| v.to_le_bytes())
@@ -356,5 +388,13 @@ mod tests {
         // No look function: Halo 2's.
         let c = player_control_from(&block, &[]);
         assert_eq!(c.look_function, PlayerControl::default().look_function);
+        // The action button's hold, 7 ticks.
+        assert_eq!(action_hold_from(&block), 0.2333);
+        assert_eq!(PlayerMovement::default().action_hold, 0.2333);
+        block[0x7C..0x80].copy_from_slice(&0f32.to_le_bytes());
+        assert_eq!(action_hold_from(&block), 0.2333);
+        block[0x7C..0x80].copy_from_slice(&0.5f32.to_le_bytes());
+        assert_eq!(action_hold_from(&block), 0.5);
+        assert_eq!(action_hold_from(&block[..0x40]), 0.2333);
     }
 }

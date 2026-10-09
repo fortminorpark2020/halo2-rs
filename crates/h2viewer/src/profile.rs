@@ -42,7 +42,7 @@ pub fn color(color: u8) -> [f32; 3] {
 }
 
 /// Splitscreen guests with settings of their own: NAME(1) to NAME(3).
-const GUESTS: usize = crate::MAX_LOCAL - 1;
+pub const GUESTS: usize = crate::MAX_LOCAL - 1;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
@@ -86,6 +86,9 @@ fn read_control(c: &mut Controls, key: &str, value: &str) -> bool {
         "look_sensitivity" => c.look_sensitivity = sensitivity(c.look_sensitivity),
         "mouse_sensitivity" => c.mouse_sensitivity = sensitivity(c.mouse_sensitivity),
         "invert_look" => c.invert_look = value.eq_ignore_ascii_case("yes"),
+        "vibration" => c.vibration = !value.eq_ignore_ascii_case("no"),
+        "look_centering" => c.look_centering = value.eq_ignore_ascii_case("yes"),
+        "dual_wield_inversion" => c.dual_wield_inversion = value.eq_ignore_ascii_case("yes"),
         "button_layout" => c.buttons = ButtonLayout::from_key(value).unwrap_or(c.buttons),
         "thumbstick_layout" => c.sticks = StickLayout::from_key(value).unwrap_or(c.sticks),
         _ => return false,
@@ -100,11 +103,18 @@ fn control_lines(c: &Controls, prefix: &str, mouse: bool) -> String {
     if mouse {
         text += &format!("{prefix}mouse_sensitivity={}\n", c.mouse_sensitivity);
     }
-    let invert = if c.invert_look { "yes" } else { "no" };
+    let yes = |on: bool| if on { "yes" } else { "no" };
     text += &format!(
-        "{prefix}invert_look={invert}\n{prefix}button_layout={}\n{prefix}thumbstick_layout={}\n",
+        "{prefix}invert_look={}\n{prefix}button_layout={}\n{prefix}thumbstick_layout={}\n",
+        yes(c.invert_look),
         c.buttons.key(),
         c.sticks.key()
+    );
+    text += &format!(
+        "{prefix}vibration={}\n{prefix}look_centering={}\n{prefix}dual_wield_inversion={}\n",
+        yes(c.vibration),
+        yes(c.look_centering),
+        yes(c.dual_wield_inversion)
     );
     text
 }
@@ -352,6 +362,33 @@ mod tests {
         let r = Profile::parse(" button_layout = GREEN_THUMB \nthumbstick_layout=Legacy");
         assert_eq!(r.controls.buttons, ButtonLayout::GreenThumb);
         assert_eq!(r.controls.sticks, StickLayout::Legacy);
+    }
+
+    #[test]
+    fn vibration_look_centering_and_inversion_are_saved() {
+        let mut p = Profile::default();
+        // Halo 2's: vibration on, the others off.
+        assert!(p.controls.vibration);
+        assert!(!p.controls.look_centering && !p.controls.dual_wield_inversion);
+        let text = p.to_text();
+        assert!(text.contains("vibration=yes\n"), "{text}");
+        assert!(text.contains("look_centering=no\n"), "{text}");
+        assert!(text.contains("dual_wield_inversion=no\n"), "{text}");
+        p.controls.vibration = false;
+        p.controls.look_centering = true;
+        p.guests[1].dual_wield_inversion = true;
+        p.guests[2].vibration = false;
+        let text = p.to_text();
+        assert!(text.contains("\nvibration=no\n"), "{text}");
+        assert!(text.contains("\nlook_centering=yes\n"), "{text}");
+        assert!(text.contains("guest2_dual_wield_inversion=yes\n"), "{text}");
+        assert!(text.contains("guest3_vibration=no\n"), "{text}");
+        assert_eq!(Profile::parse(&text), p);
+        // A profile from before them has Halo 2's; nonsense keeps vibration.
+        let old = Profile::parse("name=CHIEF\nlook_sensitivity=5\n");
+        assert!(old.controls.vibration && !old.controls.look_centering);
+        assert!(Profile::parse("vibration=maybe").controls.vibration);
+        assert!(!Profile::parse("vibration=NO").controls.vibration);
     }
 
     #[test]

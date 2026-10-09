@@ -16,6 +16,7 @@ use blam_cache::physics::{self, BipedPhysics, PlayerControl, PlayerMovement};
 use blam_cache::render::{LevelGeometry, Section, SectionOwner};
 use blam_cache::scenario::PlacedKind;
 use blam_cache::shader::{self, Blend};
+use blam_cache::weapon::Vibration;
 use blam_cache::{
     render, scenario, sound, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp,
 };
@@ -274,6 +275,24 @@ pub struct WeaponAssets {
     pub sounds: WeaponSounds,
     /// How its rounds look and sound, when they fly.
     pub round: RoundAssets,
+    /// How it rumbles controllers.
+    pub rumble: WeaponRumble,
+}
+
+/// How a weapon rumbles controllers: its damage effects' vibrations
+/// (`crate::rumble`).
+#[derive(Clone, Debug, Default)]
+pub struct WeaponRumble {
+    /// Firing it, for the one firing.
+    pub fire: Vec<Vibration>,
+    /// Its rounds hitting someone.
+    pub impact: Vec<Vibration>,
+    /// Its rounds going off, for those within the radius.
+    pub detonation: Vec<Vibration>,
+    pub blast_radius: f32,
+    /// Its melee: for the one hit, and the one hitting.
+    pub melee: Vec<Vibration>,
+    pub melee_response: Vec<Vibration>,
 }
 
 /// A weapon's rounds in flight (rockets, plasma bolts, needles...).
@@ -578,10 +597,13 @@ pub fn placement_matrix(position: [f32; 3], rotation: [f32; 3], scale: f32) -> M
         * Mat4::from_scale(Vec3::splat(scale))
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 pub struct GrenadeAssets {
     pub mesh: Option<usize>,
     pub speed: Option<f32>,
+    /// Going off: the rumble for those within the radius.
+    pub rumble: Vec<Vibration>,
+    pub blast_radius: f32,
 }
 
 /// How many Spartans can be on screen at once (each gets its own copy of the
@@ -1223,6 +1245,14 @@ impl Loader {
             attached_super: attached_super.as_ref(),
         };
         let mut def = WeaponDef::from_tags(&w, trigger, rounds);
+        let rumble = self.weapon_rumble(
+            datum,
+            &w,
+            barrel_index,
+            projectile.as_ref(),
+            detonation.as_ref(),
+            def.flight.is_some_and(|f| f.blast.is_some()),
+        );
         def.melee_damage = w
             .melee_damage
             .and_then(|d| weapon::read_damage(&mut self.set, d).ok())
@@ -1327,6 +1357,7 @@ impl Loader {
             trigger,
             world_mesh,
             round,
+            rumble,
             def,
             view_mesh,
             mirror_mesh,
@@ -1340,6 +1371,42 @@ impl Loader {
             hud,
             sounds,
         })
+    }
+
+    /// A damage effect's vibrations (none if it has none, or no data).
+    fn vibration(&mut self, jpt: Option<DatumIndex>) -> Vec<Vibration> {
+        jpt.filter(|&d| d != DatumIndex::NONE)
+            .and_then(|d| weapon::read_vibration(&mut self.set, d).ok())
+            .unwrap_or_default()
+    }
+
+    /// How weapon `datum` (`w`) rumbles controllers, firing its barrel
+    /// `barrel`'s rounds (`projectile`, going off as `detonation`).
+    fn weapon_rumble(
+        &mut self,
+        datum: DatumIndex,
+        w: &weapon::Weapon,
+        barrel: usize,
+        projectile: Option<&weapon::Projectile>,
+        detonation: Option<&weapon::Damage>,
+        explosive: bool,
+    ) -> WeaponRumble {
+        let fired = weapon::firing_damage(&mut self.set, datum, barrel)
+            .ok()
+            .flatten();
+        let mut fire = self.vibration(fired);
+        // Some firing effects are empty in the PC maps: an estimate then.
+        if fired.is_some() && fire.is_empty() {
+            fire.push(crate::rumble::firing_fallback(explosive));
+        }
+        WeaponRumble {
+            fire,
+            impact: self.vibration(projectile.map(|p| p.impact_damage)),
+            detonation: self.vibration(projectile.map(|p| p.detonation_damage)),
+            blast_radius: detonation.map_or(0.0, |d| d.radius.1),
+            melee: self.vibration(w.melee_damage),
+            melee_response: self.vibration(w.melee_response),
+        }
     }
 
     /// A HUD bitmap's first image, by tag name.
@@ -1969,15 +2036,22 @@ impl Scene {
         let campaign = campaign.then(|| campaign_start(&mut loader.set, &weapons));
         let grenades = ["frag_grenade", "plasma_grenade"].map(|g| {
             let name = format!("objects\\weapons\\grenade\\{g}\\{g}");
+            let projectile = loader
+                .find("proj", &name)
+                .and_then(|p| weapon::read_projectile(&mut loader.set, p).ok());
+            let blast = projectile.as_ref().map(|p| p.detonation_damage);
             GrenadeAssets {
                 mesh: loader
                     .find("eqip", &name)
                     .and_then(|e| loader.object_mesh(e, &mut meshes)),
-                speed: loader
-                    .find("proj", &name)
-                    .and_then(|p| weapon::read_projectile(&mut loader.set, p).ok())
+                speed: projectile
+                    .as_ref()
                     .map(|p| p.initial_velocity)
                     .filter(|v| *v > 0.0),
+                rumble: loader.vibration(blast),
+                blast_radius: blast
+                    .and_then(|d| weapon::read_damage(&mut loader.set, d).ok())
+                    .map_or(0.0, |d| d.radius.1),
             }
         });
         let named = |loader: &mut Loader, name: &str| loader.sound_named(name);

@@ -429,6 +429,11 @@ impl WeaponDef {
     }
 }
 
+/// The zoom button held longer than this (more than 15 of Halo 2's
+/// thirtieths of a second) zooms in only until it's let go (the CC0
+/// decompilation's player control update).
+const ZOOM_HOLD: f32 = 15.0 / 30.0;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WeaponInput {
     pub fire: bool,
@@ -467,6 +472,10 @@ pub struct WeaponState {
     queued: bool,
     fire_held: bool,
     zoom_held: bool,
+    /// The zoom before the last press, and how long that press has been
+    /// held (while it zoomed in): held long enough, letting go goes back.
+    zoom_before: u32,
+    zoom_press: Option<f32>,
     /// 0..1: how far sustained fire has pushed spread and rate of fire.
     heat: f32,
     rng: u32,
@@ -487,6 +496,8 @@ impl WeaponState {
             queued: false,
             fire_held: false,
             zoom_held: false,
+            zoom_before: 0,
+            zoom_press: None,
             heat: 0.0,
             rng: 0x9E37_79B9,
             since_shot: f32::INFINITY,
@@ -520,6 +531,7 @@ impl WeaponState {
             self.burst_left = 0;
             self.queued = false;
             self.zoom = 0;
+            self.zoom_press = None;
         }
     }
 
@@ -527,6 +539,7 @@ impl WeaponState {
     /// abandoned and the trigger let go.
     pub fn put_away(&mut self) {
         self.zoom = 0;
+        self.zoom_press = None;
         self.reloading = None;
         self.let_go();
     }
@@ -546,7 +559,18 @@ impl WeaponState {
         self.fire_held = input.fire;
 
         if input.zoom && !self.zoom_held && def.zoom_levels > 0 && self.reloading.is_none() {
+            self.zoom_before = self.zoom;
             self.zoom = (self.zoom + 1) % (def.zoom_levels + 1);
+            self.zoom_press = (self.zoom > 0).then_some(0.0);
+        } else if input.zoom {
+            if let Some(held) = self.zoom_press.as_mut() {
+                *held += dt;
+            }
+        } else if let Some(held) = self.zoom_press.take() {
+            // Held, it was only a look: back as it was.
+            if held > ZOOM_HOLD && self.zoom > 0 {
+                self.zoom = self.zoom_before;
+            }
         }
         self.zoom_held = input.zoom;
 
@@ -1003,5 +1027,18 @@ mod tests {
         w.update(&def, WeaponInput::default(), 0.01);
         w.update(&def, zoom, 0.01);
         assert_eq!(w.zoom, 0);
+        // Held over half a second, it zooms in only until let go.
+        w.update(&def, WeaponInput::default(), 0.01);
+        for _ in 0..60 {
+            w.update(&def, zoom, 0.01);
+        }
+        assert_eq!(w.zoom, 1);
+        w.update(&def, WeaponInput::default(), 0.01);
+        assert_eq!(w.zoom, 0);
+        // A quick press stays in.
+        w.update(&def, zoom, 0.01);
+        w.update(&def, zoom, 0.2);
+        w.update(&def, WeaponInput::default(), 0.01);
+        assert_eq!(w.zoom, 1);
     }
 }

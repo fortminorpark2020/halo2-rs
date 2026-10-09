@@ -4,11 +4,11 @@
 //! into each game it starts.
 
 use crate::flow::bot_for;
+use crate::input::PadId;
 use crate::local::{Keyboard, LocalPlayer};
 use crate::menu::{self, Screen, SeatInfo};
 use crate::options::GameOptions;
 use crate::{scene, App, Mode, Then};
-use gilrs::GamepadId;
 use h2net::{Client, ClientEvent, Host, HostEvent, LanGame, Lobby, LobbyPlayer};
 use h2sim::game::{guest_name, TICK};
 use h2sim::Command;
@@ -43,7 +43,7 @@ pub enum Net {
         /// Our players are in the host's game (otherwise still joining).
         seated: bool,
         /// Controllers waiting for the host to add their player.
-        waiting_pads: Vec<Option<GamepadId>>,
+        waiting_pads: Vec<Option<PadId>>,
         /// The host's lobby, while waiting there for its next game.
         lobby: Option<Lobby>,
         /// Who plays here and the teams they'd like, as last told to the
@@ -414,6 +414,7 @@ impl App {
 
     /// Joined: our players' controls now.
     fn joined_commands(&mut self) -> Vec<(usize, Command)> {
+        self.latch_left_hands();
         let keyboard = Keyboard {
             keys: &self.keys,
             captured: self.captured,
@@ -610,6 +611,8 @@ impl App {
             let mut seat = LocalPlayer::new(p, &self.game);
             seat.keyboard = l.keyboard;
             seat.pad = l.pad;
+            seat.lost_pad = l.lost_pad;
+            seat.slot = l.slot;
             seat.messages = l.messages;
             self.locals.push(seat);
         }
@@ -626,8 +629,10 @@ impl App {
             waiting_pads.remove(0)
         };
         if player < self.game.players.len() {
+            let slot = self.guest_slot(pad);
             let mut l = LocalPlayer::new(player, &self.game);
             l.pad = pad;
+            l.slot = slot;
             self.locals.push(l);
             let name = crate::local::player_name(&self.game, usize::MAX, player);
             self.announce(&format!("{name} JOINED"));
@@ -635,7 +640,7 @@ impl App {
     }
 
     /// Joined: another person here wants to play (controller Start).
-    pub(crate) fn request_local(&mut self, pad: Option<GamepadId>) {
+    pub(crate) fn request_local(&mut self, pad: Option<PadId>) {
         // The host turns them away without a word when its game is full.
         if self.game.players.len() >= scene::MAX_BODIES {
             self.announce("THE GAME IS FULL");

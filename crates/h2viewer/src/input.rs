@@ -12,25 +12,65 @@
 //! shows the scoreboard. Menus use the buttons themselves, whatever the
 //! layout: the d-pad or left stick moves, A chooses, B goes back, X
 //! changes team, Start joins and Back leaves.
+//!
+//! A press that works a menu, takes a controller over or skips a cutscene
+//! is spent there: the button doesn't count as held in the game until
+//! it's let go (`Pads::hold_off`), so B that closes the pause menu doesn't
+//! also melee.
 
 use crate::profile::Profile;
 use gilrs::ev::filter::{axis_dpad_to_button, Filter};
+use gilrs::ff::{BaseEffect, BaseEffectType, Effect, EffectBuilder, Repeat};
 use gilrs::{Axis, Button, EventType, GamepadId, Gilrs, GilrsBuilder};
 use glam::Vec2;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// The sticks' dead zone, all of it (gilrs' own filters are off, so
-/// XInput's, about a quarter of the way, doesn't stack on it): a fifth of
-/// the way out, measured round each stick.
-const DEAD_ZONE: f32 = 0.2;
-/// Triggers count as pulled past this, and let go under the second; a
-/// press (a tapped shot, Boxer's melee) comes at the same pull as a hold.
-const TRIGGER: f32 = 0.3;
-const TRIGGER_RELEASE: f32 = 0.2;
-/// The stick counts as pushed past this, and let go under the second.
-const STICK_PUSH: (f32, f32) = (0.6, 0.35);
+/// XInput's doesn't stack on it): Halo 2's 9000 of 32767, a little over a
+/// quarter of the way, along each axis on its own, the rest of the way
+/// stretched to the whole (`k_thumbstick_dead_zone` in the CC0
+/// decompilation's gamepad poll; the Xbox's number, as Vista's PC code
+/// isn't in it).
+const DEAD_ZONE: f32 = 9000.0 / 32767.0;
+/// A trigger counts as pulled once it's squeezed this much past the least
+/// it was pulled since it was let go, and let go once it eases this much
+/// off the most it was pulled: Halo 2's analog button margins, 64 and 32
+/// of 255 (the CC0 decompilation's gamepad poll; `Trigger`).
+const TRIGGER_PRESS: f32 = 64.0 / 255.0;
+const TRIGGER_RELEASE: f32 = 32.0 / 255.0;
+/// A rumble reaches the motors for at least this long: gilrs sets them
+/// every 50 milliseconds, and would miss one shorter (the battle rifle's
+/// 0.034 seconds). The remake's.
+const MOTOR_HOLD: Duration = Duration::from_millis(60);
+/// The stick counts as pushed past this (through the dead zone), and let
+/// go under the second, for menus: Halo 2's push (0x7332 of 32767, from
+/// the CC0 decompilation's menu input); the let go is an estimate (Halo
+/// 2's has none).
+const STICK_PUSH: (f32, f32) = (0.9, 0.35);
+/// A direction held in a menu moves again after the first wait, then
+/// every second one: Halo 2's quarter second for both (the CC0
+/// decompilation's menu input).
+const MENU_REPEAT: (Duration, Duration) = (Duration::from_millis(250), Duration::from_millis(250));
+
+/// A controller: gilrs' number for it (XInput's slot, 0 to 3, on
+/// Windows), or a scripted one's (`H2_PAD_SCRIPT`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PadId(pub usize);
+
+impl From<GamepadId> for PadId {
+    fn from(id: GamepadId) -> PadId {
+        PadId(usize::from(id))
+    }
+}
+
+impl std::fmt::Display for PadId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 /// Which system the controllers are read through.
 pub const BACKEND: &str = if cfg!(windows) {
     "XInput"
@@ -116,6 +156,32 @@ impl PadButton {
             .iter()
             .find(|g| g.1 == self)
             .map_or(Button::Unknown, |g| g.0)
+    }
+
+    /// The button a test script names (`H2_PAD_SCRIPT`): its label, or
+    /// LS, RS or the d-pad's direction alone.
+    pub fn from_name(name: &str) -> Option<PadButton> {
+        let name = name.to_ascii_uppercase();
+        let short = match name.as_str() {
+            "LS" => Some(PadButton::LeftStick),
+            "RS" => Some(PadButton::RightStick),
+            "UP" => Some(PadButton::Up),
+            "DOWN" => Some(PadButton::Down),
+            "LEFT" => Some(PadButton::Left),
+            "RIGHT" => Some(PadButton::Right),
+            _ => None,
+        };
+        short.or_else(|| Self::ALL.into_iter().find(|b| b.label() == name))
+    }
+
+    /// The d-pad's button that way.
+    pub fn dpad(dir: Dir) -> PadButton {
+        match dir {
+            Dir::Up => PadButton::Up,
+            Dir::Down => PadButton::Down,
+            Dir::Left => PadButton::Left,
+            Dir::Right => PadButton::Right,
+        }
     }
 
     /// Its name in prompts and on the controller screen.
@@ -479,15 +545,72 @@ impl StickLayout {
     }
 
     /// Movement (x strafe, y forward) and look (x turn, y up) from the
-    /// left and right sticks (each through the dead zone already).
+    /// left and right sticks (each through the dead zone already). The
+    /// Legacy layouts first snap each stick to its nearer axis but near a
+    /// diagonal, as Halo 2 does (`legacy_snap`).
     pub fn apply(self, left: Vec2, right: Vec2) -> (Vec2, Vec2) {
+        let snapped = || {
+            (
+                legacy_snap(left, LEGACY_ZONES[0]),
+                legacy_snap(right, LEGACY_ZONES[1]),
+            )
+        };
         match self {
             StickLayout::Default => (left, right),
             StickLayout::Southpaw => (right, left),
-            StickLayout::Legacy => (Vec2::new(right.x, left.y), Vec2::new(left.x, right.y)),
-            StickLayout::LegacySouthpaw => (Vec2::new(left.x, right.y), Vec2::new(right.x, left.y)),
+            StickLayout::Legacy => {
+                let (left, right) = snapped();
+                (Vec2::new(right.x, left.y), Vec2::new(left.x, right.y))
+            }
+            StickLayout::LegacySouthpaw => {
+                let (left, right) = snapped();
+                (Vec2::new(left.x, right.y), Vec2::new(right.x, left.y))
+            }
         }
     }
+}
+
+/// How far either side of a diagonal the Legacy layouts let a stick mix
+/// its two axes, the left stick's and the right's, in radians: 35 and 10
+/// degrees (the CC0 decompilation's stick conditioning).
+const LEGACY_ZONES: [f32; 2] = [0.610_865_2, 0.174_532_9];
+
+/// A stick under the Legacy layouts, as Halo 2 snaps it (re-implemented
+/// from the CC0 decompilation's stick conditioning): within `zone` of a
+/// diagonal, the nearer axis gets the stick's whole push and the other
+/// less the further it is from the diagonal (all of it on the diagonal,
+/// none 35 degrees off); outside, the nearer axis gets it all.
+fn legacy_snap(v: Vec2, zone: f32) -> Vec2 {
+    use std::f32::consts::{FRAC_PI_4, PI};
+    if v == Vec2::ZERO {
+        return v;
+    }
+    let sign = |a: f32| if a < 0.0 { -1.0 } else { 1.0 };
+    let angle = v.y.atan2(v.x);
+    // The diagonal of the quarter it's in.
+    let diagonal = match (v.x < 0.0, v.y < 0.0) {
+        (false, false) => FRAC_PI_4,
+        (true, false) => 3.0 * FRAC_PI_4,
+        (false, true) => -FRAC_PI_4,
+        (true, true) => -3.0 * FRAC_PI_4,
+    };
+    let off = (angle - diagonal).abs();
+    let push = v.length();
+    let across = angle.abs() < FRAC_PI_4 || angle.abs() > PI - FRAC_PI_4;
+    let snapped = if off < zone {
+        // Halo 2's 1.6370222: none of the other axis 35 degrees off.
+        let less = (1.0 - off * 1.637_022_3) * push;
+        if across {
+            Vec2::new(sign(v.x) * push, sign(v.y) * less)
+        } else {
+            Vec2::new(sign(v.x) * less, sign(v.y) * push)
+        }
+    } else if v.x.abs() > v.y.abs() {
+        Vec2::new(sign(v.x) * push, 0.0)
+    } else {
+        Vec2::new(0.0, sign(v.y) * push)
+    };
+    snapped.clamp(Vec2::NEG_ONE, Vec2::ONE)
 }
 
 /// Buttons held: a bit each.
@@ -501,6 +624,24 @@ impl ButtonSet {
 
     pub fn contains(self, b: PadButton) -> bool {
         self.0 & 1 << b as u16 != 0
+    }
+
+    pub fn remove(&mut self, b: PadButton) {
+        self.0 &= !(1 << b as u16);
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Those in both.
+    pub fn and(self, other: ButtonSet) -> ButtonSet {
+        ButtonSet(self.0 & other.0)
+    }
+
+    /// Those not in `other`.
+    pub fn without(self, other: ButtonSet) -> ButtonSet {
+        ButtonSet(self.0 & !other.0)
     }
 }
 
@@ -523,12 +664,15 @@ impl FunctionSet {
 }
 
 /// A controller this frame, by its buttons: the sticks through the dead
-/// zone, and the buttons held (the triggers pulled past `TRIGGER`).
+/// zone and squared off (`condition`), the buttons held (the triggers as
+/// `Trigger` counts them), and how far each trigger is pulled, left and
+/// right (0 to 1).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PadReading {
     pub left: Vec2,
     pub right: Vec2,
     pub held: ButtonSet,
+    pub pull: [f32; 2],
 }
 
 /// What a controller asks of the game this frame, under its player's
@@ -542,6 +686,8 @@ pub struct PadState {
     pub held: FunctionSet,
     /// Back held: the scoreboard.
     pub scores: bool,
+    /// Either trigger is past half way (Halo 2 won't zoom in then).
+    pub trigger_down: bool,
 }
 
 impl PadReading {
@@ -560,6 +706,9 @@ impl PadReading {
             look,
             held,
             scores: self.held.contains(PadButton::Back),
+            // Halo 2's 127 of 255, the triggers as they are (the CC0
+            // decompilation's player control update).
+            trigger_down: self.pull.iter().any(|&v| v > 127.0 / 255.0),
         }
     }
 }
@@ -581,27 +730,83 @@ pub enum PadEvent {
     /// The left stick pushed one way: for menus only (never the d-pad's
     /// functions in a game, or walking would work Recon's flashlight).
     Stick(Dir),
+    /// The d-pad or left stick held one way a while: for menus only, as
+    /// another push.
+    Repeat(Dir),
     /// The controller went (unplugged, or out of battery).
     Disconnected,
     /// It's back.
     Connected,
 }
 
+/// A stick through Halo 2's dead zone: each axis on its own (`DEAD_ZONE`).
 fn dead_zone(v: Vec2) -> Vec2 {
-    let len = v.length();
-    if len < DEAD_ZONE {
-        Vec2::ZERO
-    } else {
-        v / len * ((len - DEAD_ZONE) / (1.0 - DEAD_ZONE)).min(1.0)
+    let axis = |a: f32| (a.abs() - DEAD_ZONE).max(0.0) / (1.0 - DEAD_ZONE) * a.signum();
+    Vec2::new(axis(v.x), axis(v.y)).clamp(Vec2::NEG_ONE, Vec2::ONE)
+}
+
+/// A stick as the game uses it: through the dead zone, then its round
+/// travel stretched to a square, so a full push corner to corner is full
+/// along both axes (Halo 2's stick conditioning, re-implemented from the
+/// CC0 decompilation: each axis times 1 / max(|sin|, |cos|) of the
+/// stick's angle).
+fn condition(v: Vec2) -> Vec2 {
+    let v = dead_zone(v);
+    let most = v.x.abs().max(v.y.abs());
+    if most <= 0.0 {
+        return Vec2::ZERO;
+    }
+    (v * (v.length() / most)).clamp(Vec2::NEG_ONE, Vec2::ONE)
+}
+
+/// A trigger, as Halo 2 reads one (re-implemented from the CC0
+/// decompilation's gamepad poll): pulled while its last reading was past
+/// a threshold that follows it, up to `TRIGGER_RELEASE` under the most it
+/// was pulled while held, and down to `TRIGGER_PRESS` over the least
+/// while let go. So easing off an eighth and squeezing again fires again,
+/// without going back to rest; and it counts a reading late.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Trigger {
+    value: f32,
+    threshold: f32,
+}
+
+impl Default for Trigger {
+    /// At rest, as after it's let go there. (Halo 2 starts its threshold
+    /// at nothing, so the very first pull counts at a hair; the remake
+    /// starts where it settles.)
+    fn default() -> Trigger {
+        Trigger {
+            value: 0.0,
+            threshold: TRIGGER_PRESS,
+        }
     }
 }
 
+impl Trigger {
+    /// The trigger is now at `v` (0 to 1): whether it counts as pulled.
+    fn sample(&mut self, v: f32) -> bool {
+        let down = self.value > self.threshold;
+        self.value = v;
+        self.threshold = if down {
+            self.threshold.max(v - TRIGGER_RELEASE)
+        } else {
+            self.threshold.min((v + TRIGGER_PRESS).min(1.0))
+        };
+        down
+    }
+}
+
+/// The triggers' buttons, left and right.
+const TRIGGERS: [PadButton; 2] = [PadButton::LT, PadButton::RT];
+
 /// Our own dead zone and trigger pull, the same on every system: gilrs'
-/// filters off, its trigger presses at `TRIGGER`.
+/// filters off. Its own trigger presses (at Halo 2's press margin from
+/// rest) are only the probe's; the game's are `Trigger`'s.
 fn open_gilrs() -> Result<Gilrs, String> {
     GilrsBuilder::new()
         .with_default_filters(false)
-        .set_axis_to_btn(TRIGGER, TRIGGER_RELEASE)
+        .set_axis_to_btn(TRIGGER_PRESS, TRIGGER_RELEASE)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -620,11 +825,73 @@ fn list(g: &Gilrs) -> Vec<String> {
         .collect()
 }
 
+impl Dir {
+    /// The way a d-pad button points.
+    pub fn of_dpad(b: PadButton) -> Option<Dir> {
+        match b {
+            PadButton::Up => Some(Dir::Up),
+            PadButton::Down => Some(Dir::Down),
+            PadButton::Left => Some(Dir::Left),
+            PadButton::Right => Some(Dir::Right),
+            _ => None,
+        }
+    }
+}
+
+/// Where the controllers come from.
+enum Source {
+    /// Nowhere: a copy of the game with no window.
+    None,
+    Gilrs(Gilrs),
+    /// A test's script (`H2_PAD_SCRIPT`).
+    Script(Script),
+}
+
+/// What a controller did, before this window's claims and the menus'
+/// stick pushes are worked out.
+#[derive(Clone, Debug, PartialEq)]
+enum Raw {
+    /// It came (its name).
+    Connected(String),
+    Disconnected,
+    Down(PadButton),
+    /// The left stick moved: where it is now, before the dead zone.
+    LeftStick(Vec2),
+}
+
+/// A controller's two motors, as Halo 2 rumbles them: the low one (the
+/// left, heavy motor) and the high one (the right, light motor), 0 to 1.
+struct Motors {
+    id: PadId,
+    level: [f32; 2],
+    /// When each last went up (`MOTOR_HOLD`).
+    raised: [Instant; 2],
+    /// Played for good, their gain the level: none on a scripted
+    /// controller, or one that can't rumble.
+    effects: Option<[Effect; 2]>,
+}
+
+/// A controller's triggers, left and right (`Trigger`), and whether each
+/// counted as pulled at the last reading.
+struct Triggers {
+    id: PadId,
+    pulls: [Trigger; 2],
+    down: [bool; 2],
+}
+
 pub struct Pads {
-    gilrs: Option<Gilrs>,
-    /// Which way each controller's left stick last pointed (x, y), for
-    /// menu presses.
-    sticks: Vec<(GamepadId, [i8; 2])>,
+    source: Source,
+    /// Which way each controller's left stick last pointed, for menu
+    /// presses.
+    sticks: Vec<(PadId, Option<Dir>)>,
+    /// A direction held on a controller in a menu, and when it moves
+    /// again.
+    repeats: Vec<(PadId, Dir, Instant)>,
+    /// Buttons whose press was spent outside the game (on a menu, taking
+    /// a controller, skipping a cutscene): not held in it until let go.
+    held_off: Vec<(PadId, ButtonSet)>,
+    motors: Vec<Motors>,
+    triggers: Vec<Triggers>,
     /// The controllers this window plays with.
     claims: Claims,
     /// The window has focus (not before it's made): controllers no window
@@ -637,14 +904,23 @@ pub struct Pads {
 impl Pads {
     pub fn new() -> Pads {
         let log = std::env::var("H2_PADS").is_ok_and(|v| v == "log");
-        let gilrs = match open_gilrs() {
-            Ok(g) => Some(g),
+        if let Some(path) = std::env::var_os("H2_PAD_SCRIPT") {
+            let path = PathBuf::from(path);
+            println!("controllers: scripted, from {}", path.display());
+            let script = Script::new(Some(path), log);
+            // H2_PAD_CLAIMS=<folder>: windows share their claims there, to
+            // test two windows with one controller.
+            let claims = Claims::in_dir(std::env::var_os("H2_PAD_CLAIMS").map(PathBuf::from));
+            return Pads::with(Source::Script(script), claims, log);
+        }
+        let source = match open_gilrs() {
+            Ok(g) => Source::Gilrs(g),
             Err(e) => {
                 println!("warning: controllers unavailable: {e}");
-                None
+                Source::None
             }
         };
-        if let (true, Some(g)) = (log, &gilrs) {
+        if let (true, Source::Gilrs(g)) = (log, &source) {
             println!("controllers: {BACKEND} (gilrs 0.11.2)");
             let pads = list(g);
             if pads.is_empty() {
@@ -654,10 +930,18 @@ impl Pads {
                 println!("controllers: {line}");
             }
         }
+        Pads::with(source, Claims::new(), log)
+    }
+
+    fn with(source: Source, claims: Claims, log: bool) -> Pads {
         Pads {
-            gilrs,
+            source,
             sticks: Vec::new(),
-            claims: Claims::new(),
+            repeats: Vec::new(),
+            held_off: Vec::new(),
+            motors: Vec::new(),
+            triggers: Vec::new(),
+            claims,
             focused: false,
             log,
         }
@@ -666,12 +950,26 @@ impl Pads {
     /// No controllers, for a copy of the game with no window: XInput
     /// would give it the player's, which are for the windows on this PC.
     pub fn none() -> Pads {
-        Pads {
-            gilrs: None,
-            sticks: Vec::new(),
-            claims: Claims::in_dir(None),
-            focused: false,
-            log: false,
+        Pads::with(Source::None, Claims::in_dir(None), false)
+    }
+
+    /// Controllers a test plays a line at a time (`Pads::script`).
+    #[cfg(test)]
+    pub fn scripted() -> Pads {
+        let mut pads = Pads::with(
+            Source::Script(Script::new(None, false)),
+            Claims::in_dir(None),
+            false,
+        );
+        pads.focused = true;
+        pads
+    }
+
+    /// Run a line of a test's script now (see `Script`).
+    #[cfg(test)]
+    pub fn script(&mut self, line: &str) {
+        if let Source::Script(s) = &mut self.source {
+            s.run(line, Instant::now());
         }
     }
 
@@ -687,7 +985,7 @@ impl Pads {
     /// Hold exactly the controllers in `wanted` for this window (those
     /// its players use, or lost and wait for): claim the new ones, let go
     /// of the rest.
-    pub fn keep_claimed(&mut self, wanted: &[GamepadId]) {
+    pub fn keep_claimed(&mut self, wanted: &[PadId]) {
         for (id, change) in self.claims.keep(wanted) {
             if self.log {
                 match change {
@@ -704,94 +1002,343 @@ impl Pads {
     /// What the controllers did since the last call. Only this window's
     /// controllers count, and while it has focus those no other window
     /// claimed.
-    pub fn events(&mut self) -> Vec<(GamepadId, PadEvent)> {
-        let mut out = Vec::new();
-        let Pads {
-            gilrs: Some(g),
-            sticks,
-            claims,
-            focused,
-            log,
-        } = self
-        else {
-            return out;
+    pub fn events(&mut self) -> Vec<(PadId, PadEvent)> {
+        let now = Instant::now();
+        let mut raw = match &mut self.source {
+            Source::None => return Vec::new(),
+            Source::Gilrs(g) => gilrs_events(g),
+            Source::Script(s) => s.events(now),
         };
-        while let Some(ev) = g.next_event() {
-            // A d-pad that's a hat (on Linux) as four buttons, as gilrs'
-            // own filters have it.
-            let ev = ev.filter_ev(&axis_dpad_to_button, g).unwrap_or(ev);
-            g.update(&ev);
-            let event = match ev.event {
-                EventType::Connected => {
-                    if *log {
-                        let name = g.gamepad(ev.id).name().to_string();
-                        println!("controllers: pad {} connected ({name})", ev.id);
+        self.pull_triggers(&mut raw);
+        let mut out = Vec::new();
+        for (id, raw) in raw {
+            let event = match raw {
+                Raw::Connected(name) => {
+                    if self.log {
+                        println!("controllers: pad {id} connected ({name})");
                     }
-                    Some(PadEvent::Connected)
+                    PadEvent::Connected
                 }
-                EventType::Disconnected => {
-                    sticks.retain(|s| s.0 != ev.id);
-                    if *log {
-                        println!("controllers: pad {} disconnected", ev.id);
+                Raw::Disconnected => {
+                    self.forget(id);
+                    if self.log {
+                        println!("controllers: pad {id} disconnected");
                     }
-                    Some(PadEvent::Disconnected)
+                    PadEvent::Disconnected
                 }
-                EventType::ButtonPressed(b, _) => PadButton::from_gilrs(b).map(PadEvent::Down),
-                EventType::AxisChanged(axis @ (Axis::LeftStickX | Axis::LeftStickY), v, _) => {
-                    let k = match sticks.iter().position(|s| s.0 == ev.id) {
+                Raw::Down(b) => PadEvent::Down(b),
+                Raw::LeftStick(v) => {
+                    let k = match self.sticks.iter().position(|s| s.0 == id) {
                         Some(k) => k,
                         None => {
-                            sticks.push((ev.id, [0, 0]));
-                            sticks.len() - 1
+                            self.sticks.push((id, None));
+                            self.sticks.len() - 1
                         }
                     };
-                    let a = (axis == Axis::LeftStickY) as usize;
-                    stick_push(&mut sticks[k].1[a], v).map(|positive| {
-                        PadEvent::Stick(match (a, positive) {
-                            (0, false) => Dir::Left,
-                            (0, true) => Dir::Right,
-                            (_, false) => Dir::Down,
-                            (_, true) => Dir::Up,
-                        })
-                    })
+                    match stick_dir(&mut self.sticks[k].1, dead_zone(v)) {
+                        Some(dir) => PadEvent::Stick(dir),
+                        None => continue,
+                    }
                 }
-                _ => None,
-            };
-            let Some(event) = event else {
-                continue;
             };
             let presses = matches!(event, PadEvent::Down(_) | PadEvent::Stick(_));
-            if presses && !claims.accepts(ev.id, *focused) {
-                if *log && matches!(event, PadEvent::Down(_)) {
-                    let why = if claims.taken_elsewhere(ev.id) {
+            if presses && !self.claims.accepts(id, self.focused) {
+                if self.log && matches!(event, PadEvent::Down(_)) {
+                    let why = if self.claims.taken_elsewhere(id) {
                         "belongs to another window"
                     } else {
                         "is free, but this window isn't in front"
                     };
-                    println!("controllers: pad {} {why}: ignored", ev.id);
+                    println!("controllers: pad {id} {why}: ignored");
                 }
                 continue;
             }
-            out.push((ev.id, event));
+            let dir = match event {
+                PadEvent::Down(b) => Dir::of_dpad(b),
+                PadEvent::Stick(d) => Some(d),
+                _ => None,
+            };
+            if let Some(d) = dir {
+                self.repeats.retain(|r| r.0 != id);
+                self.repeats.push((id, d, now + MENU_REPEAT.0));
+            }
+            out.push((id, event));
         }
+        self.repeat(now, &mut out);
+        self.let_go();
         out
     }
 
+    /// Read each controller's triggers (`Trigger`): a pull is a press of
+    /// LT or RT, after what else they did (a controller connecting first).
+    fn pull_triggers(&mut self, raw: &mut Vec<(PadId, Raw)>) {
+        let pulls: Vec<(PadId, [f32; 2])> = match &self.source {
+            Source::None => Vec::new(),
+            Source::Gilrs(g) => (g.gamepads())
+                .map(|(id, pad)| {
+                    let pull = |b| pad.button_data(b).map_or(0.0, |d| d.value());
+                    (
+                        id.into(),
+                        [Button::LeftTrigger2, Button::RightTrigger2].map(pull),
+                    )
+                })
+                .collect(),
+            Source::Script(s) => s.pulls(),
+        };
+        for (id, pull) in pulls {
+            let k = match self.triggers.iter().position(|t| t.id == id) {
+                Some(k) => k,
+                None => {
+                    self.triggers.push(Triggers {
+                        id,
+                        pulls: Default::default(),
+                        down: [false; 2],
+                    });
+                    self.triggers.len() - 1
+                }
+            };
+            let t = &mut self.triggers[k];
+            for n in 0..2 {
+                let down = t.pulls[n].sample(pull[n]);
+                if down && !t.down[n] {
+                    raw.push((id, Raw::Down(TRIGGERS[n])));
+                }
+                t.down[n] = down;
+            }
+        }
+    }
+
+    /// A direction held a while moves a menu again (`MENU_REPEAT`), the
+    /// d-pad's or the left stick's, until it's let go.
+    fn repeat(&mut self, now: Instant, out: &mut Vec<(PadId, PadEvent)>) {
+        let held: Vec<bool> = (self.repeats.iter())
+            .map(|&(id, dir, _)| {
+                let stick = self.sticks.iter().any(|s| s.0 == id && s.1 == Some(dir));
+                let dpad = self.raw(id).map(|r| r.held.contains(PadButton::dpad(dir)));
+                stick || dpad == Some(true)
+            })
+            .collect();
+        let mut held = held.into_iter();
+        self.repeats.retain(|_| held.next() == Some(true));
+        for (id, dir, next) in &mut self.repeats {
+            if now >= *next {
+                *next = now + MENU_REPEAT.1;
+                out.push((*id, PadEvent::Repeat(*dir)));
+            }
+        }
+    }
+
+    /// Spent presses end when their buttons are let go.
+    fn let_go(&mut self) {
+        let held: Vec<ButtonSet> = (self.held_off.iter())
+            .map(|h| self.raw(h.0).map(|r| r.held).unwrap_or_default())
+            .collect();
+        for (h, held) in self.held_off.iter_mut().zip(held) {
+            h.1 = h.1.and(held);
+        }
+        self.held_off.retain(|h| !h.1.is_empty());
+    }
+
+    /// Controller `id` went: what's kept about it goes too.
+    fn forget(&mut self, id: PadId) {
+        self.sticks.retain(|s| s.0 != id);
+        self.repeats.retain(|r| r.0 != id);
+        self.held_off.retain(|h| h.0 != id);
+        self.motors.retain(|m| m.id != id);
+        self.triggers.retain(|t| t.id != id);
+    }
+
+    /// Controller `id`'s press of `b` was spent outside the game (on a
+    /// menu, taking the controller over, skipping a cutscene): `b` isn't
+    /// held in the game until it's let go, so B that closes the pause menu
+    /// doesn't melee as the game comes back.
+    pub fn hold_off(&mut self, id: PadId, b: PadButton) {
+        if self.log {
+            println!("controllers: pad {id} {} spent", b.label());
+        }
+        match self.held_off.iter_mut().find(|h| h.0 == id) {
+            Some(h) => h.1.insert(b),
+            None => {
+                let mut set = ButtonSet::default();
+                set.insert(b);
+                self.held_off.push((id, set));
+            }
+        }
+    }
+
+    /// Everything held on controller `id` now is spent (`hold_off`).
+    pub fn hold_off_all(&mut self, id: PadId) {
+        let held = self.raw(id).map(|r| r.held).unwrap_or_default();
+        for b in PadButton::ALL.into_iter().filter(|&b| held.contains(b)) {
+            self.hold_off(id, b);
+        }
+    }
+
+    /// Controller `id`'s sticks and buttons now, whatever's spent: its
+    /// triggers as `Trigger` last counted them.
+    fn raw(&self, id: PadId) -> Option<PadReading> {
+        let mut r = match &self.source {
+            Source::None => None,
+            Source::Gilrs(g) => Some(read(&g.connected_gamepad(gilrs_id(g, id)?)?)),
+            Source::Script(s) => s.reading(id),
+        }?;
+        let triggers = self.triggers.iter().find(|t| t.id == id);
+        for (n, b) in TRIGGERS.into_iter().enumerate() {
+            r.held.remove(b);
+            if let Some(t) = triggers {
+                r.pull[n] = t.pulls[n].value;
+                if t.down[n] {
+                    r.held.insert(b);
+                }
+            }
+        }
+        Some(r)
+    }
+
     /// Controller `id`'s sticks and buttons now, if it's connected and
-    /// this window takes its input.
-    pub fn reading(&self, id: GamepadId) -> Option<PadReading> {
-        let g = self.gilrs.as_ref()?;
+    /// this window takes its input; spent presses aren't held.
+    pub fn reading(&self, id: PadId) -> Option<PadReading> {
         if !self.claims.accepts(id, self.focused) {
             return None;
         }
-        Some(read(&g.connected_gamepad(id)?))
+        let mut r = self.raw(id)?;
+        if let Some(h) = self.held_off.iter().find(|h| h.0 == id) {
+            r.held = r.held.without(h.1);
+        }
+        Some(r)
+    }
+
+    /// Rumble controller `id`: its low (heavy) and high (light) motors, 0
+    /// to 1. It keeps going until told otherwise; a motor turned up stays
+    /// up at least `MOTOR_HOLD`.
+    pub fn rumble(&mut self, id: PadId, low: f32, high: f32) {
+        self.set_motors(id, [low, high], Instant::now(), false);
+    }
+
+    /// `rumble`, at `now`; `at_once` turns the motors down without
+    /// waiting out `MOTOR_HOLD`.
+    fn set_motors(&mut self, id: PadId, to: [f32; 2], now: Instant, at_once: bool) {
+        // In 64ths: not a message to the motors for every hair of change.
+        let mut level = to.map(|v| (v.clamp(0.0, 1.0) * 64.0).round() / 64.0);
+        let k = match self.motors.iter().position(|m| m.id == id) {
+            Some(k) => k,
+            None if level == [0.0; 2] => return,
+            None => {
+                let effects = match &mut self.source {
+                    Source::Gilrs(g) => motors(g, id),
+                    _ => None,
+                };
+                self.motors.push(Motors {
+                    id,
+                    level: [0.0; 2],
+                    raised: [now; 2],
+                    effects,
+                });
+                self.motors.len() - 1
+            }
+        };
+        let m = &mut self.motors[k];
+        for (n, l) in level.iter_mut().enumerate() {
+            if *l > m.level[n] {
+                m.raised[n] = now;
+            } else if !at_once && now.duration_since(m.raised[n]) < MOTOR_HOLD {
+                *l = m.level[n];
+            }
+        }
+        if m.level == level {
+            return;
+        }
+        m.level = level;
+        if let Some(effects) = &m.effects {
+            for (e, v) in effects.iter().zip(level) {
+                let _ = e.set_gain(v);
+            }
+        }
+        if self.log {
+            let [low, high] = level;
+            println!("controllers: pad {id} rumble low {low:.2} high {high:.2}");
+        }
+    }
+
+    /// What controller `id`'s motors were last told: low and high.
+    #[cfg(test)]
+    pub fn rumbling(&self, id: PadId) -> [f32; 2] {
+        (self.motors.iter().find(|m| m.id == id)).map_or([0.0; 2], |m| m.level)
+    }
+
+    /// Every motor off, at once.
+    pub fn stop_rumble(&mut self) {
+        let ids: Vec<PadId> = self.motors.iter().map(|m| m.id).collect();
+        for id in ids {
+            self.set_motors(id, [0.0; 2], Instant::now(), true);
+        }
     }
 }
 
-/// A controller's sticks and buttons now (a trigger held from `TRIGGER`
-/// down to `TRIGGER_RELEASE`, as gilrs' presses go).
+/// gilrs' id for controller `id`, if it's connected.
+fn gilrs_id(g: &Gilrs, id: PadId) -> Option<GamepadId> {
+    g.gamepads().map(|p| p.0).find(|&g| PadId::from(g) == id)
+}
+
+/// What gilrs' controllers did since the last call.
+fn gilrs_events(g: &mut Gilrs) -> Vec<(PadId, Raw)> {
+    let mut out = Vec::new();
+    while let Some(ev) = g.next_event() {
+        // A d-pad that's a hat (on Linux) as four buttons, as gilrs' own
+        // filters have it.
+        let ev = ev.filter_ev(&axis_dpad_to_button, g).unwrap_or(ev);
+        g.update(&ev);
+        let raw = match ev.event {
+            EventType::Connected => Raw::Connected(g.gamepad(ev.id).name().to_string()),
+            EventType::Disconnected => Raw::Disconnected,
+            EventType::ButtonPressed(b, _) => match PadButton::from_gilrs(b) {
+                // The triggers' presses are `Trigger`'s.
+                Some(PadButton::LT | PadButton::RT) | None => continue,
+                Some(b) => Raw::Down(b),
+            },
+            EventType::AxisChanged(Axis::LeftStickX | Axis::LeftStickY, _, _) => {
+                let pad = g.gamepad(ev.id);
+                let v = Vec2::new(pad.value(Axis::LeftStickX), pad.value(Axis::LeftStickY));
+                Raw::LeftStick(v)
+            }
+            _ => continue,
+        };
+        out.push((PadId::from(ev.id), raw));
+    }
+    out
+}
+
+/// Two effects played for good on controller `id`: the strong (low) and
+/// weak (high) motor at full strength, their gain 0 until it rumbles.
+fn motors(g: &mut Gilrs, id: PadId) -> Option<[Effect; 2]> {
+    let gid = gilrs_id(g, id).filter(|&gid| g.gamepad(gid).is_ff_supported())?;
+    let mut effect = |kind| -> Option<Effect> {
+        let e = EffectBuilder::new()
+            .add_effect(BaseEffect {
+                kind,
+                scheduling: Default::default(),
+                envelope: Default::default(),
+            })
+            .repeat(Repeat::Infinitely)
+            .gamepads(&[gid])
+            .gain(0.0)
+            .finish(g)
+            .ok()?;
+        e.play().ok()?;
+        Some(e)
+    };
+    let low = effect(BaseEffectType::Strong {
+        magnitude: u16::MAX,
+    })?;
+    let high = effect(BaseEffectType::Weak {
+        magnitude: u16::MAX,
+    })?;
+    Some([low, high])
+}
+
+/// A controller's sticks and buttons now (its triggers are `Pads::raw`'s).
 fn read(pad: &gilrs::Gamepad) -> PadReading {
-    let stick = |x: Axis, y: Axis| dead_zone(Vec2::new(pad.value(x), pad.value(y)));
+    let stick = |x: Axis, y: Axis| condition(Vec2::new(pad.value(x), pad.value(y)));
     let mut held = ButtonSet::default();
     for b in PadButton::ALL {
         if pad.is_pressed(b.to_gilrs()) {
@@ -802,19 +1349,274 @@ fn read(pad: &gilrs::Gamepad) -> PadReading {
         left: stick(Axis::LeftStickX, Axis::LeftStickY),
         right: stick(Axis::RightStickX, Axis::RightStickY),
         held,
+        pull: [0.0; 2],
     }
 }
 
-/// The left stick along one axis moved to `v`: Some(which way) when it
-/// was pushed that way just now. `dir` is the way it last pointed.
-fn stick_push(dir: &mut i8, v: f32) -> Option<bool> {
-    if v.abs() < STICK_PUSH.1 {
-        *dir = 0;
-    } else if v.abs() > STICK_PUSH.0 && *dir != v.signum() as i8 {
-        *dir = v.signum() as i8;
-        return Some(v > 0.0);
+/// The left stick moved to `v`: Some(which way) when it was pushed that
+/// way just now. `last` is the way it last pointed. Only the way it's
+/// pushed furthest counts, so a push to one side a little up moves a menu
+/// once; another way counts once the stick has come back from the last.
+fn stick_dir(last: &mut Option<Dir>, v: Vec2) -> Option<Dir> {
+    let along = |d: Dir| match d {
+        Dir::Up => v.y,
+        Dir::Down => -v.y,
+        Dir::Left => -v.x,
+        Dir::Right => v.x,
+    };
+    if last.is_some_and(|d| along(d) >= STICK_PUSH.1) {
+        return None;
     }
-    None
+    *last = None;
+    let dir = if v.x.abs() > v.y.abs() {
+        if v.x > 0.0 {
+            Dir::Right
+        } else {
+            Dir::Left
+        }
+    } else if v.y > 0.0 {
+        Dir::Up
+    } else {
+        Dir::Down
+    };
+    if along(dir) <= STICK_PUSH.0 {
+        return None;
+    }
+    *last = Some(dir);
+    Some(dir)
+}
+
+/// Controllers a test plays (`H2_PAD_SCRIPT=<file>`): the test writes
+/// lines to the file as it goes, and each frame the game reads the new
+/// ones, through the same events and readings as real controllers (a test
+/// machine can't make a real one). A line each:
+///
+/// ```text
+/// connect <pad>                   disconnect <pad>
+/// down <pad> <button>...          up <pad> <button>...
+/// press <pad> <button> [ms]       down, and up again ms later (100)
+/// stick <pad> left|right <x> <y>  -1 to 1; up and right are positive
+/// trigger <pad> left|right <v>    pulled 0 to 1 (LT or RT down is 1)
+/// ```
+///
+/// Buttons by their labels (A, B, X, Y, LB, RB, LT, RT, BACK, START) or
+/// LS, RS, UP, DOWN, LEFT and RIGHT. A controller that does something
+/// before `connect` is connected first. Lines starting # are notes.
+pub struct Script {
+    path: Option<PathBuf>,
+    /// How much of the file has been read, and a line not yet finished.
+    read: u64,
+    partial: String,
+    pads: Vec<(PadId, ScriptPad)>,
+    /// Presses to let go of, and when.
+    releases: Vec<(Instant, PadId, PadButton)>,
+    /// What the lines run since the last `events` did.
+    raw: Vec<(PadId, Raw)>,
+    log: bool,
+}
+
+/// A scripted controller now: the sticks before the dead zone, the
+/// buttons held but the triggers, and how far those are pulled.
+#[derive(Clone, Copy, Debug, Default)]
+struct ScriptPad {
+    connected: bool,
+    left: Vec2,
+    right: Vec2,
+    held: ButtonSet,
+    pull: [f32; 2],
+}
+
+impl ScriptPad {
+    /// Hold `b` down or let it go: a trigger all the way.
+    fn set(&mut self, b: PadButton, down: bool) {
+        match TRIGGERS.iter().position(|&t| t == b) {
+            Some(n) => self.pull[n] = if down { 1.0 } else { 0.0 },
+            None if down => self.held.insert(b),
+            None => self.held.remove(b),
+        }
+    }
+}
+
+impl Script {
+    fn new(path: Option<PathBuf>, log: bool) -> Script {
+        Script {
+            path,
+            read: 0,
+            partial: String::new(),
+            pads: Vec::new(),
+            releases: Vec::new(),
+            raw: Vec::new(),
+            log,
+        }
+    }
+
+    /// What the script did since the last call: its new lines, and the
+    /// presses due to be let go.
+    fn events(&mut self, now: Instant) -> Vec<(PadId, Raw)> {
+        for line in self.new_lines() {
+            if self.log {
+                println!("controllers: script: {line}");
+            }
+            self.run(&line, now);
+        }
+        let due: Vec<(PadId, PadButton)> = (self.releases.iter())
+            .filter(|r| r.0 <= now)
+            .map(|r| (r.1, r.2))
+            .collect();
+        self.releases.retain(|r| r.0 > now);
+        for (id, b) in due {
+            self.pad(id).set(b, false);
+        }
+        std::mem::take(&mut self.raw)
+    }
+
+    /// How far each connected controller's triggers are pulled.
+    fn pulls(&self) -> Vec<(PadId, [f32; 2])> {
+        (self.pads.iter())
+            .filter(|p| p.1.connected)
+            .map(|p| (p.0, p.1.pull))
+            .collect()
+    }
+
+    /// The lines written to the file since the last call.
+    fn new_lines(&mut self) -> Vec<String> {
+        let Some(path) = &self.path else {
+            return Vec::new();
+        };
+        let Ok(mut f) = File::open(path) else {
+            return Vec::new();
+        };
+        let mut bytes = Vec::new();
+        if f.seek(SeekFrom::Start(self.read)).is_err() || f.read_to_end(&mut bytes).is_err() {
+            return Vec::new();
+        }
+        self.read += bytes.len() as u64;
+        self.partial.push_str(&String::from_utf8_lossy(&bytes));
+        let mut lines = Vec::new();
+        while let Some(end) = self.partial.find('\n') {
+            let line: String = self.partial.drain(..=end).collect();
+            let line = line.trim();
+            if !line.is_empty() && !line.starts_with('#') {
+                lines.push(line.to_string());
+            }
+        }
+        lines
+    }
+
+    fn pad(&mut self, id: PadId) -> &mut ScriptPad {
+        let k = match self.pads.iter().position(|p| p.0 == id) {
+            Some(k) => k,
+            None => {
+                self.pads.push((id, ScriptPad::default()));
+                self.pads.len() - 1
+            }
+        };
+        &mut self.pads[k].1
+    }
+
+    fn connect(&mut self, id: PadId) {
+        let p = self.pad(id);
+        if !p.connected {
+            p.connected = true;
+            self.raw
+                .push((id, Raw::Connected("scripted controller".into())));
+        }
+    }
+
+    fn down(&mut self, id: PadId, b: PadButton) {
+        self.connect(id);
+        let p = self.pad(id);
+        if TRIGGERS.contains(&b) {
+            // Its press comes from the pull (`Pads::pull_triggers`).
+            p.set(b, true);
+        } else if !p.held.contains(b) {
+            p.held.insert(b);
+            self.raw.push((id, Raw::Down(b)));
+        }
+    }
+
+    /// Run a line of the script.
+    fn run(&mut self, line: &str, now: Instant) {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let (Some(&verb), Some(id)) = (words.first(), words.get(1)) else {
+            return;
+        };
+        let Ok(id) = id.parse().map(PadId) else {
+            println!("controllers: script: which controller in {line:?}?");
+            return;
+        };
+        let args = &words[2..];
+        let buttons: Vec<PadButton> = args
+            .iter()
+            .filter_map(|a| PadButton::from_name(a))
+            .collect();
+        match verb {
+            "connect" => self.connect(id),
+            "disconnect" => {
+                let p = self.pad(id);
+                if p.connected {
+                    *p = ScriptPad::default();
+                    self.raw.push((id, Raw::Disconnected));
+                }
+                self.releases.retain(|r| r.1 != id);
+            }
+            "down" => buttons.into_iter().for_each(|b| self.down(id, b)),
+            "up" => {
+                let p = self.pad(id);
+                buttons.into_iter().for_each(|b| p.set(b, false));
+            }
+            "press" => {
+                let ms = args.get(1).and_then(|ms| ms.parse().ok()).unwrap_or(100);
+                if let Some(&b) = buttons.first() {
+                    self.down(id, b);
+                    let at = now + Duration::from_millis(ms);
+                    self.releases.retain(|r| (r.1, r.2) != (id, b));
+                    self.releases.push((at, id, b));
+                }
+            }
+            "stick" => {
+                let at = |k: usize| args.get(k).and_then(|v| v.parse::<f32>().ok());
+                let (Some(&side), Some(x), Some(y)) = (args.first(), at(1), at(2)) else {
+                    println!("controllers: script: which stick, and where, in {line:?}?");
+                    return;
+                };
+                let v = Vec2::new(x, y).clamp(Vec2::splat(-1.0), Vec2::ONE);
+                self.connect(id);
+                let p = self.pad(id);
+                match side {
+                    "left" => {
+                        p.left = v;
+                        self.raw.push((id, Raw::LeftStick(v)));
+                    }
+                    _ => p.right = v,
+                }
+            }
+            "trigger" => {
+                let (Some(&side), Some(v)) = (
+                    args.first(),
+                    args.get(1).and_then(|v| v.parse::<f32>().ok()),
+                ) else {
+                    println!("controllers: script: which trigger, and how far, in {line:?}?");
+                    return;
+                };
+                self.connect(id);
+                let n = matches!(side, "right" | "RT" | "rt") as usize;
+                self.pad(id).pull[n] = v.clamp(0.0, 1.0);
+            }
+            _ => println!("controllers: script: what is {line:?}?"),
+        }
+    }
+
+    /// Controller `id` now, if it's connected.
+    fn reading(&self, id: PadId) -> Option<PadReading> {
+        let p = self.pads.iter().find(|p| p.0 == id && p.1.connected)?.1;
+        Some(PadReading {
+            left: condition(p.left),
+            right: condition(p.right),
+            held: p.held,
+            pull: p.pull,
+        })
+    }
 }
 
 /// Controllers this window plays with, held against other copies of the
@@ -828,9 +1630,9 @@ pub struct Claims {
     dir: Option<PathBuf>,
     /// Ours, and each one's locked file (none if it couldn't be made:
     /// ours all the same).
-    held: Vec<(GamepadId, Option<File>)>,
+    held: Vec<(PadId, Option<File>)>,
     /// Wanted, but another window has them.
-    refused: Vec<GamepadId>,
+    refused: Vec<PadId>,
 }
 
 /// A change in which controllers a window holds.
@@ -866,7 +1668,7 @@ impl Claims {
         }
     }
 
-    fn open(&self, id: GamepadId) -> Option<File> {
+    fn open(&self, id: PadId) -> Option<File> {
         let path = self.dir.as_ref()?.join(format!("pad{id}.lock"));
         File::options()
             .create(true)
@@ -877,12 +1679,12 @@ impl Claims {
     }
 
     /// Controller `id` is this window's.
-    pub fn ours(&self, id: GamepadId) -> bool {
+    pub fn ours(&self, id: PadId) -> bool {
         self.dir.is_none() || self.held.iter().any(|h| h.0 == id)
     }
 
     /// Another copy of the game on this PC claimed controller `id`.
-    pub fn taken_elsewhere(&self, id: GamepadId) -> bool {
+    pub fn taken_elsewhere(&self, id: PadId) -> bool {
         !self.ours(id)
             && self.open(id).is_some_and(|f| match f.try_lock() {
                 // Let go at once: closing the file lets go only when
@@ -896,7 +1698,7 @@ impl Claims {
     }
 
     /// Take controller `id` for this window; false if another has it.
-    pub fn claim(&mut self, id: GamepadId) -> bool {
+    pub fn claim(&mut self, id: PadId) -> bool {
         if self.ours(id) {
             return true;
         }
@@ -909,7 +1711,7 @@ impl Claims {
     }
 
     /// Let controller `id` go (at once, as `taken_elsewhere`).
-    pub fn release(&mut self, id: GamepadId) {
+    pub fn release(&mut self, id: PadId) {
         for (_, file) in self.held.iter().filter(|h| h.0 == id) {
             if let Some(f) = file {
                 let _ = f.unlock();
@@ -919,14 +1721,14 @@ impl Claims {
     }
 
     /// Whether this window takes controller `id`'s input (see `accepts`).
-    pub fn accepts(&self, id: GamepadId, focused: bool) -> bool {
+    pub fn accepts(&self, id: PadId, focused: bool) -> bool {
         accepts(self.ours(id), || self.taken_elsewhere(id), focused)
     }
 
     /// Hold exactly the controllers in `wanted`: claim the new ones, let
     /// go of the rest. Returns what changed (a refusal once, until it's no
     /// longer wanted).
-    pub fn keep(&mut self, wanted: &[GamepadId]) -> Vec<(GamepadId, Claim)> {
+    pub fn keep(&mut self, wanted: &[PadId]) -> Vec<(PadId, Claim)> {
         let mut changed = Vec::new();
         if self.dir.is_none() {
             return changed;
@@ -944,7 +1746,7 @@ impl Claims {
             }
         }
         self.refused.retain(|r| wanted.contains(r));
-        let gone: Vec<GamepadId> = (self.held.iter().map(|h| h.0))
+        let gone: Vec<PadId> = (self.held.iter().map(|h| h.0))
             .filter(|id| !wanted.contains(id))
             .collect();
         for id in gone {
@@ -961,7 +1763,7 @@ impl Claims {
 /// layouts. Needs no maps or window: on Windows XInput reports to any
 /// program, focused or not.
 pub fn probe(seconds: f32, profile: &Profile) {
-    use gilrs::ff::{BaseEffect, BaseEffectType, EffectBuilder, Repeat, Replay, Ticks};
+    use gilrs::ff::{Replay, Ticks};
     println!("controllers: {BACKEND} (gilrs 0.11.2)");
     for k in 0..crate::MAX_LOCAL {
         let c = profile.controls_of(k);
@@ -1107,19 +1909,117 @@ mod tests {
 
     #[test]
     fn the_dead_zone_is_ours_on_every_backend() {
-        assert_eq!(dead_zone(Vec2::new(0.19, 0.0)), Vec2::ZERO);
-        assert_eq!(dead_zone(Vec2::new(0.13, 0.13)), Vec2::ZERO);
-        assert_ne!(dead_zone(Vec2::new(0.15, 0.15)), Vec2::ZERO);
+        // Halo 2's, along each axis on its own: 9000 of 32767.
+        assert_eq!(dead_zone(Vec2::new(0.27, 0.0)), Vec2::ZERO);
+        assert_eq!(dead_zone(Vec2::new(0.25, -0.25)), Vec2::ZERO);
+        // A push off the axis a little is along it alone.
+        let d = dead_zone(Vec2::new(0.6, 0.2));
+        assert!(d.x > 0.4 && d.y == 0.0, "{d}");
         assert!((dead_zone(Vec2::new(1.0, 0.0)).x - 1.0).abs() < 1e-6);
         assert!((dead_zone(Vec2::new(0.0, -1.0)).y + 1.0).abs() < 1e-6);
         let half = dead_zone(Vec2::new(0.5, 0.0)).x;
-        assert!((half - 0.375).abs() < 1e-6, "{half}");
+        let want = (0.5 - 9000.0 / 32767.0) / (1.0 - 9000.0 / 32767.0);
+        assert!((half - want).abs() < 1e-6, "{half}");
         // Each stick on its own, before Legacy mixes them: a stick in its
         // dead zone moves nothing, whichever way the other is pushed.
         let (left, right) = (Vec2::new(0.1, 0.9), Vec2::new(0.9, 0.1));
-        let (movement, look) = StickLayout::Legacy.apply(dead_zone(left), dead_zone(right));
+        let (movement, look) = StickLayout::Legacy.apply(condition(left), condition(right));
         assert!(movement.x > 0.8 && movement.y > 0.8, "{movement}");
         assert!(look.x.abs() < 0.2 && look.y.abs() < 0.2, "{look}");
+    }
+
+    #[test]
+    fn sticks_are_squared_off_as_halo_2s_are() {
+        // Along an axis, as it is.
+        assert!((condition(Vec2::new(0.0, 1.0)) - Vec2::Y).length() < 1e-6);
+        // A round stick's full diagonal: 0.596 each way through the dead
+        // zone, 0.843 squared off (Halo 2's worked numbers).
+        let c = condition(Vec2::splat(std::f32::consts::FRAC_1_SQRT_2));
+        assert!(
+            (c.x - 0.843).abs() < 0.001 && (c.y - 0.843).abs() < 0.001,
+            "{c}"
+        );
+        // A square stick's corner: full both ways, no further.
+        assert_eq!(condition(Vec2::new(1.0, -1.0)), Vec2::new(1.0, -1.0));
+        assert_eq!(condition(Vec2::new(0.1, 0.2)), Vec2::ZERO);
+    }
+
+    #[test]
+    fn legacy_layouts_snap_their_sticks_as_halo_2s_do() {
+        let at =
+            |deg: f32, push: f32| Vec2::new(deg.to_radians().cos(), deg.to_radians().sin()) * push;
+        // On the diagonal, both full.
+        let d = legacy_snap(at(45.0, 0.8), LEGACY_ZONES[0]);
+        assert!((d - Vec2::splat(0.8)).length() < 1e-5, "{d}");
+        // 20 degrees off it (25 from across): across all of it, up less.
+        let d = legacy_snap(at(25.0, 1.0), LEGACY_ZONES[0]);
+        let less = 1.0 - 20f32.to_radians() * 1.637_022_3;
+        assert!((d - Vec2::new(1.0, less)).length() < 1e-5, "{d}");
+        // Past the zone, the nearer axis alone: the right stick's is ten
+        // degrees.
+        let d = legacy_snap(at(25.0, 1.0), LEGACY_ZONES[1]);
+        assert!((d - Vec2::X).length() < 1e-5, "{d}");
+        let d = legacy_snap(at(-120.0, 0.5), LEGACY_ZONES[1]);
+        assert!((d - Vec2::new(0.0, -0.5)).length() < 1e-5, "{d}");
+        assert_eq!(legacy_snap(Vec2::ZERO, LEGACY_ZONES[0]), Vec2::ZERO);
+        // Only the Legacy layouts snap.
+        let (left, right) = (at(25.0, 1.0), at(70.0, 1.0));
+        assert_eq!(StickLayout::Default.apply(left, right), (left, right));
+        // Legacy: the left stick 20 degrees off its diagonal turns fully
+        // and moves less; the right, 25 off, looks up alone.
+        let (movement, look) = StickLayout::Legacy.apply(left, right);
+        assert!((look - Vec2::ONE).length() < 1e-5, "{look}");
+        assert!(
+            (movement - Vec2::new(0.0, less)).length() < 1e-5,
+            "{movement}"
+        );
+    }
+
+    #[test]
+    fn triggers_fire_again_eased_off_without_letting_go() {
+        let mut t = Trigger::default();
+        // From rest, a quarter of the way; a reading late.
+        assert!(!t.sample(0.2));
+        assert!(!t.sample(0.3));
+        assert!(t.sample(1.0));
+        // Held, until it eases an eighth off the most.
+        assert!(t.sample(0.9));
+        assert!(t.sample(0.86));
+        assert!(!t.sample(0.86));
+        // Squeezed past where it let go: pulled again.
+        assert!(!t.sample(0.95));
+        assert!(t.sample(0.95));
+        // Back at rest it's a quarter of the way again.
+        t.sample(0.0);
+        t.sample(0.0);
+        assert!(!t.sample(0.24));
+        assert!(!t.sample(0.24));
+        // A press let go by the next reading still counts.
+        let mut pads = Pads::scripted();
+        pads.script("down 0 RT");
+        assert_eq!(pads.events(), [(pad(0), PadEvent::Connected)]);
+        pads.script("up 0 RT");
+        assert_eq!(pads.events(), [(pad(0), PadEvent::Down(RT))]);
+        assert!(pads.reading(pad(0)).unwrap().held.contains(RT));
+        assert!(
+            !pads
+                .reading(pad(0))
+                .unwrap()
+                .state(ButtonLayout::Default, StickLayout::Default)
+                .trigger_down
+        );
+        pads.events();
+        assert!(!pads.reading(pad(0)).unwrap().held.contains(RT));
+        // Partway, by script.
+        pads.script("trigger 0 left 0.6");
+        pads.events();
+        assert_eq!(pads.events(), [(pad(0), PadEvent::Down(LT))]);
+        let r = pads.reading(pad(0)).unwrap();
+        assert_eq!(r.pull, [0.6, 0.0]);
+        assert!(
+            r.state(ButtonLayout::Default, StickLayout::Default)
+                .trigger_down
+        );
     }
 
     #[test]
@@ -1327,27 +2227,181 @@ mod tests {
 
     #[test]
     fn the_left_stick_is_not_the_dpad() {
-        let mut dir = 0;
-        assert_eq!(stick_push(&mut dir, 0.5), None);
-        assert_eq!(stick_push(&mut dir, 0.7), Some(true));
+        let mut dir = None;
+        let x = |v: f32| Vec2::new(v, 0.0);
+        // Halo 2's menus want it pushed nine tenths of the way.
+        assert_eq!(stick_dir(&mut dir, x(0.5)), None);
+        assert_eq!(stick_dir(&mut dir, x(0.85)), None);
+        assert_eq!(stick_dir(&mut dir, x(0.95)), Some(Dir::Right));
         // Held there: once.
-        assert_eq!(stick_push(&mut dir, 0.9), None);
-        assert_eq!(stick_push(&mut dir, 0.4), None);
-        assert_eq!(stick_push(&mut dir, 0.2), None);
-        assert_eq!(stick_push(&mut dir, -0.7), Some(false));
+        assert_eq!(stick_dir(&mut dir, x(1.0)), None);
+        assert_eq!(stick_dir(&mut dir, x(0.4)), None);
+        assert_eq!(stick_dir(&mut dir, x(0.2)), None);
+        assert_eq!(stick_dir(&mut dir, x(-0.95)), Some(Dir::Left));
         // And in a game the d-pad's functions come only from Down(Up..).
         assert_ne!(PadEvent::Stick(Dir::Up), PadEvent::Down(PadButton::Up));
     }
 
     #[test]
+    fn a_diagonal_push_moves_a_menu_once() {
+        let mut dir = None;
+        // Mostly right, a little up: right, once, however it wobbles.
+        assert_eq!(stick_dir(&mut dir, Vec2::new(0.95, 0.6)), Some(Dir::Right));
+        assert_eq!(stick_dir(&mut dir, Vec2::new(0.6, 0.95)), None);
+        assert_eq!(stick_dir(&mut dir, Vec2::new(0.7, 0.7)), None);
+        // Swung round to straight up: up, once the right has let go.
+        assert_eq!(stick_dir(&mut dir, Vec2::new(0.2, 0.95)), Some(Dir::Up));
+        assert_eq!(stick_dir(&mut dir, Vec2::ZERO), None);
+        assert_eq!(dir, None);
+        assert_eq!(stick_dir(&mut dir, Vec2::new(-0.5, -0.95)), Some(Dir::Down));
+    }
+
+    #[test]
+    fn a_held_direction_repeats_in_menus() {
+        let mut pads = Pads::scripted();
+        pads.script("down 0 DOWN");
+        let events = pads.events();
+        assert!(events.contains(&(pad(0), PadEvent::Connected)));
+        assert!(events.contains(&(pad(0), PadEvent::Down(PadButton::Down))));
+        // Not at once...
+        assert!(pads.events().is_empty());
+        // ...but once it's been held a while, and on until it's let go.
+        let past = Instant::now() - MENU_REPEAT.0;
+        pads.repeats.iter_mut().for_each(|r| r.2 = past);
+        assert_eq!(pads.events(), [(pad(0), PadEvent::Repeat(Dir::Down))]);
+        pads.repeats.iter_mut().for_each(|r| r.2 = past);
+        assert_eq!(pads.events(), [(pad(0), PadEvent::Repeat(Dir::Down))]);
+        pads.script("up 0 DOWN");
+        assert!(pads.events().is_empty());
+        assert!(pads.repeats.is_empty());
+        // The left stick too.
+        pads.script("stick 0 left 0 1");
+        assert_eq!(pads.events(), [(pad(0), PadEvent::Stick(Dir::Up))]);
+        pads.repeats.iter_mut().for_each(|r| r.2 = past);
+        assert_eq!(pads.events(), [(pad(0), PadEvent::Repeat(Dir::Up))]);
+        pads.script("stick 0 left 0 0");
+        assert!(pads.events().is_empty());
+        assert!(pads.repeats.is_empty());
+    }
+
+    #[test]
+    fn a_spent_press_is_not_held_until_let_go() {
+        let mut pads = Pads::scripted();
+        pads.script("down 0 B RT");
+        pads.events();
+        // (A trigger counts a reading late.)
+        pads.events();
+        // B closed a menu: it's not held in the game; the trigger is.
+        pads.hold_off(pad(0), B);
+        let held = pads.reading(pad(0)).unwrap().held;
+        assert!(!held.contains(B) && held.contains(RT));
+        // Still held down, still spent.
+        pads.events();
+        assert!(!pads.reading(pad(0)).unwrap().held.contains(B));
+        // Let go and pressed again, it counts.
+        pads.script("up 0 B");
+        pads.events();
+        pads.script("down 0 B");
+        assert_eq!(pads.events(), [(pad(0), PadEvent::Down(B))]);
+        assert!(pads.reading(pad(0)).unwrap().held.contains(B));
+        // Everything held at once.
+        pads.hold_off_all(pad(0));
+        assert_eq!(pads.reading(pad(0)).unwrap().held, ButtonSet::default());
+    }
+
+    #[test]
+    fn a_script_plays_a_controller() {
+        let dir = claims_dir("script");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pads.txt");
+        std::fs::write(
+            &path,
+            "# a note\nconnect 1\npress 1 A 0\nstick 1 right 0.5 -1",
+        )
+        .unwrap();
+        let mut pads = Pads::with(
+            Source::Script(Script::new(Some(path.clone()), false)),
+            Claims::in_dir(None),
+            false,
+        );
+        let events = pads.events();
+        assert_eq!(
+            events,
+            [(pad(1), PadEvent::Connected), (pad(1), PadEvent::Down(A))]
+        );
+        // The unfinished last line waits for its end.
+        let r = pads.reading(pad(1)).unwrap();
+        assert_eq!(r.right, Vec2::ZERO);
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "\nstick 1 left -1 0\ndisconnect 1").unwrap();
+        let events = pads.events();
+        assert_eq!(
+            events,
+            [
+                (pad(1), PadEvent::Stick(Dir::Left)),
+                (pad(1), PadEvent::Disconnected)
+            ]
+        );
+        assert!(pads.reading(pad(1)).is_none());
+        // A press reconnects it (a trigger's counts a reading late).
+        writeln!(f, "down 1 lt\nstick 1 right 0.5 -1").unwrap();
+        assert_eq!(pads.events(), [(pad(1), PadEvent::Connected)]);
+        assert_eq!(pads.events(), [(pad(1), PadEvent::Down(LT))]);
+        let r = pads.reading(pad(1)).unwrap();
+        assert!(r.held.contains(LT) && !r.held.contains(A));
+        assert!(r.right.x > 0.0 && r.right.y < -0.5, "{}", r.right);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scripts_name_buttons_by_their_labels() {
+        for b in PadButton::ALL {
+            assert_eq!(PadButton::from_name(b.label()), Some(b), "{b:?}");
+        }
+        assert_eq!(PadButton::from_name("ls"), Some(LeftStick));
+        assert_eq!(PadButton::from_name("start"), Some(PadButton::Start));
+        assert_eq!(PadButton::from_name("up"), Some(PadButton::Up));
+        assert_eq!(PadButton::from_name("Z"), None);
+    }
+
+    #[test]
+    fn rumble_goes_to_the_motors_in_steps() {
+        let mut pads = Pads::scripted();
+        pads.script("connect 2");
+        pads.events();
+        assert_eq!(pads.rumbling(pad(2)), [0.0, 0.0]);
+        let now = Instant::now();
+        pads.set_motors(pad(2), [0.5, 2.0], now, false);
+        assert_eq!(pads.rumbling(pad(2)), [0.5, 1.0]);
+        // In 64ths; and turned up, they stay up long enough for gilrs to
+        // send it.
+        pads.set_motors(pad(2), [0.501, 0.0], now + MOTOR_HOLD / 2, false);
+        assert_eq!(pads.rumbling(pad(2)), [0.5, 1.0]);
+        pads.set_motors(pad(2), [0.501, 0.0], now + MOTOR_HOLD, false);
+        assert_eq!(pads.rumbling(pad(2)), [0.5, 0.0]);
+        pads.rumble(pad(2), 1.0, 1.0);
+        pads.stop_rumble();
+        assert_eq!(pads.rumbling(pad(2)), [0.0, 0.0]);
+        // Gone with the controller.
+        pads.rumble(pad(2), 1.0, 1.0);
+        pads.script("disconnect 2");
+        pads.events();
+        assert_eq!(pads.rumbling(pad(2)), [0.0, 0.0]);
+    }
+
+    #[test]
     fn trigger_presses_and_holds_agree() {
-        const { assert!(TRIGGER_RELEASE < TRIGGER) };
+        const { assert!(TRIGGER_RELEASE < TRIGGER_PRESS) };
         let reading = |held: &[PadButton]| {
             let mut r = PadReading::default();
             held.iter().for_each(|&b| r.held.insert(b));
             r
         };
-        // What read() counts as held at 0.3, the layout turns into its
+        // What `Trigger` counts as held, the layout turns into its
         // functions.
         let r = reading(&[RT, LT, PadButton::Back]);
         let s = r.state(ButtonLayout::Default, StickLayout::Default);
@@ -1371,11 +2425,8 @@ mod tests {
         }
     }
 
-    /// A controller's id, which gilrs hands out only for controllers it
-    /// finds.
-    fn pad(n: usize) -> GamepadId {
-        // It is a usize inside (transmute checks that the sizes match).
-        unsafe { std::mem::transmute::<usize, GamepadId>(n) }
+    fn pad(n: usize) -> PadId {
+        PadId(n)
     }
 
     /// A folder of its own for a test's claims.

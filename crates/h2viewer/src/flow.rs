@@ -2,7 +2,7 @@
 //! ending games, and the menu music.
 
 use crate::campaign;
-use crate::input::{Dir, PadButton, PadEvent};
+use crate::input::{Dir, PadButton, PadEvent, PadId};
 use crate::lan::Net;
 use crate::local::{player_colors, LocalPlayer, TEAM_COLORS, TEAM_NAMES};
 use crate::menu::{self, Action, Input, MapChoice, Menu, ScoreLine, Screen, SeatInfo};
@@ -10,7 +10,6 @@ use crate::options::GameOptions;
 use crate::{
     level_focus, load_level, new_game, scene, App, Level, Loading, Mode, Then, MUSIC_VOLUME,
 };
-use gilrs::GamepadId;
 use h2net::LanGame;
 use h2sim::bot::{bot_look, bot_name};
 use h2sim::game::guest_name;
@@ -34,7 +33,10 @@ fn overview((focus, radius): (glam::Vec3, f32), angle: f32) -> crate::camera::Fl
 /// and their team in the lobby.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Seat {
-    pub pad: Option<GamepadId>,
+    pub pad: Option<PadId>,
+    /// Whose name, look and settings in the profile they have: player
+    /// one's (0) or guest `slot`'s (`pick_slot`).
+    pub slot: usize,
     pub team: u8,
     /// They chose the team (in another PC's lobby; otherwise its host
     /// chooses).
@@ -48,29 +50,57 @@ enum Press {
     Join,
     Leave,
     Team,
+    Settings,
     None,
 }
 
 /// The menus go by the buttons themselves, whatever the player's layout
 /// (as Halo 2's do): the d-pad or left stick moves, A chooses, B goes
-/// back, X changes team, Start joins and Back leaves.
+/// back, X changes team, Y opens the player's controller settings, Start
+/// joins and Back leaves.
 fn press(e: PadEvent) -> Press {
     match e {
-        PadEvent::Down(PadButton::Up) | PadEvent::Stick(Dir::Up) => Press::Menu(Input::Up),
-        PadEvent::Down(PadButton::Down) | PadEvent::Stick(Dir::Down) => Press::Menu(Input::Down),
-        PadEvent::Down(PadButton::Left) | PadEvent::Stick(Dir::Left) => Press::Menu(Input::Left),
-        PadEvent::Down(PadButton::Right) | PadEvent::Stick(Dir::Right) => Press::Menu(Input::Right),
+        PadEvent::Down(PadButton::Up) | PadEvent::Stick(Dir::Up) | PadEvent::Repeat(Dir::Up) => {
+            Press::Menu(Input::Up)
+        }
+        PadEvent::Down(PadButton::Down)
+        | PadEvent::Stick(Dir::Down)
+        | PadEvent::Repeat(Dir::Down) => Press::Menu(Input::Down),
+        PadEvent::Down(PadButton::Left)
+        | PadEvent::Stick(Dir::Left)
+        | PadEvent::Repeat(Dir::Left) => Press::Menu(Input::Left),
+        PadEvent::Down(PadButton::Right)
+        | PadEvent::Stick(Dir::Right)
+        | PadEvent::Repeat(Dir::Right) => Press::Menu(Input::Right),
         PadEvent::Down(PadButton::A) => Press::Menu(Input::Select),
         PadEvent::Down(PadButton::B) => Press::Menu(Input::Back),
         PadEvent::Down(PadButton::Start) => Press::Join,
         PadEvent::Down(PadButton::Back) => Press::Leave,
         PadEvent::Down(PadButton::X) => Press::Team,
+        PadEvent::Down(PadButton::Y) => Press::Settings,
         _ => Press::None,
     }
 }
 
 /// The profile colour of the Master Chief's armour.
 const CHIEF_OLIVE: u8 = 5;
+
+/// The guest settings (1 to `GUESTS`) controller `pad` plays with, given
+/// those `taken` by others here and the ones each controller had last
+/// (`memory`): its own again if free, so a guest's settings follow their
+/// controller from game to game; else the first free that no other
+/// controller had, else the first free.
+pub fn pick_slot(memory: &[(PadId, usize)], pad: Option<PadId>, taken: &[usize]) -> usize {
+    let free = |s: &usize| !taken.contains(s);
+    let own = pad.and_then(|id| memory.iter().find(|m| m.0 == id));
+    let others = |s: &usize| !memory.iter().any(|m| m.1 == *s && Some(m.0) != pad);
+    let guests = 1..=crate::profile::GUESTS;
+    own.map(|m| m.1)
+        .filter(free)
+        .or_else(|| guests.clone().find(|s| free(s) && others(s)))
+        .or_else(|| guests.clone().find(free))
+        .unwrap_or(crate::profile::GUESTS)
+}
 
 pub fn bot_for(player: usize) -> (usize, Bot) {
     (player, Bot::new(player as u32 * 7919 + 13))
@@ -122,7 +152,7 @@ impl App {
 
     /// Controller `id` works the menus: any of them, but over a game only
     /// one that's up for its player (or for everyone).
-    pub(crate) fn pad_in_menu(&self, id: GamepadId) -> bool {
+    pub(crate) fn pad_in_menu(&self, id: PadId) -> bool {
         if self.mode != Mode::Playing {
             return self.in_menu();
         }
@@ -130,9 +160,18 @@ impl App {
         self.menu_for(k.unwrap_or(usize::MAX))
     }
 
-    /// The game stands still: someone here paused it, and no one on another
-    /// PC plays in it (Halo 2 pauses a game at one console, but not one
-    /// over System Link).
+    /// Someone here waits for their controller to come back (or for A on
+    /// another, or Enter at the keyboard for player one).
+    pub(crate) fn reconnecting(&self) -> bool {
+        self.mode == Mode::Playing && self.locals.iter().any(|l| l.lost_pad.is_some())
+    }
+
+    /// The game stands still: someone here paused it, and no one on
+    /// another PC plays in it (Halo 2 pauses a game at one console, but not
+    /// one over System Link). Waiting for a controller to come back stands
+    /// a mission still, but not a multiplayer game: its player stands
+    /// still in it with the dialog up (Halo 2's reconnect dialog, from the
+    /// CC0 decompilation).
     pub(crate) fn paused(&self) -> bool {
         let alone = match &self.net {
             Net::Offline | Net::Connecting { .. } => true,
@@ -141,7 +180,8 @@ impl App {
             }
             Net::Joined { .. } => false,
         };
-        let pause = self.menu_open && self.menu.pausing();
+        let mission = self.game.rules.game_type == h2sim::game::GameType::Campaign;
+        let pause = self.menu_open && self.menu.pausing() || mission && self.reconnecting();
         self.mode == Mode::Playing && pause && alone
     }
 
@@ -195,7 +235,10 @@ impl App {
             host_lobby,
             objectives: &objectives,
             online: online.as_ref(),
-            owner: self.menu_owner.unwrap_or(0),
+            owner: self
+                .menu_owner
+                .and_then(|k| self.locals.get(k))
+                .map_or(0, |l| l.slot),
         };
         f(&mut self.menu, &ctx)
     }
@@ -267,7 +310,22 @@ impl App {
     }
 
     /// A controller press while the menus are up.
-    pub(crate) fn menu_pad(&mut self, id: GamepadId, event: PadEvent) {
+    pub(crate) fn menu_pad(&mut self, id: PadId, event: PadEvent) {
+        if self.menu.editing {
+            // The on-screen keyboard: X erases, Y types a space and Start
+            // is done, as on Halo 2's.
+            let action = match event {
+                PadEvent::Down(PadButton::X) => self.menu.typed(menu::Typed::Erase),
+                PadEvent::Down(PadButton::Y) => self.menu.typed(menu::Typed::Text(" ".into())),
+                PadEvent::Down(PadButton::Start) => self.menu.typed(menu::Typed::Done),
+                _ => match press(event) {
+                    Press::Menu(input) => self.menu.keyboard(input),
+                    _ => Action::None,
+                },
+            };
+            self.after_menu(action);
+            return;
+        }
         let seated = self.seats.iter().position(|s| s.pad == Some(id));
         let lobby = self.mode == Mode::Menu && self.menu.screen == Screen::Lobby;
         match press(event) {
@@ -276,41 +334,31 @@ impl App {
                 self.seats.retain(|s| s.pad != Some(id));
                 self.sound.play_ui(&self.scene, menu::Sound::Back);
             }
-            Press::Menu(input) => {
-                // A on a new controller takes over player one (the keyboard
-                // and mouse still work for them too).
-                let menus = self.mode == Mode::Menu;
-                if input == Input::Select
-                    && menus
-                    && seated.is_none()
-                    && self.seats[0].pad.is_none()
-                {
-                    self.seats[0].pad = Some(id);
-                    if self.keyboard_used {
-                        // Taking over, not choosing what's highlighted.
-                        self.sound.play_ui(&self.scene, menu::Sound::Forward);
-                        return;
-                    }
-                }
-                self.menu_input(input);
-            }
+            Press::Menu(input) => self.pad_menu_input(id, seated, input),
             Press::Join if lobby && seated.is_none() => {
                 if self.seat_free() {
-                    self.seats[0].pad = Some(id);
+                    self.seat_player_one(id);
                 } else if self.seats.len() < crate::MAX_LOCAL {
+                    let slot = self.guest_slot(Some(id));
                     self.seats.push(Seat {
                         pad: Some(id),
+                        slot,
                         ..Seat::default()
                     });
                 }
                 self.sound.play_ui(&self.scene, menu::Sound::Forward);
             }
             // Start on the pause menu (or its controller settings) goes
-            // back toward the game.
-            Press::Join if self.menu.pausing() => self.menu_input(Input::Back),
-            Press::Join => self.menu_input(Input::Select),
+            // back to the game, as in Halo 2.
+            Press::Join if self.menu.pausing() => {
+                self.menu.sound = Some(menu::Sound::Back);
+                self.after_menu(Action::Resume);
+            }
+            // Elsewhere it's A.
+            Press::Join => self.pad_menu_input(id, seated, Input::Select),
+            // Player one stays (the keyboard takes them back when it's used).
             Press::Leave if lobby => match seated {
-                Some(0) => self.seats[0].pad = None,
+                Some(0) => {}
                 Some(k) => {
                     self.seats.remove(k);
                     self.sound.play_ui(&self.scene, menu::Sound::Back);
@@ -320,14 +368,82 @@ impl App {
             Press::Leave => self.menu_input(Input::Back),
             Press::Team if lobby => {
                 if seated.is_none() && self.seat_free() {
-                    self.seats[0].pad = Some(id);
+                    self.seat_player_one(id);
                 }
                 if let Some(k) = self.seats.iter().position(|s| s.pad == Some(id)) {
                     self.change_team(k);
                 }
             }
-            Press::Team | Press::None => {}
+            // Their own controller settings, from the lobby.
+            Press::Settings if lobby => {
+                if let Some(k) = seated {
+                    let slot = self.seats[k].slot;
+                    self.menu.open_controls(slot);
+                    self.after_menu(Action::None);
+                }
+            }
+            Press::Team | Press::Settings | Press::None => {}
         }
+    }
+
+    /// The guest settings controller `pad` plays with now (`pick_slot`),
+    /// remembered for it.
+    pub(crate) fn guest_slot(&mut self, pad: Option<PadId>) -> usize {
+        let seats = self.seats.iter().map(|s| s.slot);
+        let taken: Vec<usize> = match self.mode {
+            Mode::Playing => self.locals.iter().map(|l| l.slot).collect(),
+            _ => seats.collect(),
+        };
+        let slot = pick_slot(&self.pad_slots, pad, &taken);
+        if let Some(id) = pad {
+            self.pad_slots.retain(|m| m.0 != id);
+            self.pad_slots.push((id, slot));
+        }
+        slot
+    }
+
+    /// Controller `id` (in lobby seat `seated`, if any) works the menus:
+    /// A on a new one takes over player one (the keyboard and mouse still
+    /// work for them too). A guest's (any but player one's, once player
+    /// one has one) can't quit the game or end it for everyone.
+    fn pad_menu_input(&mut self, id: PadId, seated: Option<usize>, input: Input) {
+        let menus = self.mode == Mode::Menu;
+        if input == Input::Select && menus && seated.is_none() && self.seats[0].pad.is_none() {
+            self.seat_player_one(id);
+            if self.keyboard_used {
+                // Taking over, not choosing what's highlighted.
+                self.sound.play_ui(&self.scene, menu::Sound::Forward);
+                return;
+            }
+        }
+        // The lobby and its game options are player one's; another
+        // controller works only its own controller settings there.
+        let one = self.seats[0].pad == Some(id);
+        let own = seated.is_some_and(|k| self.menu.controls_for() == Some(self.seats[k].slot));
+        if menus && !may_work(self.menu.screen, one, own) {
+            return;
+        }
+        // (The carnage report's A is anyone's.)
+        let guest = match self.mode {
+            _ if self.menu.screen == Screen::PostGame => false,
+            Mode::Playing => !self.locals.iter().any(|l| l.pad == Some(id) && l.keyboard),
+            _ => self.seats[0].pad != Some(id),
+        };
+        let action = self.with_menu(|m, ctx| m.input(input, ctx));
+        if guest && matches!(action, Action::Quit | Action::EndGame | Action::Leave) {
+            self.menu.sound = None;
+            self.sound.play_ui(&self.scene, menu::Sound::Back);
+            return;
+        }
+        self.after_menu(action);
+    }
+
+    /// Controller `id` is player one's from now on (and again if it goes
+    /// and comes back in the menus).
+    fn seat_player_one(&mut self, id: PadId) {
+        self.seats[0].pad = Some(id);
+        self.pad_slots.retain(|m| m.0 != id);
+        self.pad_slots.push((id, 0));
     }
 
     /// Player one is free for a controller: no one has used the keyboard or
@@ -372,8 +488,8 @@ impl App {
             .iter()
             .enumerate()
             .map(|(k, s)| SeatInfo {
-                name: guest_name(&profile.name, k),
-                look: profile.look.guest(k),
+                name: guest_name(&profile.name, s.slot),
+                look: profile.look.guest(s.slot),
                 how: if s.pad.is_some() {
                     "CONTROLLER"
                 } else {
@@ -705,17 +821,19 @@ impl App {
             if self.game.players.len() >= scene::MAX_BODIES {
                 break;
             }
+            let slot = if k == 0 { 0 } else { seat.slot };
             let i = if teams {
                 self.game.add_player_on(seat.team)
             } else {
                 self.game.add_player()
             };
             let profile = &self.menu.profile;
-            self.game.set_name(i, &guest_name(&profile.name, k));
-            self.game.set_look(i, profile.look.guest(k));
+            self.game.set_name(i, &guest_name(&profile.name, slot));
+            self.game.set_look(i, profile.look.guest(slot));
             let mut l = LocalPlayer::new(i, &self.game);
             l.keyboard = k == 0;
             l.pad = seat.pad;
+            l.slot = slot;
             self.locals.push(l);
         }
         if let Some(s) = self.start_pos {
@@ -725,6 +843,7 @@ impl App {
             self.locals[0] = LocalPlayer {
                 keyboard: true,
                 pad: self.locals[0].pad,
+                slot: self.locals[0].slot,
                 ..LocalPlayer::new(0, &self.game)
             };
             // Splitscreen player two stands in front, facing them (testing).
@@ -740,6 +859,7 @@ impl App {
                 p.yaw = yaw;
                 self.locals[1] = LocalPlayer {
                     pad: self.locals[1].pad,
+                    slot: self.locals[1].slot,
                     ..LocalPlayer::new(them, &self.game)
                 };
             }
@@ -847,6 +967,7 @@ impl App {
         if self.mode == Mode::Playing {
             let seat = |l: &LocalPlayer| Seat {
                 pad: l.pad,
+                slot: l.slot,
                 team: self.game.players.get(l.player).map_or(0, |p| p.team),
                 picked: false,
             };
@@ -1008,9 +1129,58 @@ impl App {
     }
 }
 
+/// Whether a controller may work the menus on `screen` between games:
+/// all of them if it's player one's (`one`); otherwise not the lobby or
+/// its game options, which are player one's in Halo 2, and the controller
+/// settings only when they're its own (`own`, opened with Y in the lobby).
+/// It still joins with Start, picks a team with X and leaves with B.
+fn may_work(screen: Screen, one: bool, own: bool) -> bool {
+    one || match screen {
+        Screen::Lobby | Screen::Options => false,
+        Screen::Controls => own,
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guests_leave_the_lobby_to_player_one() {
+        // Player one's controller works every menu.
+        for screen in [Screen::Lobby, Screen::Options, Screen::Controls] {
+            assert!(may_work(screen, true, false));
+        }
+        // A guest's can't start the game or change it, nor player one's
+        // settings, only their own.
+        assert!(!may_work(Screen::Lobby, false, true));
+        assert!(!may_work(Screen::Options, false, true));
+        assert!(!may_work(Screen::Controls, false, false));
+        assert!(may_work(Screen::Controls, false, true));
+        // The carnage report's A is anyone's.
+        assert!(may_work(Screen::PostGame, false, false));
+    }
+
+    #[test]
+    fn a_guests_settings_follow_their_controller() {
+        let pad = |n| Some(PadId(n));
+        // The first guest gets guest 1's, the next guest 2's.
+        assert_eq!(pick_slot(&[], pad(3), &[0]), 1);
+        assert_eq!(pick_slot(&[(PadId(3), 1)], pad(1), &[0, 1]), 2);
+        // Controller 1 had guest 2's last time: it gets them again, even
+        // joining first, and a controller new here leaves them for it.
+        let memory = [(PadId(3), 1), (PadId(1), 2)];
+        assert_eq!(pick_slot(&memory, pad(1), &[0]), 2);
+        assert_eq!(pick_slot(&memory, pad(2), &[0]), 3);
+        assert_eq!(pick_slot(&memory, pad(2), &[0, 3]), 1);
+        // Taken by someone else here, it's the first free no other
+        // controller had.
+        assert_eq!(pick_slot(&memory, pad(1), &[0, 2]), 3);
+        // Every slot taken: the last (no more guests can join anyway).
+        assert_eq!(pick_slot(&[], pad(0), &[0, 1, 2, 3]), 3);
+        assert_eq!(pick_slot(&[], None, &[0]), 1);
+    }
 
     #[test]
     fn bots_fill_the_smaller_team_counting_everyone() {
@@ -1047,8 +1217,10 @@ mod tests {
         assert_eq!(press(PadEvent::Stick(Dir::Up)), Press::Menu(Input::Up));
         assert_eq!(press(PadEvent::Stick(Dir::Left)), Press::Menu(Input::Left));
         assert_eq!(down(PadButton::Right), Press::Menu(Input::Right));
-        // The rest do nothing there.
-        for b in [PadButton::RB, PadButton::LB, PadButton::RT, PadButton::Y] {
+        // Y opens the player's controller settings in the lobby; the rest
+        // do nothing there.
+        assert_eq!(down(PadButton::Y), Press::Settings);
+        for b in [PadButton::RB, PadButton::LB, PadButton::RT] {
             assert_eq!(down(b), Press::None);
         }
     }

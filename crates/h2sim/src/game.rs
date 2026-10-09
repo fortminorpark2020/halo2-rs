@@ -44,6 +44,10 @@ pub const TICK: f32 = 1.0 / 60.0;
 /// Longest gamertag, in characters (Xbox Live allowed 15).
 pub const MAX_NAME: usize = 15;
 
+/// How far up or down a player may look on foot: 85.5 degrees (Halo 2's,
+/// from the CC0 decompilation's player control update).
+pub const MAX_PITCH: f32 = 1.492_256_5;
+
 /// Halo 2 has 18 profile colours (White, Steel, Red ... Tan).
 pub const PROFILE_COLORS: u8 = 18;
 /// Armour colours players start with, by player number, so everyone looks
@@ -219,8 +223,6 @@ const LUNGE_RANGE: f32 = 2.2;
 const MELEE_CONE: f32 = 0.6;
 const MELEE_COOLDOWN: f32 = 0.8;
 const PICKUP_RADIUS: f32 = 0.45;
-/// Hold the action key this long to swap weapons.
-const SWAP_HOLD: f32 = 0.25;
 const DROPPED_WEAPON_LIFETIME: f32 = 60.0;
 const GRENADE_THROW_COOLDOWN: f32 = 0.6;
 /// Below this distance from the top of the body, a hit is a headshot.
@@ -681,7 +683,7 @@ impl Spartan {
     /// Look where `cmd` aims.
     fn look_with(&mut self, cmd: &Command) {
         self.yaw = cmd.yaw;
-        self.pitch = cmd.pitch.clamp(-1.5, 1.5);
+        self.pitch = cmd.pitch.clamp(-MAX_PITCH, MAX_PITCH);
     }
 
     /// Look where `cmd` aims, and walk, jump and crouch as it says (riders
@@ -2115,7 +2117,7 @@ impl Game {
             self.events.push(Event::Switched { player: i });
             return Some(Taken::Weapon);
         }
-        if action && p.action_held >= SWAP_HOLD {
+        if action && p.action_held >= self.movement.action_hold {
             p.action_held = f32::MIN;
             let mut old =
                 std::mem::replace(&mut p.weapons[p.current], HeldWeapon { weapon: w, state });

@@ -12,6 +12,7 @@
 //!   h2tool scan  <maps folder>           summary line for every .map in a folder
 //!   h2tool model <file.map> <tag> [png]  render model summary for an object or `mode` tag
 //!   h2tool weapon <file.map> <tag>       a weapon's firing stats (magazine, barrel, projectile)
+//!   h2tool rumble <file.map>             every damage effect's controller vibration, and each weapon's firing one
 //!   h2tool hud   <file.map> <nhdt> [dir] a HUD's bitmap widgets in its full, half and quarter screen layouts (optionally dump their full screen images)
 //!   h2tool jmad  <file.map> <tag>        an animation graph's skeleton and animations
 //!   h2tool jmadscan <file.map>           decode every animation the map can see
@@ -43,6 +44,7 @@ fn main() -> ExitCode {
         Some("obj") if args.len() >= 3 => obj(&args[1], &args[2]),
         Some("render") if args.len() >= 3 => render_png(&args[1], &args[2]),
         Some("weapon") if args.len() >= 3 => weapon(&args[1], &args[2]),
+        Some("rumble") if args.len() >= 2 => rumble(&args[1]),
         Some("vehicle") if args.len() >= 3 => vehicle(&args[1], &args[2]),
         Some("hud") if args.len() >= 3 => hud(&args[1], &args[2], args.get(3).map(String::as_str)),
         Some("jmad") if args.len() >= 3 => jmad(&args[1], &args[2]),
@@ -486,6 +488,42 @@ fn vehicle(path: &str, name: &str) -> Res {
                 vehicle::read_physics_model(&mut set, m.physics_model)?
             );
         }
+    }
+    Ok(())
+}
+
+/// Every damage effect's controller vibration, then the one each weapon
+/// fires with.
+fn rumble(path: &str) -> Res {
+    use blam_cache::{weapon, MapSet};
+    let mut set = MapSet::open(path)?;
+    let of = |set: &MapSet, g: &str| -> Vec<(blam_cache::DatumIndex, String)> {
+        let g = GroupTag::parse(g).unwrap();
+        set.map
+            .tags
+            .iter()
+            .filter(|t| t.group == g)
+            .map(|t| (t.datum, t.name.clone()))
+            .collect()
+    };
+    for (datum, name) in of(&set, "jpt!") {
+        match weapon::read_vibration(&mut set, datum) {
+            Ok(v) if v.is_empty() => println!("{name}: no responses"),
+            Ok(v) => {
+                for r in v {
+                    println!(
+                        "{name}: {:?} low {:.3}s {:?} high {:.3}s {:?}",
+                        r.kind, r.low.duration, r.low.function, r.high.duration, r.high.function
+                    );
+                }
+            }
+            Err(e) => println!("{name}: {e}"),
+        }
+    }
+    for (datum, name) in of(&set, "weap") {
+        let fired = weapon::firing_damage(&mut set, datum, 0)?;
+        let jpt = fired.and_then(|d| set.locate(d).map(|(_, t)| t.name.clone()));
+        println!("weapon {name}: fires {}", jpt.as_deref().unwrap_or("-"));
     }
     Ok(())
 }
