@@ -264,6 +264,15 @@ impl App {
     /// A controller press while the menus are up.
     pub(crate) fn menu_pad(&mut self, id: GamepadId, pad_press: PadPress) {
         let seated = self.seats.iter().position(|s| s.pad == Some(id));
+        if self.menu.screen == Screen::Start {
+            // Any button goes on from the start screen, and its controller
+            // plays as player one if no other does.
+            if seated.is_none() && self.seats[0].pad.is_none() {
+                self.seats[0].pad = Some(id);
+            }
+            self.menu_input(Input::Select);
+            return;
+        }
         let lobby = self.mode == Mode::Menu && self.menu.screen == Screen::Lobby;
         match press(pad_press) {
             // A guest's B takes only them out of the lobby.
@@ -943,6 +952,7 @@ impl App {
             }
         }
         let wanted = self.mode == Mode::Menu
+            && self.intro.is_none()
             && !matches!(&self.loading, Some(l) if matches!(l.then, Then::Play | Then::Join(_) | Then::Rejoin));
         match (wanted, self.music_voice, &self.music) {
             (true, None, Some(m)) => {

@@ -3,6 +3,7 @@
 
 use crate::audio::Clip;
 use crate::body::{BodyRig, Landing};
+use crate::flythrough::Flythrough;
 use crate::messages::GameText;
 use crate::probe::LevelLight;
 use crate::rig::{FirstPersonRig, Skeleton, SkinnedMesh};
@@ -11,14 +12,15 @@ use blam_cache::bitmap::{self, Image};
 use blam_cache::geometry::Mesh;
 use blam_cache::hud::{self, Anchor};
 use blam_cache::lightmap::{self, InstanceLighting};
-use blam_cache::model::{self, RenderModel};
+use blam_cache::model::{self, Atmosphere, RenderModel};
 use blam_cache::pathfinding;
 use blam_cache::physics::{self, BipedPhysics, PlayerMovement};
 use blam_cache::render::{LevelGeometry, Section, SectionOwner};
 use blam_cache::scenario::PlacedKind;
 use blam_cache::shader::{self, Blend};
 use blam_cache::{
-    render, scenario, sound, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn, StructureBsp,
+    render, scenario, script, sound, weapon, DatumIndex, GroupTag, MapSet, PlayerSpawn,
+    StructureBsp,
 };
 use glam::{Mat4, Vec3};
 use h2sim::game::FallingDamage;
@@ -75,6 +77,10 @@ pub enum AuxKind {
     ChangeColor,
     /// The player's emblem picture (the surface's own texture is a stand-in).
     Emblem,
+    /// A second colour map multiplying the first, colour and alpha.
+    Multiply,
+    /// A second colour map multiplying the first, doubled (added clouds).
+    Multiply2x,
 }
 
 /// How a surface is drawn: its textures and how it blends.
@@ -668,6 +674,8 @@ pub struct Scene {
     pub elite: Option<Body>,
     /// The sky's model, drawn around the camera behind everything.
     pub sky: Option<usize>,
+    /// The sky's fog and clear colour.
+    pub atmosphere: Atmosphere,
     /// Frag and plasma grenades: their models, and throw speed from the
     /// projectile tags.
     pub grenades: [GrenadeAssets; 2],
@@ -1036,6 +1044,12 @@ impl Loader {
                 } else if let Some(b) = info.change_color {
                     m.aux = self.bitmap_texture(b);
                     m.aux_kind = AuxKind::ChangeColor;
+                } else if let Some((b, scale)) = info.multiply {
+                    m.aux = self.bitmap_texture(b);
+                    m.aux_kind = match scale > 1.0 {
+                        true => AuxKind::Multiply2x,
+                        false => AuxKind::Multiply,
+                    };
                 } else if info.template.contains("emblem_overlay") {
                     m.aux_kind = AuxKind::Emblem;
                 }
@@ -1589,6 +1603,72 @@ impl Loader {
         mesh
     }
 
+    fn new(set: MapSet) -> Loader {
+        Loader {
+            set,
+            textures: vec![fallback_texture()],
+            texture_of_bitmap: HashMap::new(),
+            materials: vec![Material::plain(0)],
+            material_of_shader: HashMap::new(),
+            lightmap_pages: HashMap::new(),
+            mesh_of_object: HashMap::new(),
+            hud_textures: Vec::new(),
+            hud_of_bitmap: HashMap::new(),
+            failures: 0,
+            sound_reader: sound::SoundReader::new(),
+            sounds: Vec::new(),
+            sound_of_tag: HashMap::new(),
+        }
+    }
+
+    /// The level: render geometry grouped by texture and lightmap page.
+    fn level(&mut self, bsps: &[StructureBsp]) -> MeshData {
+        let mut level = MeshData {
+            baked_lighting: true,
+            ..MeshData::default()
+        };
+        for bsp in bsps {
+            let geo = match render::bsp_render_geometry(&mut self.set, bsp) {
+                Ok(geo) => geo,
+                Err(e) => {
+                    println!(
+                        "warning: render geometry unavailable ({e}); showing collision geometry"
+                    );
+                    continue;
+                }
+            };
+            let mats: Vec<usize> = geo
+                .shaders
+                .iter()
+                .map(|&s| self.shader_material(s))
+                .collect();
+            let lights = self.level_lights(bsp, &geo);
+            let part = MeshData::from_sections(&geo.sections, &mats, &lights);
+            let base = level.vertices.len() as u32;
+            let first = level.indices.len() as u32;
+            level.vertices.extend_from_slice(&part.vertices);
+            level.indices.extend(part.indices.iter().map(|i| i + base));
+            level
+                .batches
+                .extend(part.batches.into_iter().map(|b| Batch {
+                    first_index: b.first_index + first,
+                    ..b
+                }));
+        }
+        level
+    }
+
+    /// The first sky's fog and clear colour.
+    fn atmosphere(&mut self) -> Atmosphere {
+        let Some(sky) = self.set.map.skies().ok().and_then(|s| s.first().copied()) else {
+            return Atmosphere::default();
+        };
+        model::sky_atmosphere(&mut self.set, sky).unwrap_or_else(|e| {
+            println!("warning: sky: {e}");
+            Atmosphere::default()
+        })
+    }
+
     fn sky(&mut self, meshes: &mut Vec<MeshData>) -> Option<usize> {
         let sky = *self.set.map.skies().ok()?.first()?;
         let model = model::sky_render_model(&mut self.set, sky)
@@ -1760,61 +1840,15 @@ impl Scene {
         let movement = physics::player_movement(&mut set).unwrap_or_default();
         let biped = physics::player_biped(&mut set).unwrap_or_default();
 
-        let mut loader = Loader {
-            set,
-            textures: vec![fallback_texture()],
-            texture_of_bitmap: HashMap::new(),
-            materials: vec![Material::plain(0)],
-            material_of_shader: HashMap::new(),
-            lightmap_pages: HashMap::new(),
-            mesh_of_object: HashMap::new(),
-            hud_textures: Vec::new(),
-            hud_of_bitmap: HashMap::new(),
-            failures: 0,
-            sound_reader: sound::SoundReader::new(),
-            sounds: Vec::new(),
-            sound_of_tag: HashMap::new(),
-        };
-
-        // The level: render geometry grouped by texture and lightmap page.
-        let mut level = MeshData {
-            baked_lighting: true,
-            ..MeshData::default()
-        };
-        for bsp in &bsps {
-            let geo = match render::bsp_render_geometry(&mut loader.set, bsp) {
-                Ok(geo) => geo,
-                Err(e) => {
-                    println!(
-                        "warning: render geometry unavailable ({e}); showing collision geometry"
-                    );
-                    continue;
-                }
-            };
-            let mats: Vec<usize> = geo
-                .shaders
-                .iter()
-                .map(|&s| loader.shader_material(s))
-                .collect();
-            let lights = loader.level_lights(bsp, &geo);
-            let part = MeshData::from_sections(&geo.sections, &mats, &lights);
-            let base = level.vertices.len() as u32;
-            let first = level.indices.len() as u32;
-            level.vertices.extend_from_slice(&part.vertices);
-            level.indices.extend(part.indices.iter().map(|i| i + base));
-            level
-                .batches
-                .extend(part.batches.into_iter().map(|b| Batch {
-                    first_index: b.first_index + first,
-                    ..b
-                }));
-        }
+        let mut loader = Loader::new(set);
+        let mut level = loader.level(&bsps);
         if level.batches.is_empty() {
             level = collision_mesh(&collision);
         }
 
         let mut meshes = vec![level];
         let sky = loader.sky(&mut meshes);
+        let atmosphere = loader.atmosphere();
         let arms = loader.arms(SPARTAN_ARMS, &mut meshes);
         let elite_arms = loader
             .arms(ELITE_ARMS, &mut meshes)
@@ -2178,6 +2212,7 @@ impl Scene {
             body,
             elite,
             sky,
+            atmosphere,
             grenades,
             objects,
             doors,
@@ -2213,6 +2248,64 @@ impl Scene {
 
     pub fn triangle_count(&self) -> usize {
         self.meshes[0].triangle_count()
+    }
+}
+
+/// A level only to look at: mainmenu.map's scene behind the menus, and
+/// the script that flies the camera through it.
+pub struct Backdrop {
+    pub textures: Vec<Image>,
+    pub materials: Vec<Material>,
+    /// Mesh 0 is the level.
+    pub meshes: Vec<MeshData>,
+    pub sky: Option<usize>,
+    pub atmosphere: Atmosphere,
+    /// Its scenery (the carrier, the flak guns...).
+    pub objects: Vec<SceneObject>,
+    pub flythrough: Option<Flythrough>,
+}
+
+impl Backdrop {
+    pub fn load(path: &Path) -> Result<Backdrop, Box<dyn std::error::Error>> {
+        let mut set = MapSet::open(path)?;
+        let bsps = set.map.structure_bsps()?;
+        let flythrough = match (script::scripts(&mut set), scenario::camera_points(&mut set)) {
+            (Ok(scripts), Ok(points)) => Flythrough::new(&scripts, &points),
+            _ => None,
+        };
+        let mut loader = Loader::new(set);
+        let mut meshes = vec![loader.level(&bsps)];
+        let sky = loader.sky(&mut meshes);
+        let atmosphere = loader.atmosphere();
+        let level_light = LevelLight::new(&meshes[0]);
+        let scenery = scenario::scenery(&mut loader.set).unwrap_or_default();
+        let mut objects = Vec::new();
+        for p in scenery.into_iter().filter(|p| p.automatic) {
+            let Some(mesh) = loader.object_mesh(p.object, &mut meshes) else {
+                continue;
+            };
+            let light = level_light.at(&loader.textures, Vec3::from(p.position) + Vec3::Z * 0.2);
+            objects.push(SceneObject {
+                mesh,
+                transform: placement_matrix(p.position, p.rotation, p.scale),
+                light,
+                name: p.name,
+                automatic: true,
+                door: None,
+            });
+        }
+        if loader.failures > 0 {
+            println!("warning: {} textures couldn't be decoded", loader.failures);
+        }
+        Ok(Backdrop {
+            textures: loader.textures,
+            materials: loader.materials,
+            meshes,
+            sky,
+            atmosphere,
+            objects,
+            flythrough,
+        })
     }
 }
 

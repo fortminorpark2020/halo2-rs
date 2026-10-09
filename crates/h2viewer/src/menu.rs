@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
+    /// Halo 2's start screen: any key goes on to the main menu.
+    Start,
     Main,
     Campaign,
     Lobby,
@@ -607,6 +609,8 @@ pub struct Menu {
     /// A line to show (why a game ended, a join that failed).
     pub notice: Option<String>,
     pub sound: Option<Sound>,
+    /// Seconds the game has been running, for what pulses.
+    pub time: f32,
     pub profile: Profile,
     /// Typing a new gamertag.
     pub editing: bool,
@@ -760,6 +764,7 @@ impl Menu {
             settings,
             notice: None,
             sound: None,
+            time: 0.0,
             profile,
             editing: false,
             difficulty: 1,
@@ -855,7 +860,7 @@ impl Menu {
                 return self.text.get(ask.lines()[0]);
             }
             Screen::PostGame => return self.text.get("werds/postgame_header"),
-            Screen::Main => "HALO 2",
+            Screen::Start | Screen::Main => "HALO 2",
             Screen::Campaign => "CAMPAIGN",
             Screen::Lobby if in_custom(ctx) => "CUSTOM GAME",
             Screen::Lobby => "MULTIPLAYER",
@@ -876,6 +881,7 @@ impl Menu {
 
     fn rows(&self, ctx: &Context) -> Vec<Row> {
         match self.screen {
+            Screen::Start => Vec::new(),
             Screen::Main => MAIN_ROWS.to_vec(),
             Screen::Campaign if ctx.missions.is_empty() => vec![Row::Difficulty, Row::NoMissions],
             Screen::Campaign => std::iter::once(Row::Difficulty)
@@ -1260,6 +1266,11 @@ impl Menu {
     }
 
     pub fn input(&mut self, input: Input, ctx: &Context) -> Action {
+        if self.screen == Screen::Start {
+            self.show(Screen::Main);
+            self.sound = Some(Sound::Forward);
+            return Action::None;
+        }
         if self.editing {
             return match input {
                 Input::Select | Input::Back => self.typed(Typed::Done),
@@ -1724,7 +1735,7 @@ impl Menu {
             }
             Screen::Lobby if ctx.joined => self.ask(Ask::LeaveLobby),
             Screen::Confirm => self.answer(false, ctx),
-            Screen::Main => Action::None,
+            Screen::Start | Screen::Main => Action::None,
             Screen::Profile => {
                 self.back_to_main(Row::Profile);
                 Action::None
@@ -1842,6 +1853,9 @@ impl Menu {
     /// A click at `pos`: settings step down on their left part and up
     /// elsewhere; other rows are chosen.
     pub fn click(&mut self, pos: [f32; 2], w: f32, h: f32, ctx: &Context) -> Action {
+        if self.screen == Screen::Start {
+            return self.input(Input::Select, ctx);
+        }
         if self.screen == Screen::PostGame {
             // The carnage report's tabs show their panes.
             let f = Frame::new(w, h);
@@ -1900,10 +1914,21 @@ impl Menu {
     ) {
         let f = Frame::new(w, h);
         let s = f.s;
-        // Darken behind the menu so it reads over any map.
+        if self.screen == Screen::Start {
+            // The game's name, and a prompt pulsing under it.
+            let pulse = 0.6 + 0.4 * (self.time * std::f32::consts::PI).cos();
+            hb.text(font, f.at(320.0, 180.0), 40.0 * s, "HALO 2", BRIGHT);
+            let [r, g, b, a] = TEXT;
+            let prompt = [r, g, b, a * pulse];
+            let at = f.at(320.0, 380.0);
+            hb.text(font, at, f.text(10.0), "PRESS ANY KEY TO CONTINUE", prompt);
+            return;
+        }
+        // Darken behind the menu so it reads over any map (the main menu
+        // shows Halo 2's own scene as it is).
         match self.screen {
-            Screen::Main
-            | Screen::Campaign
+            Screen::Start | Screen::Main => {}
+            Screen::Campaign
             | Screen::Lobby
             | Screen::Options
             | Screen::SystemLink
@@ -2096,6 +2121,7 @@ impl Menu {
         }
         let hint = match self.screen {
             _ if self.editing => "TYPE A GAMERTAG, THEN PRESS ENTER",
+            Screen::Start => "",
             Screen::Main => "ENTER OR A: SELECT",
             Screen::PostGame => "ENTER OR A: CONTINUE   LEFT OR RIGHT: MORE STATS",
             Screen::Pregame => "",

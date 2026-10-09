@@ -102,6 +102,13 @@ pub fn half_height(aspect: f32) -> f32 {
     (FOV_Y.to_radians() * 0.5).tan().min(widest)
 }
 
+/// The zoom that gives a horizontal field of view of `fov` degrees (a
+/// cutscene camera's) at this aspect.
+pub fn fov_magnification(aspect: f32, fov: f32) -> f32 {
+    let half_x = (half_height(aspect) * aspect).atan();
+    half_x.tan() / (fov.to_radians() * 0.5).tan().max(1e-3)
+}
+
 /// Reversed-Z perspective (near/far swapped) for far better depth precision.
 pub fn projection(aspect: f32, magnification: f32, near: f32, far: f32) -> Mat4 {
     let half = half_height(aspect) / magnification.max(1.0);

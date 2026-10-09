@@ -55,9 +55,19 @@ install. No game files are included in this repository.
 
 ### h2viewer
 
-Double-click `h2viewer.exe` to open Halo 2's menus over Lockout from
-`C:\Games\Halo 2 Project Cartographer\maps` (or drag any `.map` file onto it),
-with Halo 2's main menu music. Multiplayer opens the lobby: pick the game
+Double-click `h2viewer.exe` to start with Lockout from
+`C:\Games\Halo 2 Project Cartographer\maps` (or drag any `.map` file onto it).
+As in Halo 2, the intro movie plays first (`movie\intro_60.wmv` beside the
+maps folder, or `intro_low_60.wmv` in a window under 720 pixels tall; Windows
+plays it with Media Foundation, other systems with ffmpeg if it's installed).
+Any key, mouse button or controller button skips it, and `H2_SKIP_INTRO=1`
+leaves it out. Then comes the start screen, PRESS ANY KEY TO CONTINUE, with
+Halo 2's main menu music. Behind it and the menus is `mainmenu.map`'s scene:
+the carrier over New Mombasa, flown round by the map's own
+`mainmenu_flythrough` script between its camera points. The flight starts
+over after each game; `H2_MENU_TIME=<seconds>` holds the camera that far in,
+for screenshots. Without `mainmenu.map` the menus show the level from a
+circling camera. Multiplayer opens the lobby: pick the game
 type (Slayer, Team Slayer, Capture the Flag, King of the Hill, Team King,
 Oddball, Team Oddball, Juggernaut, Territories or Assault), the map (every multiplayer map in the maps and dlc
 folders, with Halo 2's own picture and description from `mainmenu.map`), score to win and number of bots, then Start Game. Game Options holds
@@ -288,7 +298,10 @@ and `H2_BOTS=<n>` start a game straight away, and `H2_SIM=<seconds>` plays the
 bots against each other without a window, printing kills, objective events and
 the score and kills by weapon (`H2_SEED=<n>` varies the run, `H2_SIM_WHERE=1` also prints where
 every bot is, what it carries and what it is doing every 20 seconds).
-`H2_TIME_LIMIT=<seconds>` gives games that time limit. `H2_TEST_LEVELS=1`
+`H2_TIME_LIMIT=<seconds>` gives games that time limit. Going straight into a
+game (`H2_PLAY=1`, `H2_JOIN` or `H2_LIVE_AUTO`) leaves out the intro and the
+start screen; a script that works the menus with keys needs one more key
+first, for the start screen. `H2_TEST_LEVELS=1`
 gives every player a level, so the lobby and the scoreboard's LEVEL column
 show Halo 2's rank icons (read from `mainmenu.map`), which otherwise show only
 for players whose level is known.

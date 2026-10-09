@@ -1,9 +1,10 @@
 //! wgpu renderer: textured meshes (level, objects, first person weapon),
 //! alpha-blended effect sprites, and the 2D HUD.
 
-use crate::scene::{mip_chain, AuxKind, Material, Scene, Vertex};
+use crate::scene::{mip_chain, AuxKind, Backdrop, Material, MeshData, Scene, Vertex};
 use crate::{emblem, profile};
 use blam_cache::bitmap::Image;
+use blam_cache::model::Atmosphere;
 use blam_cache::shader::Blend;
 use glam::{Mat4, Vec3};
 use h2sim::game::Emblem;
@@ -18,7 +19,7 @@ struct DrawUniforms {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
     camera: [f32; 4],
-    /// x: fog amount, y/z: screen size (HUD), w: shading (OBJECT...).
+    /// y/z: screen size (HUD), w: shading (OBJECT...).
     params: [f32; 4],
     /// Objects: the level's baked light where they stand; w = 1 when set.
     light: [f32; 4],
@@ -31,6 +32,10 @@ struct DrawUniforms {
     /// x: how hidden by active camouflage (0-1), y: overshield glow (drawn
     /// as a shell over the body), z: seconds, for shimmering.
     fx: [f32; 4],
+    /// Fog: its colour (linear) and density, and the distances it starts
+    /// at and is thickest from.
+    fog: [f32; 4],
+    fog_range: [f32; 4],
 }
 
 const SLOT: u64 = 512;
@@ -100,6 +105,8 @@ pub const MENU_TEXTURES: usize = 1 << 16;
 pub const EMBLEM_TEXTURES: usize = 1 << 17;
 /// And the rank icon atlases from here (see `rank::load`).
 pub const RANK_TEXTURES: usize = 1 << 18;
+/// And the intro movie's frame (see `Gpu::set_movie_frame`).
+pub const MOVIE_TEXTURE: usize = 1 << 19;
 
 pub struct HudBatch {
     pub texture: usize,
@@ -109,6 +116,9 @@ pub struct HudBatch {
 pub struct Frame<'a> {
     /// The part of the window this view fills: x, y, width, height in pixels.
     pub viewport: [u32; 4],
+    /// The scene its sky and world are in (view models and posed meshes
+    /// are always the level's).
+    pub scene: SceneSlot,
     /// Skinned meshes posed for this view (mesh, vertices).
     pub posed: &'a [(usize, Vec<Vertex>)],
     /// The sky, drawn first; `sky_proj` sees it from its own origin.
@@ -130,6 +140,7 @@ impl<'a> Frame<'a> {
     pub fn overlay(viewport: [u32; 4], hud: &'a [HudBatch]) -> Frame<'a> {
         Frame {
             viewport,
+            scene: SceneSlot::Level,
             posed: &[],
             sky: None,
             sky_proj: Mat4::IDENTITY,
@@ -142,6 +153,77 @@ impl<'a> Frame<'a> {
             view_sprites: &[],
             hud,
         }
+    }
+}
+
+/// A scene loaded on the GPU.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SceneSlot {
+    /// The map being played (also behind the menus, without a backdrop).
+    #[default]
+    Level,
+    /// The main menu's scene, while it's loaded (see `Gpu::load_backdrop`).
+    Backdrop,
+}
+
+/// Fog as the shaders take it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Fog {
+    /// Linear colour, and density.
+    color: [f32; 4],
+    /// Where it starts, and where it's thickest.
+    range: [f32; 2],
+}
+
+/// A tag's (gamma space) colour as the shaders take it.
+fn linear([r, g, b]: [f32; 3]) -> [f32; 3] {
+    [r, g, b].map(|c| c.max(0.0).powf(2.2))
+}
+
+/// A scene's meshes and surfaces on the GPU, and its sky's air.
+struct GpuScene {
+    meshes: Vec<GpuMesh>,
+    /// One bind group per (texture, lightmap) pair the meshes use.
+    materials: Vec<wgpu::BindGroup>,
+    /// Fog over the world, and over the sky.
+    fog: Fog,
+    sky_fog: Fog,
+    /// What the screen is cleared to behind the sky.
+    clear: wgpu::Color,
+}
+
+impl GpuScene {
+    fn empty() -> GpuScene {
+        GpuScene {
+            meshes: Vec::new(),
+            materials: Vec::new(),
+            fog: Fog::default(),
+            sky_fog: Fog::default(),
+            clear: SKY,
+        }
+    }
+
+    /// Fog and clear colour from the sky's tag; its sky fog covers the
+    /// whole sky.
+    fn set_air(&mut self, air: &Atmosphere) {
+        self.fog = air.fog.map_or(Fog::default(), |f| {
+            let [r, g, b] = linear(f.color);
+            Fog {
+                color: [r, g, b, f.max_density.min(1.0)],
+                range: [f.start, f.opaque],
+            }
+        });
+        self.sky_fog = air.sky_fog.map_or(Fog::default(), |(c, density)| {
+            let [r, g, b] = linear(c);
+            Fog {
+                color: [r, g, b, density.min(1.0)],
+                range: [0.0; 2],
+            }
+        });
+        self.clear = air.clear_color.map_or(SKY, |c| {
+            let [r, g, b] = linear(c).map(f64::from);
+            wgpu::Color { r, g, b, a: 1.0 }
+        });
     }
 }
 
@@ -173,6 +255,8 @@ impl MaterialParams {
             AuxKind::Mask => 2.0,
             AuxKind::ChangeColor => 3.0,
             AuxKind::Emblem => 4.0,
+            AuxKind::Multiply => 5.0,
+            AuxKind::Multiply2x => 6.0,
         };
         let [r, g, b] = m.illum_color;
         let [tr, tg, tb] = m.tint;
@@ -206,6 +290,9 @@ struct U {
     emblem_secondary: vec4<f32>,
     // x: camouflage, y: overshield shell, z: seconds.
     fx: vec4<f32>,
+    // Colour and density; x: where it starts, y: where it's thickest.
+    fog: vec4<f32>,
+    fog_range: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(1) @binding(0) var tex: texture_2d<f32>;
@@ -240,7 +327,7 @@ fn vs(
         o.clip = u.mvp * vec4<f32>(position + normal * 0.006, 1.0);
         o.clip.z *= 1.002;
     }
-    if (m.mode.y > 3.5) {
+    if (m.mode.y > 3.5 && m.mode.y < 4.5) {
         // Emblems lie on the armour; nudge them in front of it (depth is
         // reversed, so nearer is larger).
         o.clip.z *= 1.001;
@@ -263,7 +350,8 @@ struct M {
     tint: vec4<f32>,
     // x: 0 opaque, 1 alpha tested, 2 alpha blended, 3 additive.
     // y: aux texture is 0 unused, 1 a glow map, 2 an opacity mask,
-    //    3 a change-colour map, 4 the player's emblem instead.
+    //    3 a change-colour map, 4 the player's emblem instead, 5 a colour
+    //    map multiplying the first, 6 the same doubled.
     mode: vec4<f32>,
 };
 @group(1) @binding(4) var aux: texture_2d<f32>;
@@ -279,19 +367,35 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     if (m.mode.y > 1.5 && m.mode.y < 2.5) {
         alpha = min(a.r, a.a);
     }
+    if (m.mode.y > 4.5 && m.mode.y < 5.5) {
+        alpha *= a.a;
+    }
+    if (m.mode.y > 5.5) {
+        // Added clouds: their pass adds the maps' colour alone.
+        alpha = 1.0;
+    }
     alpha *= m.tint.a;
     if ((m.mode.x > 0.5 && m.mode.x < 1.5 && alpha < 0.5) || (m.mode.x > 1.5 && alpha < 0.02)) {
         discard;
     }
     // Tag colours are in gamma space.
     var albedo = c.rgb * pow(m.tint.rgb, vec3<f32>(2.2));
-    if (m.mode.y > 2.5 && u.primary.a > 0.5) {
+    if (m.mode.y > 2.5 && m.mode.y < 3.5 && u.primary.a > 0.5) {
         // Armour colours where the change-colour map says.
         let p = pow(u.primary.rgb, vec3<f32>(2.2));
         let s = pow(u.secondary.rgb, vec3<f32>(2.2));
         albedo *= mix(vec3<f32>(1.0), p, a.r) * mix(vec3<f32>(1.0), s, a.g);
     }
-    if (m.mode.y > 3.5) {
+    if (m.mode.y > 4.5) {
+        // Clouds: a second colour map multiplies the first; the added ones
+        // double the product (in gamma space, as the lightmaps do), up to
+        // white.
+        albedo *= a.rgb;
+        if (m.mode.y > 5.5) {
+            albedo = min(albedo * LIGHTMAP_SCALE, vec3<f32>(1.0));
+        }
+    }
+    if (m.mode.y > 3.5 && m.mode.y < 4.5) {
         // Only the emblem's picture shows; the rest is see-through.
         let cover = e.r + e.g;
         let inside = all(i.uv >= vec2<f32>(0.0)) && all(i.uv <= vec2<f32>(1.0));
@@ -303,8 +407,8 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         albedo = (p * e.r + s * e.g) / cover;
     }
     var light: vec3<f32>;
-    if (u.params.w > 1.5 || m.mode.x > 2.5) {
-        // Skies and additive glows carry their own light.
+    if (u.params.w > 1.5 || m.mode.x > 2.5 || m.mode.y > 4.5) {
+        // Skies, additive glows and clouds carry their own light.
         light = vec3<f32>(1.0);
     } else if (u.params.w > 0.5) {
         // Level geometry: its lightmap page, or per-vertex colour.
@@ -329,8 +433,11 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     if (m.mode.y > 0.5 && m.mode.y < 1.5) {
         colour += a.rgb * pow(m.illum.rgb, vec3<f32>(2.2));
     }
-    let fog = clamp(distance(i.world, u.camera.xyz) / 400.0, 0.0, 1.0) * u.params.x;
-    let sky = vec3<f32>(0.62, 0.70, 0.80);
+    // None nearer than where it starts, thickening to its density by where
+    // it's thickest.
+    let range = max(u.fog_range.y - u.fog_range.x, 0.001);
+    let fog = clamp((distance(i.world, u.camera.xyz) - u.fog_range.x) / range, 0.0, 1.0) * u.fog.a;
+    let sky = u.fog.rgb;
     if (u.fx.y > 0.0 || u.fx.x > 0.0) {
         let n = normalize(i.normal);
         let v = normalize(u.camera.xyz - i.world);
@@ -349,13 +456,13 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         let shown = 1.0 - u.fx.x;
         let shimmer = pow(edge, 2.5) * (0.2 + 0.3 * ripple);
         let tint = colour * mix(0.3, 1.0, shown);
-        return vec4<f32>(mix(tint, sky, fog * fog), a * max(shown, shimmer));
+        return vec4<f32>(mix(tint, sky, fog), a * max(shown, shimmer));
     }
     if (m.mode.x > 2.5) {
         // Additive: fade out rather than towards the fog colour.
-        return vec4<f32>(colour * alpha * (1.0 - fog * fog), 1.0);
+        return vec4<f32>(colour * alpha * (1.0 - fog), 1.0);
     }
-    return vec4<f32>(mix(colour, sky, fog * fog), alpha);
+    return vec4<f32>(mix(colour, sky, fog), alpha);
 }
 "#;
 
@@ -488,8 +595,9 @@ pub struct Gpu {
     clamp: wgpu::Sampler,
     uniforms: wgpu::Buffer,
     globals: wgpu::BindGroup,
-    /// One bind group per (texture, lightmap) pair the meshes use.
-    materials: Vec<wgpu::BindGroup>,
+    level: GpuScene,
+    /// The main menu's scene, kept beside the level's once loaded.
+    backdrop: Option<GpuScene>,
     hud_textures: Vec<wgpu::BindGroup>,
     /// Textures the menus keep from map to map (the maps' pictures),
     /// numbered from [`MENU_TEXTURES`] in HUD batches.
@@ -497,7 +605,8 @@ pub struct Gpu {
     emblem_textures: Vec<wgpu::BindGroup>,
     rank_textures: Vec<wgpu::BindGroup>,
     effects_texture: wgpu::BindGroup,
-    meshes: Vec<GpuMesh>,
+    /// The intro movie's latest frame, and its size.
+    movie: Option<(wgpu::Texture, wgpu::BindGroup, [u32; 2])>,
     depth: wgpu::TextureView,
     staging: Vec<u8>,
     /// Size of the viewport being drawn, for the HUD.
@@ -532,13 +641,22 @@ fn upload_texture(
     srgb_mips: bool,
 ) -> wgpu::BindGroup {
     let view = upload_view(device, queue, img, srgb_mips);
+    texture_group(device, layout, sampler, &view)
+}
+
+fn texture_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
+                resource: wgpu::BindingResource::TextureView(view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -948,13 +1066,14 @@ impl Gpu {
             clamp,
             uniforms,
             globals,
-            materials: Vec::new(),
+            level: GpuScene::empty(),
+            backdrop: None,
             hud_textures: Vec::new(),
             menu_textures: Vec::new(),
             emblem_textures: Vec::new(),
             rank_textures: Vec::new(),
             effects_texture,
-            meshes: Vec::new(),
+            movie: None,
             depth,
             staging: Vec::new(),
             view_size: (1.0, 1.0),
@@ -966,14 +1085,40 @@ impl Gpu {
 
     /// Upload a scene's meshes, materials and HUD art, replacing the last.
     pub fn load_scene(&mut self, scene: &Scene) {
+        self.level = self.upload(&scene.textures, &scene.materials, &scene.meshes);
+        self.level.set_air(&scene.atmosphere);
+        let clamp = &self.clamp;
+        self.hud_textures = scene
+            .hud_textures
+            .iter()
+            .map(|img| {
+                upload_texture(
+                    &self.device,
+                    &self.queue,
+                    &self.texture_layout,
+                    clamp,
+                    img,
+                    false,
+                )
+            })
+            .collect();
+    }
+
+    /// Upload the main menu's scene, kept beside the level's from now on.
+    pub fn load_backdrop(&mut self, backdrop: &Backdrop) {
+        let mut b = self.upload(&backdrop.textures, &backdrop.materials, &backdrop.meshes);
+        b.set_air(&backdrop.atmosphere);
+        self.backdrop = Some(b);
+    }
+
+    fn upload(&self, textures: &[Image], surfaces: &[Material], meshes: &[MeshData]) -> GpuScene {
         let device = &self.device;
         let queue = &self.queue;
         let (repeat, clamp) = (&self.repeat, &self.clamp);
         let material_layout = &self.material_layout;
         let mut material_index = std::collections::HashMap::new();
         let mut material_keys: Vec<(usize, usize)> = Vec::new();
-        let meshes: Vec<GpuMesh> = scene
-            .meshes
+        let meshes: Vec<GpuMesh> = meshes
             .iter()
             .map(|m| GpuMesh {
                 vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -997,18 +1142,14 @@ impl Gpu {
                         if index == next {
                             material_keys.push(key);
                         }
-                        let blend = scene
-                            .materials
-                            .get(b.material)
-                            .map_or(Blend::Opaque, |m| m.blend);
+                        let blend = surfaces.get(b.material).map_or(Blend::Opaque, |m| m.blend);
                         (index, b.first_index..b.first_index + b.index_count, blend)
                     })
                     .collect(),
                 shading: if m.baked_lighting { BAKED } else { OBJECT },
             })
             .collect();
-        let views: Vec<wgpu::TextureView> = scene
-            .textures
+        let views: Vec<wgpu::TextureView> = textures
             .iter()
             .map(|img| upload_view(device, queue, img, true))
             .collect();
@@ -1016,7 +1157,7 @@ impl Gpu {
             .iter()
             .map(|&(material, l)| {
                 let view = |i: usize| views.get(i).unwrap_or(&views[0]);
-                let mat = scene.materials.get(material).cloned().unwrap_or_default();
+                let mat = surfaces.get(material).cloned().unwrap_or_default();
                 let params = MaterialParams::new(&mat);
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: None,
@@ -1055,14 +1196,11 @@ impl Gpu {
                 })
             })
             .collect();
-        let hud_textures = scene
-            .hud_textures
-            .iter()
-            .map(|img| upload_texture(device, queue, &self.texture_layout, clamp, img, false))
-            .collect();
-        self.meshes = meshes;
-        self.materials = materials;
-        self.hud_textures = hud_textures;
+        GpuScene {
+            meshes,
+            materials,
+            ..GpuScene::empty()
+        }
     }
 
     pub fn set_menu_textures(&mut self, images: &[Image]) {
@@ -1104,7 +1242,61 @@ impl Gpu {
             .unwrap_or(&self.effects_texture)
     }
 
+    /// Show a frame of the intro movie (BGRA, top row first) as HUD
+    /// texture [`MOVIE_TEXTURE`].
+    pub fn set_movie_frame(&mut self, [w, h]: [u32; 2], bgra: &[u8]) {
+        if w == 0 || h == 0 || bgra.len() < (w * h * 4) as usize {
+            return;
+        }
+        let size = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        if self.movie.as_ref().is_none_or(|m| m.2 != [w, h]) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("movie"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                // A movie's colours are gamma encoded.
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let group = texture_group(&self.device, &self.texture_layout, &self.clamp, &view);
+            self.movie = Some((texture, group, [w, h]));
+        }
+        if let Some((texture, _, _)) = &self.movie {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bgra[..(w * h * 4) as usize],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(h),
+                },
+                size,
+            );
+        }
+    }
+
+    /// The intro is over: let its frame go.
+    pub fn clear_movie(&mut self) {
+        self.movie = None;
+    }
+
     fn hud_texture(&self, texture: usize) -> Option<&wgpu::BindGroup> {
+        if texture == MOVIE_TEXTURE {
+            return self.movie.as_ref().map(|m| &m.1);
+        }
         if let Some(k) = texture.checked_sub(RANK_TEXTURES) {
             return self.rank_textures.get(k);
         }
@@ -1138,7 +1330,7 @@ impl Gpu {
         proj: Mat4,
         model: Mat4,
         camera: Vec3,
-        [fog, shading]: [f32; 2],
+        (fog, shading): (Fog, f32),
         object: Option<&DrawCall>,
         fx: [f32; 4],
     ) -> Option<u32> {
@@ -1154,7 +1346,7 @@ impl Gpu {
             mvp: (proj * model).to_cols_array_2d(),
             model: model.to_cols_array_2d(),
             camera: camera.extend(1.0).into(),
-            params: [fog, w, h, shading],
+            params: [0.0, w, h, shading],
             light: light.map_or([0.0; 4], |[r, g, b]| [r, g, b, 1.0]),
             colors: colors.map_or([[0.0; 4]; 2], |c| c.map(|[r, g, b]| [r, g, b, 1.0])),
             emblem: emblem.map_or([0.0; 4], |e| emblem::armour_cell(e.foreground)),
@@ -1165,15 +1357,17 @@ impl Gpu {
                 })
             }),
             fx,
+            fog: fog.color,
+            fog_range: [fog.range[0], fog.range[1], 0.0, 0.0],
         };
         self.staging.extend_from_slice(bytemuck::bytes_of(&u));
         self.staging.resize((offset + SLOT) as usize, 0);
         Some(offset as u32)
     }
 
-    /// Replace a mesh's vertices (same count) with a newly posed set.
+    /// Replace a level mesh's vertices (same count) with a newly posed set.
     pub fn update_mesh(&self, mesh: usize, vertices: &[Vertex]) {
-        if let Some(m) = self.meshes.get(mesh) {
+        if let Some(m) = self.level.meshes.get(mesh) {
             let bytes: &[u8] = bytemuck::cast_slice(vertices);
             if bytes.len() as u64 <= m.vertices.size() && !bytes.is_empty() {
                 self.queue.write_buffer(&m.vertices, 0, bytes);
@@ -1206,7 +1400,9 @@ impl Gpu {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        // Clear once; each view then draws over its own part of the window.
+        // Clear once (to the first view's sky); each view then draws over
+        // its own part of the window.
+        let clear = frames.first().map_or(SKY, |f| self.scene(f.scene).clear);
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -1217,7 +1413,7 @@ impl Gpu {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(SKY),
+                    load: wgpu::LoadOp::Clear(clear),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -1244,21 +1440,31 @@ impl Gpu {
         self.view_size = (vw as f32, vh as f32);
         self.staging.clear();
         let cam = f.camera;
+        let (fog, sky_fog) = (self.scene(f.scene).fog, self.scene(f.scene).sky_fog);
+        let clear = Fog::default();
         let sky = f.sky.as_ref().and_then(|d| {
             Some((
                 d.mesh,
-                self.slot(f.sky_proj, d.model, cam, [0.0, UNLIT], None, [0.0; 4])?,
+                self.slot(f.sky_proj, d.model, cam, (sky_fog, UNLIT), None, [0.0; 4])?,
             ))
         });
-        let world = self.draw_slots(f.view_proj, cam, 1.0, f.world);
+        let world = self.draw_slots(f.scene, f.view_proj, cam, fog, f.world);
         let none = [0.0; 4];
-        let sprites_slot = self.slot(f.view_proj, Mat4::IDENTITY, cam, [0.0, OBJECT], None, none);
-        let views = self.draw_slots(f.view_model_proj, cam, 0.0, f.view_models);
+        let sprites_slot = self.slot(
+            f.view_proj,
+            Mat4::IDENTITY,
+            cam,
+            (clear, OBJECT),
+            None,
+            none,
+        );
+        let level = SceneSlot::Level;
+        let views = self.draw_slots(level, f.view_model_proj, cam, clear, f.view_models);
         let view_sprites_slot = self.slot(
             f.view_model_proj,
             Mat4::IDENTITY,
             cam,
-            [0.0, OBJECT],
+            (clear, OBJECT),
             None,
             none,
         );
@@ -1266,7 +1472,7 @@ impl Gpu {
             Mat4::IDENTITY,
             Mat4::IDENTITY,
             cam,
-            [0.0, OBJECT],
+            (clear, OBJECT),
             None,
             none,
         );
@@ -1321,7 +1527,7 @@ impl Gpu {
             });
             fit(&mut pass);
             let pipelines = (&self.sky_pipeline, &self.sky_alpha_pipeline);
-            self.draw_meshes(&mut pass, &[(mesh, offset)], pipelines);
+            self.draw_meshes(&mut pass, self.scene(f.scene), &[(mesh, offset)], pipelines);
         }
         // The world, then effects in it.
         {
@@ -1332,7 +1538,7 @@ impl Gpu {
                 ..Default::default()
             });
             fit(&mut pass);
-            self.draw_slotted(&mut pass, &world);
+            self.draw_slotted(&mut pass, self.scene(f.scene), &world);
             if let (Some(buf), Some(offset)) = (&sprites, sprites_slot) {
                 self.draw_sprites(&mut pass, buf, f.sprites.len(), offset);
             }
@@ -1346,7 +1552,7 @@ impl Gpu {
                 ..Default::default()
             });
             fit(&mut pass);
-            self.draw_slotted(&mut pass, &views);
+            self.draw_slotted(&mut pass, &self.level, &views);
             if let (Some(buf), Some(offset)) = (&view_sprites, view_sprites_slot) {
                 self.draw_sprites(&mut pass, buf, f.view_sprites.len(), offset);
             }
@@ -1370,15 +1576,31 @@ impl Gpu {
         self.queue.submit([enc.finish()]);
     }
 
-    /// Uniform slots for objects: plain ones, camouflaged ones and
-    /// overshield shells.
-    fn draw_slots(&mut self, proj: Mat4, cam: Vec3, fog: f32, draws: &[DrawCall]) -> Slotted {
+    /// A loaded scene: the backdrop's, or the level's until it's loaded.
+    fn scene(&self, slot: SceneSlot) -> &GpuScene {
+        match (slot, &self.backdrop) {
+            (SceneSlot::Backdrop, Some(b)) => b,
+            _ => &self.level,
+        }
+    }
+
+    /// Uniform slots for objects (in `scene`): plain ones, camouflaged
+    /// ones and overshield shells.
+    fn draw_slots(
+        &mut self,
+        scene: SceneSlot,
+        proj: Mat4,
+        cam: Vec3,
+        fog: Fog,
+        draws: &[DrawCall],
+    ) -> Slotted {
         let now = self.started.elapsed().as_secs_f32();
         let mut out = Slotted::default();
         for d in draws {
-            let shading = self.meshes.get(d.mesh).map_or(OBJECT, |m| m.shading);
+            let mesh = self.scene(scene).meshes.get(d.mesh);
+            let shading = mesh.map_or(OBJECT, |m| m.shading);
             let fx = [d.fx.camo, 0.0, now, 0.0];
-            if let Some(o) = self.slot(proj, d.model, cam, [fog, shading], Some(d), fx) {
+            if let Some(o) = self.slot(proj, d.model, cam, (fog, shading), Some(d), fx) {
                 let list = if d.fx.camo > 0.0 {
                     &mut out.cloaked
                 } else {
@@ -1389,7 +1611,7 @@ impl Gpu {
             let glow = d.fx.overshield * (1.0 - d.fx.camo);
             if glow > 0.01 {
                 let fx = [0.0, glow, now, 0.0];
-                if let Some(o) = self.slot(proj, d.model, cam, [fog, shading], Some(d), fx) {
+                if let Some(o) = self.slot(proj, d.model, cam, (fog, shading), Some(d), fx) {
                     out.shells.push((d.mesh, o));
                 }
             }
@@ -1398,23 +1620,24 @@ impl Gpu {
     }
 
     /// Plain meshes, then camouflaged ones over them, then glowing shells.
-    fn draw_slotted(&self, pass: &mut wgpu::RenderPass, s: &Slotted) {
+    fn draw_slotted(&self, pass: &mut wgpu::RenderPass, scene: &GpuScene, s: &Slotted) {
         let pipelines = (&self.mesh_pipeline, &self.alpha_pipeline);
-        self.draw_meshes(pass, &s.plain, pipelines);
-        self.draw_whole(pass, &s.cloaked, &self.alpha_pipeline);
-        self.draw_whole(pass, &s.shells, &self.additive_pipeline);
+        self.draw_meshes(pass, scene, &s.plain, pipelines);
+        self.draw_whole(pass, scene, &s.cloaked, &self.alpha_pipeline);
+        self.draw_whole(pass, scene, &s.shells, &self.additive_pipeline);
     }
 
     /// Draw every surface of these meshes with one pipeline.
     fn draw_whole(
         &self,
         pass: &mut wgpu::RenderPass,
+        scene: &GpuScene,
         meshes: &[(usize, u32)],
         pipeline: &wgpu::RenderPipeline,
     ) {
         pass.set_pipeline(pipeline);
         for &(mesh, offset) in meshes {
-            let Some(m) = self.meshes.get(mesh) else {
+            let Some(m) = scene.meshes.get(mesh) else {
                 continue;
             };
             pass.set_bind_group(0, &self.globals, &[offset]);
@@ -1422,7 +1645,7 @@ impl Gpu {
             pass.set_vertex_buffer(0, m.vertices.slice(..));
             pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
             for (material, range, _) in &m.batches {
-                pass.set_bind_group(1, &self.materials[*material], &[]);
+                pass.set_bind_group(1, &scene.materials[*material], &[]);
                 pass.draw_indexed(range.clone(), 0, 0..1);
             }
         }
@@ -1433,6 +1656,7 @@ impl Gpu {
     fn draw_meshes(
         &self,
         pass: &mut wgpu::RenderPass,
+        scene: &GpuScene,
         meshes: &[(usize, u32)],
         (opaque, alpha): (&wgpu::RenderPipeline, &wgpu::RenderPipeline),
     ) {
@@ -1444,7 +1668,7 @@ impl Gpu {
         for (pipeline, blends) in passes {
             pass.set_pipeline(pipeline);
             for &(mesh, offset) in meshes {
-                let Some(m) = self.meshes.get(mesh) else {
+                let Some(m) = scene.meshes.get(mesh) else {
                     continue;
                 };
                 pass.set_bind_group(0, &self.globals, &[offset]);
@@ -1453,7 +1677,7 @@ impl Gpu {
                 pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for (material, range, blend) in &m.batches {
                     if blends.contains(blend) {
-                        pass.set_bind_group(1, &self.materials[*material], &[]);
+                        pass.set_bind_group(1, &scene.materials[*material], &[]);
                         pass.draw_indexed(range.clone(), 0, 0..1);
                     }
                 }
