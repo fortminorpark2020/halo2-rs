@@ -1238,11 +1238,11 @@ impl Pads {
             }
         };
         let m = &mut self.motors[k];
-        for n in 0..2 {
-            if level[n] > m.level[n] {
+        for (n, l) in level.iter_mut().enumerate() {
+            if *l > m.level[n] {
                 m.raised[n] = now;
             } else if !at_once && now.duration_since(m.raised[n]) < MOTOR_HOLD {
-                level[n] = m.level[n];
+                *l = m.level[n];
             }
         }
         if m.level == level {

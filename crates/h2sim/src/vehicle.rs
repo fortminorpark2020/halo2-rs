@@ -126,7 +126,7 @@ impl SeatLook {
             f = f.powf(self.exponent);
         }
         let rate =
-            |[rest, top]: [f32; 2]| (rest > 0.0 || top > 0.0).then(|| rest + (top - rest) * f);
+            |[rest, top]: [f32; 2]| (rest > 0.0 || top > 0.0).then_some(rest + (top - rest) * f);
         [rate(self.yaw), rate(self.pitch)]
     }
 }
