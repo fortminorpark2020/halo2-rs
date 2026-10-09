@@ -184,7 +184,8 @@ Battle Rifle); a melee that lands from behind kills outright (not someone
 sitting in a vehicle). As in Halo 2, pressing reload (or switching weapons)
 during a melee calls off the rest of it, so you can fire as soon as it has
 struck: that's the BXR (B, X, right trigger on a controller; F, R, left mouse
-on the keyboard). Another melee or a grenade still waits for the animation.
+on the keyboard), and reload can still be held down as you pull the trigger.
+Another melee or a grenade still waits for the animation.
 A grenade leaves the hand 8 frames into the throw animation and you can't fire
 until the throw ends (1.23 s). Grenades fly at the biped tag's 10 world units a
 second; a frag goes off half a second after it first lands, a plasma grenade

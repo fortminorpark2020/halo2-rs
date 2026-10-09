@@ -1465,6 +1465,12 @@ impl Game {
         let p = &self.players[i];
         let called_off = p.recovery == Recovery::CalledOff && p.striking.is_none();
         let ready = p.readying <= 0.0 && (free(self) || called_off);
+        // Till a called-off melee would have let go, reload held down
+        // doesn't hold the gun: the button that called it off may still be
+        // down as the trigger's pulled (B, X and R rolled together). Only a
+        // fresh press with rounds to load reloads then.
+        let bxr = called_off && !free(self);
+        let reload_pressed = pressed(cmd.reload, last.reload);
         let mut shots = Vec::new();
         let mut reloaded = Vec::new();
         // A flag in hand only melees.
@@ -1490,7 +1496,7 @@ impl Game {
             }
             let input = WeaponInput {
                 fire: cmd.fire && ready && !lunges,
-                reload: cmd.reload,
+                reload: cmd.reload && (!bxr || (reload_pressed && held.state.can_reload(&def))),
                 zoom: cmd.zoom && !dual,
             };
             let w = gun.unwrap_or_default();
@@ -2978,6 +2984,62 @@ pub(crate) mod tests {
                 melee: t == 0,
                 reload: t == 12,
                 fire: t == 13,
+                ..aim
+            },
+        );
+        assert!(seen.shots.is_empty(), "{seen:?}");
+        assert_eq!(g.players[0].weapons[0].state.loaded, 12);
+    }
+
+    #[test]
+    fn reload_still_held_as_the_trigger_is_pulled_doesnt_hold_the_gun() {
+        // B, X, R rolled together: X is still down when R goes in, and
+        // the shot leaves at once.
+        let (seen, _) = melee_test(
+            FACING,
+            |_| {},
+            |t, aim| Command {
+                melee: t == 0,
+                reload: (8..=14).contains(&t),
+                fire: t == 12,
+                ..aim
+            },
+        );
+        assert_eq!(seen.shots, [12], "{seen:?}");
+        // X pressed before the strike and let go after R: the shot leaves
+        // as the strike lands.
+        let (seen, _) = melee_test(
+            FACING,
+            |_| {},
+            |t, aim| Command {
+                melee: t == 0,
+                reload: (4..=11).contains(&t),
+                fire: (8..30).contains(&t),
+                ..aim
+            },
+        );
+        assert_eq!(seen.shots.first(), Some(&10), "{seen:?}");
+        // X held through a burst doesn't cut it short with a reload.
+        let (seen, g) = melee_test(
+            FACING,
+            |g| g.weapons[0].shots_per_fire = 3,
+            |t, aim| Command {
+                melee: t == 0,
+                reload: (8..=30).contains(&t),
+                fire: t == 12,
+                ..aim
+            },
+        );
+        assert_eq!(seen.shots, [12, 18, 24], "{seen:?}");
+        assert!(g.players[0].weapons[0].state.reloading.is_none());
+        // With rounds to load, X (held on) reloads.
+        let (seen, g) = melee_test(
+            FACING,
+            |g| g.players[0].weapons[0].state.loaded = 5,
+            |t, aim| Command {
+                melee: t == 0,
+                reload: (12..=20).contains(&t),
+                fire: t == 14,
                 ..aim
             },
         );
