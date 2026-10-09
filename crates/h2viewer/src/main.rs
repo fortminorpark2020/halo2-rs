@@ -51,6 +51,7 @@ mod probe;
 mod profile;
 mod rank;
 mod rig;
+mod rumble;
 mod scene;
 mod soundscape;
 mod vehicles;
@@ -60,7 +61,6 @@ use blam_cache::PlayerSpawn;
 use body::{BodyAnimator, BodyInput};
 use camera::FlyCamera;
 use effects::Effects;
-use gilrs::GamepadId;
 use glam::{Mat4, Vec3};
 use gpu::{hud_mode, DrawCall, Frame, Fx, HudBatch};
 use h2sim::bot::{bot_look, bot_name};
@@ -71,7 +71,7 @@ use h2sim::{
     World,
 };
 use hud::HudBuilder;
-use input::{PadButton, PadEvent, Pads};
+use input::{PadButton, PadEvent, PadId, Pads};
 use lan::Net;
 use local::{display_name, kill_message, player_colors, Keyboard, LocalPlayer, Taps};
 use menu::{MapChoice, Menu, Screen, Settings};
@@ -1077,6 +1077,9 @@ struct App {
     window: Option<Arc<Window>>,
     gpu: Option<gpu::Gpu>,
     keys: HashSet<KeyCode>,
+    /// Keys held whose press was spent on a menu or skipping a cutscene:
+    /// not held in the game until pressed again.
+    keys_spent: HashSet<KeyCode>,
     captured: bool,
     fire_held: bool,
     zoom_held: bool,
@@ -1244,7 +1247,7 @@ impl App {
     }
 
     /// Another person joins in splitscreen.
-    fn add_local(&mut self, pad: Option<GamepadId>) {
+    fn add_local(&mut self, pad: Option<PadId>) {
         if self.joined() {
             self.request_local(pad);
             return;
@@ -1267,28 +1270,40 @@ impl App {
         self.announce(&format!("{guest} JOINED"));
     }
 
-    fn pad_pressed(&mut self, id: GamepadId, event: PadEvent) {
+    fn pad_pressed(&mut self, id: PadId, event: PadEvent) {
         let button = match event {
             PadEvent::Disconnected => return self.pad_lost(id),
             PadEvent::Connected => return self.pad_back(id),
             PadEvent::Down(b) => Some(b),
-            PadEvent::Stick(_) => None,
+            PadEvent::Stick(_) | PadEvent::Repeat(_) => None,
         };
+        // A press spent on anything but the game (a menu, taking the
+        // controller, skipping a cutscene) isn't held in it until it's
+        // let go: B that closes the pause menu doesn't melee as the game
+        // comes back.
+        let played = self.pad_press(id, event);
+        if let (Some(b), false) = (button, played) {
+            self.pads.hold_off(id, b);
+        }
+    }
+
+    /// What a controller's press does: true if it went to the game.
+    fn pad_press(&mut self, id: PadId, event: PadEvent) -> bool {
         if self.loading.is_some() {
-            return;
+            return false;
         }
         if self.pad_in_menu(id) {
             self.menu_pad(id, event);
-            return;
+            return false;
         }
         // The left stick's pushes are only for menus.
-        let Some(button) = button else {
-            return;
+        let PadEvent::Down(button) = event else {
+            return false;
         };
         // A, Start or the trigger skip a cutscene.
         let skip = matches!(button, PadButton::A | PadButton::Start | PadButton::RT);
         if skip && self.mission.as_mut().is_some_and(|m| m.skip_cutscene()) {
-            return;
+            return false;
         }
         let owner = self.locals.iter().position(|l| l.pad == Some(id));
         match (owner, button) {
@@ -1317,13 +1332,15 @@ impl App {
                         k + 1
                     );
                 }
+                return true;
             }
             _ => {}
         }
+        false
     }
 
     /// Local player `k` plays with controller `id` from now on.
-    fn take_pad(&mut self, k: usize, id: GamepadId) {
+    fn take_pad(&mut self, k: usize, id: PadId) {
         let l = &mut self.locals[k];
         l.pad = Some(id);
         l.lost_pad = None;
@@ -1335,7 +1352,7 @@ impl App {
     /// goes with it, and so does a guest's pause menu, which only that
     /// controller worked: to the keyboard while the game stands still for
     /// it (to resume or end it there), or away over a game that plays on.
-    fn pad_lost(&mut self, id: GamepadId) {
+    fn pad_lost(&mut self, id: PadId) {
         match self.seats.iter().position(|s| s.pad == Some(id)) {
             Some(0) => self.seats[0].pad = None,
             Some(k) => {
@@ -1363,27 +1380,29 @@ impl App {
     /// The controllers people here play with, or lost and wait for, or
     /// asked a host to play with: this window's, held against other
     /// copies of the game on this PC.
-    fn pads_in_use(&self) -> Vec<GamepadId> {
+    fn pads_in_use(&self) -> Vec<PadId> {
         let seats = self.seats.iter().map(|s| s.pad);
         let locals = self.locals.iter().flat_map(|l| [l.pad, l.lost_pad]);
         let waiting = match &self.net {
             Net::Joined { waiting_pads, .. } => waiting_pads.as_slice(),
             _ => &[],
         };
-        let mut ids: Vec<GamepadId> = seats
+        let mut ids: Vec<PadId> = seats
             .chain(locals)
             .chain(waiting.iter().copied())
             .flatten()
             .collect();
-        ids.sort_by_key(|&id| usize::from(id));
+        ids.sort();
         ids.dedup();
         ids
     }
 
     /// A controller came back: to whoever lost it.
-    fn pad_back(&mut self, id: GamepadId) {
+    fn pad_back(&mut self, id: PadId) {
         if let Some(k) = self.locals.iter().position(|l| l.lost_pad == Some(id)) {
             self.take_pad(k, id);
+            // Whatever it comes back holding waits to be pressed again.
+            self.pads.hold_off_all(id);
         }
     }
 
@@ -1397,11 +1416,12 @@ impl App {
         }
         // Each player's own look settings and controller layouts (a
         // controller's Start or A may just have added a player).
-        for (k, l) in self.locals.iter_mut().enumerate() {
-            l.controls = self.menu.profile.controls_of(k);
+        for l in &mut self.locals {
+            l.controls = self.menu.profile.controls_of(l.slot);
         }
         let in_use = self.pads_in_use();
         self.pads.keep_claimed(&in_use);
+        self.update_rumble(dt);
         // The game's sounds hold while it's paused, as in Halo 2.
         self.sound.audio.pause_game(self.paused());
         let games = self.browser.poll().to_vec();
@@ -1702,6 +1722,7 @@ impl App {
         let listeners = self.listeners();
         for e in std::mem::take(&mut self.game.events) {
             self.sound.event(&self.scene, &self.game, &listeners, &e);
+            self.rumble_event(&e);
             match e {
                 Event::Shot {
                     player,
@@ -2210,7 +2231,7 @@ impl App {
             }
         }
         for g in &self.game.grenades {
-            let assets = scene.grenades[(g.kind == GrenadeKind::Plasma) as usize];
+            let assets = &scene.grenades[(g.kind == GrenadeKind::Plasma) as usize];
             if let Some(mesh) = assets.mesh {
                 // Tumbling through the air.
                 let spin = if g.velocity.length_squared() > 0.01 {
@@ -2648,6 +2669,7 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) => {
                 self.set_capture(false);
                 self.keys.clear();
+                self.keys_spent.clear();
                 self.fire_held = false;
                 self.zoom_held = false;
                 self.pads.set_focused(false);
@@ -2666,13 +2688,16 @@ impl ApplicationHandler for App {
                 }
                 match event.state {
                     ElementState::Pressed => {
-                        if !event.repeat {
-                            self.key_pressed(code);
+                        if !event.repeat && !self.key_pressed(code) {
+                            self.keys_spent.insert(code);
                         }
-                        self.keys.insert(code);
+                        if !self.keys_spent.contains(&code) {
+                            self.keys.insert(code);
+                        }
                     }
                     ElementState::Released => {
                         self.keys.remove(&code);
+                        self.keys_spent.remove(&code);
                     }
                 }
             }
@@ -2752,14 +2777,16 @@ impl App {
         self.after_menu(action);
     }
 
-    fn key_pressed(&mut self, code: KeyCode) {
+    /// A key went down: true if the press went to the game (not a menu,
+    /// a cutscene or the pause).
+    fn key_pressed(&mut self, code: KeyCode) -> bool {
         self.keyboard_used = true;
         if self.loading.is_some() {
-            return;
+            return true;
         }
         if self.mode == Mode::Menu && self.menu.screen == Screen::Lobby && code == KeyCode::KeyT {
             self.change_team(0);
-            return;
+            return false;
         }
         if self.keyboard_in_menu() {
             let input = match code {
@@ -2771,16 +2798,16 @@ impl App {
                     menu::Input::Select
                 }
                 KeyCode::Escape | KeyCode::Backspace => menu::Input::Back,
-                _ => return,
+                _ => return false,
             };
             self.menu_input(input);
-            return;
+            return false;
         }
         if code == KeyCode::Escape {
             if let Some(k) = self.locals.iter().position(|l| l.keyboard) {
                 self.pause(k);
             }
-            return;
+            return false;
         }
         // Space, Enter or E skip a cutscene.
         let skip = matches!(
@@ -2788,15 +2815,15 @@ impl App {
             KeyCode::Space | KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::KeyE
         );
         if skip && self.mission.as_mut().is_some_and(|m| m.skip_cutscene()) {
-            return;
+            return false;
         }
         if code == KeyCode::KeyB {
             self.add_bot();
-            return;
+            return false;
         }
         let joined = self.joined();
         let Some(k) = self.locals.iter().position(|l| l.keyboard) else {
-            return;
+            return true;
         };
         let player = self.locals[k].player;
         let l = &mut self.locals[k];
@@ -2833,6 +2860,7 @@ impl App {
             }
             _ => {}
         }
+        true
     }
 }
 
@@ -2955,6 +2983,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         window: None,
         gpu: None,
         keys: HashSet::new(),
+        keys_spent: HashSet::new(),
         captured: false,
         fire_held: false,
         zoom_held: false,

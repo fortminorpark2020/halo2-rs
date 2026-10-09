@@ -2,7 +2,7 @@
 //! ending games, and the menu music.
 
 use crate::campaign;
-use crate::input::{Dir, PadButton, PadEvent};
+use crate::input::{Dir, PadButton, PadEvent, PadId};
 use crate::lan::Net;
 use crate::local::{player_colors, LocalPlayer, TEAM_COLORS, TEAM_NAMES};
 use crate::menu::{self, Action, Input, MapChoice, Menu, ScoreLine, Screen, SeatInfo};
@@ -10,7 +10,6 @@ use crate::options::GameOptions;
 use crate::{
     level_focus, load_level, new_game, scene, App, Level, Loading, Mode, Then, MUSIC_VOLUME,
 };
-use gilrs::GamepadId;
 use h2net::LanGame;
 use h2sim::bot::{bot_look, bot_name};
 use h2sim::game::guest_name;
@@ -34,7 +33,7 @@ fn overview((focus, radius): (glam::Vec3, f32), angle: f32) -> crate::camera::Fl
 /// and their team in the lobby.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Seat {
-    pub pad: Option<GamepadId>,
+    pub pad: Option<PadId>,
     pub team: u8,
     /// They chose the team (in another PC's lobby; otherwise its host
     /// chooses).
@@ -56,10 +55,18 @@ enum Press {
 /// back, X changes team, Start joins and Back leaves.
 fn press(e: PadEvent) -> Press {
     match e {
-        PadEvent::Down(PadButton::Up) | PadEvent::Stick(Dir::Up) => Press::Menu(Input::Up),
-        PadEvent::Down(PadButton::Down) | PadEvent::Stick(Dir::Down) => Press::Menu(Input::Down),
-        PadEvent::Down(PadButton::Left) | PadEvent::Stick(Dir::Left) => Press::Menu(Input::Left),
-        PadEvent::Down(PadButton::Right) | PadEvent::Stick(Dir::Right) => Press::Menu(Input::Right),
+        PadEvent::Down(PadButton::Up) | PadEvent::Stick(Dir::Up) | PadEvent::Repeat(Dir::Up) => {
+            Press::Menu(Input::Up)
+        }
+        PadEvent::Down(PadButton::Down) | PadEvent::Stick(Dir::Down) | PadEvent::Repeat(Dir::Down) => {
+            Press::Menu(Input::Down)
+        }
+        PadEvent::Down(PadButton::Left) | PadEvent::Stick(Dir::Left) | PadEvent::Repeat(Dir::Left) => {
+            Press::Menu(Input::Left)
+        }
+        PadEvent::Down(PadButton::Right) | PadEvent::Stick(Dir::Right) | PadEvent::Repeat(Dir::Right) => {
+            Press::Menu(Input::Right)
+        }
         PadEvent::Down(PadButton::A) => Press::Menu(Input::Select),
         PadEvent::Down(PadButton::B) => Press::Menu(Input::Back),
         PadEvent::Down(PadButton::Start) => Press::Join,
@@ -122,7 +129,7 @@ impl App {
 
     /// Controller `id` works the menus: any of them, but over a game only
     /// one that's up for its player (or for everyone).
-    pub(crate) fn pad_in_menu(&self, id: GamepadId) -> bool {
+    pub(crate) fn pad_in_menu(&self, id: PadId) -> bool {
         if self.mode != Mode::Playing {
             return self.in_menu();
         }
@@ -267,7 +274,7 @@ impl App {
     }
 
     /// A controller press while the menus are up.
-    pub(crate) fn menu_pad(&mut self, id: GamepadId, event: PadEvent) {
+    pub(crate) fn menu_pad(&mut self, id: PadId, event: PadEvent) {
         let seated = self.seats.iter().position(|s| s.pad == Some(id));
         let lobby = self.mode == Mode::Menu && self.menu.screen == Screen::Lobby;
         match press(event) {

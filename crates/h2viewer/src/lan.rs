@@ -8,7 +8,7 @@ use crate::local::{Keyboard, LocalPlayer};
 use crate::menu::{self, Screen, SeatInfo};
 use crate::options::GameOptions;
 use crate::{scene, App, Mode, Then};
-use gilrs::GamepadId;
+use crate::input::PadId;
 use h2net::{Client, ClientEvent, Host, HostEvent, LanGame, Lobby, LobbyPlayer};
 use h2sim::game::{guest_name, TICK};
 use h2sim::Command;
@@ -43,7 +43,7 @@ pub enum Net {
         /// Our players are in the host's game (otherwise still joining).
         seated: bool,
         /// Controllers waiting for the host to add their player.
-        waiting_pads: Vec<Option<GamepadId>>,
+        waiting_pads: Vec<Option<PadId>>,
         /// The host's lobby, while waiting there for its next game.
         lobby: Option<Lobby>,
         /// Who plays here and the teams they'd like, as last told to the
@@ -635,7 +635,7 @@ impl App {
     }
 
     /// Joined: another person here wants to play (controller Start).
-    pub(crate) fn request_local(&mut self, pad: Option<GamepadId>) {
+    pub(crate) fn request_local(&mut self, pad: Option<PadId>) {
         // The host turns them away without a word when its game is full.
         if self.game.players.len() >= scene::MAX_BODIES {
             self.announce("THE GAME IS FULL");

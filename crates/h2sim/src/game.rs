@@ -219,8 +219,6 @@ const LUNGE_RANGE: f32 = 2.2;
 const MELEE_CONE: f32 = 0.6;
 const MELEE_COOLDOWN: f32 = 0.8;
 const PICKUP_RADIUS: f32 = 0.45;
-/// Hold the action key this long to swap weapons.
-const SWAP_HOLD: f32 = 0.25;
 const DROPPED_WEAPON_LIFETIME: f32 = 60.0;
 const GRENADE_THROW_COOLDOWN: f32 = 0.6;
 /// Below this distance from the top of the body, a hit is a headshot.
@@ -2115,7 +2113,7 @@ impl Game {
             self.events.push(Event::Switched { player: i });
             return Some(Taken::Weapon);
         }
-        if action && p.action_held >= SWAP_HOLD {
+        if action && p.action_held >= self.movement.action_hold {
             p.action_held = f32::MIN;
             let mut old =
                 std::mem::replace(&mut p.weapons[p.current], HeldWeapon { weapon: w, state });

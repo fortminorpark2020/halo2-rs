@@ -183,10 +183,19 @@ pub struct Controls {
     pub buttons: ButtonLayout,
     /// Which stick moves and which looks.
     pub sticks: StickLayout,
+    /// Controller Vibration: the controller rumbles with the game.
+    pub vibration: bool,
+    /// Automatic Look Centering: the view levels out as you move forward.
+    pub look_centering: bool,
+    /// Dual Wield Inversion: the triggers swap guns while dual wielding.
+    pub dual_wield_inversion: bool,
 }
 
 impl Default for Controls {
-    /// Halo 2's: look sensitivity 3, not inverted, its default layouts.
+    /// Halo 2's: look sensitivity 3, not inverted, its default layouts,
+    /// vibration on (its vibration screen picks Enabled for a profile
+    /// without the setting), and no look centering or inversion (a guess:
+    /// a new profile's flags aren't known).
     fn default() -> Controls {
         Controls {
             look_sensitivity: Controls::DEFAULT_SENSITIVITY,
@@ -194,6 +203,9 @@ impl Default for Controls {
             invert_look: false,
             buttons: ButtonLayout::Default,
             sticks: StickLayout::Default,
+            vibration: true,
+            look_centering: false,
+            dual_wield_inversion: false,
         }
     }
 }

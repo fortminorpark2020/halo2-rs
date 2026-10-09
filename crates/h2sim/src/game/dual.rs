@@ -5,7 +5,7 @@
 
 use super::{
     ready_time, DroppedWeapon, Event, Game, HeldWeapon, ItemKind, DROPPED_WEAPON_LIFETIME,
-    PICKUP_RADIUS, SWAP_HOLD,
+    PICKUP_RADIUS,
 };
 use crate::weapon::WeaponState;
 use glam::{Vec2, Vec3};
@@ -112,6 +112,7 @@ impl Game {
     /// weapon into the left hand.
     pub(super) fn press_switch(&mut self, i: usize, down: bool, was_down: bool, dt: f32) {
         let could_dual = self.left_hand_pickup(i).is_some();
+        let hold = self.movement.action_hold;
         let p = &mut self.players[i];
         if down && !was_down {
             p.switch_held = 0.0;
@@ -122,7 +123,7 @@ impl Game {
         } else if down {
             if p.switch_held >= 0.0 {
                 p.switch_held += dt;
-                if could_dual && p.switch_held >= SWAP_HOLD {
+                if could_dual && p.switch_held >= hold {
                     p.switch_held = f32::MIN;
                     self.take_left(i);
                 }

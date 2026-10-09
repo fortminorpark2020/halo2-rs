@@ -20,6 +20,11 @@ const TIRE_GRIP: f32 = 1.25;
 const COAST_DECELERATION: f32 = 0.8;
 /// How much faster a boosting Ghost or Banshee goes.
 pub const BOOST_SCALE: f32 = 1.75;
+/// The e-brake locks the back wheels: how hard they hold along, and how
+/// much of their sideways grip is left as they slide (of `TIRE_GRIP`).
+/// Estimates.
+const EBRAKE_HOLD: f32 = 0.9;
+const EBRAKE_SIDE_GRIP: f32 = 0.35;
 /// Bounce and slide off the level.
 const RESTITUTION: f32 = 0.1;
 const FRICTION: f32 = 0.5;
@@ -336,6 +341,8 @@ pub struct Controls {
     pub yaw: f32,
     pub pitch: f32,
     pub boost: bool,
+    /// The e-brake (the Warthog's): the back wheels lock, and it slides.
+    pub brake: bool,
     /// Sounding the horn (the Warthog's).
     pub horn: bool,
     /// Someone is driving.
@@ -731,6 +738,10 @@ impl Vehicle {
         let tank = def.drive == Drive::Tank;
         let mut target = 0.0;
         let mut accel = self.drive_acceleration(def, speed, dt);
+        let braking = c.driven && c.brake && def.drive == Drive::Wheels;
+        if braking {
+            accel = 0.0;
+        }
         if tank {
             if c.driven && c.throttle.y.abs() > 0.05 {
                 self.turn_toward(def, c.yaw, None, torque);
@@ -783,7 +794,13 @@ impl Vehicle {
             } else {
                 v.dot(side)
             };
-            let grip = TIRE_GRIP * load;
+            let mut grip = TIRE_GRIP * load;
+            if braking && !w.steers {
+                // Locked: they hold along, and slide sideways.
+                let hold = EBRAKE_HOLD * grip;
+                f += along * (-v.dot(along) * share / dt * 0.5).clamp(-hold, hold);
+                grip *= EBRAKE_SIDE_GRIP;
+            }
             f += side * (-slip * share / dt * 0.5).clamp(-grip, grip);
             if w.powered {
                 let drive = accel * m / powered;
@@ -1207,6 +1224,49 @@ pub(crate) mod tests {
         run(&mut v, &def, 4.0);
         let speed = v.velocity.dot(v.forward());
         assert!(speed > 4.0, "forward again at {speed}");
+    }
+
+    #[test]
+    fn the_jeeps_e_brake_stops_it_sooner_and_slides_it_round() {
+        let def = jeep();
+        let start = |brake: bool| {
+            let mut v = Vehicle::new(0, &def, Vec3::new(0.0, 0.0, 0.05), 0.0);
+            v.controls = Controls {
+                throttle: Vec2::new(0.0, 1.0),
+                driven: true,
+                ..Controls::default()
+            };
+            run(&mut v, &def, 4.0);
+            // Off the throttle, turning hard, the e-brake on or not.
+            v.controls.throttle = Vec2::ZERO;
+            v.controls.yaw = std::f32::consts::FRAC_PI_2;
+            v.controls.brake = brake;
+            v
+        };
+        let (mut coast, mut brake) = (start(false), start(true));
+        run(&mut coast, &def, 1.0);
+        run(&mut brake, &def, 1.0);
+        let speed = |v: &Vehicle| v.velocity.length();
+        assert!(
+            speed(&brake) < speed(&coast) - 1.0,
+            "braked to {} against {}",
+            speed(&brake),
+            speed(&coast)
+        );
+        // The back wheels let go sideways: it swings round further.
+        let sliding = |v: &Vehicle| v.velocity.normalize_or_zero().dot(v.forward());
+        assert!(
+            brake.yaw() > coast.yaw() || sliding(&brake) < sliding(&coast),
+            "yaw {} against {}",
+            brake.yaw(),
+            coast.yaw()
+        );
+        assert!(brake.up().z > 0.8, "stays on its wheels");
+        // Only a driven jeep's.
+        let mut parked = start(true);
+        parked.controls.driven = false;
+        run(&mut parked, &def, 1.0);
+        assert!(speed(&parked) > speed(&brake));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! gunning, running people over, and blowing up.
 
 use super::projectiles::Homing;
-use super::{Command, Event, Game, SWAP_HOLD};
+use super::{Command, Event, Game};
 use crate::collision::World;
 use crate::vehicle::{Controls, Drive, SeatRole, TrickKind, Vehicle, VehicleDef};
 use crate::weapon::{WeaponDef, WeaponInput, WeaponState};
@@ -224,7 +224,7 @@ impl Game {
             {
                 TANK_BOARD_HOLD
             }
-            _ => SWAP_HOLD,
+            _ => self.movement.action_hold,
         };
         let p = &mut self.players[i];
         p.board_held = if action { p.board_held + dt } else { 0.0 };
@@ -466,7 +466,7 @@ impl Game {
         } else {
             0.0
         };
-        if p.board_held >= SWAP_HOLD {
+        if p.board_held >= self.movement.action_hold {
             self.exit(world, i);
             return false;
         }
@@ -504,6 +504,8 @@ impl Game {
                     yaw: cmd.yaw,
                     pitch: cmd.pitch,
                     boost: cmd.throw_grenade && matches!(drive, Drive::Hover | Drive::Fly),
+                    // The left trigger: a Warthog's e-brake.
+                    brake: cmd.throw_grenade && drive == Drive::Wheels,
                     horn: def.horn && seat.weapon.is_none() && cmd.fire,
                     driven: true,
                 };
