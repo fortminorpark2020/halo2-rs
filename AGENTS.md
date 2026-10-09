@@ -5,12 +5,18 @@ this file says how the project is run.
 
 ## What this is
 
-A from-scratch Rust remake of **Halo 2 multiplayer** (no campaign) that reads
-the original game's `.map` files at runtime from the owner's Halo 2 Vista /
-Project Cartographer install. The owner has no game-dev experience, plays on
-Windows with keyboard and mouse or an Xbox controller, and just runs the .exe.
-The goal is to match Halo 2 (Xbox original) as closely as possible, with a few
-requested extras (Bumper Jumper and Recon controller layouts).
+Since 2026-10-09 the main goal is a **standalone launcher** (`crates/h2launch`,
+being built) that runs the classic Halo 2 engine (`halo2\halo2.dll`) and maps
+from the owner's own Steam copy of Halo: The Master Chief Collection (MCC),
+with our own server (`crates/h2live`) supplying the original Xbox Halo 2
+matchmaking experience: parties, playlists, the 1-50 levels and carnage
+report. See PROGRESS.md for the milestones and `docs/notes/pivot/` for why.
+
+Before that, the project was a from-scratch Rust remake of **Halo 2
+multiplayer** (no campaign) reading Halo 2 Vista / Project Cartographer `.map`
+files. That code is still here and is the fallback if the launcher can't play
+online. The owner has no game-dev experience, plays on Windows with keyboard
+and mouse or an Xbox controller, and just runs the .exe.
 
 ## Hard rules
 
@@ -26,6 +32,17 @@ requested extras (Bumper Jumper and Recon controller layouts).
   (CC0, a matching decompilation of the Xbox retail Halo 2, no leaked code) may
   be used to check behaviour and numbers. Re-implement in Rust; never paste
   its code. It is the Xbox build, while the maps are Halo 2 Vista.
+- **MCC files and code**: never commit or upload anything from MCC
+  (halo2.dll, maps, variants, fonts, shaders) or bytes, dumps or disassembly
+  taken from them. Offsets, sizes and layouts written as facts in our own words
+  are fine. HaloX and libmcc (no licence) and Blam Creation Suite and
+  Cartographer (GPL) may be read as references only; never paste their code.
+- **Keep the repository private and the project free.** MCC's licence forbids
+  third-party matchmaking and using its code outside MCC
+  (`docs/notes/pivot/legal.md`). No donations, no "Halo" in a public name.
+- The launcher can only be run on the owner's PC (CI and containers have no
+  MCC). Keep it compiling on Linux with a stub `main` so the workspace gate
+  still passes there.
 - `crates/wma` is ported from FFmpeg and is LGPL 2.1 or later; keep it a
   separate crate.
 
@@ -40,9 +57,11 @@ requested extras (Bumper Jumper and Recon controller layouts).
   and the game and the online server must use the same number.
 - `crates/h2live`: the online matchmaking server (levels 1-50, playlists,
   parties). Deployed to a Linux container; see `deploy/proxmox/` and `docs/ONLINE.md`.
-- `crates/h2viewer`: the game itself (wgpu + winit): menus, HUD, rendering,
-  input (keyboard, mouse, XInput controllers through gilrs), splitscreen, LAN
-  and online clients.
+- `crates/h2viewer`: the from-scratch game (wgpu + winit): menus, HUD,
+  rendering, input (keyboard, mouse, XInput controllers through gilrs),
+  splitscreen, LAN and online clients.
+- `crates/h2launch` (new, Windows only): the launcher that hosts MCC's
+  halo2.dll. Design notes in `docs/notes/launcher/`.
 - `docs/notes/`: design notes and research behind larger features (controller
   layouts, the main menu, the decompilation findings). Paths there that start
   with `$SP` or `scratchpad` refer to a scratch folder that no longer exists.
@@ -78,10 +97,9 @@ Several assistants may work on this repository. To avoid clobbering each other:
 
 - Branch from `main`, keep changes focused, and open a pull request. Never
   force-push or rewrite `main`.
-- Check open branches and pull requests first. As of 2026-10-09 these were in
-  progress: `controller-wip` (full controller support), `menu-preview` (Halo
-  2's main menu, intro movie and menu art), `feel-weapons`, `feel-combat` and
-  `feel-bots` (Halo 2 feel fixes). They are being merged into `main`; build
-  on `main` after they land, or coordinate before touching the same files
-  (`crates/h2viewer/src/menu.rs`, `input.rs`, `main.rs`, `local.rs` change a lot).
+- Check open branches and pull requests first. The from-scratch engine's
+  branches (`controller-wip` with draft PR #1, `menu-preview`, `feel-weapons`,
+  `feel-combat`, `feel-bots`) are parked until the launcher's go/no-go; don't
+  merge them without the owner asking. Launcher work goes on its own branches
+  off `main`.
 - Update README.md in plain words for anything a player would notice.
