@@ -871,6 +871,9 @@ impl Menu {
             ],
             Screen::SystemLink if ctx.lan.is_empty() => vec![Row::Searching],
             Screen::SystemLink => (0..ctx.lan.len()).map(Row::Join).collect(),
+            // A guest's (whose settings are a guest's) can't end the game
+            // for everyone or quit it.
+            Screen::Pause if ctx.owner > 0 => vec![Row::Resume, Row::ControllerSettings],
             Screen::Pause => vec![
                 Row::Resume,
                 Row::ControllerSettings,
@@ -3451,6 +3454,27 @@ mod tests {
         assert!(m.rows(&c).contains(&Row::MouseSensitivity));
         m.input(Input::Back, &c);
         assert_eq!(m.screen, Screen::Profile);
+    }
+
+    #[test]
+    fn a_guests_pause_menu_cannot_end_or_quit_the_game() {
+        let maps = maps();
+        let mut m = Menu::new(Settings::default(), Profile::default());
+        m.show(Screen::Pause);
+        let rows = |owner| {
+            let c = Context {
+                owner,
+                ..ctx(&maps, &[])
+            };
+            m.rows(&c)
+        };
+        assert_eq!(
+            rows(0),
+            [Row::Resume, Row::ControllerSettings, Row::EndGame, Row::Quit]
+        );
+        for guest in 1..crate::MAX_LOCAL {
+            assert_eq!(rows(guest), [Row::Resume, Row::ControllerSettings]);
+        }
     }
 
     #[test]

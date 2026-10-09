@@ -38,11 +38,13 @@ const DEAD_ZONE: f32 = 0.2;
 const TRIGGER: f32 = 0.3;
 const TRIGGER_RELEASE: f32 = 0.2;
 /// The stick counts as pushed past this, and let go under the second, for
-/// menus. Estimates.
-const STICK_PUSH: (f32, f32) = (0.6, 0.35);
+/// menus: Halo 2's push (0x7332 of 32767, from the CC0 decompilation's
+/// menu input); the let go is an estimate (Halo 2's has none).
+const STICK_PUSH: (f32, f32) = (0.9, 0.35);
 /// A direction held in a menu moves again after the first wait, then
-/// every second one. Estimates.
-const MENU_REPEAT: (Duration, Duration) = (Duration::from_millis(450), Duration::from_millis(120));
+/// every second one: Halo 2's quarter second for both (the CC0
+/// decompilation's menu input).
+const MENU_REPEAT: (Duration, Duration) = (Duration::from_millis(250), Duration::from_millis(250));
 
 /// A controller: gilrs' number for it (XInput's slot, 0 to 3, on
 /// Windows), or a scripted one's (`H2_PAD_SCRIPT`).
@@ -1876,13 +1878,15 @@ mod tests {
     fn the_left_stick_is_not_the_dpad() {
         let mut dir = None;
         let x = |v: f32| Vec2::new(v, 0.0);
+        // Halo 2's menus want it pushed nine tenths of the way.
         assert_eq!(stick_dir(&mut dir, x(0.5)), None);
-        assert_eq!(stick_dir(&mut dir, x(0.7)), Some(Dir::Right));
+        assert_eq!(stick_dir(&mut dir, x(0.85)), None);
+        assert_eq!(stick_dir(&mut dir, x(0.95)), Some(Dir::Right));
         // Held there: once.
-        assert_eq!(stick_dir(&mut dir, x(0.9)), None);
+        assert_eq!(stick_dir(&mut dir, x(1.0)), None);
         assert_eq!(stick_dir(&mut dir, x(0.4)), None);
         assert_eq!(stick_dir(&mut dir, x(0.2)), None);
-        assert_eq!(stick_dir(&mut dir, x(-0.7)), Some(Dir::Left));
+        assert_eq!(stick_dir(&mut dir, x(-0.95)), Some(Dir::Left));
         // And in a game the d-pad's functions come only from Down(Up..).
         assert_ne!(PadEvent::Stick(Dir::Up), PadEvent::Down(PadButton::Up));
     }
@@ -1892,17 +1896,17 @@ mod tests {
         let mut dir = None;
         // Mostly right, a little up: right, once, however it wobbles.
         assert_eq!(
-            stick_dir(&mut dir, Vec2::new(0.75, 0.6)),
+            stick_dir(&mut dir, Vec2::new(0.95, 0.6)),
             Some(Dir::Right)
         );
-        assert_eq!(stick_dir(&mut dir, Vec2::new(0.6, 0.75)), None);
+        assert_eq!(stick_dir(&mut dir, Vec2::new(0.6, 0.95)), None);
         assert_eq!(stick_dir(&mut dir, Vec2::new(0.7, 0.7)), None);
         // Swung round to straight up: up, once the right has let go.
-        assert_eq!(stick_dir(&mut dir, Vec2::new(0.2, 0.9)), Some(Dir::Up));
+        assert_eq!(stick_dir(&mut dir, Vec2::new(0.2, 0.95)), Some(Dir::Up));
         assert_eq!(stick_dir(&mut dir, Vec2::ZERO), None);
         assert_eq!(dir, None);
         assert_eq!(
-            stick_dir(&mut dir, Vec2::new(-0.5, -0.8)),
+            stick_dir(&mut dir, Vec2::new(-0.5, -0.95)),
             Some(Dir::Down)
         );
     }
@@ -1926,7 +1930,7 @@ mod tests {
         assert!(pads.events().is_empty());
         assert!(pads.repeats.is_empty());
         // The left stick too.
-        pads.script("stick 0 left 0 0.9");
+        pads.script("stick 0 left 0 1");
         assert_eq!(pads.events(), [(pad(0), PadEvent::Stick(Dir::Up))]);
         pads.repeats.iter_mut().for_each(|r| r.2 = past);
         assert_eq!(pads.events(), [(pad(0), PadEvent::Repeat(Dir::Up))]);

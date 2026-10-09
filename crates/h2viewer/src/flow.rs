@@ -160,9 +160,15 @@ impl App {
         self.menu_for(k.unwrap_or(usize::MAX))
     }
 
-    /// The game stands still: someone here paused it, and no one on another
-    /// PC plays in it (Halo 2 pauses a game at one console, but not one
-    /// over System Link).
+    /// Someone here waits for their controller to come back (or for A on
+    /// another, or Enter at the keyboard for player one).
+    pub(crate) fn reconnecting(&self) -> bool {
+        self.mode == Mode::Playing && self.locals.iter().any(|l| l.lost_pad.is_some())
+    }
+
+    /// The game stands still: someone here paused it, or waits for their
+    /// controller to come back, and no one on another PC plays in it (Halo
+    /// 2 pauses a game at one console, but not one over System Link).
     pub(crate) fn paused(&self) -> bool {
         let alone = match &self.net {
             Net::Offline | Net::Connecting { .. } => true,
@@ -171,7 +177,7 @@ impl App {
             }
             Net::Joined { .. } => false,
         };
-        let pause = self.menu_open && self.menu.pausing();
+        let pause = self.menu_open && self.menu.pausing() || self.reconnecting();
         self.mode == Mode::Playing && pause && alone
     }
 
@@ -324,27 +330,10 @@ impl App {
                 self.seats.retain(|s| s.pad != Some(id));
                 self.sound.play_ui(&self.scene, menu::Sound::Back);
             }
-            Press::Menu(input) => {
-                // A on a new controller takes over player one (the keyboard
-                // and mouse still work for them too).
-                let menus = self.mode == Mode::Menu;
-                if input == Input::Select
-                    && menus
-                    && seated.is_none()
-                    && self.seats[0].pad.is_none()
-                {
-                    self.seats[0].pad = Some(id);
-                    if self.keyboard_used {
-                        // Taking over, not choosing what's highlighted.
-                        self.sound.play_ui(&self.scene, menu::Sound::Forward);
-                        return;
-                    }
-                }
-                self.menu_input(input);
-            }
+            Press::Menu(input) => self.pad_menu_input(id, seated, input),
             Press::Join if lobby && seated.is_none() => {
                 if self.seat_free() {
-                    self.seats[0].pad = Some(id);
+                    self.seat_player_one(id);
                 } else if self.seats.len() < crate::MAX_LOCAL {
                     let slot = self.guest_slot(Some(id));
                     self.seats.push(Seat {
@@ -356,9 +345,13 @@ impl App {
                 self.sound.play_ui(&self.scene, menu::Sound::Forward);
             }
             // Start on the pause menu (or its controller settings) goes
-            // back toward the game.
-            Press::Join if self.menu.pausing() => self.menu_input(Input::Back),
-            Press::Join => self.menu_input(Input::Select),
+            // back to the game, as in Halo 2.
+            Press::Join if self.menu.pausing() => {
+                self.menu.sound = Some(menu::Sound::Back);
+                self.after_menu(Action::Resume);
+            }
+            // Elsewhere it's A.
+            Press::Join => self.pad_menu_input(id, seated, Input::Select),
             // Player one stays (the keyboard takes them back when it's used).
             Press::Leave if lobby => match seated {
                 Some(0) => {}
@@ -371,7 +364,7 @@ impl App {
             Press::Leave => self.menu_input(Input::Back),
             Press::Team if lobby => {
                 if seated.is_none() && self.seat_free() {
-                    self.seats[0].pad = Some(id);
+                    self.seat_player_one(id);
                 }
                 if let Some(k) = self.seats.iter().position(|s| s.pad == Some(id)) {
                     self.change_team(k);
@@ -403,6 +396,43 @@ impl App {
             self.pad_slots.push((id, slot));
         }
         slot
+    }
+
+    /// Controller `id` (in lobby seat `seated`, if any) works the menus:
+    /// A on a new one takes over player one (the keyboard and mouse still
+    /// work for them too). A guest's (any but player one's, once player
+    /// one has one) can't quit the game or end it for everyone.
+    fn pad_menu_input(&mut self, id: PadId, seated: Option<usize>, input: Input) {
+        let menus = self.mode == Mode::Menu;
+        if input == Input::Select && menus && seated.is_none() && self.seats[0].pad.is_none() {
+            self.seat_player_one(id);
+            if self.keyboard_used {
+                // Taking over, not choosing what's highlighted.
+                self.sound.play_ui(&self.scene, menu::Sound::Forward);
+                return;
+            }
+        }
+        // (The carnage report's A is anyone's.)
+        let guest = match self.mode {
+            _ if self.menu.screen == Screen::PostGame => false,
+            Mode::Playing => !self.locals.iter().any(|l| l.pad == Some(id) && l.keyboard),
+            _ => self.seats[0].pad != Some(id),
+        };
+        let action = self.with_menu(|m, ctx| m.input(input, ctx));
+        if guest && matches!(action, Action::Quit | Action::EndGame | Action::Leave) {
+            self.menu.sound = None;
+            self.sound.play_ui(&self.scene, menu::Sound::Back);
+            return;
+        }
+        self.after_menu(action);
+    }
+
+    /// Controller `id` is player one's from now on (and again if it goes
+    /// and comes back in the menus).
+    fn seat_player_one(&mut self, id: PadId) {
+        self.seats[0].pad = Some(id);
+        self.pad_slots.retain(|m| m.0 != id);
+        self.pad_slots.push((id, 0));
     }
 
     /// Player one is free for a controller: no one has used the keyboard or

@@ -90,8 +90,6 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// Most people sharing one screen.
 pub(crate) const MAX_LOCAL: usize = 4;
-/// What a guest whose controller went sees until they play on.
-const LOST_PAD: &str = "CONTROLLER DISCONNECTED: PRESS A TO PLAY ON";
 /// Seconds between someone winning and the carnage report.
 const GAME_OVER_DELAY: f32 = 4.0;
 /// Frames this far apart mean the window isn't being drawn (it's
@@ -1311,6 +1309,16 @@ impl App {
             return false;
         }
         let owner = self.locals.iter().position(|l| l.pad == Some(id));
+        // Halo 2's dialog for a controller that went: back, it's A to play
+        // on (and nothing else meanwhile).
+        if let Some(l) = owner.and_then(|k| self.locals.get_mut(k)) {
+            if l.lost_pad.is_some() {
+                if button == PadButton::A {
+                    l.lost_pad = None;
+                }
+                return false;
+            }
+        }
         match (owner, button) {
             (None, PadButton::A) => {
                 if let Some(k) = local::new_pad_for(&self.locals, button) {
@@ -1403,12 +1411,20 @@ impl App {
         ids
     }
 
-    /// A controller came back: to whoever lost it.
+    /// A controller came back: to whoever lost it, who presses A on it to
+    /// play on (as in Halo 2); in the menus, player one's is theirs again.
     fn pad_back(&mut self, id: PadId) {
-        if let Some(k) = self.locals.iter().position(|l| l.lost_pad == Some(id)) {
-            self.take_pad(k, id);
-            // Whatever it comes back holding waits to be pressed again.
-            self.pads.hold_off_all(id);
+        // Whatever it comes back holding waits to be pressed again.
+        self.pads.hold_off_all(id);
+        if let Some(l) = self.locals.iter_mut().find(|l| l.lost_pad == Some(id)) {
+            l.pad = Some(id);
+            l.message("CONTROLLER CONNECTED".into());
+            return;
+        }
+        let player_one = self.pad_slots.contains(&(id, 0));
+        let seated = self.seats.iter().any(|s| s.pad == Some(id));
+        if self.mode == Mode::Menu && player_one && !seated && self.seats[0].pad.is_none() {
+            self.seats[0].pad = Some(id);
         }
     }
 
@@ -1497,12 +1513,7 @@ impl App {
         }
         let notice = self.lan_notice();
         for l in &mut self.locals {
-            // A guest whose controller went is told how to play on.
-            let lost = l
-                .lost_pad
-                .filter(|_| !l.keyboard)
-                .map(|_| LOST_PAD.to_string());
-            l.notice = lost.or_else(|| notice.clone().filter(|_| l.keyboard));
+            l.notice = notice.clone().filter(|_| l.keyboard);
             l.update_camera(&self.game, &self.world, self.pending, dt);
         }
         self.watch_probe();
@@ -2835,6 +2846,14 @@ impl App {
         let player = self.locals[k].player;
         let l = &mut self.locals[k];
         l.typing = true;
+        // Their controller went: Enter plays on at the keyboard (Halo 2
+        // PC's "Controller disconnected. Press enter to continue.").
+        if l.lost_pad.is_some() {
+            if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
+                l.lost_pad = None;
+            }
+            return false;
+        }
         match code {
             KeyCode::Backquote => {
                 l.flying = !l.flying;

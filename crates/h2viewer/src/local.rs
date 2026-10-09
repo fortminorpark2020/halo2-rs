@@ -548,6 +548,10 @@ impl LocalPlayer {
     /// This player's controller now, under their layouts, if it's
     /// connected and this window takes its input.
     pub fn pad_state(&self, pads: &Pads) -> Option<PadState> {
+        // Back after it went, it waits for A (`lost_pad`).
+        if self.lost_pad.is_some() {
+            return None;
+        }
         let reading = pads.reading(self.pad?)?;
         Some(reading.state(self.controls.buttons, self.controls.sticks))
     }
@@ -717,6 +721,29 @@ impl LocalPlayer {
         }
         let held = self.me(game).held()?;
         Some((game.weapons.get(held.weapon)?, held.state.zoom))
+    }
+
+    /// Halo 2's dialog while their controller is gone (the game stands
+    /// still for it, unless others play over the network): at the
+    /// keyboard, Enter plays on there, as on Halo 2 PC; a guest
+    /// reconnects it (or takes another) and presses A.
+    fn lost_pad_dialog(&self, hb: &mut HudBuilder, scene: &Scene, (w, h): (f32, f32), t: f32) {
+        if self.lost_pad.is_none() {
+            return;
+        }
+        let line = if self.keyboard {
+            "CONTROLLER DISCONNECTED. PRESS ENTER TO CONTINUE."
+        } else {
+            "PLEASE RECONNECT THE CONTROLLER AND PRESS A TO CONTINUE."
+        };
+        let (half_w, half_h) = ((w * 0.5 - 8.0).min(230.0 * t), 34.0 * t);
+        let rect = [w * 0.5 - half_w, h * 0.5 - half_h, w * 0.5 + half_w, h * 0.5 + half_h];
+        let back = [0.0, 0.03, 0.08, 0.88];
+        hb.quad(scene.hud_white, rect, [0.0; 4], back, hud_mode::PLAIN, 0.0);
+        let font = scene.hud_font;
+        let title = "CONTROLLER DISCONNECTED";
+        hb.text(font, [w * 0.5, h * 0.5 - 22.0 * t], 11.0 * t, title, hud::BLUE);
+        hb.text(font, [w * 0.5, h * 0.5 + 6.0 * t], 7.0 * t, line, hud::BLUE);
     }
 
     /// Look around with a controller's look stick (the right one, but for
@@ -1288,6 +1315,7 @@ impl LocalPlayer {
         if let Some(notice) = &self.notice {
             hb.text(font, [w * 0.5, 64.0 * t], 8.0 * t, notice, hud::BLUE);
         }
+        self.lost_pad_dialog(&mut hb, scene, (w, h), t);
         // Your score (your team's in team games), and the best of the
         // others under it. The campaign keeps no score.
         let campaign = game.rules.game_type == GameType::Campaign;
@@ -2297,6 +2325,24 @@ mod tests {
         assert_eq!(new_pad_for(&locals, PadButton::Start), None);
         locals[0].pad = Some(pad(2));
         assert_eq!(new_pad_for(&locals, PadButton::A), None);
+    }
+
+    #[test]
+    fn a_controller_back_waits_for_a_before_it_plays() {
+        let mut game = h2sim::testing::game();
+        let i = game.add_player();
+        let mut l = LocalPlayer::new(i, &game);
+        let mut pads = Pads::scripted();
+        pads.script("down 0 RT");
+        pads.events();
+        l.pad = Some(pad(0));
+        assert!(l.pad_state(&pads).is_some());
+        // It went and came back: nothing from it until A (main.rs).
+        l.lost_pad = Some(pad(0));
+        assert!(l.pad_state(&pads).is_none());
+        assert!(!l.command(&game, None, l.pad_state(&pads)).fire);
+        l.lost_pad = None;
+        assert!(l.command(&game, None, l.pad_state(&pads)).fire);
     }
 
     #[test]
