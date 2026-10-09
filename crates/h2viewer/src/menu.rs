@@ -733,6 +733,12 @@ impl Menu {
         self.sound = Some(Sound::Forward);
     }
 
+    /// The guest settings the controller screen was opened for from the
+    /// lobby or a pause menu (none: player one's, off the profile).
+    pub fn controls_for(&self) -> Option<usize> {
+        self.controls_for
+    }
+
     /// The local player whose controller settings the controller screen
     /// changes (player one is 0).
     fn controls_player(&self) -> usize {

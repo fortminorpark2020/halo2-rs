@@ -416,6 +416,13 @@ impl App {
                 return;
             }
         }
+        // The lobby and its game options are player one's; another
+        // controller works only its own controller settings there.
+        let one = self.seats[0].pad == Some(id);
+        let own = seated.is_some_and(|k| self.menu.controls_for() == Some(self.seats[k].slot));
+        if menus && !may_work(self.menu.screen, one, own) {
+            return;
+        }
         // (The carnage report's A is anyone's.)
         let guest = match self.mode {
             _ if self.menu.screen == Screen::PostGame => false,
@@ -1122,9 +1129,38 @@ impl App {
     }
 }
 
+/// Whether a controller may work the menus on `screen` between games:
+/// all of them if it's player one's (`one`); otherwise not the lobby or
+/// its game options, which are player one's in Halo 2, and the controller
+/// settings only when they're its own (`own`, opened with Y in the lobby).
+/// It still joins with Start, picks a team with X and leaves with B.
+fn may_work(screen: Screen, one: bool, own: bool) -> bool {
+    one || match screen {
+        Screen::Lobby | Screen::Options => false,
+        Screen::Controls => own,
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guests_leave_the_lobby_to_player_one() {
+        // Player one's controller works every menu.
+        for screen in [Screen::Lobby, Screen::Options, Screen::Controls] {
+            assert!(may_work(screen, true, false));
+        }
+        // A guest's can't start the game or change it, nor player one's
+        // settings, only their own.
+        assert!(!may_work(Screen::Lobby, false, true));
+        assert!(!may_work(Screen::Options, false, true));
+        assert!(!may_work(Screen::Controls, false, false));
+        assert!(may_work(Screen::Controls, false, true));
+        // The carnage report's A is anyone's.
+        assert!(may_work(Screen::PostGame, false, false));
+    }
 
     #[test]
     fn a_guests_settings_follow_their_controller() {
