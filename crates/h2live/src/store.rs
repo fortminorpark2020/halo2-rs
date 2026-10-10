@@ -25,6 +25,7 @@
 //! <unix time> <match> <playlist key> <map> <game type> <counted> <player>...
 //! ```
 //!
+//! where a custom game, which has no playlist, gives `-` as its key, and
 //! with each player as
 //! `<id>:<team>:<place>:<left>:<old xp>:<new xp>:<old level>:<new level>`,
 //! followed by
@@ -353,7 +354,7 @@ pub struct GameRecord {
     /// When it ended (Unix time).
     pub unix: u64,
     pub id: u64,
-    /// The playlist's key.
+    /// The playlist's key (empty for a custom game).
     pub playlist: String,
     pub map: String,
     pub game_type: GameType,
@@ -394,7 +395,13 @@ impl GameRecord {
             "{} {} {} {} {} {}",
             self.unix,
             self.id,
-            self.playlist,
+            // A custom game has no playlist: `-`, so the words still line
+            // up (no key has a `-`).
+            if self.playlist.is_empty() {
+                "-"
+            } else {
+                &self.playlist
+            },
             self.map,
             game_type.map_or("slayer", |(_, name)| name),
             self.counted as u8
@@ -700,6 +707,15 @@ mod tests {
              00000000000000ab:1:0:0:900:978:10:10:-2:5:1:9:1:6 00000000000000cd:0:1:1:0:0:1:1"
         );
         assert!(lines[1].starts_with("1700000100 8 double_team lockout team_slayer 2 "));
+        // A custom game has no playlist key.
+        let custom = GameRecord {
+            playlist: String::new(),
+            counted: Counted::No,
+            ..game.clone()
+        };
+        assert!(custom
+            .line()
+            .starts_with("1700000100 7 - lockout team_slayer 0 "));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
