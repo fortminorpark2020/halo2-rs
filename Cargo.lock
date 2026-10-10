@@ -1014,6 +1014,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2launch"
+version = "0.1.0"
+dependencies = [
+ "png",
+ "sha2",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "h2live"
 version = "0.1.0"
 dependencies = [

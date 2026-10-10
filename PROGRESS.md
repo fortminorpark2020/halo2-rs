@@ -90,9 +90,20 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   host interface, launch steps, launch options, networking, results and UI),
   from HaloX, libmcc, Blam Creation Suite (Opus), Cartographer and the Xbox
   decompilation. Notes will be in `docs/notes/launcher/`.
-- Next: `crates/h2launch` milestone 1, built and run on the owner's PC; then
-  h2live made client-agnostic (its own protocol version, MCC game variants as
-  playlists, a fast relay for engine traffic).
+- `crates/h2launch` milestone 1 (branch `h2launch-m1`, 2026-10-10): the
+  launcher is written and the full gate and both Windows cross-builds pass on
+  Linux, but it has not run on the owner's PC yet. It finds the MCC folder,
+  opens a window and a D3D11 device, loads `halo2.dll` through its exports,
+  builds the Lockout Slayer options (loading the variant through data access),
+  serves the 256-slot host object and 151-slot event manager, feeds pad and
+  keyboard/mouse input, and logs everything plus a `RESULT:` line. No MCC file
+  is touched and no game code is patched. The brief and a crate README are in
+  `docs/notes/launcher/`. Estimates (stick/mouse sensitivity, the Halo 2
+  gamepad mapping, whether KB/M works without the engine detours) are marked in
+  the code and are what the PC run confirms.
+- Next: run it on the owner's PC (`--check`, then `--quit-after`/`--screenshot`)
+  and fix what fails; then h2live made client-agnostic (its own protocol
+  version, MCC game variants as playlists, a fast relay for engine traffic).
 
 ## Where things are
 
