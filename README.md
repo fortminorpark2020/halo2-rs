@@ -47,6 +47,11 @@ install. No game files are included in this repository.
   2's launch playlists and its later Team Snipers and Team Hardcore
   (replaceable by a `playlists.txt`), and matchmaking (level ranges that
   widen, even teams, map choice and host choice).
+- `h2launch`: a separate experiment (Windows only) that starts MCC's own
+  classic Halo 2 engine from your Master Chief Collection install, without
+  running MCC, straight into an offline Slayer match on Lockout. It reads the
+  game's `halo2.dll` and never changes any MCC file. Early work in progress; it
+  is not part of the game above. See `docs/notes/launcher/README.md`.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
 - `h2viewer`: the game: Halo 2 style menus and lobby, Halo 2's maps with their
@@ -369,15 +374,20 @@ Multiplayer maps only store the tags unique to them; the rest live in
 `h2live.exe` is the online service: accounts, parties, matchmaking and the
 relay that carries online games. It reads no map files. Double-click it on
 the PC that hosts it (allow it through Windows Firewall when asked): it
-listens on port 47050, keeps accounts in `h2live-data` (back that folder
-up), asks the router to open the port (UPnP), and says how players reach
-it: `READY: ws://<address>:47050`, `FORWARD TCP 47050 TO <this PC>` when
-the router needs a port forward set by hand, or `CGNAT: USE THE HOSTED
-OPTION` when the internet provider makes that impossible. Ctrl+C stops it.
-An `h2live.txt` next to it can set `port=` and `data=`. On a host online,
-`PORT`, `H2LIVE_DATA` and `H2LIVE_SECRET` (what signs players' stat cards)
-set the same; `/health` answers health checks, and `/` says how many
-players are online. `H2LIVE_UPNP=0` leaves the router alone.
+listens on port 47050 (TCP for signing in, and UDP for the relay that
+carries the launcher's games), keeps accounts in `h2live-data` (back that
+folder up), asks the router to open the port (UPnP), and says how players
+reach it: `READY: ws://<address>:47050`, `FORWARD TCP AND UDP 47050 TO
+<this PC>` when the router needs port forwards set by hand, or `CGNAT: USE
+THE HOSTED OPTION` when the internet provider makes that impossible. Ctrl+C
+stops it. An `h2live.txt` next to it can set `port=`, `data=` and `relay=`
+(the relay's UDP port, or `off`). On a host online, `PORT`, `H2LIVE_DATA`,
+`H2LIVE_RELAY` and `H2LIVE_SECRET` (what signs players' stat cards) set the
+same; `/health` answers health checks, and `/` says how many players are
+online. `H2LIVE_UPNP=0` leaves the router alone. The relay only lets in
+the players of matches h2live sets up. `h2relay.exe` runs a relay on its
+own for tests on one PC or a home network (`h2relay [port]`); it lets
+anyone in, so don't forward its port.
 
 Games sign in to h2live on the same PC if it's running, or else the server a
 `server=` line in `profile.txt` names, or else the one built into the game;

@@ -1014,6 +1014,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2launch"
+version = "0.1.0"
+dependencies = [
+ "h2relay",
+ "png",
+ "sha2",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "h2live"
 version = "0.1.0"
 dependencies = [
@@ -1022,6 +1032,7 @@ dependencies = [
  "getrandom 0.3.4",
  "glam",
  "h2net",
+ "h2relay",
  "h2sim",
  "igd-next",
  "rustix 1.1.5",
@@ -1042,6 +1053,16 @@ dependencies = [
  "socket2",
  "tungstenite",
  "webpki-roots",
+]
+
+[[package]]
+name = "h2relay"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "rustix 1.1.5",
+ "sha2",
+ "socket2",
 ]
 
 [[package]]

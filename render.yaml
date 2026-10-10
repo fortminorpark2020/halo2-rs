@@ -25,6 +25,7 @@ services:
         - crates/h2sim/**
         - crates/h2net/**
         - crates/h2live/**
+        - crates/h2relay/**
     envVars:
       # What signs players' stat cards, made up by Render once. Never delete
       # the service: a new one has a new secret, and old cards are no good to

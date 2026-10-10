@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 05:30 UTC. Any assistant that works on the project
+Last updated 2026-10-10 05:45 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -101,8 +101,12 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   searches instead and sends an 18-byte search to its own id on 1002 once
   a second. As of b602c19 the session file gives 0x08 (and 0x40, meaning
   unknown) to the host only, and the launcher forwards those self-addressed
-  1002 sends to every launcher in the match. Next: see whether the host
-  answers the search and the guest joins.
+  1002 sends to every launcher in the match. With that (PC runs 05:20 UTC)
+  the host answers the search (broadcast-reply) and the guest sends a
+  join-request, but the host refuses it (join-refuse), the guest's session
+  never leaves state 0 and it restarts. Next: find which check refuses
+  (likely the guest's join-request claiming the host's machine identity,
+  or the host's observer failing to open a channel to the guest).
 - Design rule kept so far: no patches, hooks, byte writes or calls by RVA
   into halo2.dll; read-only diagnostics (`--diag`, `--watch`) only. If the
   only way forward needs more, ask the owner first.

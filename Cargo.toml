@@ -1,7 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/blam-cache", "crates/h2live", "crates/h2net", "crates/h2sim", "crates/h2tool", "crates/h2viewer", "crates/wma"]
+members = ["crates/blam-cache", "crates/h2launch", "crates/h2live", "crates/h2net", "crates/h2relay", "crates/h2sim", "crates/h2tool", "crates/h2viewer", "crates/wma"]
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
+
+# The MCC launcher keeps its debug information in release builds, so the
+# addresses its crash log prints for its own code can be looked up.
+[profile.release.package.h2launch]
+debug = true
