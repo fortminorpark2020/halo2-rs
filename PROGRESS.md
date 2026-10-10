@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 06:35 UTC. Any assistant that works on the project
+Last updated 2026-10-10 06:50 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -115,10 +115,18 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   (2026-10-10 06:00). LAUNCHER_RESULT carries each player's team, standing,
   score and deaths from the engine's results block (host slot 6, 0x5D138
   bytes; layout in `crates/h2launch/src/results.rs`). Next: kills,
-  assists and betrayals in that block (needs a game with real kills), a
-  test of a team playlist (the launcher playlists now play MCC's own
-  matchmaking variants, chosen from the `h2launch --variants` list), and
-  deploying h2live with the relay to the Proxmox server.
+  assists and betrayals in that block (needs a game with real kills).
+  The launcher playlists play MCC's own matchmaking variants, chosen from
+  the `h2launch --variants` list; Team Snipers (opposite teams) and a
+  three-player Rumble Pit worked (2026-10-10 06:30).
+- The Proxmox server (container 102) runs h2live from `launcher-live`
+  edc64b8 since 2026-10-10 06:45 (still `PROTOCOL` 26 for the Rust game;
+  rollback copy `/opt/h2live/h2live.prev`), with the relay on UDP 47050.
+  Two launchers on the owner's PC played a match through it
+  (`--live 192.168.8.102`). Players outside his network need TCP and UDP
+  47050 forwarded to 192.168.8.102 in his router (his step). The binary
+  went over on a temporary orphan branch `deploy-h2live`, which can be
+  deleted (the container proxy refuses branch deletes).
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.
