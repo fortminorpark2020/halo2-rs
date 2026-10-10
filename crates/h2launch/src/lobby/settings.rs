@@ -4,7 +4,7 @@
 //! controls were added reads with Halo 2's default controls.
 //!
 //! ```text
-//! server = 192.168.8.102
+//! server = h2.mohnjorrow.com
 //! gamertag = JOHN
 //! button_layout = bumper_jumper
 //! thumbstick_layout = default
@@ -19,9 +19,10 @@
 use crate::controls::Controls;
 use std::path::{Path, PathBuf};
 
-/// The owner's matchmaking server on his home network, used until another
-/// is typed in.
-pub const DEFAULT_SERVER: &str = "192.168.8.102";
+/// The owner's matchmaking server, by its public name (port 47050 is
+/// added), until another is typed in. The name also works on the owner's
+/// home network, where 192.168.8.102 is the same server.
+pub const DEFAULT_SERVER: &str = "h2.mohnjorrow.com";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {

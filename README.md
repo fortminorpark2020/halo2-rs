@@ -50,7 +50,8 @@ install. No game files are included in this repository.
 - `h2launch`: the launcher (Windows only, work in progress) that starts MCC's
   own classic Halo 2 engine from your Master Chief Collection install,
   without running MCC. Double-click it to open its lobby: pick a gamertag,
-  form a party, search a playlist, play the match on the real engine, and
+  form a party (the sign-in screen offers the project's server,
+  h2.mohnjorrow.com, by default), search a playlist, play the match on the real engine, and
   see the carnage report with your new level afterwards. Custom Game (under
   the playlists) lets the party leader pick any game type and map for the
   party, unranked; it works alone too. Y on the playlists opens the party:
@@ -86,12 +87,13 @@ install. No game files are included in this repository.
   button to zoom, Space to jump, Left Ctrl to crouch, G to throw a
   grenade, F for the flashlight, Q to melee, R to reload, E for the action
   and Tab to switch weapons. Those are Halo 2's own keys on the PC, as
-  others have read them from the game's code; they haven't been tried in
-  this launcher yet. MCC's other keys (the right button for the left gun,
+  others have read them from the game's code; moving, jumping, crouching
+  and the grenade have been tried in this launcher, the rest not yet.
+  MCC's other keys (the right button for the left gun,
   1 to switch weapons, 2 to swap grenades, 4 for the flashlight, C to
   dual wield) are given to the game too, but may do nothing. When a match
-  starts the game's window should come to the front by itself (not yet
-  checked on a PC); if it doesn't, click it. While the game is on, the
+  starts the game's window comes to the front by itself; if it doesn't,
+  click it. While the game is on, the
   lobby window ignores the controller and the keys that could leave the
   game (Esc, Enter, Backspace, letters), so leaving takes a click. In the
   lobby, Enter or Space is A and Esc or Backspace is B.

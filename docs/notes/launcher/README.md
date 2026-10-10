@@ -287,8 +287,8 @@ h2launch --live 127.0.0.1 --instance b --name Bravo --pad none
 ## The lobby (milestone 4, being built)
 
 `h2launch` with no flags (or `--lobby`) opens a window of its own: the
-sign-in screen the first time (a gamertag and the server, 192.168.8.102 by
-default, kept in `lobby.txt`), then the playlists with your level in each
+sign-in screen the first time (a gamertag and the server, h2.mohnjorrow.com
+by default, kept in `lobby.txt`), then the playlists with your level in each
 and the party. A searches (party leader), X lists the players online to
 invite or join, B quits. When the server makes a match the pregame lobby
 shows the map, the game and the players for five seconds, then the engine
