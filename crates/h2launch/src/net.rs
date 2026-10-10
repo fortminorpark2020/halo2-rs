@@ -174,12 +174,25 @@ pub struct Net {
     started: Instant,
 }
 
+/// Bytes of each packet the log shows: `HEAD`, or `H2LAUNCH_NET_HEAD` (up
+/// to 4096) to read whole packets while finding out what the engine sends.
+fn head_len() -> usize {
+    static LEN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LEN.get_or_init(|| {
+        std::env::var("H2LAUNCH_NET_HEAD")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .map_or(HEAD, |n: usize| n.min(4096))
+    })
+}
+
 fn head(data: &[u8]) -> String {
+    let len = head_len();
     let mut s = String::new();
-    for b in data.iter().take(HEAD) {
+    for b in data.iter().take(len) {
         s.push_str(&format!("{b:02x}"));
     }
-    if data.len() > HEAD {
+    if data.len() > len {
         s.push('…');
     }
     s
@@ -675,16 +688,39 @@ mod tests {
         assert_eq!(SelfSend::parse("x"), None);
     }
 
+    /// Wait until `n` has `count` packets waiting for the engine.
+    fn wait_queued(n: &Net, count: usize) {
+        let until = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut inbox = n.inbox.lock().unwrap();
+            n.drain(&mut inbox);
+            if inbox.packets.len() >= count {
+                return;
+            }
+            drop(inbox);
+            assert!(Instant::now() < until, "only some packets arrived");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     #[test]
     fn auto_keeps_ports_apart_but_strands_nothing() {
         let (_server, host, guest) = pair(RecvPort::Auto);
         guest.send(false, HOST, b"in-band", 1000);
         guest.send(false, HOST, b"out-of-band", 1001);
-        // Port 1001 hasn't been polled yet: a poll of 1000 takes 1000's.
+        // Both are in before anything is polled, so the test doesn't hang
+        // on which arrives first.
+        wait_queued(&host, 2);
+        // Port 1001 hasn't been polled yet, but a poll of 1000 still takes
+        // 1000's packet first.
         assert_eq!(poll(&host, 1000).unwrap().2, b"in-band");
+        assert_eq!(poll(&host, 1001).unwrap().2, b"out-of-band");
         // Now 1001 is polled; a poll of 1000 must not take its packet.
+        guest.send(false, HOST, b"out-of-band 2", 1001);
+        wait_queued(&host, 1);
         let mut buf = [0u8; 64];
-        assert_eq!(host.recv(&mut buf, 1001).map(|r| r.1), Some(1001));
+        assert_eq!(host.recv(&mut buf, 1000), None);
+        assert_eq!(poll(&host, 1001).unwrap().2, b"out-of-band 2");
         guest.send(false, HOST, b"odd port", 7);
         // Port 7 is never polled: it goes to whichever poll comes.
         assert_eq!(poll(&host, 1000).map(|r| r.1), Some(7));

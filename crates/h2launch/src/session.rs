@@ -309,7 +309,9 @@ impl Session {
             opts.put_u8(off::UN_0, t);
         }
         opts.put_u64(off::HOST_SECURE_ADDRESS, self.secure);
-        opts.put_u64(off::HOST_ADDRESS, self.machines[self.host]);
+        // This machine's own id, not the host's: a guest that claims the
+        // host's id is turned away as the host's own machine.
+        opts.put_u64(off::LOCAL_ADDRESS, self.machines[me]);
         // The whole player block starts clean: the offline fields written
         // before (peer 0 and player 0 at address 123) must not linger.
         let block = off::PLAYER_OPTIONS..off::PLAYER_OPTIONS + options::PLAYER_OPTIONS_SIZE;
@@ -437,7 +439,7 @@ threshold = 2
             assert_eq!(flags, if me == 0 { 0x48 } else { 0x00 }, "machine {me}");
             assert_eq!(o.bytes()[off::UN_0], 2);
             assert_eq!(o.get_u64(0x50), 0x1234_5678_90AB_CDEF);
-            assert_eq!(o.get_u64(0x58), 0x4832_0000_0000_0001);
+            assert_eq!(o.get_u64(0x58), s.machines[me], "this machine's own id");
             assert_eq!(o.get_u64(0x60), 0x4832_0000_0000_0001);
             assert_eq!(o.get_u64(0x68), 0x4832_0000_0000_0002);
             assert_eq!(o.get_u64(0x70), 0, "no third machine");

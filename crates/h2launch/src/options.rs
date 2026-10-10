@@ -50,8 +50,11 @@ pub mod off {
     pub const SKULLS: usize = 0x048;
     /// u64 "un_2": the host's secure address.
     pub const HOST_SECURE_ADDRESS: usize = 0x050;
-    /// u64 host address; must not be zero for halo2.
-    pub const HOST_ADDRESS: usize = 0x058;
+    /// u64 this machine's own address (its machine id); must not be zero.
+    /// A joining machine puts it in its join-request as who it is, so a
+    /// guest that wrote the host's id here was refused as the host's own
+    /// machine (join-refuse reason 5; owner's PC, 2026-10-10).
+    pub const LOCAL_ADDRESS: usize = 0x058;
     /// Start of `s_player_options` (0x298 bytes, natural alignment).
     pub const PLAYER_OPTIONS: usize = 0x060;
     /// u64[17] peer (machine) addresses.
@@ -137,9 +140,10 @@ pub mod mode {
 
 /// `s_scenario_map_id.flags` of a built-in map.
 pub const BUILTIN_MAP_FLAGS: u16 = 0x8888;
-/// The address HaloX gives the one machine of an offline game. Any
-/// non-zero value works; zero freezes halo2's loading.
-pub const HOST_ADDRESS_STUB: u64 = 123;
+/// The address HaloX gives the one machine of an offline game (its own
+/// address and peer 0). Any non-zero value works; zero freezes halo2's
+/// loading.
+pub const LOCAL_ADDRESS_STUB: u64 = 123;
 
 /// What goes into the block for an offline match on one machine.
 #[derive(Clone, Debug, PartialEq)]
@@ -284,15 +288,15 @@ impl GameOptions {
     }
 
     /// The fields written after the variant copy, so they win: the map,
-    /// the host address, one peer (us) and one player (us).
+    /// this machine's address, one peer (us) and one player (us).
     pub fn apply_match(&mut self, l: &Launch) {
         self.put_i32(off::LEGACY_MAP_ID, l.map_id);
         self.put_builtin_map_id(off::MAP_ID, l.map_id);
-        self.put_u64(off::HOST_ADDRESS, HOST_ADDRESS_STUB);
-        self.put_peer(0, HOST_ADDRESS_STUB);
+        self.put_u64(off::LOCAL_ADDRESS, LOCAL_ADDRESS_STUB);
+        self.put_peer(0, LOCAL_ADDRESS_STUB);
         self.put_i32(off::PLAYER_COUNT, 1);
         self.put_i32(off::PEER_COUNT, 1);
-        self.put_player(0, l.xuid, HOST_ADDRESS_STUB);
+        self.put_player(0, l.xuid, LOCAL_ADDRESS_STUB);
     }
 }
 
@@ -412,7 +416,7 @@ mod tests {
         assert_eq!(off::VARIANT_SLOT_ID, 0x44);
         assert_eq!(off::SKULLS, 0x48);
         assert_eq!(off::HOST_SECURE_ADDRESS, 0x50);
-        assert_eq!(off::HOST_ADDRESS, 0x58);
+        assert_eq!(off::LOCAL_ADDRESS, 0x58);
         assert_eq!(off::PLAYER_OPTIONS, 0x60);
         assert_eq!(off::PEER_ADDRESSES, 0x60);
         // 17 u64 addresses end at 0xE8: the player count follows.
@@ -532,7 +536,7 @@ mod tests {
         o.apply_match(&l);
         assert_eq!(o.get_i32(off::LEGACY_MAP_ID), 44);
         assert_eq!(o.get_u16(off::MAP_ID + 6), BUILTIN_MAP_FLAGS);
-        assert_eq!(o.get_u64(off::HOST_ADDRESS), 123);
+        assert_eq!(o.get_u64(off::LOCAL_ADDRESS), 123);
         assert_eq!(o.get_u64(off::PLAYERS + player::ADDRESS), 123);
     }
 

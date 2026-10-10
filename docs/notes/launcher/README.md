@@ -147,6 +147,9 @@ then (`--no-watchdog` turns both off, for a debugger session).
 --version               The build the exe was made from.
 ```
 
+`H2LAUNCH_NET_HEAD=<n>` makes the `net:` lines show the first n bytes of
+each packet (default 16, at most 4096). The log stays on the owner's PC.
+
 `--set-option` and `--set-profile` take `<offset>=<type>:<value>`, where the
 offset is decimal or `0x...` and the type is one of `u8 i8 u16 i16 u32 i32
 u64 i64 f32 hex`. They exist so a value can be tried without a rebuild (for
@@ -181,12 +184,17 @@ h2launch --session match.txt --me 1 --instance guest --pad none
 Optional lines: `threshold = <n>` (written to option byte 0x0B), `me =
 <index>`, and `key = <32 hex>` (this launcher's member key for a room h2live
 issued). The session is written into the game options after the variant
-and before `--set-option`: flags 0x48 on the host and 0x08 elsewhere, the
-secure address at 0x50, the host's id at 0x58, the machines at 0x60, the
-players from 0xE8 (XUID, machine id, team, players on that machine,
-machine index, controller), the machine count at 0x2F0 and this machine's
-id at 0x2F8. What the engine makes of these is partly inferred; the test
-stages are finding out. The log has every network call (`net:` lines) and a
+and before `--set-option`: flags 0x48 on the host and 0x00 elsewhere
+(bit 0x08 makes the engine host a session; without it the engine searches
+for one and joins it, the way system link does), the secure address at
+0x50, this machine's own id at 0x58 (a guest gives it in its join-request,
+so writing the host's id there gets the guest refused), the machines at
+0x60, the players from 0xE8 (XUID, machine id, team, players on that
+machine, machine index, controller), the machine count at 0x2F0 and this
+machine's id again at 0x2F8. With that, two launchers on the owner's PC
+played one match on Lockout through the relay (2026-10-10 05:50 UTC): the
+guest's search reached the host, the host answered, the guest joined, and
+both loaded the map and played with about 1 MB of game traffic each way. The log has every network call (`net:` lines) and a
 summary with the relay's counters at the end.
 
 ## Input script

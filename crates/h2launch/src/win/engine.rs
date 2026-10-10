@@ -410,11 +410,11 @@ pub fn build_options(data_access: *mut c_void, s: &Setup) -> Result<*mut u8, Str
     if let Some((session, me)) = &s.session {
         session.apply(&mut opts, *me);
         log!(
-            "session written: flags {:#06x}, {} machines, {} players, host {:#018x}, this machine {:#018x}",
+            "session written: flags {:#06x}, {} machines, {} players, this machine {:#018x} (local network id {:#018x})",
             opts.get_u16(options::off::FLAGS),
             opts.get_i32(options::off::PEER_COUNT),
             opts.get_i32(options::off::PLAYER_COUNT),
-            opts.get_u64(options::off::HOST_ADDRESS),
+            opts.get_u64(options::off::LOCAL_ADDRESS),
             opts.get_u64(options::off::LOCAL_NETWORK_ID)
         );
     }
@@ -621,7 +621,7 @@ fn log_options_handed_over(p: *const u8, s: &Setup) {
     let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
     let xuid = u64_at(options::off::PLAYERS + options::player::XUID);
     log!(
-        "initialize_game will read options at {p:p}: map {} / {}, mode {}, flags {:#06x}, players {}, peers {}, player 0 XUID {xuid:#018x}{}, host address {}",
+        "initialize_game will read options at {p:p}: map {} / {}, mode {}, flags {:#06x}, players {}, peers {}, player 0 XUID {xuid:#018x}{}, this machine's address {}",
         i32_at(options::off::LEGACY_MAP_ID),
         i32_at(options::off::MAP_ID),
         i32_at(options::off::GAME_MODE),
@@ -629,7 +629,7 @@ fn log_options_handed_over(p: *const u8, s: &Setup) {
         i32_at(options::off::PLAYER_COUNT),
         i32_at(options::off::PEER_COUNT),
         if xuid == s.xuid { " (ours)" } else { " (NOT ours)" },
-        u64_at(options::off::HOST_ADDRESS)
+        u64_at(options::off::LOCAL_ADDRESS)
     );
     log!(
         "options as handed over, 0x00-0x20:\n{}",
