@@ -83,9 +83,18 @@ the launcher doesn't do.
    whether the engine is starting, loading or playing. B leaves the game.
 7. Carnage report: each player's place, team, score and deaths (kills
    once they are found in the results), and the level changes MATCH_OVER
-   gives. A goes back to the party.
+   gives. A goes back to the party (the leader of a custom game goes back
+   to the custom game screen, to pick the next).
 
-8. Offline: the server couldn't be reached or was lost. A tries again, Y
+8. Custom game: the row after the playlists, for the party leader. Left
+   and right pick the game type (one of each kind the launcher playlists
+   play, `names::CUSTOM_GAMES`) and the map (those on this PC), A starts
+   it. The server (LAUNCHER_CUSTOM, `LIVE_PROTOCOL` 2) checks the game is
+   one of its launcher playlists' and the map one every member has that a
+   launcher playlist plays, then makes an unranked match for the party
+   with the leader hosting and teams alternating down the party; from
+   there it goes as a playlist's match does. It works alone too.
+9. Offline: the server couldn't be reached or was lost. A tries again, Y
    goes back to the sign-in screen, B quits. B on the party screen asks
    before quitting, and offers Y to sign out.
 
@@ -117,6 +126,7 @@ line (`--set-option 0x354=i32:60 --pad none`, say). A script line is
 ```
 
 The screens are `signin`, `connecting`, `live`, `searching`, `players`,
+`custom`,
 `pregame`, `ingame`, `carnage-waiting`, `carnage` and `failed`, and the
 popups `invite`, `quit` and `leave`.
 
@@ -137,3 +147,11 @@ winner); then one invited the other into its party, which it accepted and
 left again. A second run had the joining player leave mid-game: it was
 back in the party screen with "You left the game", and the host's game
 ended and counted.
+
+A custom game the same way (2026-10-10): ALPHA invited BRAVO, went down to
+Custom Game, picked Team Slayer on Lockout and started it; both lobbies got
+the match (ALPHA hosting, red against blue), played it on the stand-in
+engine and showed the carnage report with "Unranked: levels don't change",
+and ALPHA was back on the custom game screen after it. The server's side
+is also covered by `a_launcher_party_plays_custom_games` in
+`crates/h2live/src/server/tests.rs`.

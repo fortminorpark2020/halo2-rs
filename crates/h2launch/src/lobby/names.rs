@@ -48,6 +48,29 @@ const VARIANTS: [(&str, &str); 29] = [
     ("H2_Hardcore_Team_King", "Hardcore King"),
 ];
 
+/// The games a custom game can be, as the lobby lists them: one of each
+/// kind the launcher playlists play (the server takes only theirs), and
+/// whether it is a team game.
+pub const CUSTOM_GAMES: [(&str, bool); 17] = [
+    ("h2_ffa_slayer_smgPrimary_magSecondary_25kills", false),
+    ("H2_Team_Slayer", true),
+    ("H2_FFA_Rockets_b", false),
+    ("H2_Team_Rockets_b", true),
+    ("H2_FFA_Shotguns_b", false),
+    ("h2_ffa_slayerSwords_25kills", false),
+    ("H2_Team_BRs", true),
+    ("H2_Team_SWAT", true),
+    ("H2_Team_Snipers", true),
+    ("H2_Hardcore_Team_Slayer", true),
+    ("h2_ffa_ball_brPrimary_smgSecondary_60points", false),
+    ("H2_Team_Ball", true),
+    ("h2_ffa_crazyKing_brPrimary_arSecondary_120points", false),
+    ("H2_Team_Crazy_King", true),
+    ("H2_Multi_Flag_CTF_3", true),
+    ("H2_Multi_Bomb", true),
+    ("H2_3_Plots", true),
+];
+
 /// A variant's name on screen: from the table, or made from its file name
 /// (`H2_Team_Slayer` becomes "Team Slayer").
 pub fn variant(file: &str) -> String {
@@ -137,6 +160,27 @@ mod tests {
             }
         }
         assert!(seen >= VARIANTS.len(), "{seen} variant lines");
+    }
+
+    #[test]
+    fn custom_games_are_the_playlists_own() {
+        let playlists = include_str!("../../../h2live/src/playlists.txt");
+        for (file, teams) in CUSTOM_GAMES {
+            let line = playlists.lines().find_map(|l| {
+                let words: Vec<&str> = l.split_whitespace().collect();
+                match words[..] {
+                    ["mcc_variant", kind, f] if f == file => Some(kind),
+                    _ => None,
+                }
+            });
+            let kind = line.unwrap_or_else(|| panic!("{file} isn't in a launcher playlist"));
+            let team_game =
+                kind.starts_with("team_") || ["ctf", "assault", "territories"].contains(&kind);
+            assert_eq!(team_game, teams, "{file} ({kind})");
+        }
+        let names: std::collections::HashSet<String> =
+            CUSTOM_GAMES.iter().map(|(f, _)| variant(f)).collect();
+        assert_eq!(names.len(), CUSTOM_GAMES.len(), "two have the same name");
     }
 
     #[test]

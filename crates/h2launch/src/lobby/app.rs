@@ -1,6 +1,7 @@
 //! The lobby's screens and what happens on them: signing in, the party and
-//! the playlists, searching, the pregame lobby, the match (its engine runs
-//! in a second copy of the launcher, see `child`) and the carnage report.
+//! the playlists, searching, custom games, the pregame lobby, the match
+//! (its engine runs in a second copy of the launcher, see `child`) and the
+//! carnage report.
 //! Nothing here opens a window: `window`, or the headless loop in
 //! `mod.rs`, gives it input and time and shows what it draws.
 
@@ -13,7 +14,7 @@ use crate::session::Session;
 use h2live::client::{LiveClient, LiveEvent, Profile, View};
 use h2net::live::{
     Activity, LauncherMatch, LauncherPlayerResult, MatchOver, OnlinePlayer, Privacy, Stage,
-    ToServer, GAMERTAG_TAKEN,
+    ToServer, CUSTOM_GAME, GAMERTAG_TAKEN,
 };
 use h2net::Connection;
 use std::collections::VecDeque;
@@ -35,6 +36,11 @@ const POSTGAME: Duration = Duration::from_secs(20);
 const QUIT_WAIT: Duration = Duration::from_secs(10);
 /// The longest server address the sign-in screen takes.
 const SERVER_LEN: usize = 100;
+/// How long the custom game screen says the game is starting, unless the
+/// match (or a notice) comes first.
+const CUSTOM_WAIT: Duration = Duration::from_secs(10);
+/// The custom game screen's rows: the game, the map, and the start.
+const CUSTOM_ROWS: usize = 3;
 
 /// What the lobby starts with.
 pub struct Config {
@@ -78,6 +84,8 @@ enum Screen {
     /// The party and the playlists, or the search while the party searches.
     Live,
     Players,
+    /// The party leader picks a custom game's game type and map.
+    Custom,
     Pregame,
     InGame,
     Carnage,
@@ -97,6 +105,9 @@ enum Hit {
     Row(usize),
     /// Puts the cursor in a field of the sign-in screen.
     Field(usize),
+    /// Selects a row of the custom game screen and moves its choice on
+    /// (`true`) or back.
+    Step(usize, bool),
     Press(Input),
 }
 
@@ -151,9 +162,17 @@ pub struct App {
     /// The client's clock starts here.
     clock: Instant,
     now: Instant,
-    /// The selected playlist and player.
+    /// The selected playlist (or the custom game row after them) and
+    /// player.
     sel: usize,
     psel: usize,
+    /// The custom game screen's selected row, the game picked (in
+    /// `names::CUSTOM_GAMES`) and the map (in `Config::maps`), and when
+    /// the server was asked for it.
+    crow: usize,
+    cgame: usize,
+    cmap: usize,
+    asked: Option<Instant>,
     game: Option<Game>,
     popup: Option<Popup>,
     toasts: VecDeque<(String, Instant)>,
@@ -187,6 +206,10 @@ impl App {
             now,
             sel: 0,
             psel: 0,
+            crow: 0,
+            cgame: 0,
+            cmap: 0,
+            asked: None,
             game: None,
             popup: None,
             toasts: VecDeque::new(),
@@ -235,6 +258,7 @@ impl App {
             Screen::Live if self.searching() => "searching",
             Screen::Live => "live",
             Screen::Players => "players",
+            Screen::Custom => "custom",
             Screen::Pregame => "pregame",
             Screen::InGame => "ingame",
             Screen::Carnage if waiting => "carnage-waiting",
@@ -363,7 +387,10 @@ impl App {
                 self.client = None;
                 self.fail(format!("Lost the server: {why}"));
             }
-            LiveEvent::Notice(text) => self.toast(text),
+            LiveEvent::Notice(text) => {
+                self.asked = None;
+                self.toast(text);
+            }
             LiveEvent::LauncherMatch(m) => self.on_match(m),
             LiveEvent::MatchOver(over) => self.on_match_over(over),
             _ => {}
@@ -445,6 +472,9 @@ impl App {
     }
 
     fn playlist_name(&self, id: u8) -> String {
+        if id == CUSTOM_GAME {
+            return "Custom Game".into();
+        }
         self.view()
             .and_then(|v| v.playlists.iter().find(|p| p.id == id))
             .map(|p| p.name.clone())
@@ -503,6 +533,7 @@ impl App {
             over: None,
         });
         self.popup = None;
+        self.asked = None;
         self.screen = Screen::Pregame;
     }
 
@@ -666,8 +697,18 @@ impl App {
         }
         self.toasts
             .retain(|(_, at)| now.saturating_duration_since(*at) < TOAST);
+        // The playlists, then the custom game row.
         let n = self.view().map(|v| v.playlists.len()).unwrap_or(0);
-        self.sel = self.sel.min(n.saturating_sub(1));
+        self.sel = self.sel.min(n);
+        if self.screen == Screen::Custom && (!self.leader() || self.searching()) {
+            self.screen = Screen::Live;
+        }
+        if self
+            .asked
+            .is_some_and(|t| now.saturating_duration_since(t) >= CUSTOM_WAIT)
+        {
+            self.asked = None;
+        }
         let n = self.others().len();
         self.psel = self.psel.min(n.saturating_sub(1));
     }
@@ -738,6 +779,7 @@ impl App {
             }
             Screen::Live => self.live_input(i),
             Screen::Players => self.players_input(i),
+            Screen::Custom => self.custom_input(i),
             Screen::Pregame => {}
             Screen::InGame => {
                 let ended = self.game.as_ref().is_some_and(|g| g.results.is_some());
@@ -747,8 +789,17 @@ impl App {
             }
             Screen::Carnage => {
                 if matches!(i, Input::A | Input::B) {
+                    // The leader of a custom game picks the next.
+                    let custom = self
+                        .game
+                        .as_ref()
+                        .is_some_and(|g| g.m.playlist == CUSTOM_GAME);
                     self.game = None;
-                    self.screen = Screen::Live;
+                    self.screen = if custom && self.leader() {
+                        Screen::Custom
+                    } else {
+                        Screen::Live
+                    };
                 }
             }
             Screen::Failed => match i {
@@ -818,10 +869,18 @@ impl App {
             }
             return;
         }
+        // The playlists, then the custom game row.
         let n = self.view().map(|v| v.playlists.len()).unwrap_or(0);
         match i {
             Input::Up => self.sel = self.sel.saturating_sub(1),
-            Input::Down => self.sel = (self.sel + 1).min(n.saturating_sub(1)),
+            Input::Down => self.sel = (self.sel + 1).min(n),
+            Input::A if self.sel == n => {
+                if !self.leader() {
+                    self.toast("Only the party leader can start a custom game.".into());
+                    return;
+                }
+                self.open_custom();
+            }
             Input::A => {
                 let Some(pl) = self.view().and_then(|v| v.playlists.get(self.sel)) else {
                     return;
@@ -853,6 +912,62 @@ impl App {
             Input::B => self.popup = Some(Popup::Quit),
             _ => {}
         }
+    }
+
+    /// The custom game screen, with a map picked: Lockout the first time,
+    /// if this PC has it.
+    fn open_custom(&mut self) {
+        if self.screen != Screen::Custom && self.cmap == 0 {
+            let lockout = self.cfg.maps.iter().position(|(m, _)| m == "lockout");
+            self.cmap = lockout.unwrap_or(0);
+        }
+        self.crow = 0;
+        self.asked = None;
+        self.screen = Screen::Custom;
+    }
+
+    fn custom_input(&mut self, i: Input) {
+        let maps = self.cfg.maps.len();
+        let step = |at: usize, n: usize, on: bool| match (n, on) {
+            (0, _) => 0,
+            (_, true) => (at + 1) % n,
+            (_, false) => (at + n - 1) % n,
+        };
+        match i {
+            Input::Up => self.crow = self.crow.saturating_sub(1),
+            Input::Down => self.crow = (self.crow + 1).min(CUSTOM_ROWS - 1),
+            Input::Left | Input::Right => {
+                let on = i == Input::Right;
+                match self.crow {
+                    0 => self.cgame = step(self.cgame, names::CUSTOM_GAMES.len(), on),
+                    1 => self.cmap = step(self.cmap, maps, on),
+                    _ => {}
+                }
+            }
+            Input::A => self.start_custom(),
+            Input::B => self.screen = Screen::Live,
+            _ => {}
+        }
+    }
+
+    /// Ask the server for the custom game picked.
+    fn start_custom(&mut self) {
+        if self.asked.is_some() {
+            return;
+        }
+        let Some((map, _)) = self.cfg.maps.get(self.cmap).cloned() else {
+            self.toast("No Halo 2 maps were found in MCC's folder.".into());
+            return;
+        };
+        let (variant, _) = names::CUSTOM_GAMES[self.cgame % names::CUSTOM_GAMES.len()];
+        self.log(&format!(
+            "lobby: starting a custom game of {variant} on {map}"
+        ));
+        self.asked = Some(self.now);
+        self.send(ToServer::LauncherCustom {
+            map,
+            variant: variant.into(),
+        });
     }
 
     fn players_input(&mut self, i: Input) {
@@ -899,6 +1014,17 @@ impl App {
         match hit {
             Some(Hit::Press(i)) => self.input(i),
             Some(Hit::Field(f)) => self.field = f,
+            Some(Hit::Step(r, on)) => {
+                self.crow = r;
+                self.input(if on { Input::Right } else { Input::Left });
+            }
+            Some(Hit::Row(r)) if self.screen == Screen::Custom => {
+                if self.crow == r && r == CUSTOM_ROWS - 1 {
+                    self.input(Input::A);
+                } else {
+                    self.crow = r;
+                }
+            }
             Some(Hit::Row(r)) => {
                 let sel = match self.screen {
                     Screen::Players => &mut self.psel,
@@ -946,6 +1072,7 @@ impl App {
             Screen::Live if self.searching() => "MATCHMAKING",
             Screen::Live => "PLAYLISTS",
             Screen::Players => "PLAYERS ONLINE",
+            Screen::Custom => "CUSTOM GAME",
             Screen::Pregame => "PREGAME LOBBY",
             Screen::InGame => "IN GAME",
             Screen::Carnage => "CARNAGE REPORT",
@@ -958,6 +1085,7 @@ impl App {
             Screen::Connecting => self.draw_connecting(p),
             Screen::Live => self.draw_live(p),
             Screen::Players => self.draw_players(p),
+            Screen::Custom => self.draw_custom(p),
             Screen::Pregame => self.draw_pregame(p),
             Screen::InGame => self.draw_in_game(p),
             Screen::Carnage => self.draw_carnage(p),
@@ -1102,7 +1230,8 @@ impl App {
             self.draw_playlists(p, v);
             let mut hints = Vec::new();
             if self.leader() {
-                hints.push((Input::A, "Search"));
+                let custom = self.sel == v.playlists.len();
+                hints.push((Input::A, if custom { "Custom game" } else { "Search" }));
             }
             hints.push((Input::X, "Players"));
             if v.party.as_ref().is_some_and(|pt| pt.members.len() > 1) {
@@ -1121,12 +1250,19 @@ impl App {
         p.text(650.0, 142.0, 16.0, HEAD, Align::Center, "SEARCHING");
         p.text(735.0, 142.0, 16.0, HEAD, Align::Center, "PLAYING");
         let rows = 8;
-        let first = first_row(self.sel, v.playlists.len(), rows);
-        for (k, pl) in v.playlists.iter().enumerate().skip(first).take(rows) {
+        // The playlists, then the custom game row.
+        let n = v.playlists.len() + 1;
+        let first = first_row(self.sel, n, rows);
+        for k in (first..n).take(rows) {
             let y = 156.0 + (k - first) as f32 * 50.0;
             let on = k == self.sel;
             p.row(72.0, y, 696.0, 46.0, on, Hit::Row(k));
             let col = if on { WHITE } else { TEXT };
+            let Some(pl) = v.playlists.get(k) else {
+                p.text(90.0, y + 32.0, 24.0, col, Align::Left, "Custom Game");
+                p.text(560.0, y + 32.0, 22.0, col, Align::Center, "-");
+                continue;
+            };
             let name = p.fit(24.0, 420.0, &pl.name);
             p.text(90.0, y + 32.0, 24.0, col, Align::Left, &name);
             let level = if pl.ranked {
@@ -1156,7 +1292,10 @@ impl App {
                 "The server has no playlists for the launcher.",
             );
         }
-        if let Some(pl) = v.playlists.get(self.sel) {
+        if self.sel == v.playlists.len() {
+            let line = "Any map and game type, with your party. Unranked.";
+            p.text(84.0, 600.0, 18.0, DIM, Align::Left, line);
+        } else if let Some(pl) = v.playlists.get(self.sel) {
             let mut parts = vec![if pl.min == pl.max {
                 format!("{} players", pl.max)
             } else {
@@ -1267,6 +1406,73 @@ impl App {
                 "Press X to invite players.",
             );
         }
+    }
+
+    fn draw_custom(&self, p: &mut Pen) {
+        p.panel(60.0, 110.0, 720.0, 530.0);
+        let (variant, teams) = names::CUSTOM_GAMES[self.cgame % names::CUSTOM_GAMES.len()];
+        let map = self
+            .cfg
+            .maps
+            .get(self.cmap)
+            .map_or("No maps".to_string(), |(m, _)| names::map(m));
+        let choices = [("GAME TYPE", names::variant(variant)), ("MAP", map)];
+        for (k, (label, value)) in choices.iter().enumerate() {
+            let y = 140.0 + k as f32 * 110.0;
+            let on = self.crow == k;
+            p.row(72.0, y, 696.0, 96.0, on, Hit::Row(k));
+            p.text(96.0, y + 28.0, 16.0, HEAD, Align::Left, label);
+            let col = if on { WHITE } else { TEXT };
+            p.text(420.0, y + 72.0, 32.0, col, Align::Center, value);
+            for (x, text, forward) in [(110.0, "<", false), (730.0, ">", true)] {
+                let arrow = if on { SEL_EDGE } else { DIM };
+                p.text(x, y + 72.0, 32.0, arrow, Align::Center, text);
+                p.area(x - 30.0, y + 30.0, 60.0, 60.0, Hit::Step(k, forward));
+            }
+        }
+        let y = 370.0;
+        let on = self.crow == CUSTOM_ROWS - 1;
+        p.row(72.0, y, 696.0, 60.0, on, Hit::Row(CUSTOM_ROWS - 1));
+        let label = if self.asked.is_some() {
+            "STARTING..."
+        } else {
+            "START GAME"
+        };
+        let col = if on { WHITE } else { TEXT };
+        p.text(420.0, y + 40.0, 26.0, col, Align::Center, label);
+        let kind = if teams { "Teams" } else { "Free for all" };
+        let people = self
+            .view()
+            .and_then(|v| v.party.as_ref())
+            .map_or(1, |pt| pt.members.len());
+        let who = if people > 1 {
+            format!("{kind}  ·  Unranked  ·  Your party of {people} plays; you host.")
+        } else {
+            format!("{kind}  ·  Unranked  ·  Invite players with X on the playlists.")
+        };
+        p.text(84.0, 480.0, 18.0, DIM, Align::Left, &who);
+        p.text(
+            84.0,
+            510.0,
+            18.0,
+            DIM,
+            Align::Left,
+            "Left and right change the game type and the map.",
+        );
+        if self.cfg.maps.is_empty() {
+            p.text(
+                84.0,
+                600.0,
+                17.0,
+                WARN,
+                Align::Left,
+                "No Halo 2 maps were found in MCC's folder, so no game can be played.",
+            );
+        }
+        if let Some(v) = self.view() {
+            self.draw_party(p, v);
+        }
+        p.hints(&[(Input::A, "Start game"), (Input::B, "Back")]);
     }
 
     fn draw_players(&self, p: &mut Pen) {
@@ -1449,6 +1655,9 @@ impl App {
                 Some(&(_, _, new)) => (format!("Level {new}"), TEXT),
                 None => ("The game counted.".to_string(), TEXT),
             },
+            Some(o) if o.reason.is_empty() && !g.m.ranked => {
+                ("Unranked: levels don't change.".to_string(), DIM)
+            }
             Some(o) if o.reason.is_empty() => ("The game didn't count.".to_string(), WARN),
             Some(o) => (o.reason.clone(), WARN),
         };
@@ -1823,6 +2032,37 @@ mod tests {
     }
 
     #[test]
+    fn the_custom_game_screen_picks_a_game_and_a_map() {
+        let dir = scratch("custom");
+        let mut a = app(&dir);
+        a.cfg.maps = vec![("midship".into(), 1), ("lockout".into(), 2)];
+        a.open_custom();
+        assert_eq!(a.label(), "custom");
+        // Lockout first, Slayer first.
+        assert_eq!((a.crow, a.cgame, a.cmap), (0, 0, 1));
+        a.input(Input::Left);
+        assert_eq!(a.cgame, names::CUSTOM_GAMES.len() - 1);
+        a.input(Input::Right);
+        a.input(Input::Right);
+        assert_eq!(a.cgame, 1);
+        a.input(Input::Down);
+        a.input(Input::Right);
+        assert_eq!(a.cmap, 0);
+        a.input(Input::Down);
+        a.input(Input::Down);
+        assert_eq!(a.crow, CUSTOM_ROWS - 1);
+        // Asked once, until the match or a notice comes.
+        a.input(Input::A);
+        assert!(a.asked.is_some());
+        a.tick(a.now + CUSTOM_WAIT);
+        assert!(a.asked.is_none());
+        assert_eq!(a.label(), "custom");
+        a.input(Input::B);
+        assert_eq!(a.label(), "live");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn screens_draw_and_clicks_land_on_buttons() {
         let Ok(mut text) = Text::system() else {
             // No font on this system: nothing to draw with.
@@ -1855,6 +2095,20 @@ mod tests {
             .unwrap();
         a.click(ox + (stay.x + 5.0) * s, oy + (stay.y + 5.0) * s);
         assert_eq!(a.label(), "signin");
+        // The custom game screen's arrows move the choices on and back.
+        a.cfg.maps = vec![("midship".into(), 1), ("lockout".into(), 2)];
+        a.open_custom();
+        a.draw(&mut c, &mut text);
+        let arrow = |a: &App, row: usize, on: bool| {
+            let hit = a.areas.iter().find(|ar| ar.hit == Hit::Step(row, on));
+            hit.copied().unwrap()
+        };
+        let next_map = arrow(&a, 1, true);
+        a.click(ox + (next_map.x + 5.0) * s, oy + (next_map.y + 5.0) * s);
+        assert_eq!((a.crow, a.cmap), (1, 0));
+        let back = arrow(&a, 0, false);
+        a.click(ox + (back.x + 5.0) * s, oy + (back.y + 5.0) * s);
+        assert_eq!((a.crow, a.cgame), (0, names::CUSTOM_GAMES.len() - 1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

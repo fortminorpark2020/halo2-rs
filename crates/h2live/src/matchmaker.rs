@@ -552,6 +552,20 @@ impl Matchmaker {
         self.searches.len() != before
     }
 
+    /// A match made outside the search (a party's custom game), which only
+    /// `host` may host: its id. It waits for the host like any other, and
+    /// is forgotten if `host` doesn't start hosting in time.
+    pub fn custom(&mut self, host: u64, now: f64) -> u64 {
+        let id = self.rng.next();
+        self.hosting.push(Hosting {
+            id,
+            hosts: vec![host],
+            asked: 0,
+            deadline: now + HOSTING_TIMEOUT,
+        });
+        id
+    }
+
     /// `host` started hosting match `id`: its HOSTING arrived. Returns
     /// whether it's the PC that was asked; then the matchmaker is done with
     /// the match.

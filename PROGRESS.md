@@ -106,7 +106,8 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   into halo2.dll; read-only diagnostics (`--diag`, `--watch`) only. If the
   only way forward needs more, ask the owner first.
 - Milestone 3 is on `launcher-live` (h2launch-m2 plus the merged
-  `live-launcher` WIP): h2live speaks `LIVE_PROTOCOL` 1 to launchers,
+  `live-launcher` WIP): h2live speaks `LIVE_PROTOCOL` 1 to launchers (2 on
+  `launcher-lobby`, which adds custom games),
   has launcher playlists 10-17, issues a relay room and key per match and
   sends LAUNCHER_MATCH; `h2launch --live <server>` signs in, searches,
   writes the session from that match, and tells the server HOSTING,
@@ -139,8 +140,13 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   with a local h2live and two headless lobbies on the stand-in engine
   (`--fake-engine`), and on the owner's PC (07:45) with two lobbies
   playing a real match on halo2.dll through the Proxmox h2live: counted,
-  carnage report on both, engines closed by themselves. Next: kills in the
-  results block, a play session by the owner, then two PCs.
+  carnage report on both, engines closed by themselves. Custom games
+  (LAUNCHER_CUSTOM, `LIVE_PROTOCOL` 2, so the Proxmox server needs the
+  new h2live): the party leader picks one of the launcher playlists'
+  variants (`names::CUSTOM_GAMES`) and a map, the server makes an unranked
+  match for the party with the leader hosting; tested on Linux with two
+  lobbies. Next: kills in the results block, a play session by the owner,
+  then two PCs.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.

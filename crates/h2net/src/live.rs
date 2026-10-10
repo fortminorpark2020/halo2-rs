@@ -22,9 +22,9 @@
 //! (`LoginClient`); the server takes it whatever the game's `PROTOCOL`
 //! is, so a new game version never locks launchers out. The messages the
 //! game sends and is sent are the same as ever (so `PROTOCOL` stays as it
-//! was); the launcher's own ones (LAUNCHER_MATCH, JOINED and
-//! LAUNCHER_RESULT) are versioned by `LIVE_PROTOCOL` and only ever go to
-//! and from launchers.
+//! was); the launcher's own ones (LAUNCHER_MATCH, JOINED, LAUNCHER_RESULT
+//! and LAUNCHER_CUSTOM) are versioned by `LIVE_PROTOCOL` and only ever go
+//! to and from launchers.
 
 use crate::conn::Connection;
 use crate::PROTOCOL;
@@ -41,8 +41,8 @@ pub const MAGIC_V2: u32 = u32::from_le_bytes(*b"H2L2");
 /// The online service's own version, separate from the game's `PROTOCOL`:
 /// bump it whenever a versioned LOGIN or a launcher's messages change. The
 /// server takes launchers at this version only, whatever the game's
-/// `PROTOCOL`.
-pub const LIVE_PROTOCOL: u32 = 1;
+/// `PROTOCOL`. (2: LAUNCHER_CUSTOM.)
+pub const LIVE_PROTOCOL: u32 = 2;
 /// The kinds of program a versioned LOGIN can say it is, as a byte.
 pub const CLIENT_VIEWER: u8 = 0;
 pub const CLIENT_LAUNCHER: u8 = 1;
@@ -62,6 +62,8 @@ pub const TIMEOUT: f64 = 15.0;
 /// The playlist number that searches whichever playlist fits the party and
 /// has the most people searching.
 pub const QUICKMATCH: u8 = 255;
+/// The playlist a custom game's LAUNCHER_MATCH names: none.
+pub const CUSTOM_GAME: u8 = QUICKMATCH;
 
 /// Why the server turned a PC away (REFUSED), as the PC shows it.
 pub const UPDATE_YOUR_GAME: &str = "UPDATE YOUR GAME";
@@ -129,6 +131,8 @@ pub mod kind {
     pub const JOINED: u8 = 34;
     /// A launcher's: how the match ended, from the engine's results.
     pub const LAUNCHER_RESULT: u8 = 35;
+    /// A launcher's party leader: play a custom game.
+    pub const LAUNCHER_CUSTOM: u8 = 36;
     // PC to server, first on a relay leg.
     pub const LINK_HELLO: u8 = 40;
     // Host to server, on its fan-out leg once linked.
@@ -214,6 +218,13 @@ pub enum ToServer {
     /// A launcher: how a match ended, as its engine's results say. The
     /// host's counts; the others' confirm it, as with RESULT.
     LauncherResult(LauncherResult),
+    /// A launcher's party leader: play MCC game variant `variant` (by file
+    /// name, one of the launcher playlists') on `map` with the whole party,
+    /// hosting it. It changes no levels.
+    LauncherCustom {
+        map: String,
+        variant: String,
+    },
     /// First on a relay leg: which leg this is.
     LinkHello {
         token: [u8; 16],
@@ -1400,6 +1411,11 @@ impl ToServer {
                 result.write(&mut w);
                 kind::LAUNCHER_RESULT
             }
+            ToServer::LauncherCustom { map, variant } => {
+                w.str(map);
+                w.str(variant);
+                kind::LAUNCHER_CUSTOM
+            }
             ToServer::LinkHello { token, account } => {
                 bytes(&mut w, token);
                 w.u64(*account);
@@ -1465,6 +1481,10 @@ impl ToServer {
             kind::BACK => ToServer::Back,
             kind::JOINED => ToServer::Joined(r.u64()?),
             kind::LAUNCHER_RESULT => ToServer::LauncherResult(LauncherResult::read(r)?),
+            kind::LAUNCHER_CUSTOM => ToServer::LauncherCustom {
+                map: read_str(r, MAX_NAME)?,
+                variant: read_str(r, MAX_NAME)?,
+            },
             kind::LINK_HELLO => ToServer::LinkHello {
                 token: read_bytes(r)?,
                 account: r.u64()?,
@@ -1797,6 +1817,10 @@ mod tests {
             ToServer::Login(launcher_login()),
             ToServer::Joined(21),
             ToServer::LauncherResult(launcher_result()),
+            ToServer::LauncherCustom {
+                map: "lockout".into(),
+                variant: "H2_Team_Slayer".into(),
+            },
             ToServer::LinkHello {
                 token: [3; 16],
                 account: 20,
@@ -1958,10 +1982,10 @@ mod tests {
         }
         // Every kind once: pings and pongs once each way, and LOGIN twice
         // (the game's and a launcher's).
-        assert_eq!(kinds.len(), 27 + 19);
+        assert_eq!(kinds.len(), 28 + 19);
         kinds.sort_unstable();
         kinds.dedup();
-        assert_eq!(kinds.len(), 27 + 19 - 2 - 1);
+        assert_eq!(kinds.len(), 28 + 19 - 2 - 1);
     }
 
     #[test]

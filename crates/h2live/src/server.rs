@@ -522,6 +522,9 @@ impl Server {
             (Some(me), ToServer::Result { id, players }) => self.result(me, id, players),
             (Some(me), ToServer::Joined(id)) => self.joined(me, id),
             (Some(me), ToServer::LauncherResult(result)) => self.launcher_result(me, result),
+            (Some(me), ToServer::LauncherCustom { map, variant }) => {
+                self.launcher_custom(me, &map, &variant, now);
+            }
             (Some(me), ToServer::LeftMatch { id, host_lost }) => {
                 self.left_match(me, id, host_lost);
             }

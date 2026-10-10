@@ -3,7 +3,7 @@ use crate::client::{LiveClient, LiveEvent, Profile};
 use crate::levels::Rank;
 use crate::store::Stats;
 use ed25519_dalek::{Signer, SigningKey};
-use h2net::live::{kind, Activity, PartyInfo};
+use h2net::live::{kind, Activity, LauncherResult, PartyInfo, CUSTOM_GAME};
 use h2sim::game::Writer;
 use std::net::Ipv4Addr;
 
@@ -966,6 +966,124 @@ fn log_lines_start_with_the_date_and_time() {
     assert_eq!(utc(951_782_400), "2000-02-29 00:00:00");
     assert_eq!(utc(1_700_000_000), "2023-11-14 22:13:20");
     assert_eq!(utc(4_107_542_399), "2100-02-28 23:59:59");
+}
+
+/// PC number `n` signs in as a launcher with `maps`, alone. Returns its
+/// index in `pcs`.
+fn sign_in_launcher(w: &mut World, n: u8, gamertag: &str, maps: &[&str]) -> usize {
+    let (server_end, pc_end) = Connection::pair();
+    w.server.accept(server_end, Route::Live, ip(n), w.now);
+    let profile = Profile {
+        maps: maps.iter().map(|m| (m.to_string(), 7)).collect(),
+        ..profile(gamertag)
+    };
+    let card = w.card_path(n);
+    let pc = LiveClient::launcher(pc_end, key(n), &profile, "test", &card, w.now);
+    w.pcs.push(pc);
+    w.events.push(Vec::new());
+    let i = w.pcs.len() - 1;
+    w.until(|w| w.pcs[i].signed_in() && w.pcs[i].view.party.is_some());
+    i
+}
+
+/// The launcher matches PC `i` was told of, in order.
+fn launcher_matches(w: &World, i: usize) -> Vec<h2net::live::LauncherMatch> {
+    let told = w.events[i].iter().filter_map(|e| match e {
+        LiveEvent::LauncherMatch(m) => Some(m.clone()),
+        _ => None,
+    });
+    told.collect()
+}
+
+#[test]
+fn a_launcher_party_plays_custom_games() {
+    let mut w = World::new("launcher-custom");
+    let config = h2relay::ServerConfig {
+        admission: h2relay::Admission::Issued,
+        ..Default::default()
+    };
+    let relay = h2relay::RelayServer::bind(("127.0.0.1", 0), config).unwrap();
+    w.server.set_relay(relay.handle());
+    let a = sign_in_launcher(&mut w, 1, "ALPHA", &["lockout", "midship"]);
+    let b = sign_in_launcher(&mut w, 2, "BRAVO", &["lockout"]);
+    let party = w.party(a).id;
+    w.send(a, ToServer::Invite(w.id(b)));
+    w.until(|w| w.pcs[b].view.invites.iter().any(|i| i.0 == party));
+    w.send(b, ToServer::Accept(party));
+    w.until(|w| w.members(a).contains(&w.id(b)));
+    let custom = |map: &str, variant: &str| ToServer::LauncherCustom {
+        map: map.into(),
+        variant: variant.into(),
+    };
+
+    // Only the leader starts one, with a game the server has on a map
+    // everyone has.
+    w.send(b, custom("lockout", "H2_Team_Slayer"));
+    w.send(a, custom("lockout", "01_made_up"));
+    w.until(|w| !w.notices(a).is_empty());
+    assert_eq!(w.notices(a), ["THAT GAME TYPE ISN'T ON THIS SERVER"]);
+    w.send(a, custom("midship", "H2_Team_Slayer"));
+    w.until(|w| w.notices(a).len() == 2);
+    assert_eq!(w.notices(a)[1], "NOT EVERYONE IN YOUR PARTY HAS THAT MAP");
+    assert!(launcher_matches(&w, a).is_empty());
+    assert!(launcher_matches(&w, b).is_empty());
+
+    // The leader hosts; teams alternate down the party.
+    w.send(a, custom("LOCKOUT", "h2_team_slayer"));
+    w.until(|w| !launcher_matches(w, a).is_empty() && !launcher_matches(w, b).is_empty());
+    let m = launcher_matches(&w, b).remove(0);
+    assert_eq!(launcher_matches(&w, a)[0].id, m.id);
+    assert_eq!((m.playlist, m.ranked, m.teams), (CUSTOM_GAME, false, true));
+    assert_eq!(
+        (m.map.as_str(), m.variant.as_str()),
+        ("lockout", "H2_Team_Slayer")
+    );
+    assert_eq!(m.host, super::matches::relay_id(w.id(a)));
+    let teams: Vec<(u64, u8)> = m.players.iter().map(|p| (p.account, p.team)).collect();
+    assert_eq!(teams, [(w.id(a), 0), (w.id(b), 1)]);
+    assert_eq!(w.party(a).activity, Activity::Playing);
+
+    // It plays as a playlist's match does, and changes no levels.
+    w.send(a, ToServer::Hosting(m.id));
+    w.send(b, ToServer::Joined(m.id));
+    let went = |w: &World, i: usize| w.events[i].contains(&LiveEvent::Go(m.id));
+    w.until(|w| went(w, a) && went(w, b));
+    let result = LauncherResult {
+        id: m.id,
+        finished: true,
+        team_scores: vec![50, 20],
+        players: m
+            .players
+            .iter()
+            .map(|p| h2net::live::LauncherPlayerResult {
+                relay_id: p.relay_id,
+                team: p.team,
+                place: p.team,
+                score: 0,
+                kills: 0,
+                deaths: 0,
+                left: false,
+            })
+            .collect(),
+    };
+    w.send(a, ToServer::LauncherResult(result.clone()));
+    w.send(b, ToServer::LauncherResult(result));
+    let over = |w: &World, i: usize| {
+        w.events[i].iter().find_map(|e| match e {
+            LiveEvent::MatchOver(o) if o.id == m.id => Some(o.clone()),
+            _ => None,
+        })
+    };
+    w.until(|w| over(w, a).is_some() && over(w, b).is_some());
+    let o = over(&w, b).unwrap();
+    assert!(!o.counted && o.levels.is_empty() && o.reason.is_empty());
+    w.until(|w| w.party(a).activity == Activity::Lobby);
+    // And then another.
+    w.send(a, custom("lockout", "h2_ffa_slayerSwords_25kills"));
+    w.until(|w| launcher_matches(w, b).len() == 2);
+    let m = launcher_matches(&w, b).remove(1);
+    assert!(!m.teams && m.players.iter().all(|p| p.team == 0));
+    drop(relay);
 }
 
 mod matches;

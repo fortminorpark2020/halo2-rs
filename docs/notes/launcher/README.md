@@ -272,8 +272,11 @@ shows the map, the game and the players for five seconds, then the engine
 starts in its own window (`h2launch --session <file> --events ...`, which
 tells the lobby on its standard output what the engine does). When the game
 ends the carnage report comes up with each player's place, score, deaths
-and level, and the level change once the server has counted the game. The
-details and how to test it without MCC are in `lobby.md`.
+and level, and the level change once the server has counted the game.
+Custom Game, the row after the playlists, lets the party leader pick a game
+type and a map; the server makes an unranked match of it for the party,
+with the leader hosting (LAUNCHER_CUSTOM). The details and how to test it
+without MCC are in `lobby.md`.
 
 ## Input script
 
