@@ -1017,6 +1017,7 @@ dependencies = [
 name = "h2launch"
 version = "0.1.0"
 dependencies = [
+ "h2relay",
  "png",
  "sha2",
  "windows 0.62.2",

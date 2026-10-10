@@ -31,8 +31,29 @@ fn hit(slot: usize) {
     }
 }
 
+/// `--event-return`: what a stub returns instead of 0.
+static RETURNS: [AtomicU64; EVENT_SLOTS] = [const { AtomicU64::new(0) }; EVENT_SLOTS];
+
+/// Applies `--event-return` (before the engine starts).
+pub fn set_returns(list: &[(usize, u64)]) {
+    for &(slot, v) in list {
+        if slot == EVENT_GET_GUID {
+            log!(
+                "--event-return {slot}={v:#x} ignored: slot {slot} {} has its own function",
+                event_name(slot)
+            );
+            continue;
+        }
+        RETURNS[slot].store(v, Ordering::Relaxed);
+        log!(
+            "--event-return: event-manager slot {slot} {} returns {v:#x}",
+            event_name(slot)
+        );
+    }
+}
+
 /// A stub for every event slot. The engine passes all arguments; we read
-/// none and return 0.
+/// none and return 0, or what `--event-return` set.
 unsafe extern "system" fn stub<const N: usize>(
     _this: *mut core::ffi::c_void,
     _a1: usize,
@@ -40,7 +61,7 @@ unsafe extern "system" fn stub<const N: usize>(
     _a3: usize,
 ) -> usize {
     hit(N);
-    0
+    RETURNS[N].load(Ordering::Relaxed) as usize
 }
 
 /// Slot 147: return the address of our static GUID.

@@ -16,11 +16,13 @@
 pub mod cli;
 pub mod maps;
 pub mod mccroot;
+pub mod net;
 pub mod options;
 pub mod paths;
 pub mod pe;
 pub mod profile;
 pub mod script;
+pub mod session;
 pub mod slots;
 pub mod util;
 pub mod vdf;

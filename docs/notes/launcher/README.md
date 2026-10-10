@@ -121,6 +121,19 @@ then (`--no-watchdog` turns both off, for a debugger session).
 --set-profile <o>=<t>:<v>  The same for the player profile.
 --no-watchdog           Do not end the run when the window thread stops
                         responding for 30 s (for a debugger session).
+--session <file>        Play a networked match (see "Networked match" below).
+--me <index>            Which machine in the session this launcher is.
+--relay-wait <seconds>  How long to wait for the relay before the engine
+                        starts (default 15).
+--recv-port <mode>      How the receive call's fourth argument is read: auto
+                        (default), value, pointer or ignore.
+--send-return <len|0|1> What the send calls return for a packet that went.
+--instance <name>       Own log, screenshot and engine folder
+                        (%LOCALAPPDATA%\h2launch\<name>) and window title, for
+                        two launchers on one PC.
+--pad <0-3|none|any>    Which controller is player 1's (default any).
+--slot-return <n>=<v>   Make host slot n's logging stub return v (testing).
+--event-return <n>=<v>  The same for an event-manager slot.
 --diag                  More detail in the log: dumps of the options, the
                         variant copy's effect, new calling threads, every
                         event-manager slot's first call, the input sent each
@@ -135,6 +148,43 @@ then (`--no-watchdog` turns both off, for a debugger session).
 offset is decimal or `0x...` and the type is one of `u8 i8 u16 i16 u32 i32
 u64 i64 f32 hex`. They exist so a value can be tried without a rebuild (for
 example `--set-option 0x03=u8:0` to match HaloX's player-limit bytes).
+
+## Networked match (milestone 2, being tested)
+
+The engine hands every network packet to its host through host slots 41
+(unreliable send), 42 (reliable send) and 43 (receive); it opens no sockets
+of its own (seen on the owner's PC). With `--session` the launcher carries
+those packets through the relay (`crates/h2relay`, also run inside h2live
+on UDP 47050) to the other launchers in the match. Every launcher gets the
+same session file and its own `--me`:
+
+```
+# Two launchers on one PC: run `h2relay 127.0.0.1:47051` first.
+relay = 127.0.0.1:47051
+room = 0x5EED000000000001
+secure = 0x1234567890ABCDEF
+host = 0
+machine = 0x4832000000000001
+machine = 0x4832000000000002
+player = 0x0009000000000001 machine=0 team=0 name=Host
+player = 0x0009000000000002 machine=1 team=1 name=Guest
+```
+
+```
+h2launch --session match.txt --me 0 --instance host
+h2launch --session match.txt --me 1 --instance guest --pad none
+```
+
+Optional lines: `threshold = <n>` (written to option byte 0x0B), `me =
+<index>`, and `key = <32 hex>` (this launcher's member key for a room h2live
+issued). The session is written into the game options after the variant
+and before `--set-option`: flags 0x48 on the host and 0x08 elsewhere, the
+secure address at 0x50, the host's id at 0x58, the machines at 0x60, the
+players from 0xE8 (XUID, machine id, team, players on that machine,
+machine index, controller), the machine count at 0x2F0 and this machine's
+id at 0x2F8. What the engine makes of these is partly inferred; the test
+stages are finding out. The log has every network call (`net:` lines) and a
+summary with the relay's counters at the end.
 
 ## Input script
 

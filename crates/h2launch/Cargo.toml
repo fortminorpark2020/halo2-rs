@@ -6,6 +6,8 @@ license.workspace = true
 description = "Starts MCC's classic Halo 2 engine (halo2.dll) from the owner's install, without MCC, for an offline multiplayer match"
 
 [dependencies]
+# Milestone 2: the engine's packets go between launchers through the relay.
+h2relay = { path = "../h2relay" }
 # --check: the SHA-256 of halo2.dll.
 sha2 = "0.10"
 # --screenshot: the back buffer written as a PNG.

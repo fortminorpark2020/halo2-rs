@@ -1,11 +1,13 @@
 //! Command-line flags. Every flag takes `--flag value` or `--flag=value`.
 
+use crate::net::{RecvPort, SendReturn};
 use crate::options::RawWrite;
 use crate::profile::PadMap;
 
 pub const USAGE: &str = "\
 h2launch: starts MCC's classic Halo 2 engine from your MCC install, without
-MCC, for an offline Slayer match on Lockout.
+MCC, for a Slayer match on Lockout: offline, or with other launchers through
+a relay (--session).
 
 Usage: h2launch [flags]
 
@@ -40,6 +42,25 @@ Usage: h2launch [flags]
   --set-profile <o>=<t>:<v>  The same for the player profile.
   --no-watchdog           Do not end the run when the window thread stops
                           responding for 30 s (for a debugger session).
+  --session <file>        Play a networked match: the relay, the machines and
+                          the players (docs/notes/launcher/README.md has the
+                          format). Every launcher in the match gets the same
+                          file.
+  --me <index>            Which machine in the session this launcher is.
+  --relay-wait <seconds>  How long to wait for the relay to take us in before
+                          the engine starts (default 15).
+  --recv-port <mode>      How the engine's receive call's fourth argument is
+                          read: auto (default), value, pointer or ignore.
+  --send-return <len|0|1> What the engine's send calls get back for a packet
+                          that went (default len).
+  --instance <name>       Keep this launcher's log, screenshots and engine
+                          files in their own folder (for two launchers on one
+                          PC), and put the name in the window title.
+  --slot-return <n>=<v>   Make host slot n's logging stub return v instead of 0
+                          (repeatable; for testing what the engine waits for).
+  --event-return <n>=<v>  The same for an event-manager slot.
+  --pad <0-3|none|any>    Which XInput controller is player 1's (default any:
+                          the first connected).
   --diag                  More detail in the log: dumps of the options, the
                           variant copy's effect, new calling threads, every
                           event-manager slot's first call, the input sent to
@@ -49,7 +70,19 @@ Usage: h2launch [flags]
   --version               The build.
 
 The log is %LOCALAPPDATA%\\h2launch\\h2launch.log
-(PowerShell: $env:LOCALAPPDATA\\h2launch\\h2launch.log).";
+(PowerShell: $env:LOCALAPPDATA\\h2launch\\h2launch.log); with --instance <name>
+it is in %LOCALAPPDATA%\\h2launch\\<name>\\ instead.";
+
+/// Which controller is player 1's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pad {
+    /// The first one connected.
+    Any,
+    /// None: keyboard and mouse only.
+    None,
+    /// This XInput slot.
+    Slot(u32),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Args {
@@ -61,6 +94,8 @@ pub struct Args {
     pub variant: Option<String>,
     pub no_variant: bool,
     pub name: String,
+    /// `--name` was given (it then wins over the session's name).
+    pub name_set: bool,
     pub xuid: Option<u64>,
     pub width: u32,
     pub height: u32,
@@ -75,6 +110,15 @@ pub struct Args {
     pub set_profile: Vec<RawWrite>,
     pub diag: bool,
     pub watchdog: bool,
+    pub session: Option<String>,
+    pub me: Option<usize>,
+    pub relay_wait: f64,
+    pub recv_port: RecvPort,
+    pub send_return: SendReturn,
+    pub instance: Option<String>,
+    pub pad: Pad,
+    pub slot_return: Vec<(usize, u64)>,
+    pub event_return: Vec<(usize, u64)>,
 }
 
 impl Default for Args {
@@ -88,6 +132,7 @@ impl Default for Args {
             variant: None,
             no_variant: false,
             name: "Player".into(),
+            name_set: false,
             xuid: None,
             width: 1280,
             height: 720,
@@ -102,6 +147,15 @@ impl Default for Args {
             set_profile: Vec::new(),
             diag: false,
             watchdog: true,
+            session: None,
+            me: None,
+            relay_wait: 15.0,
+            recv_port: RecvPort::Auto,
+            send_return: SendReturn::Len,
+            instance: None,
+            pad: Pad::Any,
+            slot_return: Vec::new(),
+            event_return: Vec::new(),
         }
     }
 }
@@ -122,6 +176,17 @@ fn size(v: &str) -> Result<(u32, u32), String> {
         return Err(format!("--windowed: {w}x{h} is out of range"));
     }
     Ok((w, h))
+}
+
+/// `<slot>=<value>` with the slot below `slots`.
+fn slot_value(flag: &str, v: &str, slots: usize) -> Result<(usize, u64), String> {
+    let bad = || format!("{flag}: {v:?} should look like 118=1 (slot below {slots})");
+    let (n, val) = v.split_once('=').ok_or_else(bad)?;
+    let n = crate::util::parse_u64(n.trim())
+        .filter(|&n| n < slots as u64)
+        .ok_or_else(bad)?;
+    let val = crate::util::parse_u64(val.trim()).ok_or_else(bad)?;
+    Ok((n as usize, val))
 }
 
 /// Parses the arguments after the program name.
@@ -185,6 +250,7 @@ where
                     return Err(format!("--name: {v:?} should be 1 to 15 characters"));
                 }
                 a.name = v;
+                a.name_set = true;
             }
             "--xuid" => {
                 let v = value()?;
@@ -225,6 +291,60 @@ where
                 }
                 a.set_profile.push(w);
             }
+            "--session" => a.session = Some(value()?),
+            "--me" => {
+                let v = value()?;
+                let n = crate::util::parse_u64(&v)
+                    .filter(|&n| n < crate::options::PEER_SLOTS as u64)
+                    .ok_or_else(|| format!("--me: {v:?} should be a machine index, 0 to 16"))?;
+                a.me = Some(n as usize);
+            }
+            "--relay-wait" => a.relay_wait = seconds("--relay-wait", &value()?)?,
+            "--recv-port" => {
+                let v = value()?;
+                a.recv_port = RecvPort::parse(&v).ok_or_else(|| {
+                    format!("--recv-port: {v:?} should be auto, value, pointer or ignore")
+                })?;
+            }
+            "--send-return" => {
+                let v = value()?;
+                a.send_return = SendReturn::parse(&v)
+                    .ok_or_else(|| format!("--send-return: {v:?} should be len, 0 or 1"))?;
+            }
+            "--instance" => {
+                let v = value()?;
+                let ok = !v.is_empty()
+                    && v.len() <= 32
+                    && v.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                if !ok {
+                    return Err(format!(
+                        "--instance: {v:?} should be 1 to 32 letters, digits, - or _"
+                    ));
+                }
+                a.instance = Some(v);
+            }
+            "--slot-return" => {
+                let v = value()?;
+                a.slot_return
+                    .push(slot_value("--slot-return", &v, crate::slots::HOST_SLOTS)?);
+            }
+            "--event-return" => {
+                let v = value()?;
+                a.event_return
+                    .push(slot_value("--event-return", &v, crate::slots::EVENT_SLOTS)?);
+            }
+            "--pad" => {
+                let v = value()?;
+                a.pad = match v.to_ascii_lowercase().as_str() {
+                    "any" => Pad::Any,
+                    "none" => Pad::None,
+                    n => match n.parse::<u32>() {
+                        Ok(i) if i < 4 => Pad::Slot(i),
+                        _ => return Err(format!("--pad: {v:?} should be 0 to 3, none or any")),
+                    },
+                };
+            }
             other => return Err(format!("unknown flag {other:?} (see --help)")),
         }
     }
@@ -249,6 +369,9 @@ pub fn absolutize_paths(a: &mut Args) {
     }
     if let Some(sc) = a.input_script.as_deref() {
         a.input_script = Some(abs(sc));
+    }
+    if let Some(f) = a.session.as_deref() {
+        a.session = Some(abs(f));
     }
 }
 
@@ -282,6 +405,10 @@ mod tests {
         assert!(a.watchdog);
         assert_eq!((a.width, a.height), (1280, 720));
         assert_eq!(a.pad_map, PadMap::Zero);
+        assert_eq!(a.pad, Pad::Any);
+        assert!(!a.name_set);
+        assert_eq!(a.relay_wait, 15.0);
+        assert_eq!(a.recv_port, RecvPort::Auto);
     }
 
     #[test]
@@ -316,8 +443,36 @@ mod tests {
             "--diag",
             "--no-variant",
             "--no-watchdog",
+            "--session",
+            "match.txt",
+            "--me=1",
+            "--relay-wait",
+            "5",
+            "--recv-port",
+            "pointer",
+            "--send-return",
+            "1",
+            "--instance",
+            "guest-2",
+            "--pad",
+            "2",
+            "--slot-return",
+            "118=1",
+            "--slot-return=0x63=0x10",
+            "--event-return",
+            "141=1",
         ])
         .unwrap();
+        assert_eq!(a.slot_return, vec![(118, 1), (99, 16)]);
+        assert_eq!(a.event_return, vec![(141, 1)]);
+        assert_eq!(a.session.as_deref(), Some("match.txt"));
+        assert_eq!(a.me, Some(1));
+        assert_eq!(a.relay_wait, 5.0);
+        assert_eq!(a.recv_port, RecvPort::Pointer);
+        assert_eq!(a.send_return, SendReturn::One);
+        assert_eq!(a.instance.as_deref(), Some("guest-2"));
+        assert_eq!(a.pad, Pad::Slot(2));
+        assert!(a.name_set);
         assert!(!a.watchdog);
         assert!(a.check && a.groundhog && a.host_fonts && a.diag && a.no_variant);
         assert!(!a.attach_input);
@@ -354,6 +509,20 @@ mod tests {
             vec!["--check=yes"],
             vec!["--set-option", "0x2BF30=u8:1"],
             vec!["--set-profile", "0xACB=u16:1"],
+            vec!["--me", "17"],
+            vec!["--me", "x"],
+            vec!["--relay-wait", "-2"],
+            vec!["--recv-port", "maybe"],
+            vec!["--send-return", "2"],
+            vec!["--instance", "a b"],
+            vec!["--instance", ""],
+            vec!["--instance", "..\\up"],
+            vec!["--pad", "4"],
+            vec!["--pad", "first"],
+            vec!["--slot-return", "256=1"],
+            vec!["--slot-return", "118"],
+            vec!["--event-return", "151=0"],
+            vec!["--event-return", "1=x"],
         ] {
             assert!(parse(&bad).is_err(), "{bad:?} should fail");
         }

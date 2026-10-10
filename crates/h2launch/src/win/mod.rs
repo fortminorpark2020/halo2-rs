@@ -96,6 +96,15 @@ pub(crate) struct Setup {
     pub name: Vec<u16>,
     pub script: Option<Script>,
     pub map: &'static MapEntry,
+    /// The networked match (`--session`) and which machine we are.
+    pub session: Option<(crate::session::Session, usize)>,
+}
+
+/// `--instance`: set before the log opens.
+static INSTANCE: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn instance() -> Option<&'static str> {
+    INSTANCE.get().map(|s| s.as_str())
 }
 
 static SETUP: OnceLock<Setup> = OnceLock::new();
@@ -256,21 +265,29 @@ pub fn run() -> i32 {
         println!("h2launch {}", crate::BUILD);
         return 0;
     }
+    if let Some(i) = &args.instance {
+        let _ = INSTANCE.set(i.clone());
+    }
     if args.check {
         return check::run(&args);
     }
     launch(args)
 }
 
-/// `%LOCALAPPDATA%\h2launch`, or the folder of the exe.
+/// `%LOCALAPPDATA%\h2launch` (or the folder of the exe), with
+/// `\<instance>` after it for `--instance`.
 pub(crate) fn log_dir() -> std::path::PathBuf {
-    if let Some(d) = std::env::var_os("LOCALAPPDATA") {
-        return std::path::PathBuf::from(d).join("h2launch");
+    let base = match std::env::var_os("LOCALAPPDATA") {
+        Some(d) => std::path::PathBuf::from(d).join("h2launch"),
+        None => std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| ".".into()),
+    };
+    match instance() {
+        Some(i) => base.join(i),
+        None => base,
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| ".".into())
 }
 
 unsafe extern "system" fn on_console(kind: u32) -> windows::core::BOOL {
@@ -407,7 +424,7 @@ fn random_xuid() -> u64 {
     crate::util::xuid_from_seed(seed)
 }
 
-fn launch(args: Args) -> i32 {
+fn launch(mut args: Args) -> i32 {
     let dir = log_dir();
     let log_path = log::init(&dir);
     log!("h2launch {}", crate::BUILD);
@@ -453,16 +470,43 @@ fn launch(args: Args) -> i32 {
         Some(m) => crate::maps::find(m).expect("checked by the parser"),
         None => crate::maps::by_id(crate::maps::LOCKOUT).expect("Lockout is in the table"),
     };
-    let xuid = args.xuid.unwrap_or_else(random_xuid);
-    log!(
-        "player {:?}, XUID {xuid:#018x}{}",
-        args.name,
-        if args.xuid.is_some() {
-            " (from --xuid)"
-        } else {
-            " (random)"
+    let session = match &args.session {
+        Some(p) => {
+            let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
+                log!("session file {p}: {e}");
+                finish("session file not readable");
+            });
+            let sess = crate::session::Session::parse(&text).unwrap_or_else(|e| {
+                log!("session file {p}: {e}");
+                finish("bad session file");
+            });
+            let me = sess.resolve_me(args.me).unwrap_or_else(|e| {
+                log!("session file {p}: {e}");
+                finish("bad session file");
+            });
+            log!("session file {p}");
+            log!("{}", sess.describe(me));
+            Some((sess, me))
         }
-    );
+        None => {
+            if args.me.is_some() {
+                log!("--me does nothing without --session");
+            }
+            None
+        }
+    };
+    let local = session.as_ref().and_then(|(s, me)| s.local_player(*me));
+    let (xuid, xuid_from) = match (args.xuid, local) {
+        (Some(x), _) => (x, " (from --xuid)"),
+        (None, Some(p)) => (p.xuid, " (from the session)"),
+        (None, None) => (random_xuid(), " (random)"),
+    };
+    if !args.name_set {
+        if let Some(n) = local.and_then(|p| p.name.clone()) {
+            args.name = n;
+        }
+    }
+    log!("player {:?}, XUID {xuid:#018x}{xuid_from}", args.name);
     let engine_dir = dir.join("engine");
     for kind in 0..4 {
         if let Some(p) = crate::paths::game_folder_halo2(&engine_dir.to_string_lossy(), kind) {
@@ -505,6 +549,7 @@ fn launch(args: Args) -> i32 {
         name,
         script,
         map,
+        session,
     });
     let s = setup().expect("just set");
     if let Err(e) = std::thread::Builder::new()
@@ -567,6 +612,26 @@ fn launch(args: Args) -> i32 {
     };
     let host = host::init(s);
     pump();
+    // The relay, before the engine can send anything.
+    host::start_net(s);
+    if let Some(net) = host::net() {
+        if net.state().is_some() {
+            let until = now() + s.args.relay_wait;
+            while net.state() == Some(h2relay::State::Joining) && now() < until {
+                beat();
+                pump();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            match net.state() {
+                Some(h2relay::State::Joined) => log!("relay: in the room"),
+                Some(st) => log!(
+                    "relay: {st:?} after {:.0} s; starting the engine anyway (sends fail until the relay takes us in)",
+                    s.args.relay_wait
+                ),
+                None => {}
+            }
+        }
+    }
 
     // The engine, on its own thread so this one keeps pumping messages.
     let worker = engine::Worker {
@@ -798,6 +863,13 @@ fn summary(periodic: bool) {
     );
     host::log_summary();
     events::log_summary();
+    if let Some(net) = host::net() {
+        let lines = net.summary();
+        let n = if periodic { 1 } else { lines.len() };
+        for l in lines.iter().take(n) {
+            log!("{l}");
+        }
+    }
     if periodic {
         crash::refresh_filter();
         let before = LAST_FRAMES.swap(frames, Ordering::SeqCst);

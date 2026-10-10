@@ -8,6 +8,9 @@
 //! `this` first argument, and the real ones catch panics so none crosses
 //! into the engine.
 //!
+//! The network slots 41 to 44 go to `crate::net` (the relay, or with no
+//! `--session` a logger that sends nothing and receives nothing).
+//!
 //! Fonts are never served in milestone 1, so the font slots answer "no":
 //! the probes 59, 60 and 68 say yes only with `--host-fonts` (setting 6),
 //! and 61, 62, 64 and 67 always say no (host-interface.verify C25,
@@ -24,6 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 use super::gfx;
 use super::log::log;
 use super::Setup;
+use crate::net::{self, Net, RecvPort};
 use crate::paths;
 use crate::profile::{self, PadMap};
 use crate::slots::{host_slot_name, summary_lines, SlotCount, HOST_SLOTS};
@@ -186,8 +190,18 @@ unsafe impl Send for Host {}
 static HOST: OnceLock<Box<Host>> = OnceLock::new();
 
 /// Builds the host object and returns the pointer the engine is given.
-pub fn init(_s: &Setup) -> *mut c_void {
+pub fn init(s: &Setup) -> *mut c_void {
     let table: &'static [*const c_void; HOST_SLOTS] = Box::leak(Box::new(vtable()));
+    for &(slot, v) in &s.args.slot_return {
+        // Only the generic stubs read it; a slot with its own function
+        // keeps its behaviour.
+        RETURNS[slot].store(v, Ordering::Relaxed);
+        log!(
+            "--slot-return: host slot {slot} {} returns {v:#x} if it is a logging stub",
+            host_slot_name(slot)
+        );
+    }
+    super::events::set_returns(&s.args.event_return);
     let host = HOST.get_or_init(|| {
         Box::new(Host {
             vtable: table.as_ptr(),
@@ -203,6 +217,154 @@ pub fn init(_s: &Setup) -> *mut c_void {
         0xB788
     );
     host.as_ref() as *const Host as *mut c_void
+}
+
+// ---------------------------------------------------------------- network
+
+static NET: OnceLock<Net> = OnceLock::new();
+
+pub fn net() -> Option<&'static Net> {
+    NET.get()
+}
+
+/// Sets up the network slots: the relay for `--session`, else the solo
+/// logger. Returns at once; the caller waits for the relay.
+pub fn start_net(s: &Setup) {
+    let log: net::Log = std::sync::Arc::new(|l: &str| log!("{l}"));
+    let settings = |machines: Vec<u64>| net::Settings {
+        recv_port: s.args.recv_port,
+        send_return: s.args.send_return,
+        machines,
+    };
+    let n = match &s.session {
+        None => Net::solo(settings(Vec::new()), log),
+        Some((sess, me)) => {
+            let joined = sess.relay_addr().and_then(|addr| {
+                log!(
+                    "relay {addr}: joining room {:#x} as {:#018x}",
+                    sess.room,
+                    sess.machines[*me]
+                );
+                Net::connect(
+                    addr,
+                    sess.room,
+                    sess.machines[*me],
+                    sess.key.as_deref(),
+                    settings(sess.machines.clone()),
+                    log.clone(),
+                )
+            });
+            match joined {
+                Ok(n) => n,
+                Err(e) => {
+                    log!("relay: {e}; the engine's sends will fail");
+                    Net::solo(settings(sess.machines.clone()), log)
+                }
+            }
+        }
+    };
+    log!(
+        "network slots: receive port argument read as {:?}, sends return {:?}",
+        n.settings().recv_port,
+        n.settings().send_return
+    );
+    let _ = NET.set(n);
+}
+
+static NET_ODD: Oddities = Oddities::new(16);
+
+/// Slots 41 and 42: `(network_id id, const char* buf, u32 len, u32 port)
+/// -> u32` (libmcc game_manager.h; research 2.1).
+fn net_send(reliable: bool, id: u64, buf: *const u8, len: u32, port: u32) -> u32 {
+    let slot = if reliable { 42 } else { 41 };
+    let Some(n) = NET.get() else { return 0 };
+    let size = len as usize;
+    if size > h2relay::MAX_PAYLOAD || (buf.is_null() && size > 0) {
+        if NET_ODD.fresh(slot, size as u64) {
+            log!("net: slot {slot} send of {size} bytes from {buf:p} to {id:#018x} port {port} not read (over {} bytes, or no buffer)", h2relay::MAX_PAYLOAD);
+        }
+        return 0;
+    }
+    let data: &[u8] = if size == 0 {
+        &[]
+    } else {
+        // SAFETY: the engine hands us `len` readable bytes at `buf` for the
+        // length of the call; they are copied before we return.
+        unsafe { std::slice::from_raw_parts(buf, size) }
+    };
+    n.send(reliable, id, data, port)
+}
+
+unsafe extern "system" fn network_sendto_unreliable(
+    _this: *mut c_void,
+    id: u64,
+    buf: *const u8,
+    len: u32,
+    port: u32,
+) -> u32 {
+    record(41, id as usize, buf as usize, len as usize, port as usize);
+    panic_guard(41, || net_send(false, id, buf, len, port))
+}
+
+unsafe extern "system" fn network_sendto_reliable(
+    _this: *mut c_void,
+    id: u64,
+    buf: *const u8,
+    len: u32,
+    port: u32,
+) -> u32 {
+    record(42, id as usize, buf as usize, len as usize, port as usize);
+    panic_guard(42, || net_send(true, id, buf, len, port))
+}
+
+/// Slot 43: `(char* buf, u32 len, network_id* id_out, a4) -> u32`, the
+/// bytes copied or 0. On the owner's PC a4 was 1000, not a pointer, so it
+/// is read as `--recv-port` says; only `pointer` writes through it.
+unsafe extern "system" fn network_recvfrom(
+    _this: *mut c_void,
+    buf: *mut u8,
+    len: u32,
+    id_out: *mut u64,
+    a4: usize,
+) -> u32 {
+    record(43, buf as usize, len as usize, id_out as usize, a4);
+    panic_guard(43, || {
+        let Some(n) = NET.get() else { return 0 };
+        if buf.is_null() || len == 0 {
+            return 0;
+        }
+        // SAFETY: the engine's receive buffer of `len` bytes, ours to fill
+        // during the call.
+        let out = unsafe { std::slice::from_raw_parts_mut(buf, len as usize) };
+        let Some((src, port, size)) = n.recv(out, a4 as u64) else {
+            return 0;
+        };
+        if !id_out.is_null() {
+            // SAFETY: the engine's out parameter for the sender's id.
+            unsafe { id_out.write_unaligned(src) };
+        }
+        if n.settings().recv_port == RecvPort::Pointer && a4 > 0xFFFF {
+            // SAFETY: only with --recv-port pointer, which says a4 is the
+            // engine's u32 port out parameter.
+            unsafe { (a4 as *mut u32).write_unaligned(port) };
+        }
+        size as u32
+    })
+}
+
+/// Slot 44: `network_send(buf)`, meaning unknown: logged.
+unsafe extern "system" fn network_send(
+    _this: *mut c_void,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+) -> usize {
+    record(44, a1, a2, a3, a4);
+    if let Some(n) = NET.get() {
+        n.note_slot44(a1, a2, a3);
+    }
+    0
 }
 
 pub fn log_summary() {
@@ -224,7 +386,11 @@ pub fn log_summary() {
 
 // ---------------------------------------------------------------- stubs
 
-/// A logging stub for any slot: ignores its arguments and returns 0.
+/// `--slot-return`: what a logging stub returns instead of 0.
+static RETURNS: [AtomicU64; HOST_SLOTS] = [const { AtomicU64::new(0) }; HOST_SLOTS];
+
+/// A logging stub for any slot: ignores its arguments and returns 0, or
+/// what `--slot-return` set.
 unsafe extern "system" fn stub<const N: usize>(
     _this: *mut c_void,
     a1: usize,
@@ -233,7 +399,7 @@ unsafe extern "system" fn stub<const N: usize>(
     a4: usize,
 ) -> usize {
     record(N, a1, a2, a3, a4);
-    0
+    RETURNS[N].load(Ordering::Relaxed) as usize
 }
 
 /// A stub for a slot that returns f32 (XMM0): slots 38 and 69.
@@ -253,10 +419,10 @@ macro_rules! row {
     };
 }
 
-fn vtable() -> [*const c_void; HOST_SLOTS] {
+/// Generic logging stubs for all 256 slots, in 16-wide rows so each const
+/// generic is spelled out.
+fn generic_stubs() -> [*const c_void; HOST_SLOTS] {
     let mut v: [*const c_void; HOST_SLOTS] = [std::ptr::null(); HOST_SLOTS];
-    // Generic logging stubs for all 256 slots, in 16-wide rows so each
-    // const generic is spelled out.
     let rows: [[*const c_void; 16]; 16] = [
         row![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
         row![16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
@@ -278,6 +444,11 @@ fn vtable() -> [*const c_void; HOST_SLOTS] {
     for (i, r) in rows.iter().enumerate() {
         v[i * 16..i * 16 + 16].copy_from_slice(r);
     }
+    v
+}
+
+fn vtable() -> [*const c_void; HOST_SLOTS] {
+    let mut v = generic_stubs();
     // Real behaviour where the engine relies on it.
     v[0] = begin_frame as *const c_void;
     v[1] = end_frame as *const c_void;
@@ -296,6 +467,10 @@ fn vtable() -> [*const c_void; HOST_SLOTS] {
     v[37] = get_input_state_gamepad as *const c_void;
     v[38] = stub_f32::<38> as *const c_void;
     v[39] = set_input_state as *const c_void;
+    v[41] = network_sendto_unreliable as *const c_void;
+    v[42] = network_sendto_reliable as *const c_void;
+    v[43] = network_recvfrom as *const c_void;
+    v[44] = network_send as *const c_void;
     v[46] = get_folder_path as *const c_void;
     v[47] = get_game_folder_path as *const c_void;
     v[48] = get_scenario_path_a as *const c_void;

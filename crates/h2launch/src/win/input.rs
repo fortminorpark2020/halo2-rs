@@ -260,8 +260,22 @@ fn read_pad(index: u32) -> Option<XINPUT_GAMEPAD> {
     }
 }
 
-/// Player 0's pad: the first connected one.
+/// Player 0's pad: the one `--pad` names, or the first connected one.
 fn player0_pad() -> Option<XINPUT_GAMEPAD> {
+    match super::setup().map(|s| s.args.pad) {
+        Some(crate::cli::Pad::None) => return None,
+        Some(crate::cli::Pad::Slot(i)) => {
+            let g = read_pad(i);
+            let was = PAD.swap(if g.is_some() { i as i32 } else { -1 }, Ordering::SeqCst);
+            if was != -1 && g.is_none() {
+                log!("pad {i} disconnected");
+            } else if was == -1 && g.is_some() {
+                log!("pad {i} connected (--pad {i}); it is player 1's controller");
+            }
+            return g;
+        }
+        _ => {}
+    }
     let i = PAD.load(Ordering::SeqCst);
     if i >= 0 {
         if let Some(g) = read_pad(i as u32) {

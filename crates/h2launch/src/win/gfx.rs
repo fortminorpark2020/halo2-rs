@@ -111,10 +111,14 @@ pub fn create_window(width: u32, height: u32) -> Result<HWND, String> {
         let (ww, wh) = (r.right - r.left, r.bottom - r.top);
         let x = ((GetSystemMetrics(SM_CXSCREEN) - ww) / 2).max(0);
         let y = ((GetSystemMetrics(SM_CYSCREEN) - wh) / 2).max(0);
+        let title = windows::core::HSTRING::from(match super::instance() {
+            Some(i) => format!("Halo 2 - h2launch ({i})"),
+            None => "Halo 2 - h2launch".to_string(),
+        });
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class,
-            w!("Halo 2 - h2launch"),
+            &title,
             style,
             x,
             y,

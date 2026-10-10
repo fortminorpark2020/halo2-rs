@@ -407,6 +407,17 @@ pub fn build_options(data_access: *mut c_void, s: &Setup) -> Result<*mut u8, Str
 
     // These win over whatever the variant wrote.
     opts.apply_match(&launch);
+    if let Some((session, me)) = &s.session {
+        session.apply(&mut opts, *me);
+        log!(
+            "session written: flags {:#06x}, {} machines, {} players, host {:#018x}, this machine {:#018x}",
+            opts.get_u16(options::off::FLAGS),
+            opts.get_i32(options::off::PEER_COUNT),
+            opts.get_i32(options::off::PLAYER_COUNT),
+            opts.get_u64(options::off::HOST_ADDRESS),
+            opts.get_u64(options::off::LOCAL_NETWORK_ID)
+        );
+    }
     for w in &s.args.set_option {
         match w.apply(opts.bytes_mut()) {
             Ok(()) => log!("option override applied: {}", w.text),
@@ -414,10 +425,12 @@ pub fn build_options(data_access: *mut c_void, s: &Setup) -> Result<*mut u8, Str
         }
     }
     log!(
-        "options: map {} (id {}), mode multiplayer, flags {:#06x}, 1 player, XUID {:#018x}",
+        "options: map {} (id {}), mode multiplayer, flags {:#06x}, {} player(s) on {} machine(s), our XUID {:#018x}",
         s.map.display,
         s.map.id,
         opts.get_u16(options::off::FLAGS),
+        opts.get_i32(options::off::PLAYER_COUNT),
+        opts.get_i32(options::off::PEER_COUNT),
         s.xuid
     );
     if s.args.diag {
