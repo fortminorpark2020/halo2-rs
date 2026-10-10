@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 20:45 UTC. Any assistant that works on the project
+Last updated 2026-10-10 20:30 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -121,7 +121,7 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   the `h2launch --variants` list; Team Snipers (opposite teams) and a
   three-player Rumble Pit worked (2026-10-10 06:30).
 - The Proxmox server (container 102) runs h2live from `launcher-friends`
-  af23128 since 2026-10-10 20:40 (`PROTOCOL` 26 for the Rust game,
+  af23128 since 2026-10-10 20:30 (`PROTOCOL` 26 for the Rust game,
   `LIVE_PROTOCOL` 3 for launchers: friends, service records, kills). The
   rollback copies are `/opt/h2live/h2live.prev` (`launcher-lobby` 214ee4b,
   protocol 2) and `/var/lib/h2live.v2-backup` (the data before: the new
@@ -176,7 +176,7 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   with kills confirms them (`COUNTS_SEEN`), kills are sent only from
   Slayer games that bear them out, assists as 0, and the carnage report
   shows "-". Tested on Linux with three headless lobbies and on the
-  owner's PC with the real engine (2026-10-10 20:00 local server, 20:40
+  owner's PC with the real engine (2026-10-10 20:00 local server, 20:30
   through Proxmox). Next: a real game with kills (to set `COUNTS_SEEN`),
   a play session by the owner, two PCs, then clans.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
