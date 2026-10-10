@@ -305,7 +305,10 @@ impl Server {
         let members = members.iter().filter_map(|&a| {
             let pc = &self.pcs[self.pc_of(a)?];
             let account = self.accounts.get(&a)?;
-            let ranked = self.playlists.iter().filter(|p| p.ranked && p.client == client);
+            let ranked = self
+                .playlists
+                .iter()
+                .filter(|p| p.ranked && p.client == client);
             let levels = ranked.filter_map(|p| Some((p.id, account.stats(&p.key)?.rank.level)));
             Some(Member {
                 account: a,

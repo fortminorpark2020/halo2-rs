@@ -866,7 +866,10 @@ fn the_games_players_and_the_launchers_never_meet() {
         .map(|(_, m)| (m.playlist, accounts(&m)))
         .collect();
     made.sort();
-    assert_eq!(made, [(HEAD_TO_HEAD, vec![2, 4]), (MCC_HEAD_TO_HEAD, vec![1, 3])]);
+    assert_eq!(
+        made,
+        [(HEAD_TO_HEAD, vec![2, 4]), (MCC_HEAD_TO_HEAD, vec![1, 3])]
+    );
     // Quickmatch picks among the party's own kind of playlist only.
     for seed in 0..20 {
         let mut mm = Matchmaker::new(built_in(), seed);

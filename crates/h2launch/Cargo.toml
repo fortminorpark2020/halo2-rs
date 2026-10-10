@@ -8,6 +8,9 @@ description = "Starts MCC's classic Halo 2 engine (halo2.dll) from the owner's i
 [dependencies]
 # Milestone 2: the engine's packets go between launchers through the relay.
 h2relay = { path = "../h2relay" }
+# --live: signing in to h2live and playing the matches it makes.
+h2live = { path = "../h2live" }
+h2net = { path = "../h2net" }
 # --check: the SHA-256 of halo2.dll.
 sha2 = "0.10"
 # --screenshot: the back buffer written as a PNG.

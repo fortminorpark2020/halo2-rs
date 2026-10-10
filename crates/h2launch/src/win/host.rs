@@ -612,6 +612,7 @@ unsafe extern "system" fn set_game_state(_this: *mut c_void, state: i32) -> usiz
         }
         if state == 1 {
             super::mark(&super::STATE1_AT);
+            crate::live::tell(crate::live::Engine::MapLoaded);
         }
     });
     0
@@ -655,6 +656,16 @@ unsafe extern "system" fn set_game_result(_this: *mut c_void, result: *mut c_voi
         profile::GAME_RESULT_SIZE,
         super::now()
     );
+    // The game ended (every PC gets this at the end), unless we asked the
+    // engine to quit: then it is our own result as a quitter (seen on the
+    // owner's PC), and closing says we left.
+    let quitting = matches!(
+        super::QUIT.load(Ordering::SeqCst),
+        super::QUIT_USER | super::QUIT_CONSOLE
+    );
+    if !quitting {
+        crate::live::tell(crate::live::Engine::Ended);
+    }
     0
 }
 

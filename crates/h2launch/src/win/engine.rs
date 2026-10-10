@@ -607,6 +607,7 @@ fn run_launch(w: &Worker) -> Result<(), String> {
             ))
         }
     );
+    crate::live::tell(crate::live::Engine::Running);
     super::wake();
     Ok(())
 }

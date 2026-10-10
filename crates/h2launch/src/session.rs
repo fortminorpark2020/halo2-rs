@@ -162,7 +162,7 @@ impl Session {
         Ok(p)
     }
 
-    fn check(&self) -> Result<(), String> {
+    pub(crate) fn check(&self) -> Result<(), String> {
         let m = self.machines.len();
         if m == 0 || m > PEER_SLOTS {
             return Err(format!("{m} machines; 1 to {PEER_SLOTS} are allowed"));

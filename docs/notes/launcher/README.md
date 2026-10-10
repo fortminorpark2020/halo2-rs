@@ -125,6 +125,12 @@ then (`--no-watchdog` turns both off, for a debugger session).
 --me <index>            Which machine in the session this launcher is.
 --relay-wait <seconds>  How long to wait for the relay before the engine
                         starts (default 15).
+--live <server>         Sign in to h2live (host, host:port or ws:// URL),
+                        search a playlist and play the match it makes (see
+                        "Matchmaking through h2live" below).
+--playlist <n>          The launcher playlist to search (default 11, Head
+                        to Head).
+--live-wait <seconds>   How long to search before giving up (default 600).
 --recv-port <mode>      How the receive call's fourth argument is read: auto
                         (default), value, pointer or ignore.
 --send-return <len|0|1> What the send calls return for a packet that went.
@@ -196,6 +202,45 @@ played one match on Lockout through the relay (2026-10-10 05:30 UTC): the
 guest's search reached the host, the host answered, the guest joined, and
 both loaded the map and played with about 1 MB of game traffic each way. The log has every network call (`net:` lines) and a
 summary with the relay's counters at the end.
+
+Later runs there (2026-10-10) showed:
+
+- A match ends by itself only if the variant gives it a time or score
+  limit. The variant copy's time limit is at options 0x354 (seconds; 0 is
+  none, which `01_slayer` gives) and its score to win at 0x350 (25), so
+  `--set-option 0x354=i32:60` makes a one-minute match. At the end every PC
+  gets host slot 6 (`set_game_result`, a 0x5D138-byte block), then about
+  7 s of scoreboard, then `restart_game(0)`, and the launcher quits.
+- A player who quits writes its own result through slot 6 first. In a
+  two-player match the host then ends the match normally; with three, the
+  match goes on, and a new launcher for the same machine joins it in
+  progress.
+- Three launchers play one match the same way as two.
+
+## Matchmaking through h2live (milestone 3, being built)
+
+With `--live <server>` the launcher signs in to h2live (its own key is kept
+as `live-key.bin` in its log folder, so each `--instance` is its own
+account), searches a launcher playlist (`--playlist`, default 11, Head to
+Head) and waits for the match the server makes. The match names the map,
+the variant, who hosts, the room on the relay beside the server and this
+PC's key for it; the launcher writes the session from that and starts the
+engine as with `--session`. While the engine runs it tells the server when
+the host is up (HOSTING), when a joining PC has loaded the map (JOINED),
+when the game ended (LAUNCHER_RESULT; the results block isn't read yet, so
+the match stays unrated), and that it left (LEFT_MATCH) if it closes before
+the end.
+
+To try it on one PC, start h2live listening on this PC only, then two
+launchers:
+
+```
+set H2LIVE_BIND=127.0.0.1
+set H2LIVE_DATA=C:\h2work\live-data
+target\release\h2live.exe
+h2launch --live 127.0.0.1 --instance a --name Alpha
+h2launch --live 127.0.0.1 --instance b --name Bravo --pad none
+```
 
 ## Input script
 

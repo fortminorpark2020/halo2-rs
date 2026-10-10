@@ -14,10 +14,11 @@
 //! Its settings come from the environment: PORT (47050 unless set),
 //! H2LIVE_DATA (the folder accounts are kept in, `h2live-data` unless set),
 //! H2LIVE_SECRET (what stat cards are signed with; without it, a key kept in
-//! `secret.txt` there), H2LIVE_RELAY (the relay's UDP port, or `off`), and
-//! H2LIVE_UPNP=0 to leave the router alone. So a double-click is enough at
-//! home, an `h2live.txt` next to the program can hold `port=`, `data=` and
-//! `relay=` lines too.
+//! `secret.txt` there), H2LIVE_RELAY (the relay's UDP port, or `off`),
+//! H2LIVE_UPNP=0 to leave the router alone, and H2LIVE_BIND (the address to
+//! listen on, all of this PC's unless set; 127.0.0.1 keeps it to this PC,
+//! for tests). So a double-click is enough at home, an `h2live.txt` next to
+//! the program can hold `port=`, `data=`, `relay=` and `bind=` lines too.
 //!
 //! At home it asks the router to pass the ports on to this PC (UPnP), and
 //! says how players reach it: READY with the address, FORWARD when the
@@ -80,6 +81,8 @@ enum Relay {
 /// How the program was told to run.
 struct Settings {
     port: u16,
+    /// The address both ports listen on.
+    bind: Ipv4Addr,
     data: PathBuf,
     secret: Option<String>,
     relay: Relay,
@@ -93,6 +96,7 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             port: PORT,
+            bind: Ipv4Addr::UNSPECIFIED,
             data: PathBuf::from(DATA),
             secret: None,
             relay: Relay::SamePort,
@@ -103,7 +107,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Take on the `port=`, `data=` and `relay=` lines of h2live.txt's
+    /// Take on the `port=`, `data=`, `relay=` and `bind=` lines of h2live.txt's
     /// `text`, in any case. A data folder that isn't a whole path is in
     /// `folder`, the program's. The lines it didn't take (but for blank
     /// ones and # comments), to say so.
@@ -124,6 +128,7 @@ impl Settings {
                 "port" => self.port = port(value)?,
                 "data" => self.data = folder.join(value),
                 "relay" => self.relay = relay(value)?,
+                "bind" => self.bind = bind(value)?,
                 _ => ignored.push(line),
             }
         }
@@ -135,6 +140,12 @@ fn port(text: &str) -> Result<u16, String> {
     text.trim()
         .parse()
         .map_err(|_| format!("{text} isn't a port number"))
+}
+
+fn bind(text: &str) -> Result<Ipv4Addr, String> {
+    text.trim()
+        .parse()
+        .map_err(|_| format!("{text} isn't an IPv4 address"))
 }
 
 /// The relay's port, or `off`.
@@ -178,7 +189,7 @@ fn run() -> Result<(), String> {
         h2net::live::LIVE_PROTOCOL
     ));
     let settings = settings()?;
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, settings.port)).map_err(|e| {
+    let listener = TcpListener::bind((settings.bind, settings.port)).map_err(|e| {
         let port = settings.port;
         match e.kind() {
             ErrorKind::AddrInUse => format!("port {port} is in use (is h2live running already?)"),
@@ -196,7 +207,7 @@ fn run() -> Result<(), String> {
     ctrlc::set_handler(move || stopping.store(true, Ordering::SeqCst))
         .map_err(|e| e.to_string())?;
     log(format_args!("listening on port {port} (Ctrl+C stops)"));
-    let relay = start_relay(settings.relay, port)?;
+    let relay = start_relay(settings.relay, settings.bind, port)?;
     let relay_port = relay.as_ref().map(|r| r.local_addr().port());
     if let Some(relay) = &relay {
         server.set_relay(relay.handle().clone());
@@ -226,7 +237,7 @@ fn run() -> Result<(), String> {
 /// have it. It admits only rooms issued through its handle (`issue`, with
 /// `member_key` for each player), which the server does for each of the
 /// launcher's matches.
-fn start_relay(relay: Relay, tcp: u16) -> Result<Option<RelayThread>, String> {
+fn start_relay(relay: Relay, bind: Ipv4Addr, tcp: u16) -> Result<Option<RelayThread>, String> {
     let (udp, asked) = match relay {
         Relay::Off => {
             log("relay off");
@@ -241,7 +252,7 @@ fn start_relay(relay: Relay, tcp: u16) -> Result<Option<RelayThread>, String> {
     };
     // `log` only queues the line (`log_in_background`), so it never holds
     // the relay up.
-    let bound = RelayServer::bind((Ipv4Addr::UNSPECIFIED, udp), config)
+    let bound = RelayServer::bind((bind, udp), config)
         .and_then(|relay| relay.with_log(Arc::new(|line: &str| log(line))).spawn());
     match bound {
         Ok(relay) => {
@@ -275,7 +286,7 @@ fn settings() -> Result<Settings, String> {
             log(format_args!("settings from {}", file.display()));
             for line in ignored {
                 log(format_args!(
-                    "ignored {line:?} (only port=, data= and relay= lines count)"
+                    "ignored {line:?} (only port=, data=, relay= and bind= lines count)"
                 ));
             }
         }
@@ -291,8 +302,14 @@ fn settings() -> Result<Settings, String> {
     if let Some(r) = env("H2LIVE_RELAY") {
         settings.relay = relay(&r).map_err(|why| format!("H2LIVE_RELAY: {why}"))?;
     }
+    if let Some(b) = env("H2LIVE_BIND") {
+        settings.bind = bind(&b).map_err(|why| format!("H2LIVE_BIND: {why}"))?;
+    }
     settings.secret = env("H2LIVE_SECRET");
-    settings.upnp = !settings.hosted && env("H2LIVE_UPNP").as_deref() != Some("0");
+    // Kept to this PC, there's nothing for the router to pass on.
+    settings.upnp = !settings.hosted
+        && !settings.bind.is_loopback()
+        && env("H2LIVE_UPNP").as_deref() != Some("0");
     Ok(settings)
 }
 
@@ -583,6 +600,12 @@ mod tests {
         assert_eq!(s.relay, Relay::Off);
         let why = Settings::default().read("relay=udp\n", folder).err();
         assert_eq!(why.as_deref(), Some("udp isn't a port number or off"));
+        // Where it listens: everywhere unless told.
+        assert_eq!(s.bind, Ipv4Addr::UNSPECIFIED);
+        s.read("bind=127.0.0.1\n", folder).unwrap();
+        assert_eq!(s.bind, Ipv4Addr::LOCALHOST);
+        let why = Settings::default().read("bind=here\n", folder).err();
+        assert_eq!(why.as_deref(), Some("here isn't an IPv4 address"));
         // What the FORWARD line asks for.
         assert_eq!(ports_to_forward(47050, None), "TCP 47050");
         assert_eq!(ports_to_forward(47050, Some(47050)), "TCP AND UDP 47050");
@@ -598,13 +621,21 @@ mod tests {
         let free = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
         let port = free.local_addr().unwrap().port();
         drop(free);
-        let relay = start_relay(Relay::SamePort, port).unwrap().unwrap();
+        let relay = start_relay(Relay::SamePort, Ipv4Addr::UNSPECIFIED, port)
+            .unwrap()
+            .unwrap();
         assert_eq!(relay.local_addr().port(), port);
         // Taken: without it, unless it was asked for.
-        assert!(start_relay(Relay::SamePort, port).unwrap().is_none());
-        let why = start_relay(Relay::Port(port), 1).err().unwrap();
+        assert!(start_relay(Relay::SamePort, Ipv4Addr::UNSPECIFIED, port)
+            .unwrap()
+            .is_none());
+        let why = start_relay(Relay::Port(port), Ipv4Addr::UNSPECIFIED, 1)
+            .err()
+            .unwrap();
         assert!(why.contains(&format!("UDP port {port}")), "{why}");
-        assert!(start_relay(Relay::Off, port).unwrap().is_none());
+        assert!(start_relay(Relay::Off, Ipv4Addr::UNSPECIFIED, port)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

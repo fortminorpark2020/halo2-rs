@@ -47,6 +47,14 @@ Usage: h2launch [flags]
                           format). Every launcher in the match gets the same
                           file.
   --me <index>            Which machine in the session this launcher is.
+  --live <server>         Sign in to h2live at this address (host, host:port
+                          or a ws:// URL), search a playlist and play the
+                          match it makes, in place of --session. --name is
+                          the gamertag; the sign-in key is kept in the log
+                          folder.
+  --playlist <n>          The launcher playlist to search (default 11, Head
+                          to Head: two players).
+  --live-wait <seconds>   How long to search before giving up (default 600).
   --relay-wait <seconds>  How long to wait for the relay to take us in before
                           the engine starts (default 15).
   --recv-port <mode>      How the engine's receive call's fourth argument is
@@ -85,6 +93,10 @@ Usage: h2launch [flags]
 The log is %LOCALAPPDATA%\\h2launch\\h2launch.log
 (PowerShell: $env:LOCALAPPDATA\\h2launch\\h2launch.log); with --instance <name>
 it is in %LOCALAPPDATA%\\h2launch\\<name>\\ instead.";
+
+/// The playlist `--live` searches unless told: Head to Head, the launcher
+/// playlist for two (crates/h2live/src/playlists.txt).
+pub const DEFAULT_PLAYLIST: u8 = 11;
 
 /// Which controller is player 1's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +137,10 @@ pub struct Args {
     pub watchdog: bool,
     pub session: Option<String>,
     pub me: Option<usize>,
+    /// `--live`: h2live's address.
+    pub live: Option<String>,
+    pub playlist: u8,
+    pub live_wait: f64,
     pub relay_wait: f64,
     pub recv_port: RecvPort,
     pub send_return: SendReturn,
@@ -164,6 +180,9 @@ impl Default for Args {
             watchdog: true,
             session: None,
             me: None,
+            live: None,
+            playlist: DEFAULT_PLAYLIST,
+            live_wait: 600.0,
             relay_wait: 15.0,
             recv_port: RecvPort::Auto,
             send_return: SendReturn::Len,
@@ -316,6 +335,15 @@ where
                     .ok_or_else(|| format!("--me: {v:?} should be a machine index, 0 to 16"))?;
                 a.me = Some(n as usize);
             }
+            "--live" => a.live = Some(value()?),
+            "--playlist" => {
+                let v = value()?;
+                a.playlist = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("--playlist: {v:?} should be a playlist number"))?;
+            }
+            "--live-wait" => a.live_wait = seconds("--live-wait", &value()?)?,
             "--relay-wait" => a.relay_wait = seconds("--relay-wait", &value()?)?,
             "--recv-port" => {
                 let v = value()?;
@@ -376,6 +404,9 @@ where
             }
             other => return Err(format!("unknown flag {other:?} (see --help)")),
         }
+    }
+    if a.live.is_some() && a.session.is_some() {
+        return Err("--live and --session can't go together".into());
     }
     Ok(a)
 }
@@ -577,6 +608,27 @@ mod tests {
         );
         assert_eq!(variant_path(root, Some(r"D:\v\x.bin")), r"D:\v\x.bin");
         assert_eq!(variant_path(root, Some(r"v/x")), r"v/x.bin");
+    }
+
+    #[test]
+    fn live_flags() {
+        let a = parse([
+            "--live",
+            "192.168.8.102",
+            "--playlist",
+            "13",
+            "--live-wait=30",
+        ])
+        .unwrap();
+        assert_eq!(a.live.as_deref(), Some("192.168.8.102"));
+        assert_eq!(a.playlist, 13);
+        assert_eq!(a.live_wait, 30.0);
+        assert_eq!(
+            parse(Vec::<String>::new()).unwrap().playlist,
+            DEFAULT_PLAYLIST
+        );
+        assert!(parse(["--playlist", "300"]).is_err());
+        assert!(parse(["--live", "x", "--session", "m.txt"]).is_err());
     }
 
     #[test]

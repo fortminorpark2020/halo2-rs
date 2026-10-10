@@ -14,6 +14,7 @@
 //! estimate.
 
 pub mod cli;
+pub mod live;
 pub mod maps;
 pub mod mccroot;
 pub mod net;

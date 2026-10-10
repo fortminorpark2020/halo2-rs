@@ -733,7 +733,13 @@ impl Server {
 /// `text` as a log line can show it: anything but printable ASCII as `?`
 /// (so what a PC sends can't start a line of its own).
 fn printable(text: &str) -> String {
-    let shown = |c: char| if c.is_ascii_graphic() || c == ' ' { c } else { '?' };
+    let shown = |c: char| {
+        if c.is_ascii_graphic() || c == ' ' {
+            c
+        } else {
+            '?'
+        }
+    };
     text.chars().map(shown).collect()
 }
 
