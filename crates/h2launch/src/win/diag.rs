@@ -17,6 +17,7 @@ use std::sync::atomic::Ordering;
 use super::crash::readable;
 use super::log::log;
 use crate::expected::{DIAG_KEY_GATE_RVA, DIAG_KEY_POLLER_FLAG_RVA};
+use crate::watch::{Step, Watch};
 
 #[derive(Default)]
 pub struct KeyDiag {
@@ -89,4 +90,110 @@ fn read_line(base: usize) -> String {
         first.join(" "),
         set.join(" ")
     )
+}
+
+/// `--watch`: engine values read ten times a second and logged when they
+/// change (see `crate::watch`). Each watch logs at most 400 changes, then
+/// only a count every 10 s, so a value that changes every frame cannot
+/// flood the log.
+pub struct Watches {
+    items: Vec<(Watch, Option<String>, u32)>,
+    next: f64,
+    next_quiet: f64,
+    announced: bool,
+}
+
+const WATCH_LINES: u32 = 400;
+
+impl Watches {
+    pub fn new(list: &[Watch]) -> Watches {
+        Watches {
+            items: list.iter().map(|w| (w.clone(), None, 0)).collect(),
+            next: 0.0,
+            next_quiet: 10.0,
+            announced: false,
+        }
+    }
+
+    pub fn tick(&mut self, t: f64) {
+        if self.items.is_empty() || t < self.next {
+            return;
+        }
+        self.next = t + 0.1;
+        let base = super::HALO2_BASE.load(Ordering::SeqCst);
+        if base == 0 {
+            return;
+        }
+        if !self.announced {
+            self.announced = true;
+            log!(
+                "watch: reading {} engine value(s) ten times a second, read only{}",
+                self.items.len(),
+                if super::BUILD_MATCHES.load(Ordering::SeqCst) {
+                    ""
+                } else {
+                    " (halo2.dll is NOT the researched build, so the RVAs may mean nothing)"
+                }
+            );
+        }
+        let quiet_report = t >= self.next_quiet;
+        if quiet_report {
+            self.next_quiet = t + 10.0;
+        }
+        for (w, last, changes) in &mut self.items {
+            let now = read_watch(base, w);
+            if last.as_deref() != Some(now.as_str()) {
+                *changes += 1;
+                if *changes <= WATCH_LINES {
+                    log!("watch {}: {}", w.name, now);
+                    if *changes == WATCH_LINES {
+                        log!(
+                            "watch {}: {WATCH_LINES} changes logged; from now on only a count every 10 s",
+                            w.name
+                        );
+                    }
+                }
+                *last = Some(now);
+            } else if quiet_report && *changes > WATCH_LINES {
+                log!(
+                    "watch {}: {} ({} changes so far)",
+                    w.name,
+                    last.as_deref().unwrap_or("?"),
+                    changes
+                );
+            }
+        }
+    }
+}
+
+/// Follows a watch's path from halo2.dll's base and reads its value, or
+/// says where the path broke.
+fn read_watch(base: usize, w: &Watch) -> String {
+    let mut addr = base.wrapping_add(w.rva as usize);
+    for step in &w.steps {
+        match *step {
+            Step::Add(v) => addr = addr.wrapping_add(v as usize),
+            Step::Deref(v) => {
+                if !readable(addr, 8) {
+                    return format!("unreadable pointer at {addr:#x}");
+                }
+                // SAFETY: checked readable; a plain read of engine data.
+                let p = unsafe { std::ptr::read_volatile(addr as *const usize) };
+                if p == 0 {
+                    return "null pointer".into();
+                }
+                addr = p.wrapping_add(v as usize);
+            }
+        }
+    }
+    let n = w.kind.size();
+    if !readable(addr, n) {
+        return format!("unreadable at {addr:#x}");
+    }
+    let mut b = [0u8; 64];
+    for (i, x) in b[..n].iter_mut().enumerate() {
+        // SAFETY: checked readable above; plain reads of engine data.
+        *x = unsafe { std::ptr::read_volatile((addr + i) as *const u8) };
+    }
+    w.kind.show(&b[..n])
 }

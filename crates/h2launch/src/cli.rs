@@ -61,6 +61,13 @@ Usage: h2launch [flags]
   --event-return <n>=<v>  The same for an event-manager slot.
   --pad <0-3|none|any>    Which XInput controller is player 1's (default any:
                           the first connected).
+  --watch <name>=<path>:<type>  Read an engine value at an RVA in halo2.dll
+                          ten times a second and log it when it changes
+                          (read only; repeatable). The path is an RVA, then
+                          any number of ->off (read a pointer, add off) and
+                          an optional +off; the type is u8 i8 u16 i16 u32
+                          i32 u64 i64 f32 or hex<n>. Example:
+                          --watch state=0xE15048+0x90A8:i32
   --diag                  More detail in the log: dumps of the options, the
                           variant copy's effect, new calling threads, every
                           event-manager slot's first call, the input sent to
@@ -119,6 +126,7 @@ pub struct Args {
     pub pad: Pad,
     pub slot_return: Vec<(usize, u64)>,
     pub event_return: Vec<(usize, u64)>,
+    pub watch: Vec<crate::watch::Watch>,
 }
 
 impl Default for Args {
@@ -156,6 +164,7 @@ impl Default for Args {
             pad: Pad::Any,
             slot_return: Vec::new(),
             event_return: Vec::new(),
+            watch: Vec::new(),
         }
     }
 }
@@ -334,6 +343,13 @@ where
                 a.event_return
                     .push(slot_value("--event-return", &v, crate::slots::EVENT_SLOTS)?);
             }
+            "--watch" => {
+                let v = value()?;
+                if a.watch.len() >= 32 {
+                    return Err("--watch: at most 32 watches".into());
+                }
+                a.watch.push(crate::watch::Watch::parse(&v)?);
+            }
             "--pad" => {
                 let v = value()?;
                 a.pad = match v.to_ascii_lowercase().as_str() {
@@ -461,8 +477,12 @@ mod tests {
             "--slot-return=0x63=0x10",
             "--event-return",
             "141=1",
+            "--watch",
+            "net=0xE14FF0:u8",
         ])
         .unwrap();
+        assert_eq!(a.watch.len(), 1);
+        assert_eq!(a.watch[0].name, "net");
         assert_eq!(a.slot_return, vec![(118, 1), (99, 16)]);
         assert_eq!(a.event_return, vec![(141, 1)]);
         assert_eq!(a.session.as_deref(), Some("match.txt"));

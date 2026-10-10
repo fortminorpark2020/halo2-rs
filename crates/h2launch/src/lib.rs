@@ -26,6 +26,7 @@ pub mod session;
 pub mod slots;
 pub mod util;
 pub mod vdf;
+pub mod watch;
 
 #[cfg(windows)]
 pub mod win;

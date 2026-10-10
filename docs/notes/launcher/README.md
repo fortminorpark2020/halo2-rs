@@ -134,6 +134,9 @@ then (`--no-watchdog` turns both off, for a debugger session).
 --pad <0-3|none|any>    Which controller is player 1's (default any).
 --slot-return <n>=<v>   Make host slot n's logging stub return v (testing).
 --event-return <n>=<v>  The same for an event-manager slot.
+--watch <name>=<path>:<type>  Log an engine value (read only) whenever it
+                        changes, e.g. --watch state=0xE15048+0x90A8:i32
+                        (see --help for the path syntax).
 --diag                  More detail in the log: dumps of the options, the
                         variant copy's effect, new calling threads, every
                         event-manager slot's first call, the input sent each

@@ -318,9 +318,12 @@ unsafe extern "system" fn network_sendto_reliable(
     panic_guard(42, || net_send(true, id, buf, len, port))
 }
 
-/// Slot 43: `(char* buf, u32 len, network_id* id_out, a4) -> u32`, the
-/// bytes copied or 0. On the owner's PC a4 was 1000, not a pointer, so it
-/// is read as `--recv-port` says; only `pointer` writes through it.
+/// Slot 43: `(char* buf, u32 len, network_id* id_out, u16 port) -> u32`,
+/// the bytes copied or 0. The engine polls port 1000 (its game links) and
+/// 1002 (out-of-band transport and session messages, the first contact),
+/// and fills the rest of the sender's address itself (static read of
+/// 1.3528 on the owner's PC). `--recv-port` can still read the fourth
+/// argument differently; only `pointer` writes through it.
 unsafe extern "system" fn network_recvfrom(
     _this: *mut c_void,
     buf: *mut u8,

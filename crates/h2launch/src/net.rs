@@ -341,7 +341,9 @@ impl Net {
     pub fn recv(&self, buf: &mut [u8], arg: u64) -> Option<(u64, u32, usize)> {
         let n = self.calls[2].fetch_add(1, Relaxed);
         let mode = self.settings.recv_port;
-        let want = arg as u32;
+        // The engine passes the socket's port as a u16; the rest of the
+        // register is left over from the caller (static read of 1.3528).
+        let want = arg as u16 as u32;
         let Ok(mut inbox) = self.inbox.lock() else {
             return None;
         };

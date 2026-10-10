@@ -690,6 +690,7 @@ fn main_loop() -> i32 {
     // Below 0 so script steps at time 0 fire.
     let mut script_t = -1.0f64;
     let mut key_diag = diag::KeyDiag::default();
+    let mut watches = diag::Watches::new(&s.args.watch);
     let mut quit_started: Option<(f64, f64)> = None; // (when, deadline)
     let mut game_exit_logged = false;
     let mut attach = input::Attach::default();
@@ -768,6 +769,7 @@ fn main_loop() -> i32 {
         if s.args.diag {
             key_diag.tick(t);
         }
+        watches.tick(t);
 
         if t >= next_summary {
             next_summary = t + 10.0;
