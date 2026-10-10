@@ -379,8 +379,10 @@ stops it. An `h2live.txt` next to it can set `port=`, `data=` and `relay=`
 (the relay's UDP port, or `off`). On a host online, `PORT`, `H2LIVE_DATA`,
 `H2LIVE_RELAY` and `H2LIVE_SECRET` (what signs players' stat cards) set the
 same; `/health` answers health checks, and `/` says how many players are
-online. `H2LIVE_UPNP=0` leaves the router alone. `h2relay.exe` runs the
-relay on its own, for tests on one PC (`h2relay [port]`).
+online. `H2LIVE_UPNP=0` leaves the router alone. The relay only lets in
+the players of matches h2live sets up. `h2relay.exe` runs a relay on its
+own for tests on one PC or a home network (`h2relay [port]`); it lets
+anyone in, so don't forward its port.
 
 Games sign in to h2live on the same PC if it's running, or else the server a
 `server=` line in `profile.txt` names, or else the one built into the game;

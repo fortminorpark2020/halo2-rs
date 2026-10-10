@@ -10,25 +10,48 @@
 //! - `recv` (the engine's receive) pops what a background thread received;
 //!   it never waits.
 //!
+//! Packets a client sends to its own id (Halo 2 talks to itself for
+//! splitscreen) go straight to its own `recv`, never on the wire.
+//! Packets up to [`MAX_PAYLOAD`] (4 KiB) go; those over [`MTU_PAYLOAD`]
+//! are fragmented by IP on the way, which is counted (`over_mtu`), with the
+//! largest packet each way, for the launcher to log.
+//!
 //! The background thread owns the receiving side and the timers: it says
-//! hello to the relay server until the server answers (and gives up, as
-//! [`State::Failed`], after `hello_timeout`), sends a keepalive to the
-//! server and a ping to every other member each second, resends reliable
-//! frames, and says bye when the client is dropped. If the server forgets
-//! the client (a restart, or its address changed) it answers with
-//! [`Refusal::NotMember`] and the client says hello again by itself.
+//! hello to the relay server until the server answers, sends a keepalive
+//! to the server and a ping to every other member each second, resends
+//! reliable frames, and says bye when the client is dropped. Joining takes
+//! two hellos: the server answers the first with a challenge holding a
+//! cookie for this client's address, and the second brings it back (with,
+//! for a room h2live issued, a proof of the member key it gave this
+//! player: `member_key`). Refusals don't end it: it keeps saying hello
+//! (the room may be issued a moment later, say) and only gives up, as
+//! [`State::Failed`], after `hello_timeout`, with the last refusal as the
+//! reason. If the server forgets the client (a restart, or its address
+//! changed) it answers with [`Refusal::NotMember`], and the client says
+//! hello again by itself; so it does when the room is closed, to be sure.
 //!
 //! Reliable: each (sender, receiver) pair has its own stream. A stream
 //! starts with a SYN frame (a reliable frame with [`FLAG_SYN`] and no
 //! payload) whose seq is a random number; the data frames that follow
 //! number on from it. The receiver acks every reliable frame with its seq
 //! and the next seq it expects, holds frames that arrive early (up to
-//! `RECV_WINDOW` ahead), and hands them out in order, each once. A SYN
-//! with a new number means the sender started over (a new client), so the
-//! receiver starts over too. The sender resends a frame after
-//! max(2 x smoothed round trip, 50 ms), doubling each time up to a second,
-//! and after `max_resends` gives up on the stream: what was waiting is
-//! dropped (and counted) and the next reliable send opens a new stream.
+//! `RECV_WINDOW` ahead), and hands them out in order, each once. A frame
+//! acked is never dropped: frames are refused (not acked, so they come
+//! again) while `recv` is behind, but once one is taken, every frame it
+//! lets out in order goes to `recv` however full that is. A SYN with a new
+//! number means the sender started over (a new client), so the receiver
+//! starts over too. A reliable frame for a stream the receiver doesn't
+//! have (it started over itself) is answered with a "no stream" ack (an
+//! ack with [`FLAG_SYN`]); the sender then opens a new stream and sends
+//! what was waiting again, numbered in it. It heeds that only once the
+//! receiver has taken the SYN, and only for a frame sent after the SYN's
+//! ack came back (or for any frame, a second after that): frames sent just
+//! behind a SYN can overtake it, and the "no stream" answers they get can
+//! come back after the SYN's ack, meaning nothing. The sender resends a
+//! frame after max(2 x smoothed round trip, 50 ms), doubling each time up
+//! to a second, and after `max_resends` gives up on the stream: what was
+//! waiting is dropped (and counted) and the next reliable send opens a new
+//! stream.
 //! Round trips come from acks of frames sent once (Karn's rule) and from
 //! the pings, so a peer seen only through unreliable traffic has one too.
 //!
@@ -37,9 +60,10 @@
 //! this client sends. Jitter may reorder frames, as a real network does.
 
 use crate::frame::{
-    decode, seq_after, Frame, Kind, Refusal, BROADCAST, FLAG_PEER, FLAG_SERVER, FLAG_SYN,
-    MAX_FRAME, MAX_PAYLOAD,
+    decode, seq_after, set_seq, Frame, Kind, Refusal, BROADCAST, COOKIE_LEN, FLAG_PEER,
+    FLAG_SERVER, FLAG_SYN, HELLO_LEN, MAX_FRAME, MAX_PAYLOAD, MTU_PAYLOAD,
 };
+use crate::keys::MemberKey;
 use crate::rng::Rng;
 use crate::sockets::{self, RecvError};
 use std::cmp::Reverse;
@@ -47,7 +71,7 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -64,6 +88,11 @@ const DUPLICATE_WINDOW: i32 = 4096;
 /// Peers tracked at most (a match has 16 machines at most): frames from
 /// more are still delivered, but get no stats or reliable stream.
 const MAX_PEERS: usize = 64;
+/// A "no stream" answer about a frame sent before the receiver's ack of
+/// the SYN came back counts only after this long (or four round trips, if
+/// longer): until then it may be one the receiver sent before the SYN got
+/// there, overtaken by that ack. One about a later frame counts at once.
+const NO_STREAM_GRACE: Duration = Duration::from_secs(1);
 /// Frames the lag hooks may hold at once.
 const MAX_DELAYED: usize = 8192;
 /// Peer pings remembered, to match their pongs to.
@@ -122,7 +151,9 @@ impl Lag {
 pub struct ClientConfig {
     /// Hello is sent this often until the server answers...
     pub hello_every: Duration,
-    /// ...and the client gives up ([`Failure::Timeout`]) after this long.
+    /// ...and the client gives up after this long: [`Failure::Refused`]
+    /// with the server's last refusal, or [`Failure::Timeout`] if it never
+    /// answered.
     pub hello_timeout: Duration,
     /// A keepalive to the server, and a ping to the other members, this
     /// often. The server forgets a member quiet for 15 s.
@@ -142,8 +173,11 @@ pub struct ClientConfig {
     /// refused ([`SendError::Full`]) and counted.
     pub send_window: usize,
     /// Received packets waiting for `recv`, at most; more are dropped
-    /// (reliable ones aren't acked, so they come again).
+    /// (reliable ones aren't acked, so they come again). Reliable frames
+    /// already acked go over it, by up to the reliable window.
     pub recv_queue: usize,
+    /// For a room h2live issued: the key it gave this player for it.
+    pub member_key: Option<MemberKey>,
     pub lag: Lag,
 }
 
@@ -160,6 +194,7 @@ impl Default for ClientConfig {
             max_resends: 20,
             send_window: 256,
             recv_queue: 4096,
+            member_key: None,
             lag: Lag::default(),
         }
     }
@@ -190,7 +225,7 @@ pub enum State {
 pub enum Failure {
     /// The server never answered hello.
     Timeout,
-    /// The server said no.
+    /// The server said no, for `hello_timeout` (the last reason it gave).
     Refused(Refusal),
 }
 
@@ -258,6 +293,14 @@ pub struct ClientStats {
     pub resends: u64,
     pub duplicates: u64,
     pub gave_up: u64,
+    /// Reliable streams started over because the receiver had lost its
+    /// end (it started over itself).
+    pub restarts: u64,
+    /// The biggest engine packet sent and received (bytes), and sends over
+    /// [`MTU_PAYLOAD`], which IP fragments.
+    pub largest_sent: usize,
+    pub largest_received: usize,
+    pub over_mtu: u64,
     /// Frames the lag hooks lost on purpose.
     pub lag_lost: u64,
     /// The round trip to the relay server.
@@ -359,10 +402,17 @@ impl RelayClient {
 
     /// Send `data` to member `dst` (or every other member, for
     /// [`BROADCAST`]) best-effort, with `port` passed on unchanged. Never
-    /// waits.
+    /// waits. To this client's own id, it goes straight to `recv`.
     pub fn send_unreliable(&self, dst: u64, port: u32, data: &[u8]) -> Result<(), SendError> {
         let s = &self.shared;
         s.sendable(data)?;
+        if dst == s.me {
+            // As if it came back from the network (dropped if `recv` is
+            // far behind).
+            s.deliver(s.me, port, data, false);
+            s.sent(data.len());
+            return Ok(());
+        }
         let seq = s.unreliable_seq.fetch_add(1, Relaxed);
         let frame = Frame::new(Kind::Unreliable, s.room, s.me, dst)
             .with_port(port)
@@ -370,7 +420,7 @@ impl RelayClient {
             .with_payload(data);
         let sent = s.send_frame(&frame);
         if sent.is_ok() {
-            s.counters.packets_sent.fetch_add(1, Relaxed);
+            s.sent(data.len());
             if dst != BROADCAST {
                 let mut peers = lock(&s.peers);
                 if let Some(peer) = peer(&mut peers, dst) {
@@ -385,12 +435,21 @@ impl RelayClient {
     /// Send `data` to member `dst`, to be handed out there once and in
     /// order with the others sent reliably to it, with `port` passed on
     /// unchanged. Never waits: the frame goes out at once and is kept for
-    /// resending.
+    /// resending. To this client's own id, it goes straight to `recv`
+    /// ([`SendError::Full`] if `recv` is too far behind).
     pub fn send_reliable(&self, dst: u64, port: u32, data: &[u8]) -> Result<(), SendError> {
         let s = &self.shared;
         s.sendable(data)?;
         if dst == BROADCAST {
             return Err(SendError::BroadcastReliable);
+        }
+        if dst == s.me {
+            if !s.deliver(s.me, port, data, false) {
+                s.counters.send_drops.fetch_add(1, Relaxed);
+                return Err(SendError::Full);
+            }
+            s.sent(data.len());
+            return Ok(());
         }
         let now = Instant::now();
         let mut out: Vec<Vec<u8>> = Vec::with_capacity(2);
@@ -413,6 +472,7 @@ impl RelayClient {
                     open: true,
                     isn,
                     next: isn,
+                    synced: None,
                     pending: VecDeque::new(),
                 };
                 let syn = Frame::new(Kind::Reliable, s.room, s.me, dst).with_flags(FLAG_SYN);
@@ -425,7 +485,7 @@ impl RelayClient {
             peer.packets_out += 1;
             peer.bytes_out += data.len() as u64;
         }
-        s.counters.packets_sent.fetch_add(1, Relaxed);
+        s.sent(data.len());
         for frame in &out {
             // It's kept, so a frame the socket had no room for goes again
             // with the next resend.
@@ -448,6 +508,7 @@ impl RelayClient {
             };
             to.copy_from_slice(&packet.data);
             s.counters.packets_received.fetch_add(1, Relaxed);
+            s.counters.largest_received.fetch_max(n, Relaxed);
             return Some((packet.src, packet.port, n));
         }
         None
@@ -487,6 +548,10 @@ impl RelayClient {
             resends: get(&c.resends),
             duplicates: get(&c.duplicates),
             gave_up: get(&c.gave_up),
+            restarts: get(&c.restarts),
+            largest_sent: c.largest_sent.load(Relaxed),
+            largest_received: c.largest_received.load(Relaxed),
+            over_mtu: get(&c.over_mtu),
             lag_lost: get(&c.lag_lost),
             server_rtt: s.server_rtt(),
             room_members: s.room_members.load(Relaxed),
@@ -531,6 +596,10 @@ struct Counters {
     resends: AtomicU64,
     duplicates: AtomicU64,
     gave_up: AtomicU64,
+    restarts: AtomicU64,
+    largest_sent: AtomicUsize,
+    largest_received: AtomicUsize,
+    over_mtu: AtomicU64,
     lag_lost: AtomicU64,
 }
 
@@ -656,17 +725,31 @@ impl Shared {
         rto.saturating_mul(1 << resends.min(16)).min(cap)
     }
 
-    fn deliver(&self, src: u64, port: u32, data: &[u8]) {
+    /// An engine packet handed to `send_*` has gone (or is kept to go).
+    fn sent(&self, len: usize) {
+        let c = &self.counters;
+        c.packets_sent.fetch_add(1, Relaxed);
+        c.largest_sent.fetch_max(len, Relaxed);
+        if len > MTU_PAYLOAD {
+            c.over_mtu.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// Queue a packet for `recv`: whether it was. Over `recv_queue` it's
+    /// dropped (and counted), unless `acked`: a reliable frame already
+    /// acked must not be lost (and the window keeps those few).
+    fn deliver(&self, src: u64, port: u32, data: &[u8], acked: bool) -> bool {
         let mut inbox = lock(&self.inbox);
-        if inbox.len() >= self.config.recv_queue {
+        if inbox.len() >= self.config.recv_queue && !acked {
             self.counters.queue_drops.fetch_add(1, Relaxed);
-            return;
+            return false;
         }
         inbox.push_back(Packet {
             src,
             port,
             data: data.to_vec(),
         });
+        true
     }
 
     fn inbox_full(&self) -> bool {
@@ -706,6 +789,10 @@ struct Stream {
     /// The SYN's seq, and the next seq to use.
     isn: u32,
     next: u32,
+    /// Once the receiver's ack of the SYN came: the next seq then, and
+    /// when. Frames from that seq on were sent after the receiver had the
+    /// stream, so a "no stream" about one means it lost it.
+    synced: Option<(u32, Instant)>,
     /// Frames sent and not acked, oldest first.
     pending: VecDeque<Pending>,
 }
@@ -721,6 +808,52 @@ struct Pending {
 }
 
 impl Stream {
+    /// The receiver said it has no stream from us, answering our frame
+    /// `seq`. If that's a data frame of this stream, the receiver took the
+    /// SYN (until then, the SYN's resends open it), and the answer can't be
+    /// an old one (see `synced` and [`NO_STREAM_GRACE`]: `grace`), start a
+    /// new stream with what's waiting, numbered in it, all to go again now
+    /// (added to `out`). Whether it did.
+    #[allow(clippy::too_many_arguments)]
+    fn restart(
+        &mut self,
+        seq: u32,
+        isn: u32,
+        syn: Frame,
+        now: Instant,
+        rto: Duration,
+        grace: Duration,
+        out: &mut Vec<Vec<u8>>,
+    ) -> bool {
+        let sent = self.next.wrapping_sub(self.isn);
+        let offset = seq.wrapping_sub(self.isn);
+        let Some((mark, synced)) = self.synced else {
+            return false;
+        };
+        let after = offset >= mark.wrapping_sub(self.isn);
+        if !self.open || offset == 0 || offset >= sent || (!after && now < synced + grace) {
+            return false;
+        }
+        let waiting = std::mem::take(&mut self.pending);
+        self.isn = isn;
+        self.next = isn;
+        self.synced = None;
+        self.push(syn, now, rto, out);
+        for mut p in waiting {
+            p.seq = self.next;
+            self.next = p.seq.wrapping_add(1);
+            set_seq(&mut p.frame, p.seq);
+            out.push(p.frame.clone());
+            self.pending.push_back(Pending {
+                sent: now,
+                due: now + rto,
+                resends: 0,
+                ..p
+            });
+        }
+        true
+    }
+
     /// Number `frame` next in this stream, keep it, and add it to `out`.
     fn push(&mut self, frame: Frame, now: Instant, rto: Duration, out: &mut Vec<Vec<u8>>) {
         let seq = self.next;
@@ -756,6 +889,9 @@ struct Worker {
     nonce: u32,
     joining_since: Instant,
     hello_sent: Option<Instant>,
+    /// The cookie the server sent this attempt, and the last refusal.
+    cookie: Option<[u8; COOKIE_LEN]>,
+    refusal: Option<Refusal>,
     /// When the last keepalive went, and the server was last heard from.
     keepalive_sent: Instant,
     heard_server: Instant,
@@ -775,6 +911,8 @@ impl Worker {
             nonce: 0,
             joining_since: now,
             hello_sent: None,
+            cookie: None,
+            refusal: None,
             keepalive_sent: now,
             heard_server: now,
             server_ping: (0, now),
@@ -833,7 +971,28 @@ impl Worker {
         self.nonce = self.shared.rng.next_u32();
         self.joining_since = now;
         self.hello_sent = None;
+        self.cookie = None;
+        self.refusal = None;
         self.shared.set_state(State::Joining);
+    }
+
+    /// Say hello: with the server's cookie once it sent one, and then the
+    /// member key's proof if there's a key.
+    fn hello(&mut self, now: Instant) {
+        let s = &self.shared;
+        let mut payload = [0; HELLO_LEN];
+        if let Some(cookie) = &self.cookie {
+            payload[..COOKIE_LEN].copy_from_slice(cookie);
+            if let Some(key) = &s.config.member_key {
+                let proof = key.proof(s.room, s.me, cookie);
+                payload[COOKIE_LEN..].copy_from_slice(&proof);
+            }
+        }
+        let hello = Frame::new(Kind::Hello, s.room, s.me, 0)
+            .with_seq(self.nonce)
+            .with_payload(&payload);
+        let _ = s.send_frame(&hello);
+        self.hello_sent = Some(now);
     }
 
     /// Do what's due: hello, keepalive and pings, resends, held frames.
@@ -845,15 +1004,14 @@ impl Worker {
         match self.state() {
             State::Joining => {
                 if now >= self.joining_since + config.hello_timeout {
-                    s.set_state(State::Failed(Failure::Timeout));
+                    let failure = self.refusal.map_or(Failure::Timeout, Failure::Refused);
+                    s.set_state(State::Failed(failure));
                 } else {
                     if self
                         .hello_sent
                         .is_none_or(|sent| now >= sent + config.hello_every)
                     {
-                        let hello = Frame::new(Kind::Hello, s.room, s.me, 0).with_seq(self.nonce);
-                        let _ = s.send_frame(&hello);
-                        self.hello_sent = Some(now);
+                        self.hello(now);
                     }
                     wake = wake.min(now + config.hello_every);
                 }
@@ -983,7 +1141,7 @@ impl Worker {
         }
         match frame.kind {
             Kind::Unreliable => {
-                s.deliver(frame.src, frame.port, frame.payload);
+                s.deliver(frame.src, frame.port, frame.payload, false);
                 self.count_in(frame.src, frame.payload.len());
             }
             Kind::Reliable => self.reliable(&frame),
@@ -1002,9 +1160,9 @@ impl Worker {
                     }
                 }
             }
-            // Only the server says hello, refuses or pongs a keepalive, and
-            // the server takes byes.
-            Kind::Hello | Kind::Bye | Kind::Refused => {
+            // Only the server says hello, challenges, refuses or pongs a
+            // keepalive, and the server takes byes.
+            Kind::Hello | Kind::Bye | Kind::Refused | Kind::Challenge => {
                 c.foreign.fetch_add(1, Relaxed);
             }
         }
@@ -1036,12 +1194,24 @@ impl Worker {
                     self.server_rtt(now - self.server_ping.1);
                 }
             }
+            Kind::Challenge => {
+                if state == State::Joining && frame.seq == self.nonce {
+                    let mut cookie = [0; COOKIE_LEN];
+                    cookie.copy_from_slice(frame.payload);
+                    self.cookie = Some(cookie);
+                    // Again at once, with it.
+                    self.hello(now);
+                }
+            }
             Kind::Refused => match (state, Refusal::from_code(frame.seq)) {
-                // Forgotten: join again.
-                (State::Joined, Refusal::NotMember) => self.join(now),
+                // Forgotten, or the room closed: join again (and if it
+                // really is gone, that's refused until it gives up).
+                (State::Joined, Refusal::NotMember | Refusal::NoSuchRoom) => self.join(now),
                 // About something sent before the hello got there.
                 (State::Joining, Refusal::NotMember) => {}
-                (State::Joining, why) => s.set_state(State::Failed(Failure::Refused(why))),
+                // Kept for when it gives up; until then it may yet join
+                // (the room issued a moment later, a place freed).
+                (State::Joining, why) => self.refusal = Some(why),
                 _ => {}
             },
             _ => {
@@ -1086,9 +1256,15 @@ impl Worker {
             self.send_ack(src, frame.seq, expected);
             return;
         }
-        // Before its SYN: not acked, so it comes again once the stream is
-        // open.
+        // No stream from it: either its SYN is still on the way (then
+        // it's resent, and this frame after it), or this client started
+        // after the stream did (a restart). Say so: in the second case the
+        // sender starts a new stream.
         let Some(stream) = self.inbound.get_mut(&src) else {
+            let none = Frame::new(Kind::Ack, s.room, s.me, src)
+                .with_flags(FLAG_SYN)
+                .with_seq(frame.seq);
+            let _ = s.send_frame(&none);
             return;
         };
         let ahead = seq_after(frame.seq, stream.expected);
@@ -1117,8 +1293,10 @@ impl Worker {
                 stream.expected = stream.expected.wrapping_add(1);
                 handed.push((port, data));
             }
+            // Each one acked (this one now, the held ones when they came),
+            // so never dropped.
             for (port, data) in &handed {
-                s.deliver(src, *port, data);
+                s.deliver(src, *port, data, true);
                 self.count_in(src, data.len());
             }
         }
@@ -1135,12 +1313,33 @@ impl Worker {
     }
 
     /// An ack from a peer: forget what it took, and learn the round trip.
+    /// Or its "no stream": start a new one.
     fn ack(&mut self, frame: &Frame, now: Instant) {
-        let s = &self.shared;
+        let s = self.shared.clone();
         let mut peers = lock(&s.peers);
         let Some(peer) = peers.get_mut(&frame.src) else {
             return;
         };
+        if frame.flags & FLAG_SYN != 0 {
+            let rto = s.rto(peer.srtt);
+            let grace = peer
+                .srtt
+                .map_or(NO_STREAM_GRACE, |rtt| (rtt * 4).max(NO_STREAM_GRACE));
+            let syn = Frame::new(Kind::Reliable, s.room, s.me, frame.src).with_flags(FLAG_SYN);
+            let isn = s.rng.next_u32();
+            let mut out = Vec::new();
+            if peer
+                .out
+                .restart(frame.seq, isn, syn, now, rto, grace, &mut out)
+            {
+                s.counters.restarts.fetch_add(1, Relaxed);
+            }
+            drop(peers);
+            for frame in &out {
+                let _ = s.transmit(frame);
+            }
+            return;
+        }
         let stream = &mut peer.out;
         if !stream.open {
             return;
@@ -1152,13 +1351,18 @@ impl Worker {
         let cumulative = if cumulative <= sent { cumulative } else { 0 };
         let acked = offset(frame.seq);
         let mut sample = None;
+        let mut syn_taken = false;
         stream.pending.retain(|p| {
             let taken = offset(p.seq) < cumulative || offset(p.seq) == acked;
             if taken && p.seq == frame.seq && p.resends == 0 {
                 sample = Some(now - p.sent);
             }
+            syn_taken |= taken && offset(p.seq) == 0;
             !taken
         });
+        if syn_taken {
+            stream.synced = Some((stream.next, now));
+        }
         if let Some(sample) = sample {
             peer.srtt = Some(smooth(peer.srtt, sample));
         }

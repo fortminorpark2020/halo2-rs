@@ -24,6 +24,10 @@
 //!   most [`MAX_PAYLOAD`] bytes. [`RELAY_PROTOCOL`] is this crate's own
 //!   version, separate from h2net's `PROTOCOL`: bump it on any change to
 //!   the format or to what the frames mean.
+//! - The `keys` module: the server's address cookies (a hello only counts
+//!   once it brings back a cookie sent to its address, so no one can sign
+//!   up someone else's address) and the member keys for rooms h2live
+//!   issued ([`MemberKey`]).
 //! - [`RelayClient`] (the [`client`] module): one per match in the
 //!   launcher. Sends go straight to a non-blocking socket, a background
 //!   thread receives and keeps the timers, and reliable sends are acked,
@@ -33,8 +37,8 @@
 //!   token, members keyed by network id and checked against the address
 //!   they said hello from, forwarding by destination id (or to the whole
 //!   room), timeouts, and limits on members, rooms and packet rates. Its
-//!   module docs have the details, including what "open" admission means
-//!   for now.
+//!   module docs have the details, including the two kinds of admission:
+//!   rooms h2live issued (with member keys), and open rooms for tests.
 //!
 //! The server never looks inside a payload, and the client never
 //! interprets the network ids or ports it carries: both belong to the
@@ -42,6 +46,8 @@
 
 pub mod client;
 pub mod frame;
+mod keys;
+mod log;
 mod rng;
 pub mod server;
 mod sockets;
@@ -49,10 +55,12 @@ mod sockets;
 pub use client::{
     ClientConfig, ClientStats, Failure, Lag, PeerStats, RelayClient, SendError, State,
 };
-pub use frame::{decode, Frame, FrameError, Kind, Refusal, BROADCAST, MAX_PAYLOAD, RELAY_PROTOCOL};
-pub use server::{
-    Admission, Logger, RelayHandle, RelayServer, RelayThread, ServerConfig, ServerStats,
+pub use frame::{
+    decode, Frame, FrameError, Kind, Refusal, BROADCAST, MAX_PAYLOAD, MTU_PAYLOAD, RELAY_PROTOCOL,
 };
+pub use keys::MemberKey;
+pub use log::{background_logger, stdout_logger, Logger};
+pub use server::{Admission, RelayHandle, RelayServer, RelayThread, ServerConfig, ServerStats};
 
 /// The relay's UDP port unless told otherwise: h2live's TCP port's number.
 pub const DEFAULT_PORT: u16 = 47050;

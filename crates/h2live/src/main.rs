@@ -6,7 +6,9 @@
 //!
 //! Beside it, on UDP, it runs the relay that carries the launcher's game
 //! traffic between PCs (`h2relay`): on the same port number unless told
-//! otherwise, so 47050/tcp and 47050/udp.
+//! otherwise, so 47050/tcp and 47050/udp. The relay admits only the rooms
+//! h2live issues for matches, each player with the member key h2live gives
+//! it, so it's no use to anyone else.
 //!
 //! Its settings come from the environment: PORT (47050 unless set),
 //! H2LIVE_DATA (the folder accounts are kept in, `h2live-data` unless set),
@@ -26,7 +28,7 @@
 
 use h2live::server::{flush_log, log, log_in_background, say, Route, Server};
 use h2net::Request;
-use h2relay::{RelayServer, RelayThread, ServerConfig, RELAY_PROTOCOL};
+use h2relay::{Admission, RelayServer, RelayThread, ServerConfig, RELAY_PROTOCOL};
 use igd_next::{AddPortError, Gateway, PortMappingProtocol, SearchOptions};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
@@ -212,7 +214,9 @@ fn run() -> Result<(), String> {
 
 /// Start the relay on its own thread, as `relay` says (on UDP `tcp`, the
 /// sign-in port's number, unless told otherwise). Without it h2live goes
-/// on, unless it was told a port and can't have it.
+/// on, unless it was told a port and can't have it. It admits only rooms
+/// issued through its handle (`issue`, with `member_key` for each player),
+/// which the launcher's match flow is to do; until then no room opens.
 fn start_relay(relay: Relay, tcp: u16) -> Result<Option<RelayThread>, String> {
     let (udp, asked) = match relay {
         Relay::Off => {
@@ -222,13 +226,20 @@ fn start_relay(relay: Relay, tcp: u16) -> Result<Option<RelayThread>, String> {
         Relay::SamePort => (tcp, false),
         Relay::Port(port) => (port, true),
     };
-    let bound = RelayServer::bind((Ipv4Addr::UNSPECIFIED, udp), ServerConfig::default())
+    let config = ServerConfig {
+        admission: Admission::Issued,
+        ..ServerConfig::default()
+    };
+    // `log` only queues the line (`log_in_background`), so it never holds
+    // the relay up.
+    let bound = RelayServer::bind((Ipv4Addr::UNSPECIFIED, udp), config)
         .and_then(|relay| relay.with_log(Arc::new(|line: &str| log(line))).spawn());
     match bound {
         Ok(relay) => {
             let port = relay.local_addr().port();
             log(format_args!(
-                "relay on UDP port {port} (relay protocol {RELAY_PROTOCOL}, open rooms)"
+                "relay on UDP port {port} (relay protocol {RELAY_PROTOCOL}, \
+                 only rooms h2live issues)"
             ));
             Ok(Some(relay))
         }

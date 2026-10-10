@@ -1,6 +1,7 @@
 //! The relay's wire format: one frame per UDP datagram, a fixed 40-byte
-//! header and, on data frames only, the engine's packet exactly as it was
-//! handed over. All numbers are little-endian.
+//! header and, on data frames, the engine's packet exactly as it was handed
+//! over (hellos and challenges carry a cookie instead). All numbers are
+//! little-endian.
 //!
 //! | Offset | Size | Field   | Meaning |
 //! |-------:|-----:|---------|---------|
@@ -13,7 +14,16 @@
 //! | 24     | 8    | dst     | the receiver's network id, or [`BROADCAST`] |
 //! | 32     | 4    | port    | data: the engine's port, carried unchanged; ack: the cumulative ack |
 //! | 36     | 4    | seq     | sequence number; refused: the [`Refusal`] code |
-//! | 40     | ..   | payload | data frames only, at most [`MAX_PAYLOAD`] bytes |
+//! | 40     | ..   | payload | see below |
+//!
+//! Payloads: data frames carry the engine's packet, at most [`MAX_PAYLOAD`]
+//! bytes. A client's hello carries exactly [`HELLO_LEN`] bytes: the cookie
+//! from the server's challenge (zeros before it has one), then the proof
+//! of its member key (zeros without one; see the `keys` module). A
+//! challenge carries the cookie, [`COOKIE_LEN`] bytes. Nothing else has a
+//! payload. A client's first hello is bigger than any answer to it, so the
+//! server never sends more than it was sent to an address it hasn't
+//! checked.
 //!
 //! The payload's length is the datagram's length less the header: there is
 //! no length field to disagree with it. [`decode`] checks every field and
@@ -21,20 +31,30 @@
 //! [`Frame::encode`] refuses to write such a frame, so what one end writes
 //! the other always reads.
 
+pub use crate::keys::{COOKIE_LEN, HELLO_LEN};
 use std::fmt;
 
 /// The first four bytes of every frame.
 pub const MAGIC: [u8; 4] = *b"H2RL";
 /// The relay's own protocol version, separate from h2net's `PROTOCOL`.
 /// Bump it on any change to this format or to what the frames mean.
-pub const RELAY_PROTOCOL: u16 = 1;
+/// 2: address cookies (the challenge), member keys, the "no stream" ack,
+/// and payloads up to 4 KiB.
+pub const RELAY_PROTOCOL: u16 = 2;
 /// The header's size in bytes.
 pub const HEADER_LEN: usize = 40;
+/// Where a frame's seq is, for numbering a frame already written.
+const SEQ_AT: usize = 36;
 /// The largest payload a data frame carries. Xbox Halo 2 sent engine
-/// packets of at most 1304 bytes (0x518), and Vista's at most 1264; this
-/// leaves room and keeps a whole frame (1440 bytes) under a 1500-byte
-/// Ethernet MTU with IPv4 or IPv6 and UDP headers.
-pub const MAX_PAYLOAD: usize = 1400;
+/// packets of at most 1304 bytes (0x518), and Vista's at most 1264, but
+/// MCC's sizes are unknown until the launcher logs them, so this takes up
+/// to 4 KiB (the research's advice). Anything over [`MTU_PAYLOAD`] goes as
+/// a fragmented IP datagram, which works on most paths but is lost whole if
+/// one fragment is; the client counts those sends.
+pub const MAX_PAYLOAD: usize = 4096;
+/// The largest payload whose frame (1440 bytes) fits a 1500-byte Ethernet
+/// MTU with IPv4 or IPv6 and UDP headers, unfragmented.
+pub const MTU_PAYLOAD: usize = 1400;
 /// The largest frame on the wire.
 pub const MAX_FRAME: usize = HEADER_LEN + MAX_PAYLOAD;
 /// The destination meaning every other member of the room (unreliable data
@@ -49,7 +69,9 @@ pub const FLAG_SERVER: u8 = 0x01;
 /// rather than a keepalive to the server and its answer.
 pub const FLAG_PEER: u8 = 0x02;
 /// On a reliable frame with no payload: "my reliable stream to you starts
-/// here, at this frame's seq" (see the client's module docs).
+/// here, at this frame's seq". On an ack: "I have no stream from you" (the
+/// receiver started after the sender's stream did), for the frame `seq`;
+/// the sender then starts a new one. See the client's module docs.
 pub const FLAG_SYN: u8 = 0x04;
 const KNOWN_FLAGS: u8 = FLAG_SERVER | FLAG_PEER | FLAG_SYN;
 
@@ -62,7 +84,8 @@ pub enum Kind {
     /// An engine packet delivered once and in order (the engine's reliable
     /// send), or the start of such a stream ([`FLAG_SYN`]).
     Reliable = 1,
-    /// A client joining a room; from the server ([`FLAG_SERVER`]), its yes.
+    /// A client joining a room (with the cookie from a challenge); from the
+    /// server ([`FLAG_SERVER`]), its yes.
     Hello = 2,
     /// A client leaving its room.
     Bye = 3,
@@ -75,6 +98,9 @@ pub enum Kind {
     Pong = 6,
     /// The server saying no; `seq` is the [`Refusal`] code.
     Refused = 7,
+    /// The server's answer to a hello without a good cookie: the cookie to
+    /// say hello again with, from the same address. `seq` is the hello's.
+    Challenge = 8,
 }
 
 impl Kind {
@@ -88,6 +114,7 @@ impl Kind {
             5 => Kind::Ping,
             6 => Kind::Pong,
             7 => Kind::Refused,
+            8 => Kind::Challenge,
             _ => return None,
         })
     }
@@ -111,8 +138,12 @@ pub enum Refusal {
     /// forgot it (restarted, or it was quiet too long) or its address
     /// changed (a NAT rebind). It should say hello again.
     NotMember,
-    /// Too many members come from that IP address already.
+    /// Too many members come from that IP address already (or it opened
+    /// too many rooms lately).
     TooManyFromAddress,
+    /// The room was issued by h2live and the hello didn't prove the
+    /// member key for that id.
+    BadKey,
     /// A code this version doesn't know.
     Other(u32),
 }
@@ -125,6 +156,7 @@ impl Refusal {
             Refusal::TooManyRooms => 3,
             Refusal::NotMember => 4,
             Refusal::TooManyFromAddress => 5,
+            Refusal::BadKey => 6,
             Refusal::Other(code) => code,
         }
     }
@@ -136,6 +168,7 @@ impl Refusal {
             3 => Refusal::TooManyRooms,
             4 => Refusal::NotMember,
             5 => Refusal::TooManyFromAddress,
+            6 => Refusal::BadKey,
             _ => Refusal::Other(code),
         }
     }
@@ -148,7 +181,8 @@ impl fmt::Display for Refusal {
             Refusal::NoSuchRoom => write!(f, "no such room"),
             Refusal::TooManyRooms => write!(f, "the relay has too many rooms"),
             Refusal::NotMember => write!(f, "not a member of the room"),
-            Refusal::TooManyFromAddress => write!(f, "too many members from one address"),
+            Refusal::TooManyFromAddress => write!(f, "too many from one address"),
+            Refusal::BadKey => write!(f, "wrong member key"),
             Refusal::Other(code) => write!(f, "refused ({code})"),
         }
     }
@@ -184,7 +218,8 @@ pub enum FrameError {
     BadDestination,
     /// A data payload over [`MAX_PAYLOAD`] (its length).
     PayloadTooLarge(usize),
-    /// A payload on a frame that carries none.
+    /// A payload on a frame that carries none, or the wrong length for a
+    /// hello's or a challenge's.
     UnexpectedPayload,
     /// `encode`'s buffer is too small (the length the frame needs).
     BufferTooSmall(usize),
@@ -273,9 +308,11 @@ impl<'a> Frame<'a> {
         let peer = flags & FLAG_PEER != 0;
         let syn = flags & FLAG_SYN != 0;
         let allowed = match self.kind {
-            Kind::Unreliable | Kind::Ack | Kind::Bye => flags == 0,
+            Kind::Unreliable | Kind::Bye => flags == 0,
+            Kind::Ack => flags == 0 || flags == FLAG_SYN,
             Kind::Reliable => !server && !peer,
             Kind::Hello => !peer && !syn,
+            Kind::Challenge => flags == FLAG_SERVER,
             Kind::Ping => !server && !syn,
             // From the server, or from a member: one or the other.
             Kind::Pong => server != peer && !syn,
@@ -295,12 +332,20 @@ impl<'a> Frame<'a> {
         if self.dst == BROADCAST && !broadcast {
             return Err(FrameError::BadDestination);
         }
-        let carries = self.kind.is_data() && !syn;
-        if !carries && !self.payload.is_empty() {
+        let len = self.payload.len();
+        let fits = match self.kind {
+            Kind::Unreliable => true,
+            Kind::Reliable => !syn || len == 0,
+            Kind::Hello if server => len == 0,
+            Kind::Hello => len == HELLO_LEN,
+            Kind::Challenge => len == COOKIE_LEN,
+            _ => len == 0,
+        };
+        if !fits {
             return Err(FrameError::UnexpectedPayload);
         }
-        if self.payload.len() > MAX_PAYLOAD {
-            return Err(FrameError::PayloadTooLarge(self.payload.len()));
+        if len > MAX_PAYLOAD {
+            return Err(FrameError::PayloadTooLarge(len));
         }
         Ok(())
     }
@@ -371,6 +416,13 @@ pub fn decode(bytes: &[u8]) -> Result<Frame<'_>, FrameError> {
     Ok(frame)
 }
 
+/// Give the frame written in `bytes` the seq `seq`.
+pub(crate) fn set_seq(bytes: &mut [u8], seq: u32) {
+    if let Some(at) = bytes.get_mut(SEQ_AT..SEQ_AT + 4) {
+        at.copy_from_slice(&seq.to_le_bytes());
+    }
+}
+
 /// How far `seq` is after `base` in a wrapping 32-bit sequence space
 /// (negative when before).
 pub fn seq_after(seq: u32, base: u32) -> i32 {
@@ -386,6 +438,7 @@ mod tests {
     /// One well-formed frame of each shape there is.
     fn samples() -> Vec<Vec<u8>> {
         let big = vec![0xa5; MAX_PAYLOAD];
+        let hello = [0x3c; HELLO_LEN];
         let frames = [
             Frame::new(Kind::Unreliable, ROOM, 1, 2)
                 .with_port(1000)
@@ -400,15 +453,24 @@ mod tests {
             Frame::new(Kind::Reliable, ROOM, 3, 4)
                 .with_flags(FLAG_SYN)
                 .with_seq(99),
-            Frame::new(Kind::Hello, ROOM, 5, 0).with_seq(42),
+            Frame::new(Kind::Hello, ROOM, 5, 0)
+                .with_seq(42)
+                .with_payload(&hello),
             Frame::new(Kind::Hello, ROOM, 0, 5)
                 .with_flags(FLAG_SERVER)
                 .with_seq(42)
                 .with_port(3),
+            Frame::new(Kind::Challenge, ROOM, 0, 5)
+                .with_flags(FLAG_SERVER)
+                .with_seq(42)
+                .with_payload(&hello[..COOKIE_LEN]),
             Frame::new(Kind::Bye, ROOM, 5, 0),
             Frame::new(Kind::Ack, ROOM, 4, 3)
                 .with_seq(100)
                 .with_port(101),
+            Frame::new(Kind::Ack, ROOM, 4, 3)
+                .with_flags(FLAG_SYN)
+                .with_seq(100),
             Frame::new(Kind::Ping, ROOM, 5, 0).with_seq(1),
             Frame::new(Kind::Ping, ROOM, 5, BROADCAST).with_flags(FLAG_PEER),
             Frame::new(Kind::Pong, ROOM, 0, 5).with_flags(FLAG_SERVER),
@@ -442,6 +504,10 @@ mod tests {
         for code in 0..8 {
             assert_eq!(Refusal::from_code(code).code(), code);
         }
+        // Numbering a frame already written.
+        let mut bytes = samples().remove(0);
+        set_seq(&mut bytes, 0x0102_0304);
+        assert_eq!(decode(&bytes).unwrap().seq, 0x0102_0304);
     }
 
     #[test]
@@ -457,9 +523,9 @@ mod tests {
             b
         };
         assert_eq!(decode(&with(0, b'X')), Err(FrameError::BadMagic));
-        assert_eq!(decode(&with(4, 2)), Err(FrameError::BadVersion(2)));
-        assert_eq!(decode(&with(5, 1)), Err(FrameError::BadVersion(257)));
-        assert_eq!(decode(&with(6, 8)), Err(FrameError::BadKind(8)));
+        assert_eq!(decode(&with(4, 1)), Err(FrameError::BadVersion(1)));
+        assert_eq!(decode(&with(5, 1)), Err(FrameError::BadVersion(258)));
+        assert_eq!(decode(&with(6, 9)), Err(FrameError::BadKind(9)));
         assert_eq!(decode(&with(7, 0x80)), Err(FrameError::BadFlags(0x80)));
         // Flags that don't belong on the kind: a client can't be the server.
         assert_eq!(
@@ -473,10 +539,28 @@ mod tests {
             decode(&syn_with_payload),
             Err(FrameError::UnexpectedPayload)
         );
-        // Payloads only on data.
+        // Payloads only on data, and hellos' and challenges' just so long.
         let mut hello = good.clone();
         hello[6] = Kind::Hello as u8;
         assert_eq!(decode(&hello), Err(FrameError::UnexpectedPayload));
+        let mut ack = good[..HEADER_LEN].to_vec();
+        ack[6] = Kind::Ack as u8;
+        assert!(decode(&ack).is_ok());
+        ack.push(0);
+        assert_eq!(decode(&ack), Err(FrameError::UnexpectedPayload));
+        let short_hello = Frame::new(Kind::Hello, ROOM, 1, 0).with_payload(&[0; COOKIE_LEN]);
+        assert_eq!(short_hello.to_vec(), Err(FrameError::UnexpectedPayload));
+        assert_eq!(
+            Frame::new(Kind::Hello, ROOM, 1, 0).to_vec(),
+            Err(FrameError::UnexpectedPayload)
+        );
+        let challenge = Frame::new(Kind::Challenge, ROOM, 0, 1).with_flags(FLAG_SERVER);
+        assert_eq!(challenge.to_vec(), Err(FrameError::UnexpectedPayload));
+        // Only the server challenges; only an ack may say "no stream".
+        let from_client = Frame::new(Kind::Challenge, ROOM, 0, 1).with_payload(&[0; COOKIE_LEN]);
+        assert_eq!(from_client.to_vec(), Err(FrameError::BadFlags(0)));
+        let syn_data = Frame::new(Kind::Unreliable, ROOM, 1, 2).with_flags(FLAG_SYN);
+        assert_eq!(syn_data.to_vec(), Err(FrameError::BadFlags(FLAG_SYN)));
         // Broadcast as the source, or where it can't go.
         let mut source = good.clone();
         source[16..24].copy_from_slice(&BROADCAST.to_le_bytes());
@@ -523,18 +607,18 @@ mod tests {
     #[test]
     fn hostile_bytes_never_panic() {
         let mut rng = XorShift(0x9e37_79b9_7f4a_7c15);
-        let mut buf = vec![0u8; 2048];
+        let mut buf = vec![0u8; 2 * MAX_FRAME];
         // Random bytes, with the right magic and version half the time so
         // the field checks get exercised too.
         for i in 0..20_000 {
-            let len = (rng.next() % 1600) as usize;
+            let len = (rng.next() % (MAX_FRAME as u64 + 200)) as usize;
             for b in &mut buf[..len] {
                 *b = rng.next() as u8;
             }
             if i % 2 == 0 && len >= 6 {
                 buf[..4].copy_from_slice(&MAGIC);
                 buf[4..6].copy_from_slice(&RELAY_PROTOCOL.to_le_bytes());
-                buf[6] %= 9;
+                buf[6] %= 10;
                 buf[7] &= 0x0f;
             }
             if let Ok(frame) = decode(&buf[..len]) {

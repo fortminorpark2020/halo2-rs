@@ -8,10 +8,12 @@
 //! h2relay 127.0.0.1:47051  # this PC only
 //! ```
 //!
-//! Rooms are open (any room token a launcher names is made), as in
-//! h2live for now. Ctrl+C stops it.
+//! Rooms are open: any room token a launcher names is made, and anyone who
+//! knows a room's token can join it. So run it on one PC or a home network
+//! only, and don't forward its port: h2live's own relay admits only the
+//! rooms it issues for matches. Ctrl+C stops it.
 
-use h2relay::{RelayServer, ServerConfig, DEFAULT_PORT, RELAY_PROTOCOL};
+use h2relay::{stdout_logger, RelayServer, ServerConfig, DEFAULT_PORT, RELAY_PROTOCOL};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -43,12 +45,16 @@ fn main() {
         }
     };
     let start = Instant::now();
+    // Written by a thread of its own: a console with text selected in it
+    // (on Windows) holds up its output, and must not hold up the relay.
+    let out = stdout_logger();
     let log = Arc::new(move |line: &str| {
         let t = start.elapsed().as_secs_f64();
-        println!("[{t:9.3}] {line}");
+        out(&format!("[{t:9.3}] {line}"));
     });
     log(&format!(
-        "h2relay, relay protocol {RELAY_PROTOCOL}, on UDP {} (Ctrl+C stops)",
+        "h2relay, relay protocol {RELAY_PROTOCOL}, on UDP {} with open rooms \
+         (for tests: don't forward this port; Ctrl+C stops)",
         server.local_addr()
     ));
     server.with_log(log).run();

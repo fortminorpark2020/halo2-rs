@@ -11,3 +11,7 @@ description = "The UDP relay that carries the launcher's engine packets between 
 rustix = { version = "1", features = ["event"] }
 # Bigger socket buffers than the system's defaults, for bursts.
 socket2 = "0.6"
+# HMAC-SHA256 for the server's address cookies and the member keys, and
+# the server's secret (the same crates h2live already uses).
+sha2 = "0.10"
+getrandom = "0.3"

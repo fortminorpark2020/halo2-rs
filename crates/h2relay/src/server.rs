@@ -2,39 +2,57 @@
 //! socket and one thread, passing frames between the members of each
 //! room. It never looks inside a payload.
 //!
-//! - A hello registers (room, src id) at the address it came from and is
-//!   answered with a hello. A hello for a member already there from a new
-//!   address moves it (a NAT rebind, or a client that started over).
+//! - Joining takes two hellos. The first is answered with a challenge
+//!   carrying a cookie made from the address it came from (see the `keys`
+//!   module), and nothing is kept. The second brings the cookie back from
+//!   that address: only then is (room, src id) registered at that address
+//!   and answered with a hello. So the server never sends anything to an
+//!   address that didn't ask (a forged source address gets one challenge
+//!   per hello, smaller than the hello), and no one can sign up an address
+//!   that isn't theirs. A checked hello for a member already there from a
+//!   new address moves it (a NAT rebind, or a client that started over).
 //! - Data, acks and peer pings from a registered (room, id, address) go to
 //!   the member named as the destination, or to every other member for
 //!   [`BROADCAST`] (unreliable data and peer pings only). Anything from a
 //!   sender not registered at that address is dropped and counted, and the
-//!   sender is told [`Refusal::NotMember`] (at most twice a second), so it
-//!   says hello again.
+//!   sender is told [`Refusal::NotMember`] (a few times a second at most),
+//!   so it says hello again.
 //! - A keepalive is answered with a pong; a bye removes the member.
 //! - Members not heard from for `member_timeout` (15 s) are removed, and a
-//!   room left empty for `room_linger` expires.
+//!   room left empty for `room_linger` expires (an open room only one
+//!   member ever joined, at once).
+//!
+//! Admission: rooms h2live issued ([`RelayHandle::issue`]) can only be
+//! joined by the players it gave member keys to ([`RelayHandle::member_key`],
+//! handed to each player over its signed-in connection): a hello into an
+//! issued room must prove the key for its id, so a player can't take over
+//! another's id, and no one can make up ids to fill the room. With
+//! [`Admission::Issued`] (what h2live runs) those are the only rooms. With
+//! [`Admission::Open`] (the standalone `h2relay`, for tests on one PC or a
+//! LAN) a hello naming any other room makes it, and anyone who knows its
+//! token can join it, or take the place of a member whose id they know.
 //!
 //! Limits, so one bad client can't spoil it for the others: members per
 //! room (17: Halo 2's 16 players and a spare), rooms, members from one IP
-//! address, and a packet rate per source address (a token bucket; a
-//! broadcast costs one token per member it goes to).
-//!
-//! Admission: with [`Admission::Open`] (what h2live uses for now), any room
-//! token a client names is made on its first hello, so the room token is
-//! the only thing keeping strangers out of a match: anyone who knows it
-//! can join (and, knowing a member's id too, take that member's place).
-//! With [`Admission::Issued`] only rooms made with [`RelayHandle::issue`]
-//! can be joined, which is what h2live should switch to once it hands out
-//! the match tokens itself.
+//! address, a packet rate per member (a token bucket; a broadcast costs one
+//! token per member it goes to), and for everyone else, by IP address: a
+//! hello rate, a refusal rate, and (open rooms only) a rate of new rooms.
+//! What's kept about senders that aren't members lives in a fixed table
+//! (addresses hashed to slots, with a key the server picks), so no flood of
+//! addresses can fill anything up.
 
-use crate::frame::{decode, Frame, Kind, Refusal, BROADCAST, FLAG_PEER, FLAG_SERVER, MAX_FRAME};
+use crate::frame::{
+    decode, Frame, Kind, Refusal, BROADCAST, COOKIE_LEN, FLAG_PEER, FLAG_SERVER, MAX_FRAME,
+};
+use crate::keys::{self, MemberKey};
+use crate::log::{stdout_logger, Logger};
 use crate::sockets::{self, RecvError};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::io;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -42,23 +60,29 @@ use std::time::{Duration, Instant};
 /// Socket buffers asked for (bytes): a few thousand full frames, for
 /// bursts while the thread is busy.
 const BUFFERS: usize = 4 << 20;
-/// Source addresses tracked for the rate limit at most; past that, new
-/// ones are dropped until quiet ones are forgotten.
-const MAX_SOURCES: usize = 1 << 16;
-/// A source quiet this long is forgotten.
-const SOURCE_IDLE: Duration = Duration::from_secs(10);
-/// A sender is told it isn't a member at most this often.
-const REFUSE_EVERY: Duration = Duration::from_millis(500);
+/// Slots in the table of what's kept about senders that aren't members.
+/// Addresses that land in one slot share it.
+const GATES: usize = 4096;
+/// "Not a member" refusals one IP address is sent a second at most (and
+/// at once, after a quiet spell): enough for a house full of PCs the relay
+/// forgot all at once (it restarted, say) to hear soon.
+const REFUSALS: f64 = 20.0;
+/// How long one cookie is made for; the one before is good too, so a
+/// cookie lasts this long at least and twice it at most.
+const COOKIE_STEP: u64 = 30;
 /// The thread looks at the time (stop, sweeps, commands) at least this
 /// often.
 const TICK: Duration = Duration::from_millis(100);
 /// Datagrams read in one go before the time is looked at again.
 const BURST: usize = 1024;
+/// Receive errors are logged at most this often.
+const ERROR_LOG_EVERY: Duration = Duration::from_secs(10);
 
-/// Who may open a room.
+/// Which rooms can be joined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
-    /// Any room a hello names is made then.
+    /// Rooms issued through [`RelayHandle::issue`], and any other room a
+    /// hello names (made then, open to anyone who knows its token).
     Open,
     /// Only rooms issued through [`RelayHandle::issue`].
     Issued,
@@ -73,19 +97,27 @@ pub struct ServerConfig {
     pub max_members: usize,
     /// Rooms at most.
     pub max_rooms: usize,
-    /// Members from one IP address at most, across all rooms: room for a
-    /// house full of PCs behind one router.
+    /// Members from one IP address (a /64 for IPv6) at most, across all
+    /// rooms: room for a house full of PCs behind one router.
     pub max_members_per_ip: usize,
-    /// Packets a second one source address may send, and how many it may
-    /// send at once after a quiet spell. An estimate: a 16-player host
-    /// sending each peer a packet or two per 30 Hz tick, and its acks,
-    /// stays well under it.
+    /// Packets a second one member may send, and how many it may send at
+    /// once after a quiet spell. An estimate: a 16-player host sending each
+    /// peer a packet or two per 30 Hz tick, and its acks, stays well under
+    /// it. Check it against real 16-player traffic.
     pub rate: f64,
     pub burst: f64,
+    /// Hellos a second from one IP address (a /64 for IPv6), and at once:
+    /// everyone joining from behind one router shares them. An estimate: a
+    /// client joining sends two hellos per attempt, four attempts a second.
+    pub hello_rate: f64,
+    pub hello_burst: f64,
+    /// Open admission: rooms one IP address may open a minute, and at once
+    /// after a quiet spell. An estimate, generous for tests.
+    pub rooms_per_ip: f64,
     /// A member quiet this long is removed.
     pub member_timeout: Duration,
     /// An empty room is kept this long (for members coming back), then
-    /// expires.
+    /// expires; an open room only one member ever joined expires at once.
     pub room_linger: Duration,
     /// A stats line this often (none if zero).
     pub stats_every: Duration,
@@ -100,15 +132,15 @@ impl Default for ServerConfig {
             max_members_per_ip: 64,
             rate: 3000.0,
             burst: 3000.0,
+            hello_rate: 100.0,
+            hello_burst: 200.0,
+            rooms_per_ip: 10.0,
             member_timeout: Duration::from_secs(15),
             room_linger: Duration::from_secs(60),
             stats_every: Duration::from_secs(60),
         }
     }
 }
-
-/// Where log lines go.
-pub type Logger = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// What a server has done so far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -132,8 +164,10 @@ pub struct ServerStats {
     pub unknown_sender: u64,
     /// Frames to members not in the room.
     pub unknown_dst: u64,
-    /// Frames over a source's rate limit.
+    /// Frames over a member's rate, or hellos over an address's.
     pub rate_limited: u64,
+    /// Hellos answered with a challenge (no cookie, or not a good one).
+    pub challenged: u64,
     /// Hellos refused.
     pub refused: u64,
     /// Members removed for being quiet.
@@ -157,6 +191,7 @@ struct Counters {
     unknown_sender: AtomicU64,
     unknown_dst: AtomicU64,
     rate_limited: AtomicU64,
+    challenged: AtomicU64,
     refused: AtomicU64,
     timeouts: AtomicU64,
     send_errors: AtomicU64,
@@ -164,7 +199,7 @@ struct Counters {
 
 impl Counters {
     fn snapshot(&self) -> ServerStats {
-        let get = |a: &AtomicU64| a.load(Relaxed);
+        let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
         ServerStats {
             rooms: get(&self.rooms),
             members: get(&self.members),
@@ -179,6 +214,7 @@ impl Counters {
             unknown_sender: get(&self.unknown_sender),
             unknown_dst: get(&self.unknown_dst),
             rate_limited: get(&self.rate_limited),
+            challenged: get(&self.challenged),
             refused: get(&self.refused),
             timeouts: get(&self.timeouts),
             send_errors: get(&self.send_errors),
@@ -187,7 +223,7 @@ impl Counters {
 }
 
 fn bump(counter: &AtomicU64, n: u64) {
-    counter.fetch_add(n, Relaxed);
+    counter.fetch_add(n, Ordering::Relaxed);
 }
 
 enum Command {
@@ -202,6 +238,9 @@ struct Control {
     pending: AtomicBool,
     commands: Mutex<Vec<Command>>,
     counters: Counters,
+    /// What cookies and member keys are made with: random, picked when the
+    /// server starts, never sent anywhere.
+    secret: [u8; 32],
 }
 
 /// Talks to a running server from other threads.
@@ -214,18 +253,31 @@ pub struct RelayHandle {
 impl RelayHandle {
     /// Ask the server to stop (within a tenth of a second).
     pub fn stop(&self) {
-        self.control.stop.store(true, Relaxed);
+        self.control.stop.store(true, Ordering::Relaxed);
     }
 
-    /// Make `room` joinable (for [`Admission::Issued`]); it expires like
-    /// any room left empty.
+    /// Make `room` joinable by the players given member keys for it
+    /// ([`RelayHandle::member_key`]). Issue it before handing the keys out:
+    /// hellos that come after this returns find it. It expires like any
+    /// room left empty for `room_linger`; issuing it again starts that wait
+    /// over.
     pub fn issue(&self, room: u64) {
         self.command(Command::Issue(room));
     }
 
-    /// Close `room` now, its members with it.
+    /// Close `room` now: its members are told, and it can't be joined (or,
+    /// with open admission, made again) until `room_linger` has passed or
+    /// it's issued again.
     pub fn revoke(&self, room: u64) {
         self.command(Command::Revoke(room));
+    }
+
+    /// Member `id`'s key for the issued room `room`: for h2live to give to
+    /// that player only (over its signed-in connection), and for the
+    /// launcher to give its client (`ClientConfig::member_key`). Good for
+    /// as long as this server runs.
+    pub fn member_key(&self, room: u64, id: u64) -> MemberKey {
+        keys::member_key(&self.control.secret, room, id)
     }
 
     fn command(&self, command: Command) {
@@ -235,7 +287,7 @@ impl RelayHandle {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         commands.push(command);
-        self.control.pending.store(true, Relaxed);
+        self.control.pending.store(true, Ordering::Release);
     }
 
     pub fn stats(&self) -> ServerStats {
@@ -285,9 +337,44 @@ impl Drop for RelayThread {
     }
 }
 
+/// A token bucket, full until first used.
+#[derive(Default)]
+struct Bucket {
+    tokens: f64,
+    last: Option<Instant>,
+}
+
+impl Bucket {
+    /// Take `cost` tokens, if there are that many, filling up at `rate` a
+    /// second to `burst` since last time.
+    fn take(&mut self, rate: f64, burst: f64, cost: f64, now: Instant) -> bool {
+        let tokens = match self.last {
+            None => burst,
+            Some(last) => {
+                let elapsed = now.saturating_duration_since(last).as_secs_f64();
+                (self.tokens + elapsed * rate).min(burst)
+            }
+        };
+        self.last = Some(now);
+        let enough = tokens >= cost;
+        self.tokens = if enough { tokens - cost } else { tokens };
+        enough
+    }
+}
+
+/// What's kept about the senders (by IP address) in one slot of the table
+/// for those that aren't members.
+#[derive(Default)]
+struct Gate {
+    hellos: Bucket,
+    refusals: Bucket,
+    rooms: Bucket,
+}
+
 struct Member {
     addr: SocketAddr,
     heard: Instant,
+    bucket: Bucket,
 }
 
 struct Room {
@@ -297,24 +384,33 @@ struct Room {
     empty_since: Option<Instant>,
     /// Members that ever joined.
     joined: u64,
+    /// Issued by h2live: hellos must prove the member key.
+    issued: bool,
 }
 
 impl Room {
-    fn new(now: Instant) -> Room {
+    fn new(now: Instant, issued: bool) -> Room {
         Room {
             members: HashMap::new(),
             opened: now,
             empty_since: Some(now),
             joined: 0,
+            issued,
         }
     }
 }
 
-/// A source address's token bucket.
-struct Source {
-    tokens: f64,
-    last: Instant,
-    refused: Option<Instant>,
+/// What one IP address counts as for the limits: itself (an IPv4 address
+/// written as IPv6 as the IPv4 one), or for IPv6 its /64, as one host can
+/// use any address in that.
+fn ip_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0).into()
+        }
+        v4 => v4,
+    }
 }
 
 /// The relay server. Make it with [`RelayServer::bind`], then [`run`] it
@@ -329,12 +425,19 @@ pub struct RelayServer {
     control: Arc<Control>,
     log: Logger,
     rooms: HashMap<u64, Room>,
+    /// Rooms revoked lately, and when.
+    revoked: HashMap<u64, Instant>,
     members_per_ip: HashMap<IpAddr, usize>,
-    sources: HashMap<SocketAddr, Source>,
+    gates: Vec<Gate>,
+    gate_hasher: RandomState,
+    started: Instant,
     next_sweep: Instant,
     /// When the last stats line was, and the stats then.
     stats_at: Instant,
     stats_then: ServerStats,
+    /// Receive errors not yet logged, and when one last was.
+    errors: u64,
+    error_logged: Option<Instant>,
 }
 
 impl RelayServer {
@@ -361,18 +464,26 @@ impl RelayServer {
                 pending: AtomicBool::new(false),
                 commands: Mutex::new(Vec::new()),
                 counters: Counters::default(),
+                secret: keys::random_secret()?,
             }),
-            log: Arc::new(|line| println!("{line}")),
+            log: stdout_logger(),
             rooms: HashMap::new(),
+            revoked: HashMap::new(),
             members_per_ip: HashMap::new(),
-            sources: HashMap::new(),
+            gates: (0..GATES).map(|_| Gate::default()).collect(),
+            gate_hasher: RandomState::new(),
+            started: now,
             next_sweep: now,
             stats_at: now,
             stats_then: ServerStats::default(),
+            errors: 0,
+            error_logged: None,
         })
     }
 
-    /// Send log lines to `log` rather than standard output.
+    /// Send log lines to `log` rather than standard output. It's called on
+    /// the relay's thread, so it must never wait ([`crate::background_logger`]
+    /// makes one that doesn't).
     pub fn with_log(mut self, log: Logger) -> RelayServer {
         self.log = log;
         self
@@ -405,26 +516,30 @@ impl RelayServer {
     pub fn run(mut self) {
         let mut buf = vec![0; 2 * MAX_FRAME];
         let tick = TICK.min(self.sweep_every());
-        while !self.control.stop.load(Relaxed) {
+        while !self.control.stop.load(Ordering::Relaxed) {
             sockets::wait(&self.socket, tick);
             for _ in 0..BURST {
                 match self.socket.recv_from(&mut buf) {
-                    Ok((n, from)) => self.handle_datagram(&buf[..n], from, Instant::now()),
+                    Ok((n, from)) => {
+                        let now = Instant::now();
+                        // What h2live asked for first, so a hello sent
+                        // after `issue` returned finds its room.
+                        self.commands(now);
+                        self.handle_datagram(&buf[..n], from, now);
+                    }
                     Err(e) => match sockets::recv_error(&e) {
                         RecvError::Empty => break,
                         RecvError::Skip => continue,
                         RecvError::Other => {
-                            (self.log)(&format!("relay: receiving: {e}"));
+                            self.receive_error(&e, Instant::now());
                             std::thread::sleep(Duration::from_millis(10));
                             break;
                         }
                     },
                 }
             }
-            if self.control.pending.swap(false, Relaxed) {
-                self.commands(Instant::now());
-            }
             let now = Instant::now();
+            self.commands(now);
             if now >= self.next_sweep {
                 self.sweep(now);
                 self.next_sweep = now + self.sweep_every();
@@ -437,7 +552,31 @@ impl RelayServer {
         (self.config.member_timeout / 4).clamp(Duration::from_millis(10), Duration::from_secs(1))
     }
 
+    /// Log a receive error, but not more than one line every so often.
+    fn receive_error(&mut self, e: &io::Error, now: Instant) {
+        self.errors += 1;
+        if self
+            .error_logged
+            .is_some_and(|t| now.saturating_duration_since(t) < ERROR_LOG_EVERY)
+        {
+            return;
+        }
+        let more = match self.errors {
+            1 => String::new(),
+            n => format!(" ({n} errors since the last said)"),
+        };
+        (self.log)(&format!("relay: receiving: {e}{more}"));
+        self.errors = 0;
+        self.error_logged = Some(now);
+    }
+
+    /// Do what the handles asked, if they asked anything.
     fn commands(&mut self, now: Instant) {
+        if !self.control.pending.load(Ordering::Acquire)
+            || !self.control.pending.swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
         let commands = std::mem::take(
             &mut *self
                 .control
@@ -447,39 +586,62 @@ impl RelayServer {
         );
         for command in commands {
             match command {
-                Command::Issue(room) => {
-                    if !self.rooms.contains_key(&room) && self.rooms.len() < self.config.max_rooms {
-                        self.rooms.insert(room, Room::new(now));
-                        bump(&self.control.counters.rooms_opened, 1);
-                        (self.log)(&format!("relay: room {room:016x} issued"));
-                    }
-                }
-                Command::Revoke(room) => {
-                    if let Some(gone) = self.rooms.remove(&room) {
-                        for member in gone.members.values() {
-                            self.left(member.addr.ip());
-                        }
-                        (self.log)(&format!(
-                            "relay: room {room:016x} closed after {}, {} joined",
-                            minutes(now - gone.opened),
-                            gone.joined
-                        ));
-                    }
-                }
+                Command::Issue(room) => self.issue(room, now),
+                Command::Revoke(room) => self.revoke(room, now),
             }
         }
         self.count_rooms();
     }
 
+    fn issue(&mut self, id: u64, now: Instant) {
+        self.revoked.remove(&id);
+        if let Some(room) = self.rooms.get_mut(&id) {
+            room.issued = true;
+            if room.members.is_empty() {
+                room.empty_since = Some(now);
+            }
+        } else if self.rooms.len() < self.config.max_rooms {
+            self.rooms.insert(id, Room::new(now, true));
+            bump(&self.control.counters.rooms_opened, 1);
+            (self.log)(&format!("relay: room {id:016x} issued"));
+        } else {
+            (self.log)(&format!(
+                "relay: room {id:016x} not issued: the relay has its most rooms ({})",
+                self.config.max_rooms
+            ));
+        }
+    }
+
+    fn revoke(&mut self, id: u64, now: Instant) {
+        self.revoked.insert(id, now);
+        let Some(gone) = self.rooms.remove(&id) else {
+            return;
+        };
+        for (&member, m) in &gone.members {
+            self.left(m.addr.ip());
+            // So it knows now, not when it next sends something.
+            let told = Frame::new(Kind::Refused, id, 0, member)
+                .with_flags(FLAG_SERVER)
+                .with_seq(Refusal::NoSuchRoom.code());
+            self.reply(&told, m.addr);
+        }
+        (self.log)(&format!(
+            "relay: room {id:016x} closed after {}, {} joined",
+            minutes(now.saturating_duration_since(gone.opened)),
+            gone.joined
+        ));
+    }
+
     fn count_rooms(&self) {
         let c = &self.control.counters;
-        c.rooms.store(self.rooms.len() as u64, Relaxed);
+        c.rooms.store(self.rooms.len() as u64, Ordering::Relaxed);
         let members = self.rooms.values().map(|r| r.members.len() as u64).sum();
-        c.members.store(members, Relaxed);
+        c.members.store(members, Ordering::Relaxed);
     }
 
     /// A member from `ip` is gone.
     fn left(&mut self, ip: IpAddr) {
+        let ip = ip_key(ip);
         if let Some(n) = self.members_per_ip.get_mut(&ip) {
             *n -= 1;
             if *n == 0 {
@@ -488,7 +650,7 @@ impl RelayServer {
         }
     }
 
-    /// Remove quiet members, expire empty rooms, forget quiet sources.
+    /// Remove quiet members, expire empty rooms, forget old revocations.
     fn sweep(&mut self, now: Instant) {
         let control = self.control.clone();
         let c = &control.counters;
@@ -512,10 +674,22 @@ impl RelayServer {
             self.left(ip);
         }
         let linger = self.config.room_linger;
+        // An open room no one else ever joined isn't kept for anyone: so
+        // one address can't keep the table full by opening and leaving.
+        let linger = |room: &Room| {
+            if room.issued || room.joined > 1 {
+                linger
+            } else {
+                Duration::ZERO
+            }
+        };
         let expired: Vec<u64> = self
             .rooms
             .iter()
-            .filter(|(_, r)| r.empty_since.is_some_and(|t| now - t >= linger))
+            .filter(|(_, r)| {
+                r.empty_since
+                    .is_some_and(|t| now.saturating_duration_since(t) >= linger(r))
+            })
             .map(|(&id, _)| id)
             .collect();
         for id in expired {
@@ -523,20 +697,21 @@ impl RelayServer {
                 bump(&c.rooms_expired, 1);
                 (self.log)(&format!(
                     "relay: room {id:016x} expired after {}, {} joined",
-                    minutes(now - room.opened),
+                    minutes(now.saturating_duration_since(room.opened)),
                     room.joined
                 ));
             }
         }
-        self.sources
-            .retain(|_, s| now.saturating_duration_since(s.last) < SOURCE_IDLE);
+        let room_linger = self.config.room_linger;
+        self.revoked
+            .retain(|_, t| now.saturating_duration_since(*t) < room_linger);
         self.count_rooms();
     }
 
     /// Say what happened since the last stats line, if anything did.
     fn stats_line(&mut self, now: Instant) {
         let every = self.config.stats_every;
-        if every.is_zero() || now - self.stats_at < every {
+        if every.is_zero() || now.saturating_duration_since(self.stats_at) < every {
             return;
         }
         let stats = self.control.counters.snapshot();
@@ -549,7 +724,7 @@ impl RelayServer {
         (self.log)(&format!(
             "relay: {} rooms, {} members; in {} frames ({}), out {} ({}); \
              dropped {} malformed, {} from strangers, {} to no one, {} over the rate, \
-             {} unsent; {} timed out",
+             {} unsent; {} hellos challenged, {} refused; {} timed out",
             stats.rooms,
             stats.members,
             d(|s| s.frames_in),
@@ -561,52 +736,37 @@ impl RelayServer {
             d(|s| s.unknown_dst),
             d(|s| s.rate_limited),
             d(|s| s.send_errors),
+            d(|s| s.challenged),
+            d(|s| s.refused),
             d(|s| s.timeouts),
         ));
     }
 
-    /// Take `cost` tokens from `from`'s bucket, if it has them.
-    fn spend(&mut self, from: SocketAddr, cost: f64, now: Instant) -> bool {
-        let (rate, burst) = (self.config.rate, self.config.burst);
-        if !self.sources.contains_key(&from) && self.sources.len() >= MAX_SOURCES {
-            return false;
-        }
-        let source = self.sources.entry(from).or_insert(Source {
-            tokens: burst,
-            last: now,
-            refused: None,
-        });
-        let elapsed = now.saturating_duration_since(source.last).as_secs_f64();
-        source.tokens = (source.tokens + elapsed * rate).min(burst);
-        source.last = now;
-        if source.tokens < cost {
-            return false;
-        }
-        source.tokens -= cost;
-        true
+    /// The slot of the table for senders that aren't members that `ip`
+    /// belongs in.
+    fn gate(&self, ip: IpAddr) -> usize {
+        (self.gate_hasher.hash_one(ip_key(ip)) % GATES as u64) as usize
     }
 
     fn handle_datagram(&mut self, bytes: &[u8], from: SocketAddr, now: Instant) {
         let c = &self.control.counters;
         bump(&c.frames_in, 1);
         bump(&c.bytes_in, bytes.len() as u64);
-        if !self.spend(from, 1.0, now) {
-            bump(&self.control.counters.rate_limited, 1);
-            return;
-        }
+        // Checked before anything is looked up or kept for it, so junk
+        // costs no more than this.
         let frame = match decode(bytes) {
             // Only the server makes server frames.
             Ok(frame) if frame.flags & FLAG_SERVER == 0 => frame,
             _ => {
-                bump(&self.control.counters.malformed, 1);
+                bump(&c.malformed, 1);
                 return;
             }
         };
         match frame.kind {
             Kind::Hello => self.hello(&frame, from, now),
-            Kind::Bye => self.bye(&frame, from),
+            Kind::Bye => self.bye(&frame, from, now),
             Kind::Ping if frame.flags & FLAG_PEER == 0 => {
-                if self.member(&frame, from, now) {
+                if self.member(&frame, from, now, 1) {
                     let pong = Frame::new(Kind::Pong, frame.room, 0, frame.src)
                         .with_flags(FLAG_SERVER)
                         .with_seq(frame.seq);
@@ -616,36 +776,42 @@ impl RelayServer {
             Kind::Unreliable | Kind::Reliable | Kind::Ack | Kind::Ping | Kind::Pong => {
                 self.forward(&frame, bytes, from, now)
             }
-            Kind::Refused => {
-                bump(&self.control.counters.malformed, 1);
-            }
+            // Only the server sends these (`decode` passes them only with
+            // its flag, refused above).
+            Kind::Refused | Kind::Challenge => bump(&c.malformed, 1),
         }
     }
 
-    /// Whether `frame` is from a member registered at `from` (heard from
-    /// now, if so; told it isn't, if not).
-    fn member(&mut self, frame: &Frame, from: SocketAddr, now: Instant) -> bool {
+    /// Whether `frame` is from a member registered at `from` with `cost`
+    /// tokens to spend (heard from now, and they're spent, if so; told it
+    /// isn't a member, if not).
+    fn member(&mut self, frame: &Frame, from: SocketAddr, now: Instant, cost: usize) -> bool {
+        let (rate, burst) = (self.config.rate, self.config.burst);
         let member = self
             .rooms
             .get_mut(&frame.room)
             .and_then(|r| r.members.get_mut(&frame.src))
             .filter(|m| m.addr == from);
-        if let Some(member) = member {
-            member.heard = now;
+        let Some(member) = member else {
+            self.stranger(frame, from, now);
+            return false;
+        };
+        member.heard = now;
+        if member.bucket.take(rate, burst, cost as f64, now) {
             return true;
         }
+        bump(&self.control.counters.rate_limited, 1);
+        false
+    }
+
+    /// `frame` came from someone not registered at `from`: count it, and
+    /// tell them now and then, so they say hello again.
+    fn stranger(&mut self, frame: &Frame, from: SocketAddr, now: Instant) {
         bump(&self.control.counters.unknown_sender, 1);
-        let told = self.sources.get_mut(&from).is_some_and(|s| {
-            let due = s.refused.is_none_or(|t| now - t >= REFUSE_EVERY);
-            if due {
-                s.refused = Some(now);
-            }
-            !due
-        });
-        if !told {
+        let gate = self.gate(from.ip());
+        if self.gates[gate].refusals.take(REFUSALS, REFUSALS, 1.0, now) {
             self.refuse(frame, Refusal::NotMember, from);
         }
-        false
     }
 
     fn reply(&self, frame: &Frame, to: SocketAddr) {
@@ -672,39 +838,44 @@ impl RelayServer {
         }
     }
 
+    /// The cookie time step `now` is in.
+    fn cookie_step(&self, now: Instant) -> u64 {
+        now.saturating_duration_since(self.started).as_secs() / COOKIE_STEP
+    }
+
     fn hello(&mut self, frame: &Frame, from: SocketAddr, now: Instant) {
-        let config = &self.config;
-        let ip = from.ip();
-        let from_ip = self.members_per_ip.get(&ip).copied().unwrap_or(0);
-        let refusal = match self.rooms.get(&frame.room) {
-            None if config.admission == Admission::Issued => Some(Refusal::NoSuchRoom),
-            None if self.rooms.len() >= config.max_rooms => Some(Refusal::TooManyRooms),
-            room => {
-                let member = room.and_then(|r| r.members.get(&frame.src));
-                let members = room.map_or(0, |r| r.members.len());
-                match member {
-                    // Already here from there: just answer again.
-                    Some(m) if m.addr == from => None,
-                    // Moving here: one more from this address.
-                    Some(_) if from_ip >= config.max_members_per_ip => {
-                        Some(Refusal::TooManyFromAddress)
-                    }
-                    Some(_) => None,
-                    None if members >= config.max_members => Some(Refusal::RoomFull),
-                    None if from_ip >= config.max_members_per_ip => {
-                        Some(Refusal::TooManyFromAddress)
-                    }
-                    None => None,
-                }
-            }
-        };
-        if let Some(why) = refusal {
+        let gate = self.gate(from.ip());
+        let (rate, burst) = (self.config.hello_rate, self.config.hello_burst);
+        if !self.gates[gate].hellos.take(rate, burst, 1.0, now) {
+            bump(&self.control.counters.rate_limited, 1);
+            return;
+        }
+        // `decode` made sure it's a cookie and a proof.
+        let (cookie, proof) = frame.payload.split_at(COOKIE_LEN);
+        let step = self.cookie_step(now);
+        let secret = &self.control.secret;
+        let made = |step: u64| keys::cookie(secret, step, from, frame.room, frame.src);
+        let fresh = made(step);
+        let good = keys::same(cookie, &fresh) || (step > 0 && keys::same(cookie, &made(step - 1)));
+        if !good {
+            // Nothing kept, and an answer smaller than the hello: a forged
+            // source address gets no more than whoever forged it sent.
+            bump(&self.control.counters.challenged, 1);
+            let challenge = Frame::new(Kind::Challenge, frame.room, 0, frame.src)
+                .with_flags(FLAG_SERVER)
+                .with_seq(frame.seq)
+                .with_payload(&fresh);
+            self.reply(&challenge, from);
+            return;
+        }
+        // From here on, the sender is known to get what's sent to `from`.
+        if let Some(why) = self.admit(frame, from, cookie, proof, gate, now) {
             bump(&self.control.counters.refused, 1);
             self.refuse(frame, why, from);
             return;
         }
         if let Entry::Vacant(room) = self.rooms.entry(frame.room) {
-            room.insert(Room::new(now));
+            room.insert(Room::new(now, false));
             bump(&self.control.counters.rooms_opened, 1);
             (self.log)(&format!("relay: room {:016x} opened by {from}", frame.room));
         }
@@ -725,6 +896,7 @@ impl RelayServer {
                         Member {
                             addr: from,
                             heard: now,
+                            bucket: Bucket::default(),
                         },
                     );
                     room.empty_since = None;
@@ -737,7 +909,7 @@ impl RelayServer {
             self.left(old);
         }
         if joined || moved_from.is_some() {
-            *self.members_per_ip.entry(ip).or_default() += 1;
+            *self.members_per_ip.entry(ip_key(from.ip())).or_default() += 1;
         }
         let members = self.rooms.get(&frame.room).map_or(0, |r| r.members.len());
         let welcome = Frame::new(Kind::Hello, frame.room, 0, frame.src)
@@ -748,14 +920,72 @@ impl RelayServer {
         self.count_rooms();
     }
 
-    fn bye(&mut self, frame: &Frame, from: SocketAddr) {
+    /// Whether a hello with a good cookie may join (or move), and if not,
+    /// why. Opening an open room takes one of the opener's new-room tokens.
+    fn admit(
+        &mut self,
+        frame: &Frame,
+        from: SocketAddr,
+        cookie: &[u8],
+        proof: &[u8],
+        gate: usize,
+        now: Instant,
+    ) -> Option<Refusal> {
+        let config = &self.config;
+        let revoked = self.revoked.get(&frame.room);
+        if revoked.is_some_and(|t| now.saturating_duration_since(*t) < config.room_linger) {
+            return Some(Refusal::NoSuchRoom);
+        }
+        let from_ip = self
+            .members_per_ip
+            .get(&ip_key(from.ip()))
+            .copied()
+            .unwrap_or(0);
+        let Some(room) = self.rooms.get(&frame.room) else {
+            if config.admission == Admission::Issued {
+                return Some(Refusal::NoSuchRoom);
+            }
+            if self.rooms.len() >= config.max_rooms {
+                return Some(Refusal::TooManyRooms);
+            }
+            if from_ip >= config.max_members_per_ip {
+                return Some(Refusal::TooManyFromAddress);
+            }
+            let per_minute = config.rooms_per_ip;
+            if !self.gates[gate]
+                .rooms
+                .take(per_minute / 60.0, per_minute, 1.0, now)
+            {
+                return Some(Refusal::TooManyFromAddress);
+            }
+            return None;
+        };
+        if room.issued {
+            let key = keys::member_key(&self.control.secret, frame.room, frame.src);
+            if !keys::same(proof, &key.proof(frame.room, frame.src, cookie)) {
+                return Some(Refusal::BadKey);
+            }
+        }
+        match room.members.get(&frame.src) {
+            // Already here from there: just answer again.
+            Some(m) if m.addr == from => None,
+            // Moving here: one more from this address.
+            Some(_) if from_ip >= config.max_members_per_ip => Some(Refusal::TooManyFromAddress),
+            Some(_) => None,
+            None if room.members.len() >= config.max_members => Some(Refusal::RoomFull),
+            None if from_ip >= config.max_members_per_ip => Some(Refusal::TooManyFromAddress),
+            None => None,
+        }
+    }
+
+    fn bye(&mut self, frame: &Frame, from: SocketAddr, now: Instant) {
         let Some(room) = self.rooms.get_mut(&frame.room) else {
             return;
         };
         if room.members.get(&frame.src).is_some_and(|m| m.addr == from) {
             room.members.remove(&frame.src);
             if room.members.is_empty() {
-                room.empty_since = Some(Instant::now());
+                room.empty_since = Some(now);
             }
             self.left(from.ip());
             self.count_rooms();
@@ -764,34 +994,27 @@ impl RelayServer {
 
     /// Pass `frame` (as `bytes`, unchanged) on to its destination.
     fn forward(&mut self, frame: &Frame, bytes: &[u8], from: SocketAddr, now: Instant) {
-        if !self.member(frame, from, now) {
-            return;
-        }
-        let Some(room) = self.rooms.get(&frame.room) else {
+        let room = self.rooms.get(&frame.room);
+        let sender = room.and_then(|r| r.members.get(&frame.src));
+        let Some(room) = room.filter(|_| sender.is_some_and(|m| m.addr == from)) else {
+            self.stranger(frame, from, now);
             return;
         };
-        let to: Vec<SocketAddr> = if frame.dst == BROADCAST {
-            room.members
-                .iter()
-                .filter(|(&id, _)| id != frame.src)
-                .map(|(_, m)| m.addr)
-                .collect()
+        let to: Option<Vec<SocketAddr>> = if frame.dst == BROADCAST {
+            let others = room.members.iter().filter(|(&id, _)| id != frame.src);
+            Some(others.map(|(_, m)| m.addr).collect())
         } else {
-            match room.members.get(&frame.dst) {
-                Some(m) => vec![m.addr],
-                None => {
-                    bump(&self.control.counters.unknown_dst, 1);
-                    return;
-                }
-            }
+            room.members.get(&frame.dst).map(|m| vec![m.addr])
         };
-        // A broadcast costs one token per member it goes to (one was
-        // spent already).
-        let extra = to.len().saturating_sub(1) as f64;
-        if extra > 0.0 && !self.spend(from, extra, now) {
-            bump(&self.control.counters.rate_limited, 1);
+        // One token per member it goes to (and one for a frame to no one).
+        let cost = to.as_ref().map_or(1, |to| to.len().max(1));
+        if !self.member(frame, from, now, cost) {
             return;
         }
+        let Some(to) = to else {
+            bump(&self.control.counters.unknown_dst, 1);
+            return;
+        };
         bump(&self.control.counters.forwarded, to.len() as u64);
         for addr in to {
             self.send(bytes, addr);
@@ -811,5 +1034,40 @@ fn bytes(n: u64) -> String {
         0..1_000 => format!("{n} B"),
         1_000..1_000_000 => format!("{:.1} kB", n as f64 / 1e3),
         _ => format!("{:.1} MB", n as f64 / 1e6),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buckets_fill_at_their_rate_up_to_their_burst() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut bucket = Bucket::default();
+        // Full at first.
+        assert!(bucket.take(10.0, 3.0, 3.0, at(0)));
+        assert!(!bucket.take(10.0, 3.0, 1.0, at(0)));
+        // A tenth of a second: one more.
+        assert!(bucket.take(10.0, 3.0, 1.0, at(100)));
+        assert!(!bucket.take(10.0, 3.0, 1.0, at(100)));
+        // Never more than the burst, however long it waits.
+        assert!(!bucket.take(10.0, 3.0, 4.0, at(60_000)));
+        assert!(bucket.take(10.0, 3.0, 3.0, at(60_000)));
+    }
+
+    #[test]
+    fn addresses_count_by_host() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert_eq!(ip_key(ip("203.0.113.9")), ip("203.0.113.9"));
+        // An IPv4 address on a dual-stack socket is that address.
+        assert_eq!(ip_key(ip("::ffff:203.0.113.9")), ip("203.0.113.9"));
+        // An IPv6 host is its /64.
+        assert_eq!(
+            ip_key(ip("2001:db8:1:2:aaaa:bbbb:cccc:dddd")),
+            ip("2001:db8:1:2::")
+        );
+        assert_ne!(ip_key(ip("2001:db8:1:3::1")), ip_key(ip("2001:db8:1:2::1")));
     }
 }

@@ -7,7 +7,7 @@
 use ed25519_dalek::SigningKey;
 use h2live::client::{LiveClient, LiveEvent, Profile};
 use h2net::live::{self, ToServer};
-use h2relay::{ClientConfig, RelayClient, State};
+use h2relay::{ClientConfig, Failure, Refusal, RelayClient, State};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -275,7 +275,7 @@ fn the_program_serves_pcs_and_web_requests_and_stops_cleanly() {
 }
 
 #[test]
-fn the_program_relays_launcher_traffic_on_udp() {
+fn the_program_runs_the_relay_on_udp_for_its_own_rooms_only() {
     let data = TempDir::new("relay-data");
     let mut program = Program::start(&data.0);
     // On UDP, the same port number as the sign-ins.
@@ -285,28 +285,30 @@ fn the_program_relays_launcher_traffic_on_udp() {
         line.contains(&format!("relay on UDP port {port} ")),
         "{line}"
     );
+    assert!(line.contains("only rooms h2live issues"), "{line}");
+    // It answers (a challenge, then a refusal), but admits no room it
+    // didn't issue: it's no open relay.
     let relay = SocketAddr::from(([127, 0, 0, 1], port));
-    let config = ClientConfig::default;
-    let alpha = RelayClient::connect_with(relay, 7, 1, config()).unwrap();
-    let bravo = RelayClient::connect_with(relay, 7, 2, config()).unwrap();
+    let config = ClientConfig {
+        hello_timeout: Duration::from_millis(500),
+        ..ClientConfig::default()
+    };
+    let stranger = RelayClient::connect_with(relay, 7, 1, config).unwrap();
     let start = Instant::now();
-    while [&alpha, &bravo].iter().any(|c| c.state() != State::Joined) {
-        assert!(start.elapsed() < WAIT, "{:?}", alpha.state());
+    while stranger.state() == State::Joining {
+        assert!(start.elapsed() < WAIT, "no answer");
         std::thread::sleep(Duration::from_millis(5));
     }
-    program.wait_for("relay: room 0000000000000007 opened by 127.0.0.1:");
-    alpha.send_unreliable(2, 1000, b"over UDP").unwrap();
-    let mut buf = [0; 64];
-    let got = loop {
-        if let Some(got) = bravo.recv(&mut buf) {
-            break got;
-        }
-        assert!(start.elapsed() < WAIT, "nothing came");
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    assert_eq!(got, (1, 1000, 8));
-    assert_eq!(&buf[..8], b"over UDP");
+    assert_eq!(
+        stranger.state(),
+        State::Failed(Failure::Refused(Refusal::NoSuchRoom))
+    );
+    assert!(stranger.stats().server_rtt.is_none());
     program.stop();
+    assert!(!program
+        .said
+        .iter()
+        .any(|l| l.contains("room 0000000000000007")));
 }
 
 #[test]

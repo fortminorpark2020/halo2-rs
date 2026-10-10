@@ -7,7 +7,11 @@ There are three ways to run it. Option A is the easy one.
 The server uses one port number twice: TCP 47050 for signing in, and UDP
 47050 for the relay that carries the launcher's games between PCs (the
 game's own packets go over UDP so that one lost packet doesn't hold up
-everyone). Friends outside your home network need both.
+everyone). Friends outside your home network need both. The relay only
+lets in the players of matches the server set up, so opening the port
+doesn't give strangers a free relay. (Until the launcher's matches are
+set up through the server, launcher tests use the test relay described at
+the end of "Moving or turning off the relay".)
 
 ## Option A: a free server on Render (recommended)
 
@@ -125,9 +129,12 @@ otherwise. A `relay=47051` line in `h2live.txt` next to the program (or the
 setting `H2LIVE_RELAY=47051`, for the container) moves it to another port;
 `relay=off` turns it off. Forward whichever UDP port it uses.
 
-For tests on one PC, `h2relay.exe` runs the relay on its own, without the
-rest of the server: `h2relay` listens on UDP 47050, and `h2relay 47051` or
-`h2relay 127.0.0.1:47051` somewhere else.
+For tests on one PC or your home network, `h2relay.exe` runs a relay on
+its own, without the rest of the server: `h2relay` listens on UDP 47050,
+and `h2relay 47051` or `h2relay 127.0.0.1:47051` somewhere else. Unlike
+h2live's, it lets anyone in who knows a match's number, so never forward
+its port in the router. (On the server container, run it on another port,
+such as 47051, beside h2live.)
 
 ## What friends do
 
