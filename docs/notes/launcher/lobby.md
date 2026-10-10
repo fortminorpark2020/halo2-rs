@@ -1,8 +1,15 @@
 # The launcher's lobby (milestone 4)
 
-Built on `launcher-lobby` (`crates/h2launch/src/lobby/`), tested on Linux
-with a local h2live and two lobbies playing on the stand-in engine; not yet
-run with the real engine on the owner's PC.
+Built on `launcher-lobby` (`crates/h2launch/src/lobby/`). Tested on Linux
+with a local h2live and two lobbies on the stand-in engine, and on the
+owner's PC (2026-10-10 07:45) with two headless lobbies playing a real
+match on halo2.dll through the Proxmox h2live: Head to Head, Swords on
+Gemini, one hosting and one joining, a 60 s time limit
+(`H2LOBBY_ENGINE_ARGS=--set-option 0x354=i32:60`). Both engines said
+running, maploaded and ended (the same results on both), the server counted
+the game, both engines closed by themselves about 7 s after the end (the
+engine's own restart_game(0)), and both lobbies showed the carnage report.
+The sign-in window opened and drew with no errors.
 
 What a player sees around a match, in the spirit of Halo 2's Xbox Live
 screens: sign in, a party, the playlists with their levels, searching,
@@ -31,6 +38,10 @@ the launcher doesn't do.
   the lobby closes, and 20 s after the game ended if the engine is still up
   (an estimate of its own postgame). A child that hasn't closed 10 s after
   being asked is stopped. Closing before the end says LEFT_MATCH.
+- Double-clicked, the launcher lets go of the console window Windows gave
+  it (its log is in `lobby.log`); started from a terminal it keeps that
+  one. The engine's copy starts with no console (its output goes to the
+  lobby), and closes when the lobby's pipe to it closes.
 - A match that comes again with another host (the one asked didn't start
   hosting) stops the engine and starts it again on the new session.
 - `--live` stays as it is, for tests. `--offline` starts an offline match

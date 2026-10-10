@@ -137,7 +137,10 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   `--offline` is now how to start an offline match. Design, keys and the
   headless test harness: `docs/notes/launcher/lobby.md`. Tested on Linux
   with a local h2live and two headless lobbies on the stand-in engine
-  (`--fake-engine`). Next: the same on the owner's PC with the real engine.
+  (`--fake-engine`), and on the owner's PC (07:45) with two lobbies
+  playing a real match on halo2.dll through the Proxmox h2live: counted,
+  carnage report on both, engines closed by themselves. Next: kills in the
+  results block, a play session by the owner, then two PCs.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.
