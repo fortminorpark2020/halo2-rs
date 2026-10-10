@@ -8,8 +8,8 @@
 //! else as zlib streams that each inflate to 256 KiB. The header followed by
 //! the inflated chunks is the map's "image", and every offset the header
 //! gives (but the chunk table's) is an offset in that image. The tag index
-//! is Halo 2 Vista's, with
-//! addresses counted from the index's start instead of memory addresses.
+//! is Halo 2 Vista's, with addresses counted from the index's start instead
+//! of memory addresses.
 //!
 //! Every size read from a file is checked against the file and against a
 //! limit before anything is allocated for it, so a damaged or hostile file
