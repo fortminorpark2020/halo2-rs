@@ -37,11 +37,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::VK_F4;
 use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RAWINPUTDEVICE_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics,
-    LoadCursorW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow, ShowWindow,
-    CS_CLASSDC, HTCLIENT, IDC_ARROW, SC_KEYMENU, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW,
+    LoadCursorW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow, SetTimer,
+    ShowWindow, CS_CLASSDC, HTCLIENT, IDC_ARROW, SC_KEYMENU, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW,
     WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_INPUT,
     WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_MOUSEMOVE, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
-    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::log::log;
@@ -129,6 +129,12 @@ pub fn create_window(width: u32, height: u32) -> Result<HWND, String> {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
         let _ = SetForegroundWindow(hwnd);
+        // A tick a second for the watchdog's heartbeat; WM_TIMER also
+        // arrives inside Windows' modal move and size loops, where our
+        // main loop does not run.
+        if SetTimer(Some(hwnd), 1, 1000, None) == 0 {
+            log!("SetTimer failed (the watchdog may misjudge a long window drag)");
+        }
         // Raw mouse motion for our window while it is in front.
         let rid = RAWINPUTDEVICE {
             usUsagePage: 0x01,
@@ -471,6 +477,23 @@ fn send_shot(label: String, shot: Shot) {
     }
 }
 
+/// Writes a picture now, on this thread (used at the end of the run).
+pub fn save_png_now(label: &str, width: u32, height: u32, rgba: Vec<u8>) {
+    write_png(
+        label,
+        Shot {
+            width,
+            height,
+            rgba,
+        },
+    );
+}
+
+/// Screenshots requested but not taken yet.
+pub fn pending_screenshots() -> usize {
+    SHOT_QUEUE.try_lock().map_or(0, |q| q.len())
+}
+
 fn write_png(label: &str, mut shot: Shot) {
     let stats = crate::util::PictureStats::of_rgba(&shot.rgba, shot.width, shot.height);
     // The back buffer's alpha is whatever the engine left there; save the
@@ -509,7 +532,7 @@ pub fn finish_screenshots(timeout: f64) {
     while WRITING.load(Ordering::SeqCst) > 0 && super::now() < until {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    if let Ok(q) = SHOT_QUEUE.lock() {
+    if let Ok(q) = SHOT_QUEUE.try_lock() {
         for label in q.iter() {
             log!("screenshot {label} was not taken (no engine frame after it was requested)");
         }
@@ -519,16 +542,18 @@ pub fn finish_screenshots(timeout: f64) {
 // ---------------------------------------------------------------- window procedure
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    let r = std::panic::catch_unwind(|| handle(hwnd, msg, wp, lp));
+    let r = super::guarded(|| handle(hwnd, msg, wp, lp));
     // SAFETY: default handling for our own window.
-    r.unwrap_or_else(|_| unsafe { DefWindowProcW(hwnd, msg, wp, lp) })
+    r.unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, msg, wp, lp) })
 }
 
 fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     use super::input;
+    super::beat();
     // SAFETY: default handling for our own window.
     let default = || unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
     match msg {
+        WM_TIMER => LRESULT(0),
         WM_CLOSE => {
             super::request_quit(super::QUIT_USER);
             LRESULT(0)

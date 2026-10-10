@@ -288,6 +288,58 @@ pub fn sha256_hex(data: &[u8]) -> String {
     d.iter().map(|b| format!("{b:02X}")).collect()
 }
 
+/// What a launch logs about the `halo2.dll` it is about to load, against
+/// the build the research was checked on (`crate::expected`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuildFacts {
+    pub version: Option<[u16; 4]>,
+    pub timestamp: u32,
+    pub size_of_image: u32,
+    pub sha256: String,
+}
+
+impl BuildFacts {
+    pub fn read(data: &[u8]) -> Result<BuildFacts, String> {
+        let pe = Pe::parse(data)?;
+        Ok(BuildFacts {
+            version: pe.versions().map(|(file, _)| file),
+            timestamp: pe.timestamp,
+            size_of_image: pe.size_of_image,
+            sha256: sha256_hex(data),
+        })
+    }
+
+    /// The fields that differ from the researched build, empty if none.
+    pub fn mismatches(&self) -> Vec<&'static str> {
+        use crate::expected as e;
+        let mut out = Vec::new();
+        if self.version != Some(e::HALO2_VERSION) {
+            out.push("FileVersion");
+        }
+        if self.timestamp != e::HALO2_TIMESTAMP {
+            out.push("TimeDateStamp");
+        }
+        if self.size_of_image != e::HALO2_SIZE_OF_IMAGE {
+            out.push("SizeOfImage");
+        }
+        if self.sha256 != e::HALO2_SHA256 {
+            out.push("SHA-256");
+        }
+        out
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "FileVersion {}, TimeDateStamp {:#010x}, SizeOfImage {:#x}, SHA-256 {}",
+            self.version
+                .map_or_else(|| "not found".to_string(), version_string),
+            self.timestamp,
+            self.size_of_image,
+            self.sha256
+        )
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -448,5 +500,19 @@ pub mod tests {
             sha256_hex(b"abc"),
             "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"
         );
+    }
+
+    #[test]
+    fn build_facts() {
+        let b = build_test_dll();
+        let f = BuildFacts::read(&b).unwrap();
+        assert_eq!(f.version, Some([1, 3528, 0, 0]));
+        assert_eq!(f.timestamp, crate::expected::HALO2_TIMESTAMP);
+        // The test file is small and not the real DLL.
+        assert_eq!(f.mismatches(), vec!["SizeOfImage", "SHA-256"]);
+        assert!(f
+            .describe()
+            .starts_with("FileVersion 1.3528.0.0, TimeDateStamp 0x68a0f0f2, SizeOfImage 0x3000"));
+        assert!(BuildFacts::read(b"MZ").is_err());
     }
 }

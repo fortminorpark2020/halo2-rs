@@ -10,20 +10,27 @@
 //!   it a message and waits), and it never blocks without pumping
 //!   messages;
 //! - the launch worker makes the engine and calls `initialize_game`;
-//! - the engine's own threads call the host slots.
+//! - the engine's own threads call the host slots;
+//! - a watchdog notices when the window thread stops running (a call into
+//!   the engine on it that never returns), runs the deferred end of a
+//!   stack-overflow crash, and makes sure the run always ends with a
+//!   RESULT line.
 
 pub mod check;
 mod crash;
+mod diag;
 mod engine;
 mod events;
 mod gfx;
 mod host;
 mod input;
 mod log;
+mod screen;
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
@@ -39,7 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::cli::Args;
 use crate::maps::MapEntry;
 use crate::script::{Action, Base, Script};
-use crate::slots::Outcome;
+use crate::slots::{InGame, Outcome};
 use log::log;
 
 // ---------------------------------------------------------------- time
@@ -112,6 +119,47 @@ pub(crate) static CRASHED: AtomicU32 = AtomicU32::new(0);
 /// The engine's game thread handle once initialize_game returned it.
 pub(crate) static GAME_THREAD: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static LAUNCH_FAILED: AtomicBool = AtomicBool::new(false);
+/// halo2.dll's load address, 0 before it is loaded.
+pub(crate) static HALO2_BASE: AtomicUsize = AtomicUsize::new(0);
+/// The halo2.dll file matched the researched build (version, timestamp,
+/// size and hash).
+pub(crate) static BUILD_MATCHES: AtomicBool = AtomicBool::new(false);
+/// When the window thread last ran (seconds, as f64 bits): its main loop
+/// and its window procedure, which a one-second timer keeps ticking even
+/// inside Windows' modal move and size loops.
+pub(crate) static HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+/// A stack overflow the crash filter could not finish on its own stack;
+/// the watchdog ends the run for it.
+pub(crate) static DEFERRED_CRASH: AtomicU32 = AtomicU32::new(0);
+/// The console window is closing: Windows ends the process about 5 s after
+/// it tells us, so the quit sequence is kept short.
+pub(crate) static CONSOLE_CLOSING: AtomicBool = AtomicBool::new(false);
+/// finish() has started (it runs once), and when.
+static FINISHING: AtomicBool = AtomicBool::new(false);
+static FINISH_AT: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn beat() {
+    HEARTBEAT.store(now().max(1e-9).to_bits(), Ordering::SeqCst);
+}
+
+thread_local! {
+    /// How many `guarded` calls this thread is inside.
+    static GUARD_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Runs `f`, catching a panic so it never crosses into the engine (a panic
+/// through an `extern "system"` function aborts the process with no log).
+/// The panic hook logs the message; this returns None for it.
+pub(crate) fn guarded<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Option<T> {
+    GUARD_DEPTH.with(|d| d.set(d.get() + 1));
+    let r = std::panic::catch_unwind(f);
+    GUARD_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    r.ok()
+}
+
+fn in_guard() -> bool {
+    GUARD_DEPTH.try_with(|d| d.get() > 0).unwrap_or(false)
+}
 
 /// Why we are quitting.
 pub(crate) const QUIT_NONE: u32 = 0;
@@ -143,6 +191,9 @@ pub(crate) fn hwnd() -> HWND {
 
 /// The launch step we are in, for crash reports.
 pub(crate) static STEP: AtomicUsize = AtomicUsize::new(0);
+/// The furthest launch step reached before quitting, for the RESULT line.
+static REACHED: AtomicUsize = AtomicUsize::new(0);
+const STEP_QUITTING: usize = 13;
 pub(crate) const STEPS: [&str; 14] = [
     "starting",
     "window and Direct3D",
@@ -162,6 +213,10 @@ pub(crate) const STEPS: [&str; 14] = [
 
 pub(crate) fn set_step(i: usize) {
     STEP.store(i, Ordering::SeqCst);
+    if i < STEP_QUITTING {
+        REACHED.fetch_max(i, Ordering::SeqCst);
+    }
+    beat();
     log!("step: {}", STEPS[i.min(STEPS.len() - 1)]);
 }
 
@@ -184,13 +239,15 @@ pub(crate) fn script_time() -> Option<f64> {
 
 pub fn run() -> i32 {
     let _ = START.set(Instant::now());
-    let args = match crate::cli::parse(std::env::args().skip(1)) {
+    let mut args = match crate::cli::parse(std::env::args().skip(1)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("h2launch: {e}");
             return 2;
         }
     };
+    // Before anything changes the working folder.
+    crate::cli::absolutize_paths(&mut args);
     if args.help {
         println!("{}", crate::cli::USAGE);
         return 0;
@@ -217,12 +274,123 @@ pub(crate) fn log_dir() -> std::path::PathBuf {
 }
 
 unsafe extern "system" fn on_console(kind: u32) -> windows::core::BOOL {
-    // Ctrl+C (0), Ctrl+Break (1) or the console closing (2): quit cleanly.
-    if kind <= 2 {
-        request_quit(QUIT_CONSOLE);
-        return true.into();
+    match kind {
+        // Ctrl+C, Ctrl+Break: quit cleanly.
+        0 | 1 => {
+            request_quit(QUIT_CONSOLE);
+            true.into()
+        }
+        // The console window closing (or logoff/shutdown): Windows ends
+        // the process as soon as this returns, or about 5 s later. Wait
+        // here so the main loop can write the summary and the RESULT line;
+        // finish() ends the process itself.
+        2 | 5 | 6 => {
+            CONSOLE_CLOSING.store(true, Ordering::SeqCst);
+            request_quit(QUIT_CONSOLE);
+            for _ in 0..45 {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            true.into()
+        }
+        _ => false.into(),
     }
-    false.into()
+}
+
+/// Logs a Rust panic with its place before anything else happens. Inside
+/// a guarded host slot or window message it is caught and the call returns
+/// a default; anywhere else it ends the run through finish(), so the log
+/// still gets its RESULT line (a panic through an `extern "system"`
+/// function would otherwise abort with nothing logged).
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".into());
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "?".into());
+        if in_guard() {
+            log!("PANIC (caught; the call returns a default): {msg} at {at}");
+        } else {
+            log!(
+                "PANIC: {msg} at {at} during {}; ending the run",
+                step_name()
+            );
+            finish(&format!("panic: {msg}"));
+        }
+    }));
+}
+
+/// A click in a classic console with QuickEdit on pauses all output to
+/// it, and every thread that logs (engine threads in host slots included)
+/// would wait. Turn it off for this run.
+fn quick_edit_off() {
+    use windows::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE, ENABLE_EXTENDED_FLAGS,
+        ENABLE_QUICK_EDIT_MODE, STD_INPUT_HANDLE,
+    };
+    // SAFETY: console mode queries on our own standard input.
+    unsafe {
+        let Ok(h) = GetStdHandle(STD_INPUT_HANDLE) else {
+            return;
+        };
+        let mut mode = CONSOLE_MODE(0);
+        if GetConsoleMode(h, &mut mode).is_err() {
+            return; // not a console
+        }
+        if mode.0 & ENABLE_QUICK_EDIT_MODE.0 == 0 {
+            return;
+        }
+        let new = CONSOLE_MODE((mode.0 & !ENABLE_QUICK_EDIT_MODE.0) | ENABLE_EXTENDED_FLAGS.0);
+        match SetConsoleMode(h, new) {
+            Ok(()) => log!(
+                "console QuickEdit turned off for this run (a click there would pause the log)"
+            ),
+            Err(e) => log!("console QuickEdit could not be turned off: {e}"),
+        }
+    }
+}
+
+/// Moves the previous run's screenshots into `prev-shots`, so a run that
+/// never renders cannot be mistaken for one that did.
+fn move_old_shots(dir: &std::path::Path) {
+    let is_shot = |p: &std::path::Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("h2launch-shot-") && n.ends_with(".png"))
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let old: Vec<std::path::PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| is_shot(p))
+        .collect();
+    if old.is_empty() {
+        return;
+    }
+    let prev = dir.join("prev-shots");
+    if let Ok(rd) = std::fs::read_dir(&prev) {
+        for e in rd.flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    let _ = std::fs::create_dir_all(&prev);
+    let mut moved = 0;
+    for p in old {
+        let to = prev.join(p.file_name().unwrap_or_default());
+        if std::fs::rename(&p, &to).is_ok() || std::fs::remove_file(&p).is_ok() {
+            moved += 1;
+        }
+    }
+    log!(
+        "{moved} screenshot(s) from the previous run moved to {}",
+        prev.display()
+    );
 }
 
 fn random_xuid() -> u64 {
@@ -247,6 +415,7 @@ fn launch(args: Args) -> i32 {
         "arguments: {:?}",
         std::env::args().skip(1).collect::<Vec<_>>()
     );
+    install_panic_hook();
     match &log_path {
         Ok(p) => log!("log: {}", p.display()),
         Err(e) => log!("log file could not be opened in {}: {e}", dir.display()),
@@ -259,7 +428,10 @@ fn launch(args: Args) -> i32 {
     if let Err(e) = unsafe { SetConsoleCtrlHandler(Some(on_console), true) } {
         log!("SetConsoleCtrlHandler failed: {e}");
     }
+    quick_edit_off();
     WINDOW_TID.store(tid(), Ordering::SeqCst);
+    beat();
+    move_old_shots(&dir);
 
     // The MCC folder.
     let found = engine::find_root(args.mcc.as_deref());
@@ -335,6 +507,12 @@ fn launch(args: Args) -> i32 {
         map,
     });
     let s = setup().expect("just set");
+    if let Err(e) = std::thread::Builder::new()
+        .name("h2launch-watchdog".into())
+        .spawn(watchdog)
+    {
+        log!("watchdog thread: {e}");
+    }
 
     // Window and device first (HaloX's order).
     set_step(1);
@@ -354,6 +532,7 @@ fn launch(args: Args) -> i32 {
 
     // The DLL.
     set_step(2);
+    engine::log_build(&root);
     engine::prepare_search(&root);
     let module = match engine::load_halo2(&root) {
         Ok(m) => m,
@@ -362,6 +541,7 @@ fn launch(args: Args) -> i32 {
             finish("halo2.dll did not load");
         }
     };
+    HALO2_BASE.store(module.0 as usize, Ordering::SeqCst);
     crash::set_filter("after loading halo2.dll");
     pump();
     set_step(3);
@@ -372,6 +552,11 @@ fn launch(args: Args) -> i32 {
             finish("CreateDataAccess failed");
         }
     };
+    engine::log_vtable(
+        "data access",
+        data_access,
+        crate::expected::DATA_ACCESS_VTABLE_RVA,
+    );
     set_step(4);
     let options = match engine::build_options(data_access, s) {
         Ok(o) => o,
@@ -437,7 +622,9 @@ fn main_loop() -> i32 {
     let mut shots: Vec<f64> = s.args.screenshots.clone();
     let mut next_summary = 10.0;
     let mut modules_logged = false;
-    let mut script_t = 0.0f64;
+    // Below 0 so script steps at time 0 fire.
+    let mut script_t = -1.0f64;
+    let mut key_diag = diag::KeyDiag::default();
     let mut quit_started: Option<(f64, f64)> = None; // (when, deadline)
     let mut game_exit_logged = false;
     let mut attach = input::Attach::default();
@@ -445,6 +632,7 @@ fn main_loop() -> i32 {
     let mut reason = String::new();
 
     loop {
+        beat();
         pump();
         let t = now();
         let game = game_thread();
@@ -508,14 +696,17 @@ fn main_loop() -> i32 {
         gfx::resize_if_settled();
         input::update_cursor_clip(game.is_some() && quit_started.is_none());
         if s.args.attach_input {
-            if let (Some(h), Some(since)) = (game, running_since) {
-                attach.try_attach(h, t - since);
+            if let Some(h) = game {
+                attach.try_attach(h, t);
             }
+        }
+        if s.args.diag {
+            key_diag.tick(t);
         }
 
         if t >= next_summary {
             next_summary = t + 10.0;
-            summary();
+            summary(true);
         }
         if let Some(since) = running_since {
             if !modules_logged && t - since >= 20.0 {
@@ -531,6 +722,9 @@ fn main_loop() -> i32 {
             if reason.is_empty() {
                 reason = match q {
                     QUIT_USER => "window closed".into(),
+                    QUIT_CONSOLE if CONSOLE_CLOSING.load(Ordering::SeqCst) => {
+                        "console window closed".into()
+                    }
                     QUIT_CONSOLE => "console Ctrl+C".into(),
                     _ => format!(
                         "engine restart_game({})",
@@ -543,7 +737,9 @@ fn main_loop() -> i32 {
                 Some(h) if !thread_exited(h) => {
                     engine::post_message(13, "quit");
                     engine::post_message(1, "resume");
-                    if q == QUIT_ENGINE {
+                    if CONSOLE_CLOSING.load(Ordering::SeqCst) {
+                        1.5
+                    } else if q == QUIT_ENGINE {
                         15.0
                     } else {
                         5.0
@@ -584,53 +780,142 @@ fn main_loop() -> i32 {
     }
 }
 
-fn summary() {
+/// The 10-second summary. `periodic` adds the checks that only make
+/// sense while the run goes on: our crash filter still in place, and when
+/// no frame came since the last summary, the process's own windows (an
+/// engine error dialog would show up there).
+fn summary(periodic: bool) {
+    static LAST_FRAMES: AtomicU64 = AtomicU64::new(u64::MAX);
     let frames = FRAMES.load(Ordering::SeqCst);
     let polls = INPUT_POLLS.load(Ordering::SeqCst);
-    let states = STATES.lock().map(|s| s.clone()).unwrap_or_default();
+    let states = STATES.try_lock().map(|s| s.clone()).unwrap_or_default();
     log!(
-        "summary: step={} frames={frames} presents={} input-polls={polls} states={states:?} {}",
+        "summary: step={} frames={frames} presents={} input-polls={polls} states={states:?} {} {}",
         step_name(),
         gfx::presents().map_or("?".to_string(), |p| p.to_string()),
-        input::pad_line()
+        input::pad_line(),
+        host::load_line()
     );
     host::log_summary();
     events::log_summary();
+    if periodic {
+        crash::refresh_filter();
+        let before = LAST_FRAMES.swap(frames, Ordering::SeqCst);
+        if before == frames && STEP.load(Ordering::SeqCst) >= 9 {
+            log!("no engine frame since the last summary; the process's windows:");
+            screen::log_windows(true);
+        }
+    }
 }
 
-/// Writes the summary and the RESULT line, then ends the process.
-/// TerminateProcess skips DLL teardown, which is where engine audio
-/// threads are known to fault (launch-sequence 4.10).
-pub(crate) fn finish(reason: &str) -> ! {
-    let game = game_thread();
-    let states = STATES.lock().map(|s| s.clone()).unwrap_or_default();
+/// What the RESULT line says.
+fn outcome(reason: &str) -> Outcome {
+    let states = STATES.try_lock().map(|s| s.clone()).unwrap_or_default();
     let frames = FRAMES.load(Ordering::SeqCst);
     let polls = INPUT_POLLS.load(Ordering::SeqCst);
     let crashed = match CRASHED.load(Ordering::SeqCst) {
         0 => None,
         c => Some(c),
     };
-    let outcome = Outcome {
-        in_game: states.contains(&1) || (frames >= 300 && polls > 0),
+    Outcome {
+        in_game: InGame::judge(&states, frames, polls),
         frames,
         crashed,
         presents: gfx::presents(),
         states,
-        game_thread_exited: game.map(thread_exited),
+        game_thread_exited: game_thread().map(thread_exited),
+        step: STEPS[REACHED.load(Ordering::SeqCst).min(STEPS.len() - 1)].to_string(),
         reason: reason.to_string(),
-    };
-    gfx::finish_screenshots(3.0);
-    summary();
-    if let Some(h) = game {
+    }
+}
+
+/// Writes the summary and the RESULT line, then ends the process. It runs
+/// once; a second caller (another thread, or a crash while finishing)
+/// waits for the first, and the watchdog ends the process if the first
+/// never gets there. TerminateProcess skips DLL teardown, which is where
+/// engine audio threads are known to fault (launch-sequence 4.10).
+pub(crate) fn finish(reason: &str) -> ! {
+    if FINISHING.swap(true, Ordering::SeqCst) {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    FINISH_AT.store(now().max(1e-9).to_bits(), Ordering::SeqCst);
+    let closing = CONSOLE_CLOSING.load(Ordering::SeqCst);
+    gfx::finish_screenshots(if closing { 0.5 } else { 3.0 });
+    let out = outcome(reason);
+    summary(false);
+    log!("the process's windows at the end:");
+    screen::log_windows(false);
+    if out.frames == 0 || gfx::pending_screenshots() > 0 {
+        screen::save_window_capture("final-gdi");
+    }
+    if let Some(h) = game_thread() {
         // SAFETY: valid handle.
         log!("game thread id {}", unsafe { GetThreadId(h) });
     }
     input::stop_rumble();
-    log!("{}", outcome.line());
-    let code = outcome.exit_code();
+    log!("{}", out.line());
+    let code = out.exit_code();
     // SAFETY: ends this process.
     unsafe {
         let _ = TerminateProcess(GetCurrentProcess(), code as u32);
     }
     std::process::exit(code)
+}
+
+/// The watchdog thread (see the module notes).
+fn watchdog() {
+    let quit_after = setup().and_then(|s| s.args.quit_after);
+    // --no-watchdog keeps only the duties that never end a healthy run.
+    let judge = setup().is_none_or(|s| s.args.watchdog);
+    let mut warned_for: Option<u64> = None;
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        let t = now();
+        if FINISHING.load(Ordering::SeqCst) {
+            if marked(&FINISH_AT).is_some_and(|at| t - at > 15.0) {
+                log!("watchdog: the end of the run did not finish in 15 s; ending the process");
+                log!("{}", outcome("finish did not complete").line());
+                // SAFETY: ends this process.
+                unsafe {
+                    let _ = TerminateProcess(GetCurrentProcess(), 3);
+                }
+            }
+            continue;
+        }
+        if DEFERRED_CRASH.load(Ordering::SeqCst) != 0 {
+            finish("unhandled exception (stack overflow)");
+        }
+        if !judge {
+            continue;
+        }
+        let hb_bits = HEARTBEAT.load(Ordering::SeqCst);
+        let stale = if hb_bits == 0 {
+            0.0
+        } else {
+            t - f64::from_bits(hb_bits)
+        };
+        if stale >= 10.0 && warned_for != Some(hb_bits) {
+            warned_for = Some(hb_bits);
+            log!(
+                "watchdog: the window thread has not run for {stale:.0} s (step: {}); a call it made may be stuck",
+                step_name()
+            );
+            summary(false);
+        }
+        if stale >= 30.0 {
+            finish(&format!(
+                "watchdog: window thread stuck during {}",
+                step_name()
+            ));
+        }
+        if let Some(q) = quit_after {
+            if t >= q + 30.0 {
+                finish(&format!(
+                    "watchdog: --quit-after {q} passed 30 s ago and the run had not ended"
+                ));
+            }
+        }
+    }
 }

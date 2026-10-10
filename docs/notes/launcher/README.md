@@ -29,8 +29,8 @@ documented Windows APIs.
    handles resize and quit.
 
 Everything it does is written to a log (see below), including every launch
-step, the first call of each engine callback, a call-count summary every ten
-seconds, and a final `RESULT:` line.
+step, the `halo2.dll` build it loaded, the first call of each engine
+callback, a call-count summary every ten seconds, and a final `RESULT:` line.
 
 ## Running it on the owner's PC
 
@@ -59,10 +59,34 @@ target\release\h2launch.exe --quit-after 120 --screenshot 30,60,90
 Watch the window, or come back and read the log and the screenshots. To play
 by hand instead, run it with no arguments and close the window to quit.
 
-The log is `%LOCALAPPDATA%\h2launch\h2launch.log` (the previous run is kept as
-`h2launch.prev.log`). Screenshots are PNGs in the same folder
-(`h2launch-shot-*.png`). When started from a terminal, the log is also printed
-there.
+The log is `%LOCALAPPDATA%\h2launch\h2launch.log` in cmd, or
+`$env:LOCALAPPDATA\h2launch\h2launch.log` in PowerShell (the previous run is
+kept as `h2launch.prev.log`). Screenshots are PNGs in the same folder
+(`h2launch-shot-*.png`); the previous run's are moved into `prev-shots` at
+start, so every PNG in the folder is from the latest run. When started from a
+terminal, the log is also printed there.
+
+The last line of the log reads like
+
+```
+RESULT: in-game=yes frames=7012 crashed=none presents=7013 states=[1] game-thread-exited=yes step="running" reason="--quit-after 120"
+```
+
+- `in-game=yes` only when the engine reported the map loaded
+  (`set_game_state(1)`); `maybe(...)` when it drew many frames and polled
+  input without saying so (it also does that on a loading screen); `no`
+  otherwise.
+- `step` is the furthest launch step reached (for example
+  `preload_common_begin` if the engine never came back from it).
+- The exit code is 0 only for `in-game=yes` with no crash, 2 after a crash,
+  and 1 otherwise.
+
+If the engine stops drawing, the log lists the process's own windows (an
+engine error dialog appears there with its text), and at the end a screen
+grab of the window area is saved as `h2launch-shot-final-gdi.png`. A
+watchdog ends the run with a `RESULT` line if the window thread stops
+responding for 30 s, or 30 s after `--quit-after` if the run has not ended by
+then (`--no-watchdog` turns both off, for a debugger session).
 
 ## Flags
 
@@ -74,6 +98,8 @@ there.
                         zanzibar, ...
 --variant <file>        Game variant .bin. A bare name is looked up in
                         halo2\hopper_game_variants (default 01_slayer.bin).
+                        A variant that cannot be loaded stops the launch.
+--no-variant            Start without a game variant (testing only).
 --name <gamertag>       Player name (default Player).
 --xuid <number>         Fixed player id instead of a random one.
 --windowed <W>x<H>      Window size (default 1280x720).
@@ -85,15 +111,22 @@ there.
 --attach-input          Share the window's keyboard input with the game
                         thread (default on).
 --no-attach-input       Do not (to compare).
---host-fonts            Tell the engine the host draws text (logs the font
-                        calls; the fonts are not served yet).
+--host-fonts            Tell the engine the host draws text (setting 6).
+                        Fonts are not served yet, so the font calls still
+                        answer no; they are logged.
 --pad-map <zero|h2>     Gamepad mapping handed to the engine (default zero,
                         which is what HaloX uses).
 --set-option <o>=<t>:<v>   Write a value into the game options before the
                         start, e.g. 0x03=u8:0 (repeatable; for testing).
 --set-profile <o>=<t>:<v>  The same for the player profile.
---diag                  More detail in the log: every host slot's first call
-                        with its arguments, and the input sent each second.
+--no-watchdog           Do not end the run when the window thread stops
+                        responding for 30 s (for a debugger session).
+--diag                  More detail in the log: dumps of the options, the
+                        variant copy's effect, new calling threads, every
+                        event-manager slot's first call, the input sent each
+                        second, and two read-only engine values about
+                        keyboard polling (the poller's branch flag and its
+                        key gate array; read, never written).
 --help                  Full help.
 --version               The build the exe was made from.
 ```
@@ -122,8 +155,9 @@ base state1                 # time 0 = when the engine reports the map loaded
 18    quit
 ```
 
-`base` chooses time 0: `state1` (map loaded, the default here), `input` (the
-engine's first input poll) or `launch` (program start).
+`base` chooses time 0: `input` (the engine's first input poll; the default
+when there is no `base` line), `state1` (map loaded, as in this example) or
+`launch` (program start).
 
 ## Building on Linux (for CI or a cross-build)
 
@@ -140,8 +174,10 @@ The background, the exact tables and the open questions are in
 `brief.md` in this folder and the research behind it. The launch order, the
 engine and data-access vtable slots, the host slots that need real behaviour,
 the game-options layout and the profile recipe come from that research
-(HaloX's tested behaviour and a matching decompilation of the same
-`halo2.dll` build). Values that are estimates are marked as such in the code:
+(HaloX's tested behaviour, libmcc's headers, and a static read of the owner's
+own `halo2.dll` 1.3528 that confirmed HaloX's offsets for that build; the
+Xbox decompilation the project uses elsewhere is of a different build).
+Values that are estimates are marked as such in the code:
 the stick look sensitivity and mouse scale in the profile, the Halo 2 default
 gamepad mapping behind `--pad-map h2`, and whether keyboard and mouse work
 without the engine detours HaloX uses (the launcher tries `AttachThreadInput`

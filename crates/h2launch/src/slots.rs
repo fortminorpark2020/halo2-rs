@@ -270,26 +270,61 @@ pub fn summary_lines(
         .collect()
 }
 
+/// Whether the run reached a match.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InGame {
+    /// The engine reported the map loaded (`set_game_state(1)`).
+    Yes,
+    /// No state 1, but the engine drew many frames and polled input, which
+    /// it may also do on a loading screen.
+    Maybe,
+    #[default]
+    No,
+}
+
+impl InGame {
+    /// From what the host saw: state 1 is the only firm signal.
+    pub fn judge(states: &[i32], frames: u64, input_polls: u64) -> InGame {
+        if states.contains(&1) {
+            InGame::Yes
+        } else if frames >= 300 && input_polls > 0 {
+            InGame::Maybe
+        } else {
+            InGame::No
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            InGame::Yes => "yes",
+            InGame::Maybe => "maybe(frames+input, no map-loaded state)",
+            InGame::No => "no",
+        }
+    }
+}
+
 /// How the run ended.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Outcome {
-    pub in_game: bool,
+    pub in_game: InGame,
     pub frames: u64,
     pub crashed: Option<u32>,
     pub presents: Option<u32>,
     pub states: Vec<i32>,
     pub game_thread_exited: Option<bool>,
+    /// The launch step reached (`starting` ... `running`, `quitting`).
+    pub step: String,
     pub reason: String,
 }
 
 impl Outcome {
     /// The last line of the log:
-    /// `RESULT: in-game=<yes/no> frames=<n> crashed=<code or none>`, then
-    /// more fields.
+    /// `RESULT: in-game=<yes/maybe/no> frames=<n> crashed=<code or none>`,
+    /// then more fields.
     pub fn line(&self) -> String {
         let mut s = format!(
             "RESULT: in-game={} frames={} crashed={}",
-            if self.in_game { "yes" } else { "no" },
+            self.in_game.word(),
             self.frames,
             match self.crashed {
                 Some(c) => format!("{c:#010x}"),
@@ -302,25 +337,26 @@ impl Outcome {
         let states: Vec<String> = self.states.iter().map(|v| v.to_string()).collect();
         let _ = write!(
             s,
-            " states=[{}] game-thread-exited={} reason={:?}",
+            " states=[{}] game-thread-exited={} step={:?} reason={:?}",
             states.join(","),
             match self.game_thread_exited {
                 Some(true) => "yes",
                 Some(false) => "no",
                 None => "n/a",
             },
+            self.step,
             self.reason
         );
         s
     }
 
-    /// 0 when the launch reached a running game and nothing crashed;
-    /// 2 after a crash; 1 otherwise.
+    /// 0 when the engine reported the map loaded and nothing crashed;
+    /// 2 after a crash; 1 otherwise (including "maybe").
     pub fn exit_code(&self) -> i32 {
         match (self.crashed, self.in_game) {
             (Some(_), _) => 2,
-            (None, true) => 0,
-            (None, false) => 1,
+            (None, InGame::Yes) => 0,
+            (None, _) => 1,
         }
     }
 }
@@ -385,17 +421,18 @@ mod tests {
     #[test]
     fn result_line() {
         let o = Outcome {
-            in_game: true,
+            in_game: InGame::Yes,
             frames: 7200,
             crashed: None,
             presents: Some(7199),
             states: vec![1, 5],
             game_thread_exited: Some(true),
+            step: "quitting".into(),
             reason: "quit-after".into(),
         };
         assert_eq!(
             o.line(),
-            "RESULT: in-game=yes frames=7200 crashed=none presents=7199 states=[1,5] game-thread-exited=yes reason=\"quit-after\""
+            "RESULT: in-game=yes frames=7200 crashed=none presents=7199 states=[1,5] game-thread-exited=yes step=\"quitting\" reason=\"quit-after\""
         );
         assert_eq!(o.exit_code(), 0);
         let c = Outcome {
@@ -407,5 +444,21 @@ mod tests {
             .starts_with("RESULT: in-game=no frames=0 crashed=0xc0000005"));
         assert_eq!(c.exit_code(), 2);
         assert_eq!(Outcome::default().exit_code(), 1);
+        let m = Outcome {
+            in_game: InGame::Maybe,
+            frames: 900,
+            ..Default::default()
+        };
+        assert!(m.line().starts_with("RESULT: in-game=maybe("));
+        assert_eq!(m.exit_code(), 1);
+    }
+
+    #[test]
+    fn in_game_needs_state_1() {
+        assert_eq!(InGame::judge(&[0, 1], 0, 0), InGame::Yes);
+        // A long loading screen that polls input is not a match.
+        assert_eq!(InGame::judge(&[], 5000, 40), InGame::Maybe);
+        assert_eq!(InGame::judge(&[0], 299, 40), InGame::No);
+        assert_eq!(InGame::judge(&[], 5000, 0), InGame::No);
     }
 }

@@ -17,6 +17,9 @@ Usage: h2launch [flags]
                           map list: lockout, midship, zanzibar, ...
   --variant <file>        Game variant .bin. A bare name is looked up in
                           halo2\\hopper_game_variants (default 01_slayer.bin).
+  --no-variant            Start without a game variant (testing only; by
+                          default a variant that cannot be loaded stops the
+                          launch).
   --name <gamertag>       Player name (default Player).
   --xuid <number>         Fixed player id instead of a random one.
   --windowed <W>x<H>      Window size (default 1280x720).
@@ -28,19 +31,25 @@ Usage: h2launch [flags]
   --attach-input          Share the window's keyboard input with the game
                           thread (default on).
   --no-attach-input       Do not.
-  --host-fonts            Tell the engine the host draws text (logs the font
-                          calls; the fonts are not served yet).
+  --host-fonts            Tell the engine the host draws text (setting 6).
+                          Fonts are not served yet, so the font calls still
+                          answer no; they are logged.
   --pad-map <zero|h2>     Gamepad mapping handed to the engine (default zero).
   --set-option <o>=<t>:<v>   Write a value into the game options before the
                           start, e.g. 0x03=u8:0 (repeatable; for testing).
   --set-profile <o>=<t>:<v>  The same for the player profile.
-  --diag                  More detail in the log: the first calls of every
-                          host slot with their arguments, and the input sent
-                          to the engine each second.
+  --no-watchdog           Do not end the run when the window thread stops
+                          responding for 30 s (for a debugger session).
+  --diag                  More detail in the log: dumps of the options, the
+                          variant copy's effect, new calling threads, every
+                          event-manager slot's first call, the input sent to
+                          the engine each second, and two read-only engine
+                          values about keyboard polling.
   --help                  This text.
   --version               The build.
 
-The log is %LOCALAPPDATA%\\h2launch\\h2launch.log.";
+The log is %LOCALAPPDATA%\\h2launch\\h2launch.log
+(PowerShell: $env:LOCALAPPDATA\\h2launch\\h2launch.log).";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Args {
@@ -50,6 +59,7 @@ pub struct Args {
     pub mcc: Option<String>,
     pub map: Option<String>,
     pub variant: Option<String>,
+    pub no_variant: bool,
     pub name: String,
     pub xuid: Option<u64>,
     pub width: u32,
@@ -64,6 +74,7 @@ pub struct Args {
     pub set_option: Vec<RawWrite>,
     pub set_profile: Vec<RawWrite>,
     pub diag: bool,
+    pub watchdog: bool,
 }
 
 impl Default for Args {
@@ -75,6 +86,7 @@ impl Default for Args {
             mcc: None,
             map: None,
             variant: None,
+            no_variant: false,
             name: "Player".into(),
             xuid: None,
             width: 1280,
@@ -89,6 +101,7 @@ impl Default for Args {
             set_option: Vec::new(),
             set_profile: Vec::new(),
             diag: false,
+            watchdog: true,
         }
     }
 }
@@ -154,6 +167,8 @@ where
             "--no-attach-input" => switch(&mut a, |a| a.attach_input = false)?,
             "--host-fonts" => switch(&mut a, |a| a.host_fonts = true)?,
             "--diag" => switch(&mut a, |a| a.diag = true)?,
+            "--no-variant" => switch(&mut a, |a| a.no_variant = true)?,
+            "--no-watchdog" => switch(&mut a, |a| a.watchdog = false)?,
             "--mcc" => a.mcc = Some(value()?),
             "--map" => {
                 let v = value()?;
@@ -216,6 +231,27 @@ where
     Ok(a)
 }
 
+/// Makes the paths the user gave absolute against the current folder,
+/// because the launcher changes its working folder to the MCC folder
+/// before it reads them: `--variant` when it names a path (a bare name is
+/// looked up in the hopper folder) and `--input-script`. (`--mcc` is made
+/// absolute where the MCC folder is chosen.)
+pub fn absolutize_paths(a: &mut Args) {
+    let abs = |p: &str| -> String {
+        std::path::absolute(p)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| p.to_string())
+    };
+    if let Some(v) = a.variant.as_deref() {
+        if v.contains(['\\', '/']) {
+            a.variant = Some(abs(v));
+        }
+    }
+    if let Some(sc) = a.input_script.as_deref() {
+        a.input_script = Some(abs(sc));
+    }
+}
+
 /// The variant file to load: a bare name goes in the hopper variant
 /// folder, `.bin` is added when missing, a path is used as given.
 pub fn variant_path(mcc_root: &str, variant: Option<&str>) -> String {
@@ -243,6 +279,7 @@ mod tests {
         assert_eq!(a, Args::default());
         assert_eq!(a.name, "Player");
         assert!(a.attach_input);
+        assert!(a.watchdog);
         assert_eq!((a.width, a.height), (1280, 720));
         assert_eq!(a.pad_map, PadMap::Zero);
     }
@@ -277,9 +314,12 @@ mod tests {
             "0x03=u8:0",
             "--set-profile=0x1B5=u8:5",
             "--diag",
+            "--no-variant",
+            "--no-watchdog",
         ])
         .unwrap();
-        assert!(a.check && a.groundhog && a.host_fonts && a.diag);
+        assert!(!a.watchdog);
+        assert!(a.check && a.groundhog && a.host_fonts && a.diag && a.no_variant);
         assert!(!a.attach_input);
         assert_eq!(a.mcc.as_deref(), Some(r"D:\MCC"));
         assert_eq!(a.map.as_deref(), Some("midship"));
@@ -335,5 +375,20 @@ mod tests {
         );
         assert_eq!(variant_path(root, Some(r"D:\v\x.bin")), r"D:\v\x.bin");
         assert_eq!(variant_path(root, Some(r"v/x")), r"v/x.bin");
+    }
+
+    #[test]
+    fn relative_paths_become_absolute() {
+        let mut a = parse(["--variant", "v/x.bin", "--input-script", "walk.txt"]).unwrap();
+        absolutize_paths(&mut a);
+        let cwd = std::env::current_dir().unwrap();
+        let v = a.variant.unwrap();
+        assert!(std::path::Path::new(&v).is_absolute(), "{v}");
+        assert!(v.starts_with(&*cwd.to_string_lossy()), "{v}");
+        assert!(std::path::Path::new(a.input_script.as_deref().unwrap()).is_absolute());
+        // A bare variant name stays a name (it is looked up in the hopper folder).
+        let mut b = parse(["--variant", "02_team_slayer"]).unwrap();
+        absolutize_paths(&mut b);
+        assert_eq!(b.variant.as_deref(), Some("02_team_slayer"));
     }
 }

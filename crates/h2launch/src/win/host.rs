@@ -5,12 +5,18 @@
 //! (launch-sequence.verify C2) and, for every other slot, a distinct
 //! logging stub that returns 0. Slots 38 and 69 return an f32 (0.0) so
 //! XMM0 is set. Every function uses `extern "system"` with an explicit
-//! `this` first argument, and catches panics so none crosses into the
-//! engine.
+//! `this` first argument, and the real ones catch panics so none crosses
+//! into the engine.
+//!
+//! Fonts are never served in milestone 1, so the font slots answer "no":
+//! the probes 59, 60 and 68 say yes only with `--host-fonts` (setting 6),
+//! and 61, 62, 64 and 67 always say no (host-interface.verify C25,
+//! launch-sequence.verify C2). They log the font-name argument, which may
+//! be a string, null or a small id (host-interface.verify A5/E11).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
@@ -84,13 +90,82 @@ pub fn input_threads() -> Vec<u32> {
 }
 
 fn panic_guard<T: Default>(slot: usize, f: impl FnOnce() -> T + std::panic::UnwindSafe) -> T {
-    std::panic::catch_unwind(f).unwrap_or_else(|_| {
+    super::guarded(f).unwrap_or_else(|| {
         log!(
-            "host slot {slot} {} panicked (ignored)",
+            "host slot {slot} {} panicked (returned the default)",
             host_slot_name(slot)
         );
         T::default()
     })
+}
+
+fn host_fonts() -> bool {
+    super::setup().is_some_and(|s| s.args.host_fonts)
+}
+
+/// Logs each of the first few distinct values a slot is asked about that
+/// we have no answer for (an XUID that is not ours, a player that is not
+/// local, a font name...).
+struct Oddities {
+    seen: Mutex<Vec<(usize, u64)>>,
+    limit: usize,
+}
+
+impl Oddities {
+    const fn new(limit: usize) -> Oddities {
+        Oddities {
+            seen: Mutex::new(Vec::new()),
+            limit,
+        }
+    }
+
+    /// True the first time (slot, value) is seen, while under the limit.
+    fn fresh(&self, slot: usize, value: u64) -> bool {
+        let Ok(mut seen) = self.seen.try_lock() else {
+            return false;
+        };
+        if seen.len() >= self.limit || seen.contains(&(slot, value)) {
+            return false;
+        }
+        seen.push((slot, value));
+        true
+    }
+}
+
+static ODD_XUIDS: Oddities = Oddities::new(8);
+static ODD_QUERIES: Oddities = Oddities::new(8);
+static FONT_NAMES: Oddities = Oddities::new(16);
+
+fn note_other_xuid(slot: usize, xuid: u64) {
+    if ODD_XUIDS.fresh(slot, xuid) {
+        let ours = super::setup().map_or(0, |s| s.xuid);
+        log!(
+            "host slot {slot} {} was asked for XUID {xuid:#018x}, not ours ({ours:#018x}); returned null",
+            host_slot_name(slot)
+        );
+    }
+}
+
+/// A font name argument: a C string, null, or a small id.
+fn note_font_name(slot: usize, v: usize) {
+    if !FONT_NAMES.fresh(slot, v as u64) {
+        return;
+    }
+    let what = if v == 0 {
+        "null".to_string()
+    } else if v < 0x10000 {
+        format!("id {v}")
+    } else if super::crash::readable(v, 1) {
+        let mut line = super::log::StackLine::new();
+        super::crash::c_string(v, &mut line);
+        format!("{:?} at {v:#x}", line.text())
+    } else {
+        format!("{v:#x} (unreadable)")
+    };
+    log!(
+        "host slot {slot} {} font name: {what}",
+        host_slot_name(slot)
+    );
 }
 
 // ---------------------------------------------------------------- the object
@@ -227,10 +302,15 @@ fn vtable() -> [*const c_void; HOST_SLOTS] {
     v[49] = get_scenario_path_w as *const c_void;
     v[51] = get_game_setting as *const c_void;
     v[52] = validate_cache_file as *const c_void;
-    v[59] = return_true::<59> as *const c_void;
-    v[60] = return_true::<60> as *const c_void;
-    v[61] = return_true::<61> as *const c_void;
-    v[68] = return_true::<68> as *const c_void;
+    v[59] = font_probe::<59> as *const c_void;
+    v[60] = font_probe::<60> as *const c_void;
+    v[61] = font_test_string as *const c_void;
+    v[62] = font_precache_character as *const c_void;
+    v[63] = font_get_texture as *const c_void;
+    v[64] = font_test_char as *const c_void;
+    v[65] = font_get_kerning_pair_offset as *const c_void;
+    v[67] = font_set_selection as *const c_void;
+    v[68] = font_probe::<68> as *const c_void;
     v[69] = stub_f32::<69> as *const c_void;
     v[88] = get_player_xuid as *const c_void;
     v[97] = chud_blend_color as *const c_void;
@@ -248,13 +328,51 @@ unsafe extern "system" fn begin_frame(_this: *mut c_void) -> usize {
 unsafe extern "system" fn end_frame(
     _this: *mut c_void,
     swapchain: *mut c_void,
-    _flags: *mut u32,
+    flags: *mut u32,
 ) -> usize {
-    record(1, swapchain as usize, 0, 0, 0);
+    record(1, swapchain as usize, flags as usize, 0, 0);
     super::FRAMES.fetch_add(1, Ordering::Relaxed);
-    // Leave *flags untouched (it is an output the engine reads).
-    panic_guard(1, move || gfx::on_end_frame(swapchain));
+    // Leave *flags untouched (libmcc marks it an output), but log what the
+    // engine left there (launch-sequence.verify C15/V12).
+    panic_guard(1, move || {
+        note_end_frame_flags(flags);
+        gfx::on_end_frame(swapchain)
+    });
     0
+}
+
+const FLAGS_NONE: u64 = u64::MAX;
+static FLAGS_PTR: AtomicUsize = AtomicUsize::new(0);
+static FLAGS_PTR_READABLE: AtomicBool = AtomicBool::new(false);
+static FLAGS_VALUE: AtomicU64 = AtomicU64::new(FLAGS_NONE);
+static FLAGS_LOGS: AtomicU32 = AtomicU32::new(0);
+
+/// Logs end_frame's `*flags` on the first call and whenever it changes
+/// (the first 20 changes).
+fn note_end_frame_flags(flags: *mut u32) {
+    let p = flags as usize;
+    if FLAGS_PTR.swap(p, Ordering::Relaxed) != p {
+        FLAGS_PTR_READABLE.store(super::crash::readable(p, 4), Ordering::Relaxed);
+    }
+    let v = if p == 0 || !FLAGS_PTR_READABLE.load(Ordering::Relaxed) {
+        FLAGS_NONE - 1 - (p == 0) as u64
+    } else {
+        // SAFETY: checked readable for this pointer; a read only.
+        unsafe { std::ptr::read_volatile(flags) as u64 }
+    };
+    if FLAGS_VALUE.swap(v, Ordering::Relaxed) != v
+        && FLAGS_LOGS.fetch_add(1, Ordering::Relaxed) < 20
+    {
+        let shown = match v {
+            x if x == FLAGS_NONE - 2 => "(null pointer)".to_string(),
+            x if x == FLAGS_NONE - 1 => "(unreadable)".to_string(),
+            x => format!("{x:#x}"),
+        };
+        log!(
+            "end_frame flags at {flags:p} = {shown} (frame {})",
+            super::FRAMES.load(Ordering::Relaxed)
+        );
+    }
 }
 
 unsafe extern "system" fn resize(_this: *mut c_void) -> usize {
@@ -275,23 +393,25 @@ unsafe extern "system" fn resize(_this: *mut c_void) -> usize {
 
 unsafe extern "system" fn set_game_state(_this: *mut c_void, state: i32) -> usize {
     record(3, state as usize, 0, 0, 0);
-    log!(
-        "set_game_state({state}){}",
-        match state {
-            0 => " (initial)",
-            1 => " (map loaded)",
-            5 => " (exit/restart)",
-            8 => " (enter leaderboard)",
-            9 => " (leave leaderboard)",
-            _ => "",
+    panic_guard(3, move || {
+        log!(
+            "set_game_state({state}){}",
+            match state {
+                0 => " (initial)",
+                1 => " (map loaded)",
+                5 => " (exit/restart)",
+                8 => " (enter leaderboard)",
+                9 => " (leave leaderboard)",
+                _ => "",
+            }
+        );
+        if let Ok(mut s) = super::STATES.lock() {
+            s.push(state);
         }
-    );
-    if let Ok(mut s) = super::STATES.lock() {
-        s.push(state);
-    }
-    if state == 1 {
-        super::mark(&super::STATE1_AT);
-    }
+        if state == 1 {
+            super::mark(&super::STATE1_AT);
+        }
+    });
     0
 }
 
@@ -301,13 +421,15 @@ unsafe extern "system" fn restart_game(
     message: *const u8,
 ) -> usize {
     record(4, reason as usize, message as usize, 0, 0);
-    let mut msg = String::new();
-    if !message.is_null() && super::crash::readable(message as usize, 1) {
-        let mut line = super::log::StackLine::new();
-        super::crash::c_string(message as usize, &mut line);
-        msg = line.text();
-    }
-    log!("restart_game(reason={reason}, message={msg:?})");
+    panic_guard(4, move || {
+        let mut msg = String::new();
+        if !message.is_null() && super::crash::readable(message as usize, 1) {
+            let mut line = super::log::StackLine::new();
+            super::crash::c_string(message as usize, &mut line);
+            msg = line.text();
+        }
+        log!("restart_game(reason={reason}, message={msg:?})");
+    });
     // Hand off to the window thread and return at once (C19).
     // SAFETY: posts to our window; non-blocking.
     unsafe {
@@ -349,19 +471,58 @@ unsafe extern "system" fn set_player_look_control(
 unsafe extern "system" fn set_player_profile_game_specific(
     _this: *mut c_void,
     player: i32,
-    _blob: *const u8,
+    blob: *const u8,
 ) -> usize {
-    record(15, player as usize, 0, 0, 0);
+    record(15, player as usize, blob as usize, 0, 0);
+    // The engine's own 0x100-byte per-game settings block (HaloX keeps it
+    // in the profile at 0x310). Logged once to see what Halo 2 puts there.
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    let p = blob as usize;
+    if !LOGGED.swap(true, Ordering::Relaxed)
+        && super::crash::readable(p, profile::GAME_SPECIFIC_SIZE)
+    {
+        panic_guard(15, move || {
+            // SAFETY: checked readable for the whole block; a read only.
+            let b =
+                unsafe { std::slice::from_raw_parts(p as *const u8, profile::GAME_SPECIFIC_SIZE) };
+            log!(
+                "set_player_profile_game_specific(player {player}), the engine's settings block:\n{}",
+                crate::util::hexdump(b, 0)
+            );
+        });
+    }
     0
 }
+
+static LOAD_PHASE: AtomicI32 = AtomicI32::new(i32::MIN);
+static LOAD_PROGRESS: AtomicU32 = AtomicU32::new(0);
+static LOAD_LOGS: AtomicU32 = AtomicU32::new(0);
 
 unsafe extern "system" fn update_launch_timer(
     _this: *mut c_void,
     phase: i32,
-    _progress: f32,
+    progress: f32,
 ) -> usize {
     record(23, phase as usize, 0, 0, 0);
+    LOAD_PROGRESS.store(progress.to_bits(), Ordering::Relaxed);
+    if LOAD_PHASE.swap(phase, Ordering::Relaxed) != phase
+        && LOAD_LOGS.fetch_add(1, Ordering::Relaxed) < 30
+    {
+        log!("update_launch_timer: phase {phase}, progress {progress:.3}");
+    }
     0
+}
+
+/// The last loading phase and progress the engine reported, for the
+/// summaries (a load that stalls shows where).
+pub fn load_line() -> String {
+    match LOAD_PHASE.load(Ordering::Relaxed) {
+        i32::MIN => "load=none".into(),
+        phase => format!(
+            "load={phase}/{:.3}",
+            f32::from_bits(LOAD_PROGRESS.load(Ordering::Relaxed))
+        ),
+    }
 }
 
 unsafe extern "system" fn get_video_setting(_this: *mut c_void, out: *mut u8) -> usize {
@@ -384,17 +545,32 @@ unsafe extern "system" fn get_audio_setting(_this: *mut c_void, out: *mut u8) ->
 
 unsafe extern "system" fn get_player_profile(_this: *mut c_void, xuid: u64) -> *const u8 {
     record(34, xuid as usize, 0, 0, 0);
-    match super::setup() {
-        Some(s) if xuid == s.xuid => profile_buffer().as_ptr(),
-        _ => std::ptr::null(),
-    }
+    panic_guard(34, move || match super::setup() {
+        Some(s) if xuid == s.xuid => profile_buffer().as_ptr() as usize,
+        _ => {
+            note_other_xuid(34, xuid);
+            0
+        }
+    }) as *const u8
 }
 
 /// The profile bytes, built once and kept for the run.
 fn profile_buffer() -> &'static [u8] {
     static BUF: OnceLock<Vec<u8>> = OnceLock::new();
     BUF.get_or_init(|| {
-        let mut p = profile::build_profile(&profile::ProfileSettings::default());
+        let ps = profile::ProfileSettings::default();
+        log!(
+            "player profile ({:#x} bytes): stick look sensitivity {} (an estimate), mouse sensitivity {}, zoom/vehicle look multipliers {}/{}, volumes {}, FOV 0 (game default), look inverted {}, vibration {}",
+            profile::PROFILE_SIZE,
+            ps.look_sensitivity,
+            ps.mouse_sensitivity,
+            ps.zoom_look_multiplier,
+            ps.vehicle_look_multiplier,
+            ps.volume,
+            ps.look_inverted,
+            ps.vibration
+        );
+        let mut p = profile::build_profile(&ps);
         if let Some(s) = super::setup() {
             for w in &s.args.set_profile {
                 match w.apply(&mut p) {
@@ -459,11 +635,13 @@ unsafe extern "system" fn get_folder_path(
     len: usize,
 ) -> usize {
     record(46, kind as usize, buf as usize, len, 0);
-    let path = super::setup().and_then(|s| paths::game_folder_halo2(&s.engine_dir, kind));
-    match path {
-        Some(p) => write_wide_path(buf, len, &p) as usize,
-        None => 0,
-    }
+    panic_guard(46, move || {
+        let path = super::setup().and_then(|s| paths::game_folder_halo2(&s.engine_dir, kind));
+        match path {
+            Some(p) => write_wide_path(buf, len, &p) as usize,
+            None => 0,
+        }
+    })
 }
 
 unsafe extern "system" fn get_game_folder_path(
@@ -473,10 +651,62 @@ unsafe extern "system" fn get_game_folder_path(
     len: usize,
 ) -> usize {
     record(47, kind as usize, buf as usize, len, 0);
-    let path = super::setup().and_then(|s| paths::game_folder(&s.engine_dir, kind));
-    match path {
-        Some(p) => write_wide_path(buf, len, &p) as usize,
-        None => 0,
+    panic_guard(47, move || {
+        let path = super::setup().and_then(|s| paths::game_folder(&s.engine_dir, kind));
+        match path {
+            Some(p) => write_wide_path(buf, len, &p) as usize,
+            None => 0,
+        }
+    })
+}
+
+/// A path in the ANSI code page, which is what the engine's `char*` file
+/// calls use; None (logged) when the path has characters that code page
+/// cannot hold.
+fn ansi_path(path: &str) -> Option<Vec<u8>> {
+    if path.is_ascii() {
+        return Some(path.as_bytes().to_vec());
+    }
+    use windows::Win32::Globalization::{WideCharToMultiByte, CP_ACP, WC_NO_BEST_FIT_CHARS};
+    let wide: Vec<u16> = path.encode_utf16().collect();
+    let mut used_default = windows::core::BOOL(0);
+    // SAFETY: a size query, then a conversion into our buffer.
+    let out = unsafe {
+        let n = WideCharToMultiByte(
+            CP_ACP,
+            WC_NO_BEST_FIT_CHARS,
+            &wide,
+            None,
+            windows::core::PCSTR::null(),
+            None,
+        );
+        if n <= 0 {
+            None
+        } else {
+            let mut buf = vec![0u8; n as usize];
+            let m = WideCharToMultiByte(
+                CP_ACP,
+                WC_NO_BEST_FIT_CHARS,
+                &wide,
+                Some(&mut buf),
+                windows::core::PCSTR::null(),
+                Some(&mut used_default),
+            );
+            (m > 0).then(|| {
+                buf.truncate(m as usize);
+                buf
+            })
+        }
+    };
+    match out {
+        Some(b) if !used_default.as_bool() => Some(b),
+        _ => {
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                log!("the MCC folder {path:?} has characters the ANSI code page cannot hold; get_scenario_path_a fails (move MCC to a plain-ASCII folder)");
+            }
+            None
+        }
     }
 }
 
@@ -490,40 +720,41 @@ unsafe extern "system" fn get_scenario_path_a(
     if buf.is_null() || len == 0 {
         return 0;
     }
-    // SAFETY: the engine put a NUL-terminated relative path in `buf`.
-    let rel: Vec<u8> = unsafe {
-        let mut v = Vec::new();
-        for i in 0..len {
-            let b = *buf.add(i);
-            if b == 0 {
-                break;
+    panic_guard(48, move || {
+        // SAFETY: the engine put a NUL-terminated relative path in `buf`.
+        let rel: Vec<u8> = unsafe {
+            let mut v = Vec::new();
+            for i in 0..len {
+                let b = *buf.add(i);
+                if b == 0 {
+                    break;
+                }
+                v.push(b);
             }
-            v.push(b);
-        }
-        v
-    };
-    log!(
-        "get_scenario_path_a(builtin={builtin}, {:?})",
-        String::from_utf8_lossy(&rel)
-    );
-    let Some(root) = super::setup().map(|s| format!("{}\\", s.root)) else {
-        return 0;
-    };
-    let out = paths::prefix_root(root.as_bytes(), &rel, len);
-    match out {
-        Some(o) => {
-            // SAFETY: prefix_root kept it under `len`; add the terminator.
-            unsafe {
-                std::ptr::copy_nonoverlapping(o.as_ptr(), buf, o.len());
-                *buf.add(o.len()) = 0;
+            v
+        };
+        log!(
+            "get_scenario_path_a(builtin={builtin}, {:?})",
+            String::from_utf8_lossy(&rel)
+        );
+        let Some(root) = super::setup().and_then(|s| ansi_path(&format!("{}\\", s.root))) else {
+            return 0;
+        };
+        match paths::prefix_root(&root, &rel, len) {
+            Some(o) => {
+                // SAFETY: prefix_root kept it under `len`; add the terminator.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(o.as_ptr(), buf, o.len());
+                    *buf.add(o.len()) = 0;
+                }
+                1
             }
-            1
+            None => {
+                log!("get_scenario_path_a: path did not fit in {len} bytes");
+                0
+            }
         }
-        None => {
-            log!("get_scenario_path_a: path did not fit in {len} bytes");
-            0
-        }
-    }
+    })
 }
 
 unsafe extern "system" fn get_scenario_path_w(
@@ -536,40 +767,42 @@ unsafe extern "system" fn get_scenario_path_w(
     if buf.is_null() || len == 0 {
         return 0;
     }
-    // SAFETY: the engine put a NUL-terminated relative path in `buf`.
-    let rel: Vec<u16> = unsafe {
-        let mut v = Vec::new();
-        for i in 0..len {
-            let c = *buf.add(i);
-            if c == 0 {
-                break;
+    panic_guard(49, move || {
+        // SAFETY: the engine put a NUL-terminated relative path in `buf`.
+        let rel: Vec<u16> = unsafe {
+            let mut v = Vec::new();
+            for i in 0..len {
+                let c = *buf.add(i);
+                if c == 0 {
+                    break;
+                }
+                v.push(c);
             }
-            v.push(c);
-        }
-        v
-    };
-    log!(
-        "get_scenario_path_w(builtin={builtin}, {:?})",
-        String::from_utf16_lossy(&rel)
-    );
-    let Some(root) = super::setup().map(|s| format!("{}\\", s.root)) else {
-        return 0;
-    };
-    let root: Vec<u16> = root.encode_utf16().collect();
-    match paths::prefix_root(&root, &rel, len) {
-        Some(o) => {
-            // SAFETY: fits in `len`; add the terminator.
-            unsafe {
-                std::ptr::copy_nonoverlapping(o.as_ptr(), buf, o.len());
-                *buf.add(o.len()) = 0;
+            v
+        };
+        log!(
+            "get_scenario_path_w(builtin={builtin}, {:?})",
+            String::from_utf16_lossy(&rel)
+        );
+        let Some(root) = super::setup().map(|s| format!("{}\\", s.root)) else {
+            return 0;
+        };
+        let root: Vec<u16> = root.encode_utf16().collect();
+        match paths::prefix_root(&root, &rel, len) {
+            Some(o) => {
+                // SAFETY: fits in `len`; add the terminator.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(o.as_ptr(), buf, o.len());
+                    *buf.add(o.len()) = 0;
+                }
+                1
             }
-            1
+            None => {
+                log!("get_scenario_path_w: path did not fit in {len} units");
+                0
+            }
         }
-        None => {
-            log!("get_scenario_path_w: path did not fit in {len} units");
-            0
-        }
-    }
+    })
 }
 
 unsafe extern "system" fn get_game_setting(
@@ -579,18 +812,24 @@ unsafe extern "system" fn get_game_setting(
     _v2: *mut u64,
 ) -> usize {
     record(51, setting as usize, v1 as usize, 0, 0);
-    // 5 enable_subtitle, 6 new_font_package.
+    // 5 enable_subtitle, 6 new_font_package. As HaloX: answer only those
+    // two (write *v1, return true); for any other setting return false and
+    // leave *v1 alone, in case the engine put its default there.
     let value = match setting {
         5 => true,
-        6 => super::setup().is_some_and(|s| s.args.host_fonts),
-        _ => false,
+        6 => host_fonts(),
+        _ => {
+            if ODD_QUERIES.fresh(51, setting as u64) {
+                log!("get_game_setting({setting}): not a setting we know; returned false");
+            }
+            return 0;
+        }
     };
     if !v1.is_null() {
         // SAFETY: a bool output.
         unsafe { *v1 = value as u8 };
     }
-    // Known settings return true (we answered them), others false.
-    matches!(setting, 5 | 6) as usize
+    1
 }
 
 unsafe extern "system" fn validate_cache_file(_this: *mut c_void, which: i32) -> usize {
@@ -598,14 +837,86 @@ unsafe extern "system" fn validate_cache_file(_this: *mut c_void, which: i32) ->
     1
 }
 
-unsafe extern "system" fn return_true<const N: usize>(
+/// Slots 59, 60 and 68: "font system ready" probes. Yes only when setting
+/// 6 (`new_font_package`) says the host draws text.
+unsafe extern "system" fn font_probe<const N: usize>(_this: *mut c_void) -> usize {
+    record(N, 0, 0, 0, 0);
+    host_fonts() as usize
+}
+
+/// Slot 61: can this string be drawn? Always no: no fonts are served.
+/// The scale is in XMM3 and the font name is the fifth argument.
+unsafe extern "system" fn font_test_string(
     _this: *mut c_void,
-    a1: usize,
-    a2: usize,
-    a3: usize,
+    text: *const u16,
+    size: i32,
+    _scale: f32,
+    font_name: usize,
 ) -> usize {
-    record(N, a1, a2, a3, 0);
-    1
+    record(61, text as usize, size as usize, 0, font_name);
+    note_font_name(61, font_name);
+    0
+}
+
+/// Slot 62: rasterise a glyph. Never done here.
+unsafe extern "system" fn font_precache_character(
+    _this: *mut c_void,
+    ch: u16,
+    out: *mut u8,
+    size: i32,
+    _scale: f32,
+    font_name: usize,
+) -> usize {
+    record(62, ch as usize, out as usize, size as usize, font_name);
+    note_font_name(62, font_name);
+    0
+}
+
+/// Slot 63: the atlas texture for a glyph from slot 62; there is none.
+unsafe extern "system" fn font_get_texture(_this: *mut c_void, texture: i32) -> *mut c_void {
+    record(63, texture as usize, 0, 0, 0);
+    std::ptr::null_mut()
+}
+
+/// Slot 64: can this glyph be drawn? No.
+unsafe extern "system" fn font_test_char(
+    _this: *mut c_void,
+    ch: u16,
+    size: i32,
+    _scale: f32,
+    font_name: usize,
+) -> usize {
+    record(64, ch as usize, size as usize, 0, font_name);
+    note_font_name(64, font_name);
+    0
+}
+
+/// Slot 65: kerning between two glyphs: 0.
+unsafe extern "system" fn font_get_kerning_pair_offset(
+    _this: *mut c_void,
+    left: u16,
+    right: u16,
+    size: i32,
+    _scale: f32,
+    font_name: usize,
+) -> i32 {
+    record(65, left as usize, right as usize, size as usize, font_name);
+    note_font_name(65, font_name);
+    0
+}
+
+/// Slot 67: select a font and report its metrics. No (metrics untouched).
+unsafe extern "system" fn font_set_selection(
+    _this: *mut c_void,
+    size: i32,
+    _scale: f32,
+    font_name: usize,
+    _ascender: *mut u16,
+    _descender: *mut u16,
+) -> usize {
+    record(67, size as usize, 0, font_name, 0);
+    note_font_name(67, font_name);
+    0
 }
 
 unsafe extern "system" fn get_player_xuid(
@@ -622,25 +933,30 @@ unsafe extern "system" fn get_player_xuid(
         size_bytes as usize,
         player as usize,
     );
-    let Some(s) = super::setup() else { return 0 };
-    if player != 0 {
-        return 0;
-    }
-    if !out_xuid.is_null() {
-        // SAFETY: an XUID output.
-        unsafe { *out_xuid = s.xuid };
-    }
-    if !name.is_null() && size_bytes > 0 {
-        let cap = (size_bytes as usize / 2).max(1);
-        let n = s.name.len().min(cap - 1);
-        // SAFETY: the engine gave `size_bytes` bytes; we write at most
-        // cap-1 characters and a terminator.
-        unsafe {
-            std::ptr::copy_nonoverlapping(s.name.as_ptr(), name, n);
-            *name.add(n) = 0;
+    panic_guard(88, move || {
+        let Some(s) = super::setup() else { return 0 };
+        if player != 0 {
+            if ODD_QUERIES.fresh(88, player as u64) {
+                log!("get_player_xuid(player {player}): not a local player; returned false");
+            }
+            return 0;
         }
-    }
-    1
+        if !out_xuid.is_null() {
+            // SAFETY: an XUID output.
+            unsafe { *out_xuid = s.xuid };
+        }
+        if !name.is_null() && size_bytes > 0 {
+            let cap = (size_bytes as usize / 2).max(1);
+            let n = s.name.len().min(cap - 1);
+            // SAFETY: the engine gave `size_bytes` bytes; we write at most
+            // cap-1 characters and a terminator.
+            unsafe {
+                std::ptr::copy_nonoverlapping(s.name.as_ptr(), name, n);
+                *name.add(n) = 0;
+            }
+        }
+        1
+    })
 }
 
 unsafe extern "system" fn chud_blend_color(_this: *mut c_void, player: i32, rgba: u32) -> u32 {
@@ -650,10 +966,13 @@ unsafe extern "system" fn chud_blend_color(_this: *mut c_void, player: i32, rgba
 
 unsafe extern "system" fn get_player_gamepad_mapping(_this: *mut c_void, xuid: u64) -> *const u8 {
     record(116, xuid as usize, 0, 0, 0);
-    match super::setup() {
-        Some(s) if xuid == s.xuid => mapping_buffer(s.args.pad_map).as_ptr(),
-        _ => std::ptr::null(),
-    }
+    panic_guard(116, move || match super::setup() {
+        Some(s) if xuid == s.xuid => mapping_buffer(s.args.pad_map).as_ptr() as usize,
+        _ => {
+            note_other_xuid(116, xuid);
+            0
+        }
+    }) as *const u8
 }
 
 fn mapping_buffer(kind: PadMap) -> &'static [u8] {

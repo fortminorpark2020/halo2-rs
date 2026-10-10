@@ -236,16 +236,31 @@ pub fn update_cursor_clip(playing: bool) {
 
 /// The XInput slot player 0 uses, -1 = none yet.
 static PAD: AtomicI32 = AtomicI32::new(-1);
-static PAD_SCAN_AT: Mutex<f64> = Mutex::new(-10.0);
+/// Per XInput slot: when (seconds, f64 bits) an empty slot may be asked
+/// again. Asking about an empty slot is slow, and the engine polls every
+/// local player every tick, so an empty slot is asked at most once a
+/// second; a connected one every time.
+static RETRY_AT: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
 fn read_pad(index: u32) -> Option<XINPUT_GAMEPAD> {
+    let slot = RETRY_AT.get(index as usize)?;
+    let t = super::now();
+    if t < f64::from_bits(slot.load(Ordering::Relaxed)) {
+        return None;
+    }
     let mut st = XINPUT_STATE::default();
     // SAFETY: fills our struct.
-    (unsafe { XInputGetState(index, &mut st) } == 0).then_some(st.Gamepad)
+    let ok = unsafe { XInputGetState(index, &mut st) } == 0;
+    if ok {
+        slot.store(0, Ordering::Relaxed);
+        Some(st.Gamepad)
+    } else {
+        slot.store((t + 1.0).to_bits(), Ordering::Relaxed);
+        None
+    }
 }
 
-/// Player 0's pad: the first connected one, looked for at most once a
-/// second (asking about empty slots is slow).
+/// Player 0's pad: the first connected one.
 fn player0_pad() -> Option<XINPUT_GAMEPAD> {
     let i = PAD.load(Ordering::SeqCst);
     if i >= 0 {
@@ -258,16 +273,6 @@ fn player0_pad() -> Option<XINPUT_GAMEPAD> {
         {
             log!("pad {i} disconnected");
         }
-    }
-    let t = super::now();
-    {
-        let Ok(mut at) = PAD_SCAN_AT.try_lock() else {
-            return None;
-        };
-        if t - *at < 1.0 {
-            return None;
-        }
-        *at = t;
     }
     for i in 0..4 {
         if let Some(g) = read_pad(i) {
@@ -465,21 +470,26 @@ pub fn stop_rumble() {
 
 /// Retries `AttachThreadInput(engine thread, window thread, TRUE)` until
 /// it works, for the game thread `initialize_game` returned and for the
-/// engine threads seen polling input; gives up after 60 s.
+/// engine threads seen polling input. The input threads only show up once
+/// the map has loaded, so it keeps trying until 60 s after the first input
+/// poll (or 10 minutes, if input never comes).
 #[derive(Default)]
 pub struct Attach {
     done: Vec<u32>,
     failed: Vec<u32>,
     next: f64,
+    started: Option<f64>,
     gave_up: bool,
 }
 
 impl Attach {
-    pub fn try_attach(&mut self, game: HANDLE, running_for: f64) {
-        if self.gave_up || running_for < self.next {
+    /// `t`: seconds since start.
+    pub fn try_attach(&mut self, game: HANDLE, t: f64) {
+        if self.gave_up || t < self.next {
             return;
         }
-        self.next = running_for + 0.25;
+        self.next = t + 0.25;
+        let started = *self.started.get_or_insert(t);
         let window = super::WINDOW_TID.load(Ordering::SeqCst);
         // SAFETY: a query on the engine's thread handle.
         let mut threads = vec![unsafe { GetThreadId(game) }];
@@ -505,7 +515,12 @@ impl Attach {
                 waiting.push(t);
             }
         }
-        if running_for > 60.0 {
+        let first_input = super::marked(&super::FIRST_INPUT_AT);
+        let over = match first_input {
+            Some(at) => t - at > 60.0,
+            None => t - started > 600.0,
+        };
+        if over {
             self.gave_up = true;
             if waiting.is_empty() {
                 log!(

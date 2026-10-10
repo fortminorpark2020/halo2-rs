@@ -49,7 +49,7 @@ pub fn run(args: &Args) -> i32 {
     let dll_path = mccroot::join(&halo2_dir, "halo2.dll");
     let mut problems = 0;
     match std::fs::read(&dll_path) {
-        Ok(bytes) => problems += report_dll(&bytes),
+        Ok(bytes) => problems += report_dll(&bytes, &root),
         Err(e) => {
             println!("\nhalo2.dll could not be read: {e}");
             return 1;
@@ -101,8 +101,8 @@ pub fn run(args: &Args) -> i32 {
 
     // The DirectX helper DLL the engine delay-loads and that is not part
     // of Windows.
-    check_system_dll("d3dx11_43.dll");
-    check_system_dll("XAudio2_9.dll");
+    check_system_dll("d3dx11_43.dll", &root);
+    check_system_dll("XAudio2_9.dll", &root);
 
     println!("\nDisplay adapters:");
     list_adapters();
@@ -119,7 +119,7 @@ pub fn run(args: &Args) -> i32 {
 }
 
 /// Returns the number of problems found.
-fn report_dll(bytes: &[u8]) -> u32 {
+fn report_dll(bytes: &[u8], root: &str) -> u32 {
     let mut problems = 0;
     println!("\nhalo2.dll:");
     println!("  size: {} bytes", bytes.len());
@@ -200,22 +200,58 @@ fn report_dll(bytes: &[u8]) -> u32 {
     }
     match pe.delay_imports() {
         Ok(d) => {
-            println!("  delay-load imports ({}):", d.len());
+            println!(
+                "  delay-load imports ({}), and where a launch would find them:",
+                d.len()
+            );
             for name in &d {
-                let present = dll_resolves(name);
-                println!(
-                    "    {name}{}",
-                    if present {
-                        ""
-                    } else {
-                        "  (not found in the search path)"
+                let found = find_dll(name, root);
+                let note = match (&found, name.to_ascii_lowercase().as_str()) {
+                    (Some(at), _) => at.clone(),
+                    (None, "aticompressdll.dll") => {
+                        "not found (known to be absent from the owner's install; it only matters if the engine ever calls into it)".into()
                     }
-                );
+                    (None, _) => "NOT FOUND in the launch's DLL folders, System32 or the search path".into(),
+                };
+                println!("    {name}: {note}");
             }
         }
         Err(e) => println!("  delay-load imports: {e}"),
     }
     problems
+}
+
+/// Where a launch would find a DLL: the folders it registers with
+/// AddDllDirectory (the MCC folder, `halo2`, `MCC\Binaries\Win64`), then
+/// System32, then the ordinary search order. `--check` never registers
+/// those folders itself, so a plain LoadLibrary would miss mss64.dll and
+/// bink2w64.dll.
+fn find_dll(name: &str, root: &str) -> Option<String> {
+    let mut dirs: Vec<String> = ["", "halo2", r"MCC\Binaries\Win64"]
+        .iter()
+        .map(|sub| {
+            if sub.is_empty() {
+                root.to_string()
+            } else {
+                mccroot::join(root, sub)
+            }
+        })
+        .collect();
+    let mut sys = [0u16; 260];
+    // SAFETY: fills our buffer.
+    let n =
+        unsafe { windows::Win32::System::SystemInformation::GetSystemDirectoryW(Some(&mut sys)) }
+            as usize;
+    if n > 0 && n < sys.len() {
+        dirs.push(String::from_utf16_lossy(&sys[..n]));
+    }
+    for d in dirs {
+        let p = mccroot::join(&d, name);
+        if std::path::Path::new(&p).is_file() {
+            return Some(p);
+        }
+    }
+    dll_resolves(name).then(|| "found on the search path".to_string())
 }
 
 /// Whether a bare DLL name resolves on the current search path, without
@@ -241,13 +277,12 @@ fn dll_resolves(name: &str) -> bool {
     }
 }
 
-fn check_system_dll(name: &str) {
+fn check_system_dll(name: &str, root: &str) {
     println!(
         "\n{name}: {}",
-        if dll_resolves(name) {
-            "found on the search path"
-        } else {
-            "NOT found (the engine delay-loads it; install the DirectX June 2010 runtime if a launch fails)"
+        match find_dll(name, root) {
+            Some(at) => at,
+            None => "NOT found (the engine delay-loads it; install the DirectX June 2010 runtime if a launch fails)".into(),
         }
     );
 }

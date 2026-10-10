@@ -142,11 +142,73 @@ pub fn find_root(cli: Option<&str>) -> (Option<String>, Vec<(Candidate, bool)>) 
     for c in cands {
         let ok = has_halo2(&c.path);
         if ok && chosen.is_none() {
-            chosen = Some(c.path.clone());
+            chosen = Some(absolute(&c.path));
         }
         listed.push((c, ok));
     }
     (chosen, listed)
+}
+
+/// An absolute form of a folder the user may have given relatively (`--mcc
+/// .`): AddDllDirectory refuses relative paths, and the working folder
+/// changes to the MCC folder before the DLL is loaded.
+fn absolute(p: &str) -> String {
+    match std::path::absolute(p) {
+        Ok(a) => mccroot::normalize_root(&a.to_string_lossy()),
+        Err(_) => p.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------- the build
+
+/// Logs which halo2.dll build is about to load (version, timestamp, size,
+/// SHA-256) and warns when it is not the one the research was checked on:
+/// every slot number and offset would then be suspect.
+pub fn log_build(root: &str) {
+    let path = mccroot::join(root, r"halo2\halo2.dll");
+    match std::fs::read(&path) {
+        Ok(bytes) => match crate::pe::BuildFacts::read(&bytes) {
+            Ok(f) => {
+                log!("halo2.dll: {}", f.describe());
+                let off = f.mismatches();
+                if off.is_empty() {
+                    log!("halo2.dll is the researched build (1.3528.0.0)");
+                    super::BUILD_MATCHES.store(true, Ordering::SeqCst);
+                } else {
+                    log!(
+                        "WARNING: halo2.dll differs from the researched build 1.3528.0.0 in {}; MCC may have updated, and the slot numbers and layouts may no longer hold",
+                        off.join(", ")
+                    );
+                }
+            }
+            Err(e) => log!("halo2.dll could not be parsed: {e}"),
+        },
+        Err(e) => log!("{path} could not be read: {e}"),
+    }
+}
+
+/// Logs where an object's vtable points (read-only: the object's first
+/// field), which should be a fixed place in halo2.dll for this build.
+pub fn log_vtable(label: &str, obj: *mut c_void, expected_rva: u32) {
+    let at = obj as usize;
+    if !super::crash::readable(at, 8) {
+        log!("{label} object {obj:p}: not readable");
+        return;
+    }
+    // SAFETY: checked readable; the first field of the object.
+    let vptr = unsafe { *(at as *const usize) };
+    let mut where_ = super::log::StackLine::new();
+    super::crash::where_is(vptr, &mut where_);
+    let base = super::HALO2_BASE.load(Ordering::SeqCst);
+    let verdict = if base != 0 && vptr == base + expected_rva as usize {
+        "as expected".to_string()
+    } else {
+        format!("expected halo2.dll+{expected_rva:#x}")
+    };
+    log!(
+        "{label} object {obj:p}: vtable {} ({verdict})",
+        where_.text()
+    );
 }
 
 // ---------------------------------------------------------------- DLL search
@@ -320,22 +382,27 @@ pub fn post_message(msg: u32, label: &str) {
 
 /// Builds the game options for an offline Lockout Slayer match: load the
 /// variant through data access and copy it in first, then write the base
-/// fields, the map and the single local player (game-options C1).
-pub fn build_options(data_access: *mut c_void, s: &Setup) -> Result<*mut GameOptions, String> {
+/// fields, the map and the single local player (game-options C1). Returns
+/// the buffer pointer `initialize_game` gets (never the `GameOptions`
+/// header). A variant that cannot be loaded stops the launch, as HaloX
+/// never starts a multiplayer game without one, unless `--no-variant`.
+pub fn build_options(data_access: *mut c_void, s: &Setup) -> Result<*mut u8, String> {
     let launch = Launch::offline(s.map.id, s.xuid);
     let mut opts = Box::new(GameOptions::new());
     opts.apply_base(&launch);
 
     let variant_path = crate::cli::variant_path(&s.root, s.args.variant.as_deref());
-    match std::fs::read(&variant_path) {
-        Ok(bytes) => {
-            log!("variant {variant_path}: {} bytes", bytes.len());
-            match load_variant(data_access, &bytes, opts.as_mut()) {
-                Ok(name) => log!("variant loaded: {name:?}"),
-                Err(e) => log!("variant could not be applied ({e}); using a bare Slayer setup"),
-            }
-        }
-        Err(e) => log!("variant {variant_path} not read ({e}); using a bare Slayer setup"),
+    if s.args.no_variant {
+        log!("--no-variant: no game variant loaded; its part of the options stays zero (engine type 0, which is not Slayer)");
+    } else {
+        let bytes = std::fs::read(&variant_path).map_err(|e| {
+            format!("variant {variant_path} could not be read ({e}); pass --variant <file>, or --no-variant to try without one")
+        })?;
+        log!("variant {variant_path}: {} bytes", bytes.len());
+        let name = load_variant(data_access, &bytes, opts.as_mut()).map_err(|e| {
+            format!("variant {variant_path} could not be applied ({e}); pass --no-variant to try without one")
+        })?;
+        log!("variant loaded: {name:?}");
     }
 
     // These win over whatever the variant wrote.
@@ -369,7 +436,13 @@ pub fn build_options(data_access: *mut c_void, s: &Setup) -> Result<*mut GameOpt
             crate::util::format_ranges(&nz)
         );
     }
-    Ok(Box::into_raw(opts))
+    let header = opts.as_ref() as *const GameOptions;
+    let buffer = opts.leak_for_engine();
+    log!(
+        "options buffer at {buffer:p} ({:#x} bytes; the GameOptions header was at {header:p}); initialize_game gets the buffer",
+        options::SIZE
+    );
+    Ok(buffer)
 }
 
 // Data-access and variant vtable slots (research 5).
@@ -487,6 +560,7 @@ fn run_launch(w: &Worker) -> Result<(), String> {
     super::set_step(6);
     let engine = create_game_engine(&w.module)?;
     ENGINE.store(engine as usize, Ordering::SeqCst);
+    log_vtable("engine", engine, crate::expected::ENGINE_VTABLE_RVA);
 
     let (device, context, swap) = super::gfx::raw().ok_or("no Direct3D device")?;
 
@@ -508,6 +582,7 @@ fn run_launch(w: &Worker) -> Result<(), String> {
     preload_level(engine, -1)?;
 
     super::set_step(11);
+    log_options_handed_over(w.options as *const u8, s);
     let thread = init_game(engine, w.host as *mut c_void, w.options as *mut c_void)?;
     super::GAME_THREAD.store(thread as usize, Ordering::SeqCst);
     // SAFETY: a valid thread handle.
@@ -521,6 +596,32 @@ fn run_launch(w: &Worker) -> Result<(), String> {
     );
     super::wake();
     Ok(())
+}
+
+/// What `initialize_game` is about to read, read back through the very
+/// pointer it gets (our own memory): the map ids, mode, counts and our
+/// XUID, and the first 0x20 bytes.
+fn log_options_handed_over(p: *const u8, s: &Setup) {
+    // SAFETY: p is the leaked options buffer of options::SIZE bytes.
+    let b = unsafe { std::slice::from_raw_parts(p, options::SIZE) };
+    let i32_at = |at: usize| i32::from_le_bytes(b[at..at + 4].try_into().unwrap_or([0; 4]));
+    let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
+    let xuid = u64_at(options::off::PLAYERS + options::player::XUID);
+    log!(
+        "initialize_game will read options at {p:p}: map {} / {}, mode {}, flags {:#06x}, players {}, peers {}, player 0 XUID {xuid:#018x}{}, host address {}",
+        i32_at(options::off::LEGACY_MAP_ID),
+        i32_at(options::off::MAP_ID),
+        i32_at(options::off::GAME_MODE),
+        u16::from_le_bytes([b[0], b[1]]),
+        i32_at(options::off::PLAYER_COUNT),
+        i32_at(options::off::PEER_COUNT),
+        if xuid == s.xuid { " (ours)" } else { " (NOT ours)" },
+        u64_at(options::off::HOST_ADDRESS)
+    );
+    log!(
+        "options as handed over, 0x00-0x20:\n{}",
+        crate::util::hexdump(&b[..0x20], 0)
+    );
 }
 
 fn init_graphics(

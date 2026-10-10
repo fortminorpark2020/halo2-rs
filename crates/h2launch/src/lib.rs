@@ -56,4 +56,9 @@ pub mod expected {
     pub const DATA_ACCESS_VTABLE_RVA: u32 = 0xBE_2038;
     /// The value both Create exports return in this build.
     pub const CREATE_RETURN: u64 = 0x46;
+    /// Data read (never written) under `--diag` to see how the engine
+    /// polls the keyboard (launch-sequence.verify V24, host-interface.verify
+    /// C15/E8): the poller's branch flag and its 256-byte key gate array.
+    pub const DIAG_KEY_POLLER_FLAG_RVA: u32 = 0x1E8_CE68;
+    pub const DIAG_KEY_GATE_RVA: u32 = 0x15E_A194;
 }

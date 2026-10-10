@@ -1,9 +1,14 @@
 //! Crash reports. A vectored handler logs fatal exceptions as they are
-//! raised (the engine may still handle some of them), with the module and
-//! offset of the faulting address, the registers and a short stack. The
+//! raised ("first chance": the engine may still handle some of them, for
+//! example a delay-load failure it expects), with the module and offset of
+//! the faulting address, the registers and a short stack. The
 //! unhandled-exception filter logs the crash, writes the RESULT line and
 //! ends the process. Rust cannot catch SEH exceptions raised inside engine
 //! code, so this is the whole plan for milestone 1.
+//!
+//! A stack overflow leaves only a page or so of stack, so for it both
+//! handlers write one fixed line with no module lookup, and the filter
+//! leaves the summary and RESULT line to the watchdog thread.
 
 use std::ffi::c_void;
 use std::fmt::Write as _;
@@ -67,6 +72,25 @@ pub fn install() {
         log!("AddVectoredExceptionHandler failed");
     }
     set_filter("at start");
+}
+
+/// Puts our filter back if something replaced it (the engine has a crash
+/// reporter of its own), logging only when it had been replaced. Called
+/// from every 10-second summary.
+pub fn refresh_filter() {
+    // SAFETY: installs a plain function.
+    let prev = unsafe { SetUnhandledExceptionFilter(Some(unhandled)) };
+    let ours: usize = unhandled as unsafe extern "system" fn(_) -> _ as usize;
+    if let Some(f) = prev {
+        if f as usize != ours {
+            let mut s = StackLine::new();
+            where_is(f as usize, &mut s);
+            log!(
+                "unhandled-exception filter had been replaced by {}; ours is back",
+                s.text()
+            );
+        }
+    }
 }
 
 /// (Re)installs our unhandled-exception filter, logging the one it
@@ -181,9 +205,13 @@ unsafe extern "system" fn vectored(info: *mut EXCEPTION_POINTERS) -> i32 {
     if fatal_name(code).is_none() {
         return CONTINUE_SEARCH;
     }
+    if code == STACK_OVERFLOW {
+        overflow_line(b"raised", ctx.Rip);
+        return CONTINUE_SEARCH;
+    }
     let n = REPORTS.fetch_add(1, Ordering::SeqCst);
     if n < MAX_REPORTS {
-        report("raised", rec, ctx);
+        report("raised (first chance; the engine may handle it)", rec, ctx);
     } else if n == MAX_REPORTS {
         let mut s = StackLine::start();
         let _ = write!(s, "more exceptions follow; no longer reporting them");
@@ -196,9 +224,49 @@ unsafe extern "system" fn unhandled(info: *const EXCEPTION_POINTERS) -> i32 {
     // SAFETY: the system passes valid records.
     let (rec, ctx) = unsafe { (&*(*info).ExceptionRecord, &*(*info).ContextRecord) };
     let code = rec.ExceptionCode.0 as u32;
-    report("UNHANDLED", rec, ctx);
     super::CRASHED.store(code.max(1), Ordering::SeqCst);
+    if code == STACK_OVERFLOW {
+        overflow_line(b"UNHANDLED", ctx.Rip);
+        // Too little stack left here for the summary: the watchdog thread
+        // writes it and ends the process. If it never does, let Windows
+        // end the process after 20 s.
+        super::DEFERRED_CRASH.store(code, Ordering::SeqCst);
+        for _ in 0..200 {
+            // SAFETY: a plain sleep.
+            unsafe { windows::Win32::System::Threading::Sleep(100) };
+        }
+        return 1; // EXCEPTION_EXECUTE_HANDLER: the process ends.
+    }
+    report("UNHANDLED", rec, ctx);
     super::finish("unhandled exception")
+}
+
+/// One fixed line for a stack overflow: no formatting machinery, no module
+/// lookup, a 128-byte buffer.
+fn overflow_line(kind: &[u8], rip: u64) {
+    let mut buf = [0u8; 128];
+    let mut n = 0;
+    let mut hex = [0u8; 16];
+    for (i, h) in hex.iter_mut().enumerate() {
+        let d = ((rip >> ((15 - i) * 4)) & 0xF) as u8;
+        *h = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+    }
+    let parts: [&[u8]; 5] = [
+        b"[stack overflow] exception ",
+        kind,
+        b": 0xc00000fd stack overflow at rip 0x",
+        &hex,
+        b" (no module lookup)\n",
+    ];
+    for part in parts {
+        for &c in part {
+            if n < buf.len() {
+                buf[n] = c;
+                n += 1;
+            }
+        }
+    }
+    super::log::raw(&buf[..n]);
 }
 
 fn report(kind: &str, rec: &EXCEPTION_RECORD, ctx: &CONTEXT) {
@@ -277,25 +345,55 @@ fn report(kind: &str, rec: &EXCEPTION_RECORD, ctx: &CONTEXT) {
     );
     s.emit();
     if code != STACK_OVERFLOW {
+        stack_top(ctx, &mut s);
         stack(ctx, &mut s);
     }
     BUSY.store(false, Ordering::SeqCst);
+}
+
+/// The first 8 qwords at rsp, as module+offset where they point into a
+/// module: the caller's return address is usually among them, even when
+/// the unwinder cannot start (a call through a null pointer).
+fn stack_top(ctx: &CONTEXT, s: &mut StackLine) {
+    let _ = write!(s, "  [rsp]:");
+    for i in 0..8u64 {
+        let at = ctx.Rsp + 8 * i;
+        if !readable(at as usize, 8) {
+            let _ = write!(s, " <unreadable>");
+            break;
+        }
+        // SAFETY: checked readable.
+        let v = unsafe { *(at as *const u64) };
+        let _ = write!(s, " ");
+        if v >= 0x10000 {
+            where_is(v as usize, s);
+        } else {
+            let _ = write!(s, "{v:#x}");
+        }
+    }
+    s.emit();
 }
 
 /// Up to 12 frames, unwound with the modules' own unwind tables.
 fn stack(ctx: &CONTEXT, s: &mut StackLine) {
     let mut c: CONTEXT = *ctx;
     let _ = write!(s, "  stack:");
-    for _ in 0..12 {
+    for frame in 0..12 {
         let pc = c.Rip;
-        if pc == 0 {
+        if pc == 0 && frame > 0 {
             break;
         }
         let _ = write!(s, " ");
         where_is(pc as usize, s);
         let mut base = 0u64;
-        // SAFETY: looks up unwind data for an address; null when none.
-        let f = unsafe { RtlLookupFunctionEntry(pc, &mut base, None) };
+        // SAFETY: looks up unwind data for an address; null when none (and
+        // always for 0, a call through a null pointer, where the return
+        // address is still at the top of the stack).
+        let f = if pc == 0 {
+            std::ptr::null_mut()
+        } else {
+            unsafe { RtlLookupFunctionEntry(pc, &mut base, None) }
+        };
         if f.is_null() {
             // A leaf function: the return address is at the top of the stack.
             if !readable(c.Rsp as usize, 8) {

@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-09 23:30 UTC. Any assistant that works on the project
+Last updated 2026-10-10 03:00 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -100,7 +100,14 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   is touched and no game code is patched. The brief and a crate README are in
   `docs/notes/launcher/`. Estimates (stick/mouse sensitivity, the Halo 2
   gamepad mapping, whether KB/M works without the engine detours) are marked in
-  the code and are what the PC run confirms.
+  the code and are what the PC run confirms. A three-lens review then found a
+  blocker (initialize_game was given the address of the options struct, not
+  the 0x2BF30-byte buffer) and a list of first-run gaps; all are fixed on the
+  same branch (font slots answer no unless fonts are served, a missing variant
+  stops the launch, a watchdog and panic hook guarantee a `RESULT:` line, the
+  RESULT line says `in-game=yes` only after `set_game_state(1)` and names the
+  step reached, the loaded build and vtables are logged, and `--diag` reads
+  two keyboard-poller values read-only).
 - Next: run it on the owner's PC (`--check`, then `--quit-after`/`--screenshot`)
   and fix what fails; then h2live made client-agnostic (its own protocol
   version, MCC game variants as playlists, a fast relay for engine traffic).

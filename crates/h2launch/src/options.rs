@@ -200,9 +200,19 @@ impl GameOptions {
         unsafe { std::slice::from_raw_parts_mut(self.words.as_mut_ptr().cast(), SIZE) }
     }
 
-    /// The pointer the engine and the variant object get.
+    /// The start of the 0x2BF30-byte buffer: what the variant object's
+    /// copy and the engine's `initialize_game` read and write. (The
+    /// `GameOptions` value itself is only the Vec's 24-byte header.)
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self.words.as_mut_ptr().cast()
+    }
+
+    /// Hands the buffer over for the rest of the run and returns the
+    /// pointer `initialize_game` gets: the buffer itself, never the address
+    /// of this struct. The memory is never freed (the engine may keep
+    /// reading it; the process ends with TerminateProcess).
+    pub fn leak_for_engine(self: Box<Self>) -> *mut u8 {
+        Box::leak(self).as_mut_ptr()
     }
 
     pub fn put(&mut self, at: usize, bytes: &[u8]) {
@@ -552,5 +562,21 @@ mod tests {
             .apply(&mut buf)
             .unwrap();
         assert_eq!(buf, vec![0, 0, 2, 1]);
+    }
+
+    #[test]
+    fn the_engine_gets_the_buffer_not_the_struct() {
+        let mut o = Box::new(GameOptions::new());
+        o.apply_base(&Launch::offline(44, 7));
+        let data = o.bytes().as_ptr();
+        let header = o.as_ref() as *const GameOptions as *const u8;
+        let p = o.leak_for_engine();
+        assert_eq!(p as *const u8, data);
+        assert_ne!(p as *const u8, header);
+        // SAFETY: p is the leaked buffer of SIZE bytes.
+        let b = unsafe { std::slice::from_raw_parts(p, SIZE) };
+        assert_eq!(b[off::GAME_TICK], 60);
+        assert_eq!(b[off::GAME_MODE], mode::MULTIPLAYER as u8);
+        assert_eq!(p as usize % 8, 0);
     }
 }
