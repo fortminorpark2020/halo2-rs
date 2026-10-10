@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 03:00 UTC. Any assistant that works on the project
+Last updated 2026-10-10 05:45 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -86,31 +86,37 @@ go/no-go; if it fails they are the fallback, and their state is exact:
 
 ## In progress
 
-- Launcher research and spec (2026-10-09): how to host halo2.dll 1.3528 (the
-  host interface, launch steps, launch options, networking, results and UI),
-  from HaloX, libmcc, Blam Creation Suite (Opus), Cartographer and the Xbox
-  decompilation. Notes will be in `docs/notes/launcher/`.
-- `crates/h2launch` milestone 1 (branch `h2launch-m1`, 2026-10-10): the
-  launcher is written and the full gate and both Windows cross-builds pass on
-  Linux, but it has not run on the owner's PC yet. It finds the MCC folder,
-  opens a window and a D3D11 device, loads `halo2.dll` through its exports,
-  builds the Lockout Slayer options (loading the variant through data access),
-  serves the 256-slot host object and 151-slot event manager, feeds pad and
-  keyboard/mouse input, and logs everything plus a `RESULT:` line. No MCC file
-  is touched and no game code is patched. The brief and a crate README are in
-  `docs/notes/launcher/`. Estimates (stick/mouse sensitivity, the Halo 2
-  gamepad mapping, whether KB/M works without the engine detours) are marked in
-  the code and are what the PC run confirms. A three-lens review then found a
-  blocker (initialize_game was given the address of the options struct, not
-  the 0x2BF30-byte buffer) and a list of first-run gaps; all are fixed on the
-  same branch (font slots answer no unless fonts are served, a missing variant
-  stops the launch, a watchdog and panic hook guarantee a `RESULT:` line, the
-  RESULT line says `in-game=yes` only after `set_game_state(1)` and names the
-  step reached, the loaded build and vtables are logged, and `--diag` reads
-  two keyboard-poller values read-only).
-- Next: run it on the owner's PC (`--check`, then `--quit-after`/`--screenshot`)
-  and fix what fails; then h2live made client-agnostic (its own protocol
-  version, MCC game variants as playlists, a fast relay for engine traffic).
+- Milestone 1 is done (2026-10-10 02:50 UTC): `h2launch` started MCC's
+  halo2.dll on the owner's PC and played offline Slayer on Lockout (HUD,
+  60 fps, mouse and controller). Code is on `h2launch-m1`, then
+  `h2launch-m2`, in draft PR #2 (it also carries `relay`: the UDP relay
+  h2live runs on UDP 47050 for the engine's packets).
+- Milestone 2 (two launchers in one match through the relay) is being
+  tested on the owner's PC by a Remote Control session in `C:\h2work\launch`.
+  What is known (static reads of halo2.dll 1.3528 there, in our own words;
+  details in `docs/notes/launcher/`): the engine sends only through host
+  slot 41 and receives through slot 43; port 1000 carries game links, 1002
+  out-of-band traffic, and first contact must come on 1002. Options flag
+  0x08 makes the launch job host a session; with it clear the engine
+  searches instead and sends an 18-byte search to its own id on 1002 once
+  a second. As of b602c19 the session file gives 0x08 (and 0x40, meaning
+  unknown) to the host only, and the launcher forwards those self-addressed
+  1002 sends to every launcher in the match. With that (PC runs 05:20 UTC)
+  the host answers the search (broadcast-reply) and the guest sends a
+  join-request, but the host refuses it (join-refuse), the guest's session
+  never leaves state 0 and it restarts. Next: find which check refuses
+  (likely the guest's join-request claiming the host's machine identity,
+  or the host's observer failing to open a channel to the guest).
+- Design rule kept so far: no patches, hooks, byte writes or calls by RVA
+  into halo2.dll; read-only diagnostics (`--diag`, `--watch`) only. If the
+  only way forward needs more, ask the owner first.
+- h2live launcher support (milestone 3) is on `live-launcher` (3a330e1,
+  WIP, unreviewed): `LIVE_PROTOCOL` 1 with a versioned LOGIN, launcher
+  playlists, a relay room per match, LAUNCHER_MATCH, JOINED and
+  LAUNCHER_RESULT. It may change once the engine's join flow is known.
+- The owner's PC clone has 3 unpushed controller commits (5301293 on
+  `controller-wip`); from there, `git push origin
+  5301293:refs/heads/pc-controller-review-fixes` saves them.
 
 ## Where things are
 
