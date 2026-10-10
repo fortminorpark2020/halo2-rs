@@ -101,6 +101,7 @@ pub fn run(args: &Args) -> i32 {
     if std::env::var_os("H2LOBBY_HEADLESS").is_some() {
         return headless(app, text, &log);
     }
+    hide_own_console(&log);
     match window::run(app, text) {
         Ok(()) => 0,
         Err(e) => {
@@ -109,6 +110,25 @@ pub fn run(args: &Args) -> i32 {
         }
     }
 }
+
+/// Started by a double-click, the launcher has a console window of its own
+/// beside the lobby's: let it go (the log is in `lobby.log`). Started from
+/// a terminal, it shares that one, and keeps it.
+#[cfg(windows)]
+fn hide_own_console(log: &Log) {
+    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut ids = [0u32; 4];
+    // SAFETY: the buffer is ours and its length is passed with it.
+    let sharing = unsafe { GetConsoleProcessList(&mut ids) };
+    if sharing == 1 {
+        log("lobby: closing the console window (the log is in lobby.log)");
+        // SAFETY: no arguments; output after it is dropped by std.
+        let _ = unsafe { FreeConsole() };
+    }
+}
+
+#[cfg(not(windows))]
+fn hide_own_console(_: &Log) {}
 
 /// Which engine matches are played on, and the maps the server is told
 /// this PC has.

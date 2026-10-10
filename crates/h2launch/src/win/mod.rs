@@ -253,7 +253,8 @@ pub fn mcc_root(cli: Option<&str>) -> Option<String> {
 
 /// With `--events`: a line `quit` from the lobby on the standard input
 /// closes the engine as closing its window does (the player left the
-/// game, or the engine stayed up after it).
+/// game, or the engine stayed up after it). So does the input closing:
+/// the lobby is gone, and with it the sign-in the match needs.
 fn listen_for_quit() {
     let spawned = std::thread::Builder::new()
         .name("h2launch-lobby".into())
@@ -265,6 +266,8 @@ fn listen_for_quit() {
                     request_quit(QUIT_USER);
                 }
             }
+            log!("the lobby is gone; closing the engine");
+            request_quit(QUIT_USER);
         });
     if let Err(e) = spawned {
         log!("no thread for the lobby's input ({e})");

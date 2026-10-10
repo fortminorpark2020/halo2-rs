@@ -1,7 +1,8 @@
 //! The engine for one match: a second copy of the launcher, started by the
 //! lobby with the match's session (`--session ... --events`), whose
 //! standard output says what the engine does. A line `quit` on its
-//! standard input closes the engine as closing its window would.
+//! standard input closes the engine as closing its window would, and so
+//! does that input closing (the lobby is gone).
 //! `--fake-engine` stands in for it where there is no MCC (Linux, tests).
 
 use crate::live::{self, Engine};
@@ -96,14 +97,20 @@ impl Running {
         std::fs::write(&file, session.to_text()).map_err(|e| format!("{}: {e}", file.display()))?;
         // For tests: more flags for the engine (`--set-option`, `--pad`).
         let extra = std::env::var("H2LOBBY_ENGINE_ARGS").unwrap_or_default();
-        let mut child = Command::new(exe)
-            .args(m.args(&file))
+        let mut cmd = Command::new(exe);
+        cmd.args(m.args(&file))
             .args(extra.split_whitespace())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("{}: {e}", exe.display()))?;
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            // Its output goes to the lobby: no console window of its own.
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
         let stdin = child.stdin.take();
         let (tx, rx) = mpsc::channel();
         if let Some(out) = child.stdout.take() {
@@ -253,17 +260,18 @@ pub fn run_fake(raw: &[String]) -> i32 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5.0);
     let quit = std::env::var_os("H2LOBBY_FAKE_QUIT").is_some();
-    // The lobby's `quit`: the player left.
+    // The lobby's `quit` (the player left), or the lobby gone.
     let left = Arc::new(AtomicBool::new(false));
     let flag = left.clone();
     std::thread::spawn(move || {
         for line in std::io::stdin().lines() {
             match line {
-                Ok(l) if l.trim() == "quit" => flag.store(true, Ordering::SeqCst),
+                Ok(l) if l.trim() == "quit" => break,
                 Ok(_) => {}
-                Err(_) => return,
+                Err(_) => break,
             }
         }
+        flag.store(true, Ordering::SeqCst);
     });
     // Sleeps `s` seconds, or less if the player leaves; false if they did.
     let wait = |s: f64| {
