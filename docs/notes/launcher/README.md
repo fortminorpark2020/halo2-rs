@@ -227,9 +227,13 @@ the variant, who hosts, the room on the relay beside the server and this
 PC's key for it; the launcher writes the session from that and starts the
 engine as with `--session`. While the engine runs it tells the server when
 the host is up (HOSTING), when a joining PC has loaded the map (JOINED),
-when the game ended (LAUNCHER_RESULT; the results block isn't read yet, so
-the match stays unrated), and that it left (LEFT_MATCH) if it closes before
-the end.
+when the game ended (LAUNCHER_RESULT, with each player's team, standing,
+score and deaths read from the engine's results block; see
+`crates/h2launch/src/results.rs` for what is known of its layout), and that
+it left (LEFT_MATCH) if it closes before the end. Kills aren't found in the
+block yet, so they go as 0. Every launcher logs the block's players as
+`result:` lines; `H2LAUNCH_RESULT_DUMP=<folder>` also keeps a copy of the
+block on the PC, for working out more of it (never commit or upload it).
 
 To try it on one PC, start h2live listening on this PC only, then two
 launchers:

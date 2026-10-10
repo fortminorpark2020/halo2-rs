@@ -11,14 +11,13 @@
 //! (after the server asked it to host), JOINED when a joining PC's engine
 //! has loaded the map (it joined the host's game to get there), and
 //! LAUNCHER_RESULT when the engine ends the game (it hands its results to
-//! host slot 6 on every PC when the round ends), and LEFT_MATCH if the
-//! launcher closes before that. The results block isn't read yet, so the
-//! result says only that the game finished: the server keeps the match
-//! unrated, and nobody who closes after the end counts as having quit.
+//! host slot 6 on every PC when the round ends; `crate::results` reads each
+//! player's team, standing, score and deaths from them), and LEFT_MATCH if
+//! the launcher closes before that.
 
 use crate::session::{Player, Session};
 use h2live::client::{LiveClient, LiveEvent, Profile};
-use h2net::live::{LauncherMatch, LauncherResult, ToServer};
+use h2net::live::{LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer};
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
@@ -339,14 +338,15 @@ fn read_until<T>(
 }
 
 /// What the launcher tells the thread about the engine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Engine {
     /// The engine is running its online game (hosting it, on the host).
     Running,
     /// The engine loaded the map (a joiner joined the host to get there).
     MapLoaded,
-    /// The engine ended the game and handed over its results.
-    Ended,
+    /// The engine ended the game and handed over its results: each
+    /// player's, as the server takes them.
+    Ended(Vec<LauncherPlayerResult>),
     /// The launcher is closing.
     Closing,
 }
@@ -438,15 +438,16 @@ impl Told {
                 self.joined = true;
                 out.push(ToServer::Joined(id));
             }
-            Some(Engine::Ended) if !self.over => {
+            Some(Engine::Ended(players)) if !self.over => {
                 self.over = true;
                 self.reported = true;
-                // Results block not read yet: no scores, no players.
+                // The block's team scores aren't known yet; the server
+                // places teams by their players' standings.
                 out.push(ToServer::LauncherResult(LauncherResult {
                     id,
                     finished: true,
                     team_scores: Vec::new(),
-                    players: Vec::new(),
+                    players,
                 }));
             }
             Some(Engine::Closing) if !self.over => {
@@ -680,17 +681,25 @@ mod tests {
     #[test]
     fn an_ended_game_reports_once_and_closing_after_it_is_no_quit() {
         let mut t = Told::default();
-        let out = t.next(7, true, None, Some(Engine::Ended));
-        assert!(matches!(
-            out.as_slice(),
-            [ToServer::LauncherResult(LauncherResult {
-                id: 7,
-                finished: true,
-                ..
-            })]
-        ));
+        let player = LauncherPlayerResult {
+            relay_id: 0x1111,
+            team: 0,
+            place: 0,
+            score: 3,
+            kills: 0,
+            deaths: 1,
+            left: false,
+        };
+        let out = t.next(7, true, None, Some(Engine::Ended(vec![player])));
+        let [ToServer::LauncherResult(r)] = out.as_slice() else {
+            panic!("{out:?}");
+        };
+        assert_eq!((r.id, r.finished), (7, true));
+        assert_eq!(r.players, [player]);
         assert!(t.reported && !t.verdict);
-        assert!(t.next(7, true, None, Some(Engine::Ended)).is_empty());
+        assert!(t
+            .next(7, true, None, Some(Engine::Ended(Vec::new())))
+            .is_empty());
         assert!(t.next(7, true, None, Some(Engine::Closing)).is_empty());
     }
 }

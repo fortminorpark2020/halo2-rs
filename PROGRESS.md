@@ -110,11 +110,13 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   has launcher playlists 10-17, issues a relay room and key per match and
   sends LAUNCHER_MATCH; `h2launch --live <server>` signs in, searches,
   writes the session from that match, and tells the server HOSTING,
-  JOINED, LAUNCHER_RESULT and LEFT_MATCH. Next: the first run on the
-  owner's PC against a local h2live (`H2LIVE_BIND=127.0.0.1`), then reading
-  the engine's results block (host slot 6, 0x5D138 bytes) so
-  LAUNCHER_RESULT carries players and matches count toward levels (it
-  sends none yet, so matches stay unrated), the MCC hopper variant per
+  JOINED, LAUNCHER_RESULT and LEFT_MATCH. A local h2live on the owner's PC
+  (`H2LIVE_BIND=127.0.0.1`) matched two launchers and they played
+  (2026-10-10 06:00). LAUNCHER_RESULT carries each player's team, standing,
+  score and deaths from the engine's results block (host slot 6, 0x5D138
+  bytes; layout in `crates/h2launch/src/results.rs`). Next: kills,
+  assists and betrayals in that block (needs a game with real kills), the
+  MCC hopper variant per
   playlist (all say `01_slayer` now, which has no time limit; options
   0x354 is the time limit in seconds, 0x350 the score to win), and
   deploying h2live with the relay to the Proxmox server.

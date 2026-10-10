@@ -22,6 +22,7 @@ pub mod options;
 pub mod paths;
 pub mod pe;
 pub mod profile;
+pub mod results;
 pub mod script;
 pub mod session;
 pub mod slots;
