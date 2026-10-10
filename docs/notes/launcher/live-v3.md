@@ -57,7 +57,8 @@ The work goes in three parts:
 ## Message kinds
 
 New and changed kinds, chosen clear of every kind in use (PC to server 1-5,
-10-18, 20-23, 30-36, 40, 42; server to PC 41, 101-116):
+10-18, 20-23, 30-36, 40, 42; server to PC 3, 4, 41, 101-116, where 3 and 4
+are PING and PONG, which go both ways):
 
 | Kind | Name | Way | Body |
 |---|---|---|---|
@@ -73,8 +74,9 @@ New and changed kinds, chosen clear of every kind in use (PC to server 1-5,
 Strings, counts and bools are written as they are now: `str` is
 `Writer::str`, a bool is a 0 or 1 byte (`read_bool`), and a count is a byte
 read with `read_count` against its limit. `live.rs` gets a test that lists
-every constant in `mod kind` and checks that no two PC-to-server kinds, and
-no two server-to-PC kinds, share a number.
+every constant in `mod kind` by direction (PING and PONG in both lists, as
+`ToServer::read` and `ToPc::read` both take them) and checks that no two
+PC-to-server kinds, and no two server-to-PC kinds, share a number.
 
 New limits in `live.rs`:
 
@@ -90,8 +92,10 @@ pub const MAX_FRIEND_ENTRIES: usize = MAX_FRIENDS + MAX_FRIEND_REQUESTS;
 pub const MAX_RECORD_PLAYLISTS: usize = 64;
 ```
 
-A FRIENDS list at its largest is about 20 KB (100 friends with a map and a
-variant name each, and 100 requests), well inside a message.
+A FRIENDS list at its largest is under 32 KB: an entry is at most 220
+bytes with every name at `MAX_NAME` (a `str` is a u16 length and the
+bytes), so 100 friends are 22 KB and 100 requests (no map or variant) about
+9 KB. That is half of `MAX_MESSAGE`.
 
 ## 1. Kills, assists and betrayals
 
@@ -146,9 +150,12 @@ pub fn check_kills(players: &[PlayerResult]) -> String
 
 It returns one of:
 
-- `kills: nothing to check (no one scored, killed themselves or betrayed)`
-  when `score + suicides + betrayals` is 0 for every player (a 0-kill game
-  proves nothing);
+- `kills: nothing to check (no one killed anyone)` when, for every player,
+  the kills read are 0 and `score + suicides` is 0 too. A game with no kills
+  proves nothing: in the games seen so far every death was a suicide, so
+  each score was minus the suicides and that sum was 0. (Testing the sum
+  alone wouldn't do: a wrong offset that read a non-zero number in such a
+  game must still be reported, by the last case.)
 - `kills: every player's kills are their score plus suicides: the offsets hold`
   when, for every player, `kills == score + suicides` or
   `kills == score + suicides + betrayals`;
@@ -156,10 +163,19 @@ It returns one of:
   `kills: player <i> has kills <k> but score <s> + suicides <u> (+ betrayals <b>): the kills offset (+0x24) may be wrong`,
   naming the first player that doesn't fit.
 
+The variants' own suicide and betrayal penalties aren't read, so the check
+accepts either form for betrayals, and the doc comment says that a
+"may be wrong" line where kills equal the score alone points at a variant
+without a suicide penalty (`h2launch --variants` shows it) before it points
+at the offset.
+
 `win/host.rs` `game_result` logs it (as `result: <line>`) after
 `describe`'s lines when the game's variant is a Slayer one. Part B makes
-the variant reachable there (it is on the engine's command line,
-`--variant`; keep it in a `OnceLock` at start if nothing holds it yet) and
+the variant reachable there: `args.variant` is kept in a `OnceLock` in
+`win/mod.rs` after the `--live` branch has put the server's variant in it
+(so the lobby's `--variant` and `--live`'s both reach it). It may be a
+bare name or a path, so `slayer` compares its file stem, ignoring case and
+a `.bin` ending. Part B also
 adds `names::slayer(variant) -> bool`: true for the variants whose game type
 in h2live's `playlists.txt` is `slayer` or `team_slayer` (15 files today),
 from a table in `names.rs`, with a test that reads `playlists.txt` (as the
@@ -218,11 +234,14 @@ PC, so the server counts the game), with plausible non-zero numbers. For
 - `kills = score + suicides` (so the kills check above would pass);
 - `assists = (n - i) / 2`;
 - `deaths[j] = kills[(j + n - 1) % n] + suicides[j]`: each player's kills
-  are the next player's deaths. With one player, deaths are 0.
+  are the next player's deaths. With one player (a custom game the leader
+  plays alone) there is no one to kill: kills, assists and deaths are 0.
 
-So the deaths add up to the kills plus the suicides. A test checks that sum,
-that kills, assists and deaths aren't all zero for two or more players, and
-that the results are the same on every call.
+So the deaths add up to the kills plus the suicides. A test checks that sum
+(for one to four players), that kills, assists and deaths aren't all zero
+for two or more players, and that the results are the same on every call.
+In team games a "kill" may land on a teammate; the stand-in doesn't call it
+a betrayal, as it only needs plausible numbers.
 
 ### 1.5 What the server keeps (part A)
 
@@ -253,7 +272,11 @@ x <id> <playlist key> <xp> <level> <games> <wins> [<kills> <assists> <deaths> <b
 written today has) or 11, and nothing else. `Account::lines` writes the
 short form when the tally is all zeros, so an account v3 hasn't touched is
 written byte for byte as before. Stat cards are `Account::lines` signed, so
-they carry the tally too, and old cards still verify and read.
+they carry the tally too, and old cards still verify and read. A long `x`
+line is about 130 bytes, so a card with every ranked playlist on it stays
+far below `MAX_CARD` (8 KB), which builds of the game already out there
+read WELCOME and MATCH_OVER cards against (an estimate from the line
+format; the store test checks a card with 20 full playlists fits).
 
 **When it adds.** In `Server::end` (server/matches.rs), in the loop that
 adds a game and maybe a win to each rated player: when the match counted
@@ -261,6 +284,11 @@ for everyone (`Counted::Yes`), each rated player's tally from the host's
 result is added to their stats in that playlist. A host's loss for quitting
 (`Counted::HostLoss`) adds a game but no tally. Unranked games keep
 nothing, as now.
+
+The tallies are the host's word, as its places are. `agrees` compares only
+teams and places, and that stays: the tallies never move a level, so a
+joining PC whose counts differ (a kill the host saw land and it didn't)
+doesn't dispute the game.
 
 Where the host's tallies come from:
 
@@ -366,9 +394,12 @@ limit.
 
 ### 2.2 The server (part A, `server/social.rs`)
 
-- A RECORD is answered only for launcher PCs. Each PC gets at most 20
+- A RECORD is answered only for launcher PCs (from the game it is an
+  unexpected message, and the PC is dropped). Each account gets at most 20
   answers in any 10 seconds (`RECORDS_PER_10S`); more are ignored without
-  a reply (the lobby caches, so a player never gets there).
+  a reply (the lobby caches, so a player never gets there). The times are
+  kept per account on the `Server`, not on the `Pc`, so signing in again
+  doesn't start the count afresh (see 3.3).
 - An account the server doesn't have gets `found: None`. Nothing else is
   said about it.
 - The playlists listed are the asker's program's ranked playlists that the
@@ -441,10 +472,15 @@ screen.
   sent requests in is our assumption; the research notes give only the
   cap. A player has at most `MAX_FRIEND_REQUESTS` (100) requests waiting
   for their answer.
-- Asking someone who already asked you makes you friends at once.
+- Asking someone who already asked you makes you friends at once. As with
+  accepting, the one asking needs room for one more (LIST_FULL if not), and
+  the other's count doesn't change.
 - Accepting is only possible for a request that is waiting. When it is
   accepted, the asker's sent request becomes a friend (their count doesn't
-  change); the one accepting needs room for one more.
+  change); the one accepting needs room for one more. A FRIEND_ACCEPT,
+  FRIEND_DECLINE or FRIEND_REMOVE that finds nothing to change (the asker
+  took the request back a moment before, say) gets no notice; the player's
+  list is sent again so their screen catches up.
 - Declining removes the request. The asker isn't told; the request just
   goes from their list.
 - Removing ends a friendship, or takes back a request you sent. The other
@@ -455,9 +491,27 @@ screen.
   highest level.
 - Inviting a friend uses INVITE, and joining their party JOIN_PARTY, with
   the rules and privacy they have now (invite only, removed members, full,
-  in a match, another program).
+  in a match, another program). The `joinable` flag a FRIENDS entry carries
+  is worked out by the same checks JOIN_PARTY makes, so the two can't
+  drift: `party.rs` gets
+  `fn can_join(&self, me: u64, id: u64) -> Result<(), &'static str>`
+  (the party exists and isn't `me`'s, isn't `Activity::Playing`, is on
+  `me`'s program, is open and hasn't removed `me` or else has invited
+  `me`, and has room for `me` and their guests),
+  and `join_party` calls it for its notices. A flag can be up to a second
+  old: a JOIN_PARTY sent on a stale one gets that check's notice (THE
+  PARTY IS FULL, THAT PARTY IS INVITE ONLY, THAT PARTY IS IN A MATCH, THAT
+  PARTY HAS BROKEN UP), nothing worse.
 - Friend actions (the four PC-to-server kinds above) are limited to 30 a
-  minute per PC. More are ignored, with one notice (SLOW_DOWN) per minute.
+  minute per account (kept on the `Server` with the RECORD times, so
+  signing in again from the same or another PC doesn't reset them; entries
+  older than a minute are dropped each tick). More are ignored, with one
+  notice (SLOW_DOWN) per minute.
+- ASKED_YOU goes to the same player for the same asker at most once in 10
+  minutes (an estimate of what stops nagging; kept in memory, lost on a
+  restart). Without it, asking, taking it back and asking again would put
+  a notice on the other player's screen every few seconds. The request
+  itself still shows in their list each time.
 - The game (h2viewer) can't send or answer requests, and never hears of
   them. A launcher player can still ask a game player's account (it
   exists); the request waits unanswered until it is taken back. A friend
@@ -476,7 +530,7 @@ server has it):
 | `ALREADY_ASKED` | `YOU ALREADY SENT {X} A FRIEND REQUEST` | the asker |
 | `LIST_FULL` | `YOUR FRIENDS LIST IS FULL` | the asker, or the one accepting |
 | `TOO_MANY_REQUESTS` | `{X} HAS TOO MANY FRIEND REQUESTS` | the asker |
-| `ASKED_YOU` | `{X} SENT YOU A FRIEND REQUEST` | the one asked, if online |
+| `ASKED_YOU` | `{X} SENT YOU A FRIEND REQUEST` | the one asked, if signed in on a launcher (at most once in 10 minutes per asker) |
 | `ACCEPTED` | `{X} ACCEPTED YOUR FRIEND REQUEST` | the asker, if online |
 | `NOW_FRIENDS` | `YOU AND {X} ARE NOW FRIENDS` | both, when requests crossed |
 | `SLOW_DOWN` | `SLOW DOWN. TRY AGAIN IN A MINUTE.` | the PC over the limit |
@@ -502,9 +556,16 @@ each entry:
   map       str  in a match: its map (MCC map name)
   variant   str  in a match: its MCC game variant
   party     u64
-  joinable  bool their party is open, has room, isn't in a match, and
-                 isn't ours
+  joinable  bool `can_join(us, party)` passes (see 3.1)
 ```
+
+QUICKMATCH and CUSTOM_GAME are the same number (255), and the activity
+tells them apart: a launcher's custom game is a match like any other, so
+its party is `Activity::Playing` with playlist 255, while 255 with
+`Activity::Searching` is a quickmatch search. (`Activity::Custom` is the
+game's custom games only, and no launcher friend has it.) A party back in
+its lobby keeps the playlist it last played, so the lobby reads `playlist`
+only while the friend searches or plays.
 
 In h2net:
 
@@ -543,7 +604,10 @@ rules, with no I/O beyond loading and saving, so it is unit tested on its
 own:
 
 ```rust
-pub struct Friends { /* pairs: BTreeSet<(u64, u64)> (smaller id first), requests: Vec<Request> */ }
+pub struct Friends {
+    /* friends: HashMap<u64, BTreeSet<u64>> (both ways: b is in a's set and
+       a in b's), requests: Vec<Request> (oldest first) */
+}
 pub struct Request { pub from: u64, pub to: u64, pub unix: u64 }
 pub enum Asked { Sent, NowFriends }
 pub enum Refusal { Yourself, AlreadyFriends, AlreadyAsked, ListFull, TheirRequestsFull }
@@ -567,8 +631,15 @@ impl Friends {
 }
 ```
 
+The friendships are kept per account, both ways, so `friends_of` and
+`are_friends` are a lookup, not a pass over every pair: the presence pass
+(3.4) calls `friends_of` for every account whose status changed, each
+second. Requests stay a list (at most 100 waiting per player, and the
+actions that touch them are rate limited).
+
 `friends.txt`, in the data folder beside `accounts.txt`, written whole
-(`store::replace`) after every change that changes something:
+(`store::replace`) after every change that changes something (a failed
+save is logged, as for `accounts.txt`, and the next change tries again):
 
 ```text
 f <id> <id>
@@ -579,7 +650,8 @@ Ids are 16 hex digits, as in `accounts.txt`. An `f` line is a friendship,
 written smaller id first; an `r` line is a request waiting for an answer,
 with when it was sent. Empty lines are allowed. A line that doesn't read
 (another letter, bad hex, an id paired with itself, a pair or request listed
-twice, or a request between friends) is an error that stops the server
+twice, a request between friends, or requests both ways between two
+players, which `ask` turns into a friendship) is an error that stops the server
 starting, as a broken `accounts.txt` does: dropping it quietly would lose it
 at the next save. Ids that `accounts.txt` doesn't have are kept. No file at
 all is an empty list, so a server that never saw friends starts as before.
@@ -592,8 +664,10 @@ is two.
 `Server` gains `friends: Friends`, loaded in `Server::open`, and the
 handlers go in a new `crates/h2live/src/server/social.rs` (friends and
 service records), dispatched from `Server::handle` for launcher PCs only.
-`Pc` gains the times of its recent friend actions and record requests (for
-the two limits).
+`Server` (not `Pc`) gains the times of each account's recent friend
+actions and record requests (for the two limits), and when each asker last
+had ASKED_YOU sent for them to each player; all three drop entries older
+than their window as they go, so they don't grow.
 
 ### 3.4 Status updates, without flooding
 
@@ -604,13 +678,23 @@ the two limits).
   one per account, and an account that signed out becomes offline. One
   account-to-PC map is built per tick, so this costs one pass over the
   signed-in PCs.
+  Offline presences are dropped once their change has been passed on, so
+  the map holds only who is signed in (plus that tick's sign-outs).
 - An account whose presence changed marks each of its friends that is
-  signed in on a launcher as needing a new list.
+  signed in on a launcher as needing a new list. It marks itself too:
+  each `joinable` flag in its own list depends on its own party and guests.
 - A change to a list (a request, an accept, a decline, a removal) marks both
-  players. Signing in marks the player.
+  players. Signing in marks the player. An INVITE marks the one invited, as
+  it can make an invite-only party joinable for them.
 - Then each marked player gets one FRIENDS, with the joinable flag worked
   out for them, and the marks are cleared. So a player hears at most one
-  list a second, however busy their friends are.
+  list a second, however busy their friends are. A list the same, byte for
+  byte, as the last one sent to that PC isn't sent again.
+- Lists keep coming while the player is in a game: the lobby keeps them
+  and draws nothing new over the engine's window. Notices that come then
+  (ASKED_YOU, say) are toasts that go after 6 s like any other, so they
+  are usually missed; the request still waits in the list (and in the
+  Live screen's RB hint count, 3.5) for after the game.
 - Map and variant come from the match the friend is in (its `info.map`
   and the launcher's `variant`).
 
@@ -634,16 +718,29 @@ friends offline, then requests we sent; by gamertag within each. Each row:
 - the level as a small rank icon at 560;
 - the status at x 660, 20 pt (DIM, GOLD for a request to us):
   - "In a lobby";
-  - "Searching <playlist>", or "Searching (quickmatch)";
+  - "Searching <playlist>", or "Searching (quickmatch)" (playlist 255 while
+    searching, see 3.2);
   - "<playlist>: <game> on <map>" in a playlist's match (game and map by
     `names::variant` and `names::map`);
-  - "Custom game: <game> on <map>";
+  - "Custom game: <game> on <map>" (playing, playlist 255);
   - "Online (h2viewer)";
   - "Offline";
   - "Wants to be your friend";
   - "Friend request sent";
 - right-aligned at 1196, 20 pt DIM: "Your party", "Open party" when
-  joinable, "Invite only" when their party isn't open, else nothing.
+  joinable, "Invite only" when it isn't joinable and the ONLINE list shows
+  their party as not open (an invite-only party that invited us is
+  joinable, so it says "Open party"), else nothing.
+
+**Selections follow the player, not the row.** A FRIENDS list can come
+every second and reorder the rows (a friend signs out and drops to the
+offline group). So the friends screen keeps the selected account, and
+after each list finds its row again (the same row number, clamped, if the
+account has gone). The Players screen's `psel` gets the same treatment
+for ONLINE lists. A popup that names a player (`friend`, `unfriend`)
+holds their account, and closes if they leave the list. Without this, A
+or X pressed just after a list came could accept, decline or remove the
+wrong player.
 
 Empty: "No friends yet. Press Y to send a friend request." 22 pt DIM at
 (640, 320).
@@ -676,14 +773,25 @@ A picks, B closes. Hints A Select, B Back at y 492. Clicks on a row select
 it, then pick it, as in lists.
 
 **Add friend popup** (label `addfriend`): `Pen::popup`'s box with the
-title "SEND FRIEND REQUEST", "Type their gamertag." and a field at
+title "SEND FRIEND REQUEST", "Type their gamertag on the keyboard." and a
+field at
 (380, 330), 520 by 52, drawn like the sign-in screen's gamertag field. It
 takes letters, digits and spaces, upper-cased, up to `GAMERTAG_LEN`, and
 Backspace. While it is up, letters are typed, not buttons (`App::input`'s
-`typing` covers it). A sends FRIEND_REQUEST with `settings::clean_gamertag`
+`typing` covers it), so Enter and Esc are A and B there (and the
+controller's A and B). A sends FRIEND_REQUEST with `settings::clean_gamertag`
 of it (nothing if empty) and closes the popup; B closes it. The answer comes
 as a notice (a toast). Y on the Players screen and the carnage report sends
-the selected player's gamertag directly, with no popup.
+the selected player's gamertag directly, with no popup. The lobby has no
+on-screen keyboard (the sign-in screen needs a keyboard too), so with only
+a controller a friend request is made from those two lists.
+
+The friend notices come as NOTICE, which the lobby already takes as the
+answer to a custom game it asked for (`LiveEvent::Notice` clears
+`App::asked`). A friend notice mustn't do that: the lobby tells them apart
+by their text (the constants in `live.rs`; the ones with a gamertag by
+their fixed ends, like `" SENT YOU A FRIEND REQUEST"`) and leaves `asked`
+alone for them.
 
 **Remove friend popup** (label `unfriend`): `Pen::popup("REMOVE FRIEND",
 "Remove {X} from your friends? They won't be told.", [A Remove, B Cancel])`,
@@ -695,7 +803,16 @@ request is waiting either way), LB Service record, RB Friends.
 **Party screen** gains LB Service record (the selected member).
 
 **Live screen** hints become: A Search (or Custom game), X Players, Y
-Party, RB Friends, LB Service record, B Quit.
+Party, RB Friends, LB Service record, B Quit. While friend requests wait
+for this player's answer, the RB hint says "Friends (2)" with their count,
+so a request made while they were offline or in a game is seen.
+
+While the party searches, the Live screen takes only B today
+(`live_input` returns early). LB and RB work there too: the search goes
+on, and B on the record or friends screen comes back to the search. A
+match that comes meanwhile takes the lobby to the pregame screen from
+wherever it is and closes any popup, as `on_match` already does, so a half
+typed friend request is dropped then.
 
 ## 4. Rank icons
 
@@ -792,6 +909,13 @@ pub fn read(map: &Path) -> Result<RankIcons, String>;
 pub fn load(log: &dyn Fn(&str)) -> Option<RankIcons>;
 ```
 
+Before opening, `read` reads the first 8 bytes itself: the `head` magic
+(as `Header::parse` checks it) and then the version word. Version 13 gives
+the MCC error at once. `Header::parse` checks `foot` at 0x7FC before the
+version, and MCC's header may not be laid out that way past its version
+word, so leaving it to blam-cache could say "missing 'foot'" for an MCC
+map instead.
+
 How `read` decodes: `MapSet::open(map)`, then for each tag
 `set.map.find_tag(GroupTag::parse("bitm")?, name)?.datum` and
 `blam_cache::bitmap::read_bitmap_at(&mut set, datum, i)` for `i` in 0..50,
@@ -851,6 +975,7 @@ arrows". LB is always the service record, RB always the friends list.
 | Screen | A | B | X | Y | LB | RB |
 |---|---|---|---|---|---|---|
 | Live | Search / Custom game | Quit | Players | Party | Your service record | Friends |
+| Live, searching | - | Stop search (leader) | - | - | Your service record | Friends |
 | Players | Invite | Back | Join party | Add friend | Service record | Friends |
 | Party | Make leader / Leave | Back | Remove | Privacy | Service record | - |
 | Friends | see 3.5 | Back | see 3.5 | Add friend | Service record | - |
@@ -868,7 +993,9 @@ New `H2LOBBY_SCRIPT` commands:
 - `see <text> [<seconds>]`: waits until text containing `<text>` (ignoring
   case) is drawn on the screen, at most `<seconds>` (120 if not given),
   and fails the run as `wait` does. The `Pen` keeps the strings it drew in
-  the last frame (`App::drawn`).
+  the last frame (`App::drawn`). The text may hold spaces, so the last word
+  is taken as the seconds when it reads as a number; a text that itself
+  ends in a number gives the seconds after it (`see 12 of 100 120`).
 - `pick <gamertag>`: selects that player's row on the players, friends,
   party or carnage screen, ignoring case; the run fails if there is none.
   Scripts then don't depend on list order.
@@ -924,8 +1051,14 @@ font and numbers, so they may be kept with the test notes.
   playlists, relation 3, online 3, activity 4, and a not-found record with
   bytes after it, are all `Malformed`.
 - The kind-numbers test above, and `LIVE_PROTOCOL == 3`.
-- A versioned launcher LOGIN at 2 is refused with UPDATE YOUR LAUNCHER
-  (beside the existing `LIVE_PROTOCOL + 1` case).
+- `login_header` reads a launcher LOGIN at 2 (beside the existing
+  `LIVE_PROTOCOL + 1` case), and `ToServer::read` refuses it.
+
+`crates/h2live/src/server/tests.rs`: a raw connection sends a LOGIN written
+byte for byte as a version 2 launcher writes it (a literal in the test, as
+`the_games_login_is_written_as_it_always_was` does for the game) and gets
+REFUSED with UPDATE YOUR LAUNCHER and nothing else. No server test checks
+that refusal today; `login_refusal` is where it happens, not h2net.
 
 `crates/h2live/src/store.rs`:
 
@@ -938,7 +1071,8 @@ font and numbers, so they may be kept with the test notes.
   keeps 8 fields.
 
 `crates/h2live/src/card.rs`: a card with tallies verifies and reads back;
-an old 6-word card still verifies.
+an old 6-word card still verifies, and a card with 20 playlists, every number at its
+largest, is under `MAX_CARD`.
 
 `crates/h2live/src/friends.rs`:
 
@@ -963,9 +1097,15 @@ with `sign_in_launcher` and a relay where matches are played:
 2. `friends_see_what_friends_are_doing`: ALPHA's party searching, then
    playing a custom game (`LauncherCustom`), shows to BRAVO with the
    playlist, map and variant; joinable follows PRIVACY; JOIN_PARTY with
-   the entry's party works.
+   the entry's party works. `joinable` agrees with `join_party` case by
+   case: invite only and not invited (false, INVITE_ONLY), invite only and
+   invited (true, and the INVITE alone brought a new list), removed by the
+   leader (false), full with BRAVO's guests counted (false, PARTY_FULL), in
+   a match (false, IN_A_MATCH), and our own party (false).
 3. `declining_and_removing_are_quiet`: a decline and a removal leave the
-   other side's list changed and no notice.
+   other side's list changed and no notice. FRIEND_ACCEPT for a request
+   its asker took back a moment before changes nothing, gives no notice,
+   and sends the list again.
 4. `friends_outlive_a_restart`: after `World::restart` the friendship and a
    waiting request are still there. A data folder holding a literal
    today's-format `accounts.txt` and no `friends.txt` opens, and its
@@ -973,19 +1113,24 @@ with `sign_in_launcher` and a relay where matches are played:
 5. `friend_lists_come_at_most_once_a_second`: BRAVO toggles PRIVACY ten
    times within a second; ALPHA gets at most two `LiveEvent::Friends` in
    that second, and the last list is right.
-6. `the_game_never_hears_of_friends`: a game PC (a raw connection with the
+6. `friend_limits_outlast_signing_in_again`: 31 friend actions in a minute
+   give one SLOW_DOWN and the 31st does nothing, and signing in again
+   within the minute doesn't reset the count; 25 RECORDs before and after
+   signing in again get 20 answers in all. Asking, taking back and asking
+   again three times gives the one asked a single ASKED_YOU.
+7. `the_game_never_hears_of_friends`: a game PC (a raw connection with the
    game's LOGIN, as the tests already make) whose account a launcher asks;
    every kind the raw connection receives is one the game knows (no 117 or
    118, and no friend notice); a FRIEND_REQUEST sent from a game PC drops
    it.
-7. `service_records_and_tallies`: two launchers play a ranked Head to Head
+8. `service_records_and_tallies`: two launchers play a ranked Head to Head
    match (playlist 11) through the relay with LAUNCHER_RESULTs carrying
    kills, assists, deaths, betrayals and suicides; the winner's RECORD shows
    the playlist with 1 game, 1 win and the host's numbers; accounts.txt has
    the 11-word `x` lines and games.log the 14-field entries; RECORD for an
    unknown id is `found: None`; 25 RECORDs in one step get at most 20
    answers. A disputed game (results that don't agree) adds nothing.
-8. In `server/tests/matches.rs`, after a counted Double Team, each player's
+9. In `server/tests/matches.rs`, after a counted Double Team, each player's
    tally has the kills and deaths of the host's RESULT.
 
 ### Part C
@@ -1000,8 +1145,9 @@ with `sign_in_launcher` and a relay where matches are played:
   Vista folders, then `maps\mainmenu.map` beside the launcher, in that
   order).
 - `find` picks the first that exists (files made in a temporary folder).
-- `read` on a missing file, a file of zeros, and a 0x800-byte file with
-  `head` and `foot` and version 13 gives errors, the last one saying
+- `read` on a missing file, a file of zeros, a 0x800-byte file with
+  `head` and `foot` and version 13, and a 0x1000-byte file with `head` and
+  version 13 but no `foot` at 0x7FC gives errors, the last two saying
   version 13; none panics.
 - One `#[ignore]` test reads `mainmenu.map` from `H2_MAPS` and checks 50
   icons of 28 by 26 and 50 of 17 by 17.
@@ -1010,7 +1156,10 @@ with `sign_in_launcher` and a relay where matches are played:
 
 - results.rs: a synthetic block with kills, assists, betrayals, in a row and
   alive at their offsets reads back; `for_server` carries them (clamped);
-  `check_kills` gives each of its three lines.
+  `check_kills` gives each of its three lines, an all-suicide game (score
+  -2, suicides 2, kills 0) is "nothing to check", and the same game with a
+  non-zero number at +0x24 is "may be wrong".
+- names.rs: `slayer` takes a bare name, a path and a `.bin` ending alike.
 - names.rs: `slayer` against `playlists.txt`.
 - live.rs (h2launch): the 10-field `ended` line round trip; the 7-field form
   is None.
@@ -1023,6 +1172,11 @@ with `sign_in_launcher` and a relay where matches are played:
   end:
   - the friends screen orders rows as 3.5 says, and A on a request sends
     FRIEND_ACCEPT, X FRIEND_DECLINE;
+  - a new FRIENDS list that moves the selected friend to another row keeps
+    them selected, so X then declines the player that was picked; an
+    `unfriend` popup closes when its friend leaves the list;
+  - LB and RB work while the party searches, and a friend notice doesn't
+    clear the custom game's `asked`;
   - the add friend popup takes typed letters (not buttons) and sends
     FRIEND_REQUEST once;
   - the options popup lists only what applies, with Remove friend last, and
@@ -1070,4 +1224,61 @@ is there.
 **Deploy** (after A and B are merged on this branch): copy the Proxmox
 server's data folder aside, deploy h2live, and give the owner the new
 launcher at the same time (a launcher at 2 is told UPDATE YOUR LAUNCHER).
-The game's players need nothing. PROGRESS.md says what was deployed.
+The server goes first: a launcher at 3 signing in to the old server is
+also told UPDATE YOUR LAUNCHER (the old server's `login_refusal` sees a
+version that isn't its own), which would send the owner the wrong way.
+Before the deploy, check the new server opens a copy of the live data
+folder (its `accounts.txt` as it is, no `friends.txt`) and that its
+accounts sign in. The game's players need nothing. PROGRESS.md says what
+was deployed.
+
+## Review changes
+
+A review of this note against the code (2026-10-10) changed:
+
+1. The kinds in use: server to PC includes 3 and 4 (PING and PONG go both
+   ways), and the kind-numbers test lists them in both directions.
+2. FRIENDS' largest size: under 32 KB, not about 20 KB.
+3. The kills check's "nothing to check" case: all-suicide games have
+   `score + suicides` of 0 but aren't "no one killed themselves"; the case
+   now also needs the kills read to be 0, so a wrong offset is still
+   caught. The suicide-penalty caveat is in its doc comment.
+4. Where the kills check finds the variant: `args.variant` after the
+   `--live` branch has set it, compared by file stem.
+5. The stand-in engine with one player: kills, assists and deaths 0, so the
+   sum its test checks holds.
+6. Tallies are the host's word and `agrees` stays as it is; stat cards
+   stay far under `MAX_CARD`, which builds of the game read cards against.
+7. Rate limits (friend actions, RECORD) are kept per account on the
+   `Server`, not on the `Pc`, so signing in again doesn't reset them.
+8. ASKED_YOU at most once in 10 minutes per asker and player, so asking
+   and taking back can't nag; it goes only to players on a launcher.
+9. `joinable` comes from a shared `can_join`, the checks JOIN_PARTY makes
+   (invited, removed, full with guests, in a match, other program), and a
+   stale flag only earns JOIN_PARTY's usual notices. Presence changes mark
+   the player's own list too, and an INVITE marks the one invited.
+10. Accept, decline or remove that finds nothing to change: no notice, the
+    list is sent again. Crossed requests need room for the one asking.
+11. `Friends` keeps friendships per account both ways, so the presence pass
+    doesn't scan every pair; offline presences are dropped; an unchanged
+    list isn't sent again; `friends.txt` refuses requests both ways
+    between two players, and a failed save is logged.
+12. Playlist 255 is a quickmatch search or a launcher custom game (which is
+    `Activity::Playing`), told apart by the activity.
+13. The lobby keeps selections and name-bearing popups on the player's
+    account, so a list arriving between two presses can't make A or X act
+    on someone else.
+14. LB and RB work while the party searches; the RB hint counts requests
+    waiting; friend notices don't clear the custom game's `asked`; the add
+    friend popup needs a keyboard (Y on Players and carnage doesn't);
+    "Invite only" is read from the ONLINE list.
+15. `ranks::read` checks the version word itself, so an MCC map says
+    version 13 even if its header differs past that.
+16. `see` takes the last word as seconds only when it is a number.
+17. Tests: the version 2 refusal is a server test (no server test checks
+    it today), plus tests for `can_join` against `join_party`, limits
+    across signing in again, the ASKED_YOU cooldown, stale accepts,
+    selections that follow the player, and the all-suicide kills check.
+18. Deploy: the server goes first (a version 3 launcher is told UPDATE YOUR
+    LAUNCHER by the old server), after trying the new one on a copy of the
+    live data folder.
