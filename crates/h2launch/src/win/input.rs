@@ -1,7 +1,10 @@
 //! Input for local player 0: an XInput pad, plus keyboard and mouse from
 //! our own window (key messages and raw mouse motion while the window is
 //! in front), plus the optional input script. Everything reaches the
-//! engine only through the input state the host fills in slot 36.
+//! engine only through the input state the host fills in slot 36. The
+//! thumbstick layout is applied here, to the pad's sticks and the
+//! script's alike (the script stands for the physical sticks); the button
+//! layout is the gamepad mapping (host slot 116), not done here.
 //!
 //! Halo 2 also asks Windows for key state itself on its own thread, which
 //! never sees our window's key messages (host-interface.verify A3). The
@@ -27,7 +30,8 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{ClipCursor, GetClientRect, GetForegroundWindow};
 
 use super::log::log;
-use crate::profile::{mouse, mouse_to_stick, InputFrame, INPUT_STATE_SIZE, MOUSE_SCALE};
+use crate::padpick::{self, Reading, Watch};
+use crate::profile::{mouse, mouse_motion, mouse_to_stick, InputFrame, INPUT_STATE_SIZE};
 
 static KEYS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static MOUSE_DX: AtomicI64 = AtomicI64::new(0);
@@ -236,6 +240,8 @@ pub fn update_cursor_clip(playing: bool) {
 
 /// The XInput slot player 0 uses, -1 = none yet.
 static PAD: AtomicI32 = AtomicI32::new(-1);
+/// What `player0_pad` remembers of each slot between polls (`--pad any`).
+static WATCH: Mutex<[Watch; 4]> = Mutex::new([Watch::new(); 4]);
 /// Per XInput slot: when (seconds, f64 bits) an empty slot may be asked
 /// again. Asking about an empty slot is slow, and the engine polls every
 /// local player every tick, so an empty slot is asked at most once a
@@ -260,10 +266,30 @@ fn read_pad(index: u32) -> Option<XINPUT_GAMEPAD> {
     }
 }
 
-/// Player 0's pad: the one `--pad` names, or the first connected one.
-fn player0_pad() -> Option<XINPUT_GAMEPAD> {
+/// Player 0's pad, and whether it was just used (a button pressed, or a
+/// trigger or stick pushed far from rest): the one `--pad` names;
+/// otherwise the one in use (`crate::padpick`). That starts as the first
+/// connected, and moves to another connected pad when that one is used
+/// while the current one has been idle for 2 s, so an idle or virtual
+/// controller in an earlier slot (Steam's, DS4Windows') can't keep the
+/// one in the player's hands from working, and a pad whose reading never
+/// changes can't take player 1 away.
+fn player0_pad() -> (Option<XINPUT_GAMEPAD>, bool) {
+    let t = super::now();
+    let reading = |g: &XINPUT_GAMEPAD| Reading {
+        buttons: g.wButtons.0,
+        left_trigger: g.bLeftTrigger,
+        right_trigger: g.bRightTrigger,
+        lx: g.sThumbLX,
+        ly: g.sThumbLY,
+        rx: g.sThumbRX,
+        ry: g.sThumbRY,
+    };
+    let Ok(mut watch) = WATCH.lock() else {
+        return (None, false);
+    };
     match super::setup().map(|s| s.args.pad) {
-        Some(crate::cli::Pad::None) => return None,
+        Some(crate::cli::Pad::None) => return (None, false),
         Some(crate::cli::Pad::Slot(i)) => {
             let g = read_pad(i);
             let was = PAD.swap(if g.is_some() { i as i32 } else { -1 }, Ordering::SeqCst);
@@ -272,46 +298,48 @@ fn player0_pad() -> Option<XINPUT_GAMEPAD> {
             } else if was == -1 && g.is_some() {
                 log!("pad {i} connected (--pad {i}); it is player 1's controller");
             }
-            return g;
+            let used = match (&g, watch.get_mut(i as usize)) {
+                (Some(g), Some(w)) => w.update(&reading(g), t),
+                (None, Some(w)) => {
+                    *w = Watch::new();
+                    false
+                }
+                _ => false,
+            };
+            return (g, used);
         }
         _ => {}
     }
-    let i = PAD.load(Ordering::SeqCst);
-    if i >= 0 {
-        if let Some(g) = read_pad(i as u32) {
-            return Some(g);
-        }
-        if PAD
-            .compare_exchange(i, -1, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            log!("pad {i} disconnected");
-        }
-    }
-    for i in 0..4 {
-        if let Some(g) = read_pad(i) {
-            if PAD
-                .compare_exchange(-1, i as i32, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                log!("pad {i} connected; it is player 1's controller");
+    let mut pads: Vec<(u32, XINPUT_GAMEPAD, bool)> = Vec::new();
+    for i in 0..4u32 {
+        match read_pad(i) {
+            Some(g) => {
+                let used = watch[i as usize].update(&reading(&g), t);
+                pads.push((i, g, used));
             }
-            return Some(g);
+            None => watch[i as usize] = Watch::new(),
         }
     }
-    None
-}
-
-fn pad_moved(g: &XINPUT_GAMEPAD) -> bool {
-    // XInput's own dead zones and trigger threshold.
-    const LEFT: i32 = 7849;
-    const RIGHT: i32 = 8689;
-    let far = |x: i16, y: i16, dz: i32| (x as i32).abs() > dz || (y as i32).abs() > dz;
-    g.wButtons.0 != 0
-        || g.bLeftTrigger > 30
-        || g.bRightTrigger > 30
-        || far(g.sThumbLX, g.sThumbLY, LEFT)
-        || far(g.sThumbRX, g.sThumbRY, RIGHT)
+    let cur = PAD.load(Ordering::SeqCst);
+    let cur = (cur >= 0).then_some(cur as u32);
+    if let Some(c) = cur.filter(|c| !pads.iter().any(|p| p.0 == *c)) {
+        log!("pad {c} disconnected");
+    }
+    let connected: Vec<(u32, bool)> = pads.iter().map(|p| (p.0, p.2)).collect();
+    let pick = padpick::pick(cur, &connected, &watch[..], t);
+    let Some((i, g, used)) = pick.and_then(|i| pads.iter().find(|p| p.0 == i).copied()) else {
+        PAD.store(-1, Ordering::SeqCst);
+        return (None, false);
+    };
+    if cur != Some(i) {
+        PAD.store(i as i32, Ordering::SeqCst);
+        let others: Vec<u32> = pads.iter().map(|p| p.0).filter(|&o| o != i).collect();
+        log!(
+            "pad {i} {}; it is player 1's controller (other pads connected: {others:?})",
+            if used { "is in use" } else { "connected" }
+        );
+    }
+    (Some(g), used)
 }
 
 pub fn pad_line() -> String {
@@ -335,10 +363,10 @@ pub fn fill(player: i32, out: *mut u8, pad_only: bool) -> bool {
         return false;
     }
     let mut f = InputFrame::default();
-    let pad = match player {
+    let (pad, used) = match player {
         0 => player0_pad(),
-        1..=3 => read_pad(player as u32),
-        _ => None,
+        1..=3 => (read_pad(player as u32), false),
+        _ => (None, false),
     };
     if let Some(g) = &pad {
         f.pad_buttons = g.wButtons.0;
@@ -348,12 +376,19 @@ pub fn fill(player: i32, out: *mut u8, pad_only: bool) -> bool {
         f.thumb_ly = g.sThumbLY;
         f.thumb_rx = g.sThumbRX;
         f.thumb_ry = g.sThumbRY;
-        if pad_moved(g) && player == 0 {
+        // The pad takes over from keyboard and mouse when it is used, not
+        // for a reading that never changes.
+        if used {
             KM_LAST.store(false, Ordering::SeqCst);
         }
     }
     let setup = super::setup();
-    if player == 0 && !pad_only {
+    // Player 0 through slot 36: keyboard, mouse and the script too.
+    let full = player == 0 && !pad_only;
+    // Raw mouse counts this poll (the window's and the script's), scaled
+    // below.
+    let (mut mouse_dx, mut mouse_dy) = (0.0f32, 0.0f32);
+    if full {
         if FOCUSED.load(Ordering::SeqCst) {
             for (i, w) in KEYS.iter().enumerate() {
                 let bits = w.load(Ordering::SeqCst);
@@ -361,8 +396,8 @@ pub fn fill(player: i32, out: *mut u8, pad_only: bool) -> bool {
                     f.keys[i * 64 + b] = bits & (1u64 << b) != 0;
                 }
             }
-            f.mouse_dx = MOUSE_DX.swap(0, Ordering::SeqCst) as f32 * MOUSE_SCALE;
-            f.mouse_dy = MOUSE_DY.swap(0, Ordering::SeqCst) as f32 * MOUSE_SCALE;
+            mouse_dx = MOUSE_DX.swap(0, Ordering::SeqCst) as f32;
+            mouse_dy = MOUSE_DY.swap(0, Ordering::SeqCst) as f32;
             f.wheel = WHEEL.swap(0, Ordering::SeqCst) as f32 / 120.0;
             f.mouse_buttons = MOUSE_BUTTONS.load(Ordering::SeqCst);
             f.cursor_x = CURSOR_X.load(Ordering::SeqCst) as f32;
@@ -389,8 +424,8 @@ pub fn fill(player: i32, out: *mut u8, pad_only: bool) -> bool {
             for &k in &syn.keys {
                 f.keys[k as usize] = true;
             }
-            f.mouse_dx += (syn.mouse_dx as f32) * MOUSE_SCALE;
-            f.mouse_dy += (syn.mouse_dy as f32) * MOUSE_SCALE;
+            mouse_dx += syn.mouse_dx as f32;
+            mouse_dy += syn.mouse_dy as f32;
             f.mouse_buttons |= syn.mouse_buttons;
             if syn.pad_active() {
                 f.is_km = false;
@@ -401,15 +436,30 @@ pub fn fill(player: i32, out: *mut u8, pad_only: bool) -> bool {
                 log!("input script is now driving player 1 (script time {t:.2} s)");
             }
         }
-        if f.is_km {
-            // HaloX copies mouse motion into the right stick in keyboard
-            // and mouse mode, because Halo 2 reads the stick when zoomed
-            // and in vehicles.
-            let (rx, ry) = mouse_to_stick(f.mouse_dx, f.mouse_dy);
-            if rx != 0 || ry != 0 {
-                f.thumb_rx = rx;
-                f.thumb_ry = ry;
-            }
+        // The mouse sensitivity and the mouse's look inversion are done
+        // here, as HaloX does them, before the motion is copied into the
+        // right stick (the profile has them too, for vehicles).
+        let c = setup.map(|s| s.controls).unwrap_or_default();
+        (f.mouse_dx, f.mouse_dy) =
+            mouse_motion(mouse_dx, mouse_dy, c.mouse_sensitivity, c.mouse_inverted);
+    }
+    // The thumbstick layout (player 0's: the only one with our profile):
+    // which physical stick moves and which looks.
+    if let Some(s) = setup.filter(|_| player == 0) {
+        let ((lx, ly), (rx, ry)) = s
+            .controls
+            .sticks
+            .apply((f.thumb_lx, f.thumb_ly), (f.thumb_rx, f.thumb_ry));
+        (f.thumb_lx, f.thumb_ly, f.thumb_rx, f.thumb_ry) = (lx, ly, rx, ry);
+    }
+    if full && f.is_km {
+        // HaloX copies mouse motion into the right stick in keyboard
+        // and mouse mode, because Halo 2 reads the stick when zoomed
+        // and in vehicles.
+        let (rx, ry) = mouse_to_stick(f.mouse_dx, f.mouse_dy);
+        if rx != 0 || ry != 0 {
+            f.thumb_rx = rx;
+            f.thumb_ry = ry;
         }
     }
     let empty = f
@@ -459,6 +509,11 @@ pub fn rumble(player: i32, state: *const u8) {
         player
     };
     if !(0..4).contains(&index) {
+        return;
+    }
+    // Vibration off: the profile says so, and none goes to the pad here
+    // even if the engine asks.
+    if super::setup().is_some_and(|s| !s.controls.vibration) {
         return;
     }
     if !RUMBLE_LOGGED.swap(true, Ordering::SeqCst) {

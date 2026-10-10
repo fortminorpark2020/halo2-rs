@@ -29,7 +29,7 @@ use super::log::log;
 use super::Setup;
 use crate::net::{self, Net, RecvPort};
 use crate::paths;
-use crate::profile::{self, PadMap};
+use crate::profile;
 use crate::slots::{host_slot_name, summary_lines, SlotCount, HOST_SLOTS};
 
 // ---------------------------------------------------------------- call records
@@ -820,9 +820,13 @@ unsafe extern "system" fn get_player_profile(_this: *mut c_void, xuid: u64) -> *
 fn profile_buffer() -> &'static [u8] {
     static BUF: OnceLock<Vec<u8>> = OnceLock::new();
     BUF.get_or_init(|| {
-        let ps = profile::ProfileSettings::default();
+        let mut ps = match super::setup() {
+            Some(s) => profile::ProfileSettings::from_controls(&s.controls),
+            None => profile::ProfileSettings::default(),
+        };
+        ps.key_bindings = super::setup().is_none_or(|s| s.args.key_bindings);
         log!(
-            "player profile ({:#x} bytes): stick look sensitivity {} (an estimate), mouse sensitivity {}, zoom/vehicle look multipliers {}/{}, volumes {}, FOV 0 (game default), look inverted {}, vibration {}",
+            "player profile ({:#x} bytes): stick look sensitivity {} (1-10; the scale is an estimate), mouse sensitivity {}, zoom/vehicle look multipliers {}/{}, volumes {}, FOV 0 (game default), look inverted {} (mouse {}), auto look centering {}, vibration {}, keyboard and mouse bindings {}",
             profile::PROFILE_SIZE,
             ps.look_sensitivity,
             ps.mouse_sensitivity,
@@ -830,7 +834,14 @@ fn profile_buffer() -> &'static [u8] {
             ps.vehicle_look_multiplier,
             ps.volume,
             ps.look_inverted,
-            ps.vibration
+            ps.mouse_inverted,
+            ps.auto_center,
+            ps.vibration,
+            if ps.key_bindings {
+                "halo2.dll's own keys plus MCC's (an estimate)"
+            } else {
+                "empty (--no-key-bindings)"
+            }
         );
         let mut p = profile::build_profile(&ps);
         if let Some(s) = super::setup() {
@@ -1229,7 +1240,7 @@ unsafe extern "system" fn chud_blend_color(_this: *mut c_void, player: i32, rgba
 unsafe extern "system" fn get_player_gamepad_mapping(_this: *mut c_void, xuid: u64) -> *const u8 {
     record(116, xuid as usize, 0, 0, 0);
     panic_guard(116, move || match super::setup() {
-        Some(s) if xuid == s.xuid => mapping_buffer(s.args.pad_map).as_ptr() as usize,
+        Some(s) if xuid == s.xuid => mapping_buffer(s).as_ptr() as usize,
         _ => {
             note_other_xuid(116, xuid);
             0
@@ -1237,11 +1248,20 @@ unsafe extern "system" fn get_player_gamepad_mapping(_this: *mut c_void, xuid: u
     }) as *const u8
 }
 
-fn mapping_buffer(kind: PadMap) -> &'static [u8] {
-    static ZERO: OnceLock<[u8; profile::GAMEPAD_MAPPING_SIZE]> = OnceLock::new();
-    static H2: OnceLock<[u8; profile::GAMEPAD_MAPPING_SIZE]> = OnceLock::new();
-    match kind {
-        PadMap::Zero => ZERO.get_or_init(|| profile::gamepad_mapping(PadMap::Zero)),
-        PadMap::Halo2 => H2.get_or_init(|| profile::gamepad_mapping(PadMap::Halo2)),
-    }
+/// The gamepad mapping, built once from the run's button layout (or all
+/// zero with `--pad-map zero`) and kept for the run.
+fn mapping_buffer(s: &Setup) -> &'static [u8] {
+    static BUF: OnceLock<[u8; profile::GAMEPAD_MAPPING_SIZE]> = OnceLock::new();
+    BUF.get_or_init(|| {
+        let m = s.args.pad_map.mapping(s.controls.buttons);
+        let which = match s.args.pad_map {
+            crate::controls::PadMap::Layout => s.controls.buttons.name(),
+            crate::controls::PadMap::Zero => "all zero (--pad-map zero)",
+        };
+        log!(
+            "gamepad mapping: {which}: {}",
+            crate::controls::describe_mapping(&m)
+        );
+        m
+    })
 }

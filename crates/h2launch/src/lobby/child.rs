@@ -5,6 +5,7 @@
 //! does that input closing (the lobby is gone).
 //! `--fake-engine` stands in for it where there is no MCC (Linux, tests).
 
+use crate::controls::Controls;
 use crate::live::{self, Engine};
 use crate::session::Session;
 use h2net::live::LauncherPlayerResult;
@@ -44,6 +45,8 @@ pub struct Match {
     pub me: usize,
     pub gamertag: String,
     pub instance: Option<String>,
+    /// The player's controls (the lobby's Settings).
+    pub controls: Controls,
 }
 
 impl Match {
@@ -67,6 +70,7 @@ impl Match {
             self.gamertag.clone(),
             "--events".into(),
         ]);
+        a.extend(self.controls.args());
         if let Some(i) = &self.instance {
             a.extend(["--instance".into(), i.clone()]);
         }
@@ -148,6 +152,7 @@ impl Running {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
+        let_to_front(child.id());
         let stdin = child.stdin.take();
         let (tx, rx) = mpsc::channel();
         if let Some(out) = child.stdout.take() {
@@ -183,6 +188,12 @@ impl Running {
             done: false,
             asked: None,
         })
+    }
+
+    /// Let its window come to the front (again: the engine's window
+    /// opens a few seconds after the start).
+    pub fn let_to_front(&self) {
+        let_to_front(self.child.id());
     }
 
     /// What it said since the last call.
@@ -233,6 +244,21 @@ impl Drop for Running {
         }
     }
 }
+
+/// Windows gives the foreground only to the process the user last used:
+/// while the lobby is in front it may pass that on to the engine's copy,
+/// whose window then takes it as it opens (`win::gfx`), so the player
+/// doesn't have to click it before the controls work.
+#[cfg(windows)]
+fn let_to_front(pid: u32) {
+    use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+    // SAFETY: a plain call with a process id; failing (the lobby isn't in
+    // front) only means the engine's window may need a click.
+    let _ = unsafe { AllowSetForegroundWindow(pid) };
+}
+
+#[cfg(not(windows))]
+fn let_to_front(_pid: u32) {}
 
 /// The made-up results `--fake-engine` ends with: the same on every PC of
 /// the match, so the server counts them. Player `i` of `n` places `i`th
@@ -480,6 +506,16 @@ mod tests {
             me: 1,
             gamertag: "MASTER CHIEF".into(),
             instance: Some("la".into()),
+            controls: Controls {
+                buttons: crate::controls::ButtonLayout::BumperJumper,
+                sticks: crate::controls::StickLayout::Southpaw,
+                look_sensitivity: 6,
+                look_inverted: true,
+                auto_center: false,
+                vibration: false,
+                mouse_sensitivity: 2.2,
+                mouse_inverted: true,
+            },
         };
         let a = m.args(Path::new("s.txt"));
         let parsed = crate::cli::parse(a.iter().cloned()).unwrap();
@@ -491,6 +527,16 @@ mod tests {
         assert_eq!(parsed.instance.as_deref(), Some("la"));
         assert_eq!(parsed.mcc.as_deref(), Some(r"D:\MCC"));
         assert!(parsed.events && !parsed.fake_engine);
+        // The controls, whatever lobby.txt says where it starts.
+        assert_eq!(parsed.controls.over(Controls::default()), m.controls);
+        let all_on = Controls {
+            look_inverted: false,
+            auto_center: true,
+            vibration: true,
+            mouse_inverted: false,
+            ..Controls::default()
+        };
+        assert_eq!(parsed.controls.over(all_on), m.controls);
         let fake = Match {
             kind: Kind::Fake,
             ..m

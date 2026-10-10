@@ -1,6 +1,7 @@
 //! The lobby's window: winit for the window, keyboard and mouse, softbuffer
 //! to show the picture `App` draws, and gilrs for Xbox controllers (the
-//! bumpers are LB and RB, as are Page Up and Page Down on the keyboard).
+//! bumpers are LB and RB, as are Page Up and Page Down on the keyboard;
+//! the d-pad and the left stick move).
 
 use super::app::{App, Input};
 use super::canvas::{Canvas, Text};
@@ -29,9 +30,10 @@ struct Shell {
     window: Option<Rc<Window>>,
     surface: Option<Surface>,
     pads: Option<Gilrs>,
-    /// Which way the left stick is held (-1, 0, 1), so holding it moves
-    /// once.
-    stick: i32,
+    /// The left stick's last values (x, y; up and right positive).
+    stick: (f32, f32),
+    /// Which way it is held (`stick_way`), so holding it moves once.
+    stick_way: Option<Input>,
     /// The window has the focus. A controller is read whichever window is
     /// in front, so while the engine's is, the lobby leaves it alone.
     focused: bool,
@@ -56,7 +58,8 @@ pub fn run(app: App, text: Text) -> Result<(), String> {
         window: None,
         surface: None,
         pads,
-        stick: 0,
+        stick: (0.0, 0.0),
+        stick_way: None,
         focused: true,
         mouse: (0.0, 0.0),
         error: None,
@@ -124,24 +127,24 @@ impl Shell {
                     };
                     inputs.extend(i);
                 }
-                EventType::AxisChanged(Axis::LeftStickY, v, _) => {
-                    // Up is positive.
-                    let held = if v > STICK {
-                        1
-                    } else if v < -STICK {
-                        -1
+                EventType::AxisChanged(axis @ (Axis::LeftStickX | Axis::LeftStickY), v, _) => {
+                    if axis == Axis::LeftStickY {
+                        self.stick.1 = v;
                     } else {
-                        0
-                    };
-                    if held != self.stick && held != 0 {
-                        inputs.push(if held > 0 { Input::Up } else { Input::Down });
+                        self.stick.0 = v;
                     }
-                    self.stick = held;
+                    let way = stick_way(self.stick.0, self.stick.1);
+                    if way != self.stick_way {
+                        inputs.extend(way);
+                    }
+                    self.stick_way = way;
                 }
                 _ => {}
             }
         }
-        if !self.focused {
+        // Read whichever window is in front, so they are left alone while
+        // the engine's is, and while the engine plays at all.
+        if !self.focused || !self.app.wants_pad() {
             return;
         }
         for i in inputs {
@@ -185,12 +188,14 @@ impl ApplicationHandler for Shell {
                     Key::Named(NamedKey::PageDown) => Some(Input::Rb),
                     _ => None,
                 };
+                // Keys go through `key`, which leaves alone the ones meant
+                // for the engine's window while it plays.
                 match i {
-                    Some(i) => self.app.input(i),
+                    Some(i) => self.app.key(i),
                     None => {
                         let typed = event.text.as_deref().unwrap_or("");
                         for c in typed.chars().filter(|c| !c.is_control()) {
-                            self.app.input(Input::Char(c));
+                            self.app.key(Input::Char(c));
                         }
                     }
                 }
@@ -229,5 +234,45 @@ impl ApplicationHandler for Shell {
             w.request_redraw();
         }
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME));
+    }
+}
+
+/// Which way a left stick at (`x`, `y`) points, up and right positive: the
+/// stronger axis only, once it is past `STICK`, so a sloppy diagonal push
+/// moves one way and doesn't also change the value on a row.
+fn stick_way(x: f32, y: f32) -> Option<Input> {
+    if x.abs() > y.abs() {
+        if x > STICK {
+            Some(Input::Right)
+        } else if x < -STICK {
+            Some(Input::Left)
+        } else {
+            None
+        }
+    } else if y > STICK {
+        Some(Input::Up)
+    } else if y < -STICK {
+        Some(Input::Down)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_diagonal_push_moves_one_way() {
+        assert_eq!(stick_way(0.0, 0.0), None);
+        assert_eq!(stick_way(0.5, 0.5), None);
+        assert_eq!(stick_way(0.0, 0.9), Some(Input::Up));
+        assert_eq!(stick_way(-0.9, 0.1), Some(Input::Left));
+        // 45 degrees, a little more down than right: down only.
+        assert_eq!(stick_way(0.70, -0.72), Some(Input::Down));
+        assert_eq!(stick_way(0.72, -0.70), Some(Input::Right));
+        // The stronger axis short of the threshold: nothing, even if the
+        // other is far.
+        assert_eq!(stick_way(0.55, 0.59), None);
     }
 }

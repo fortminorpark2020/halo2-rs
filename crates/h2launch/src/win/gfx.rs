@@ -8,7 +8,7 @@
 //! gets the swap chain.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 
 use windows::core::{w, Interface};
@@ -36,12 +36,13 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_F4;
 use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RAWINPUTDEVICE_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRect, CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics,
-    LoadCursorW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow, SetTimer,
-    ShowWindow, CS_CLASSDC, HTCLIENT, IDC_ARROW, SC_KEYMENU, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW,
-    WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_INPUT,
-    WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_MOUSEMOVE, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
-    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    AdjustWindowRect, CreateWindowExW, DefWindowProcW, GetClientRect, GetForegroundWindow,
+    GetSystemMetrics, IsIconic, LoadCursorW, PostQuitMessage, RegisterClassExW, SetCursor,
+    SetForegroundWindow, SetTimer, ShowWindow, CS_CLASSDC, HTCLIENT, IDC_ARROW, SC_KEYMENU,
+    SM_CXSCREEN, SM_CYSCREEN, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_APP,
+    WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    WM_MOUSEMOVE, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::log::log;
@@ -159,6 +160,69 @@ pub fn create_window(width: u32, height: u32) -> Result<HWND, String> {
             rc.bottom - rc.top
         );
         Ok(hwnd)
+    }
+}
+
+/// The window has been in front since it opened (or `come_to_front` gave
+/// up).
+static FRONT_SEEN: AtomicBool = AtomicBool::new(false);
+/// When `come_to_front` asks next, and gives up (seconds, f64 bits; 0 =
+/// not started).
+static FRONT_NEXT: AtomicU64 = AtomicU64::new(0);
+static FRONT_UNTIL: AtomicU64 = AtomicU64::new(0);
+/// The window that was in front when `come_to_front` first asked
+/// (normally the lobby's), as an integer.
+static FRONT_OTHER: AtomicUsize = AtomicUsize::new(0);
+
+/// Until the window has been in front once, asks Windows to put it there,
+/// once a second for 30 s: started by the lobby, it opens while the
+/// lobby is in front, and Windows lets it take the foreground only once
+/// the lobby has passed that on (`lobby::child`). Without the foreground
+/// no key or mouse input reaches it. It stops asking as soon as some
+/// third window comes to the front (the player chose to look elsewhere),
+/// and a minimised window is restored first. `t`: seconds since the
+/// start.
+pub fn come_to_front(t: f64) {
+    if FRONT_SEEN.load(Ordering::Relaxed) {
+        return;
+    }
+    let hwnd = super::hwnd();
+    // SAFETY: plain queries on windows of this desktop.
+    let front = unsafe { GetForegroundWindow() };
+    if front == hwnd {
+        FRONT_SEEN.store(true, Ordering::Relaxed);
+        log!("the window is in front ({t:.1} s): keys and mouse reach it");
+        return;
+    }
+    let next = f64::from_bits(FRONT_NEXT.load(Ordering::Relaxed));
+    if next == 0.0 {
+        FRONT_UNTIL.store((t + 30.0).to_bits(), Ordering::Relaxed);
+        FRONT_OTHER.store(front.0 as usize, Ordering::Relaxed);
+    } else if t < next {
+        return;
+    }
+    FRONT_NEXT.store((t + 1.0).to_bits(), Ordering::Relaxed);
+    let until = f64::from_bits(FRONT_UNTIL.load(Ordering::Relaxed));
+    if t > until {
+        FRONT_SEEN.store(true, Ordering::Relaxed);
+        log!("the window never came to the front by itself; click it to play with keys and mouse (the controller works either way)");
+        return;
+    }
+    let other = FRONT_OTHER.load(Ordering::Relaxed);
+    if !front.0.is_null() && front.0 as usize != other {
+        FRONT_SEEN.store(true, Ordering::Relaxed);
+        log!("another window was brought to the front ({t:.1} s); not taking it back (click the game's window to play with keys and mouse)");
+        return;
+    }
+    // SAFETY: requests on our own window.
+    unsafe {
+        let show = if IsIconic(hwnd).as_bool() {
+            SW_RESTORE
+        } else {
+            SW_SHOW
+        };
+        let _ = ShowWindow(hwnd, show);
+        let _ = SetForegroundWindow(hwnd);
     }
 }
 

@@ -10,6 +10,7 @@ use super::child::{Kind, Match, Running, Said};
 use super::names;
 use super::ranks::{RankIcons, Size};
 use super::settings::{self, Settings, GAMERTAG_LEN};
+use crate::controls::{self, button, Controls};
 use crate::live::{self, Engine, Log, Told};
 use crate::session::Session;
 use h2live::client::{LiveClient, LiveEvent, Profile, View};
@@ -44,6 +45,25 @@ const SERVER_LEN: usize = 100;
 const CUSTOM_WAIT: Duration = Duration::from_secs(10);
 /// The custom game screen's rows: the game, the map, and the start.
 const CUSTOM_ROWS: usize = 3;
+/// The controller settings screen's rows, in the order and words of Halo
+/// 2's CONTROLLER screen (in a profile's settings), then the mouse's two,
+/// then Halo 2's last, Restore Defaults.
+const SETTINGS_ROWS: [&str; 9] = [
+    "Thumbstick Layout",
+    "Button Layout",
+    "Look Sensitivity",
+    "Look Inversion",
+    "Automatic Look Centering",
+    "Controller Vibration",
+    "Mouse Sensitivity",
+    "Mouse Inversion",
+    "Restore Defaults",
+];
+const STICKS_ROW: usize = 0;
+const BUTTONS_ROW: usize = 1;
+const MOUSE_ROW: usize = 6;
+const MOUSE_INVERT_ROW: usize = 7;
+const RESTORE_ROW: usize = 8;
 /// How many service records the lobby keeps.
 const RECORDS_KEPT: usize = 32;
 /// A service record younger than this is shown without asking again.
@@ -117,6 +137,9 @@ enum Screen {
     Record,
     /// The friends list and friend requests.
     Friends,
+    /// The controller settings (`Settings::controls`), from the
+    /// playlists' Settings row, or X on the sign-in and offline screens.
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,6 +285,9 @@ pub struct App {
     cgame: usize,
     cmap: usize,
     asked: Option<Instant>,
+    /// The settings screen's selected row, and the screen it goes back to.
+    srow: usize,
+    settings_back: Screen,
     game: Option<Game>,
     popup: Option<Popup>,
     toasts: VecDeque<(String, Instant)>,
@@ -313,6 +339,8 @@ impl App {
             cgame: 0,
             cmap: 0,
             asked: None,
+            srow: 0,
+            settings_back: Screen::SignIn,
             game: None,
             popup: None,
             toasts: VecDeque::new(),
@@ -374,6 +402,7 @@ impl App {
             Screen::Failed => "failed",
             Screen::Record => "record",
             Screen::Friends => "friends",
+            Screen::Settings => "settings",
         }
         .into()
     }
@@ -402,7 +431,8 @@ impl App {
             return;
         }
         self.form_error = None;
-        self.settings = Settings { server, gamertag };
+        self.settings.server = server;
+        self.settings.gamertag = gamertag;
         let url = live::server_url(&self.settings.server);
         self.log(&format!(
             "lobby: signing in to {url} as {:?}",
@@ -920,6 +950,7 @@ impl App {
                 me: g.me,
                 gamertag: self.settings.gamertag.clone(),
                 instance: self.cfg.instance.clone(),
+                controls: self.settings.controls,
             };
             match Running::start(&self.cfg.exe, &self.cfg.folder, &m) {
                 Ok(c) => {
@@ -945,10 +976,15 @@ impl App {
                     Said::Event(e) => {
                         notes.push(format!("lobby: the engine says {}", live::event_line(&e)));
                         match &e {
-                            Engine::Running => g.running = true,
+                            Engine::Running => {
+                                g.running = true;
+                                // Its window is about to open.
+                                c.let_to_front();
+                            }
                             Engine::MapLoaded => {
                                 g.running = true;
                                 g.loaded = true;
+                                c.let_to_front();
                             }
                             Engine::Ended(players) => {
                                 g.results = Some(players.clone());
@@ -1041,9 +1077,9 @@ impl App {
         }
         self.toasts
             .retain(|(_, at)| now.saturating_duration_since(*at) < TOAST);
-        // The playlists, then the custom game row.
+        // The playlists, then the custom game and settings rows.
         let n = self.view().map(|v| v.playlists.len()).unwrap_or(0);
-        self.sel = self.sel.min(n);
+        self.sel = self.sel.min(n + 1);
         if self.screen == Screen::Custom && (!self.leader() || self.searching()) {
             self.screen = Screen::Live;
         }
@@ -1128,8 +1164,34 @@ impl App {
 
     // ------------------------------------------------------------- input
 
+    /// A key pressed in the lobby's window (the window's keyboard events
+    /// come here; clicks, the controller and the headless script's
+    /// presses go straight to `input`).
+    pub fn key(&mut self, i: Input) {
+        if self.keys_are_the_games(i, self.engine_running()) {
+            return;
+        }
+        self.input(i)
+    }
+
+    /// A key that belongs to the game rather than the lobby: on the
+    /// in-game screen the letters are the game's keys typed into the
+    /// wrong window (Space jumps there, and is A here), and while the
+    /// engine plays so are Enter, Esc and Backspace (A and B here; Esc is
+    /// Halo 2's pause) on that screen and in its Leave Game popup, so
+    /// leaving the game takes a click.
+    fn keys_are_the_games(&self, i: Input, playing: bool) -> bool {
+        let in_game = self.screen == Screen::InGame || self.popup == Some(Popup::LeaveGame);
+        match i {
+            Input::Char(_) => in_game,
+            Input::A | Input::B | Input::Backspace => in_game && playing,
+            _ => false,
+        }
+    }
+
     pub fn input(&mut self, i: Input) {
-        // Letters are buttons, except where a name is typed.
+        // Letters are buttons, except where a name is typed; Backspace is
+        // B where it doesn't rub a letter out.
         let typing = (self.screen == Screen::SignIn && self.popup.is_none())
             || self.popup == Some(Popup::AddFriend);
         let i = match i {
@@ -1142,6 +1204,7 @@ impl App {
                 'e' => Input::Rb,
                 _ => return,
             },
+            Input::Backspace if !typing => Input::B,
             other => other,
         };
         if let Some(p) = self.popup {
@@ -1182,8 +1245,10 @@ impl App {
             Screen::Carnage => self.carnage_input(i),
             Screen::Record => self.record_input(i),
             Screen::Friends => self.friends_input(i),
+            Screen::Settings => self.settings_input(i),
             Screen::Failed => match i {
                 Input::A => self.connect(),
+                Input::X => self.open_settings(),
                 Input::Y => {
                     self.form_error = None;
                     self.screen = Screen::SignIn;
@@ -1432,6 +1497,8 @@ impl App {
                 }
             }
             Input::A => self.connect(),
+            // The controller's X: the letter x is typed.
+            Input::X => self.open_settings(),
             Input::B => self.popup = Some(Popup::Quit),
             _ => {}
         }
@@ -1463,11 +1530,12 @@ impl App {
             }
             return;
         }
-        // The playlists, then the custom game row.
+        // The playlists, then the custom game and settings rows.
         let n = self.view().map(|v| v.playlists.len()).unwrap_or(0);
         match i {
             Input::Up => self.sel = self.sel.saturating_sub(1),
-            Input::Down => self.sel = (self.sel + 1).min(n),
+            Input::Down => self.sel = (self.sel + 1).min(n + 1),
+            Input::A if self.sel == n + 1 => self.open_settings(),
             Input::A if self.sel == n => {
                 if !self.leader() {
                     self.toast("Only the party leader can start a custom game.".into());
@@ -1604,6 +1672,114 @@ impl App {
         });
     }
 
+    // ---------------------------------------------------------- settings
+
+    /// The controller settings screen, on its first row.
+    fn open_settings(&mut self) {
+        if self.screen != Screen::Settings {
+            self.settings_back = self.screen;
+        }
+        self.srow = 0;
+        self.screen = Screen::Settings;
+    }
+
+    /// An engine is running for the match.
+    fn engine_running(&self) -> bool {
+        self.game.as_ref().is_some_and(|g| g.child.is_some())
+    }
+
+    /// Controller presses are for the lobby, except while the engine
+    /// plays: its window may not be in front, and B then A here would
+    /// leave the game.
+    pub fn wants_pad(&self) -> bool {
+        self.pad_is_the_lobbys(self.engine_running())
+    }
+
+    fn pad_is_the_lobbys(&self, playing: bool) -> bool {
+        !(self.screen == Screen::InGame && playing)
+    }
+
+    fn save_settings(&mut self) {
+        let path = self.cfg.folder.join("lobby.txt");
+        if let Err(e) = self.settings.save(&path) {
+            self.log(&format!("lobby: {e}"));
+        }
+    }
+
+    /// Change a control by its `lobby.txt` name and save it, as the
+    /// settings screen would (for the headless script's `set`).
+    pub fn set_control(&mut self, key: &str, value: &str) -> Result<(), String> {
+        if !self.settings.controls.set(key, value)? {
+            return Err(format!("no control called {key:?}"));
+        }
+        self.save_settings();
+        Ok(())
+    }
+
+    /// Move the value on row `row` on (`forward`) or back. Numbers stop at
+    /// their ends unless `wrap` (A goes round).
+    fn step_setting(&mut self, row: usize, forward: bool, wrap: bool) {
+        let c = &mut self.settings.controls;
+        match row {
+            STICKS_ROW => c.sticks = c.sticks.next(forward),
+            BUTTONS_ROW => c.buttons = c.buttons.next(forward),
+            2 => {
+                let (lo, hi) = (
+                    controls::LOOK_SENSITIVITY_MIN,
+                    controls::LOOK_SENSITIVITY_MAX,
+                );
+                let v = c.look_sensitivity;
+                c.look_sensitivity = match (forward, wrap) {
+                    (true, true) if v >= hi => lo,
+                    (false, true) if v <= lo => hi,
+                    (true, _) => (v + 1).min(hi),
+                    (false, _) => v.saturating_sub(1).max(lo),
+                };
+            }
+            3 => c.look_inverted = !c.look_inverted,
+            4 => c.auto_center = !c.auto_center,
+            5 => c.vibration = !c.vibration,
+            MOUSE_ROW => {
+                let (lo, hi) = (
+                    controls::MOUSE_SENSITIVITY_MIN,
+                    controls::MOUSE_SENSITIVITY_MAX,
+                );
+                let v = c.mouse_sensitivity;
+                let step = controls::MOUSE_SENSITIVITY_STEP;
+                c.mouse_sensitivity = match (forward, wrap) {
+                    (true, true) if v >= hi - step / 2.0 => lo,
+                    (false, true) if v <= lo + step / 2.0 => hi,
+                    (true, _) => controls::clean_mouse_sensitivity(v + step),
+                    (false, _) => controls::clean_mouse_sensitivity(v - step),
+                };
+            }
+            MOUSE_INVERT_ROW => c.mouse_inverted = !c.mouse_inverted,
+            _ => return,
+        }
+        self.save_settings();
+    }
+
+    fn settings_input(&mut self, i: Input) {
+        let last = SETTINGS_ROWS.len() - 1;
+        match i {
+            Input::Up => self.srow = self.srow.saturating_sub(1),
+            Input::Down => self.srow = (self.srow + 1).min(last),
+            Input::Left | Input::Right => self.step_setting(self.srow, i == Input::Right, false),
+            Input::A if self.srow == RESTORE_ROW => {
+                self.settings.controls = Controls::default();
+                self.save_settings();
+                self.toast("Controller settings are back to Halo 2's defaults.".into());
+            }
+            Input::A => self.step_setting(self.srow, true, true),
+            Input::B => {
+                let c = self.settings.controls.describe();
+                self.log(&format!("lobby: controls: {c}"));
+                self.screen = self.settings_back;
+            }
+            _ => {}
+        }
+    }
+
     /// Select row `k` of the players screen.
     fn select_player(&mut self, k: usize) {
         let rows: Vec<u64> = self.others().iter().map(|o| o.account).collect();
@@ -1667,7 +1843,11 @@ impl App {
             Some(Hit::Press(i)) => self.input(i),
             Some(Hit::Field(f)) => self.field = f,
             Some(Hit::Step(r, on)) => {
-                self.crow = r;
+                if self.screen == Screen::Settings {
+                    self.srow = r;
+                } else {
+                    self.crow = r;
+                }
                 self.input(if on { Input::Right } else { Input::Left });
             }
             Some(Hit::Row(r)) if matches!(self.popup, Some(Popup::FriendOptions(_))) => {
@@ -1689,6 +1869,13 @@ impl App {
                     self.input(Input::A);
                 } else {
                     self.select_player(r);
+                }
+            }
+            Some(Hit::Row(r)) if self.screen == Screen::Settings => {
+                if self.srow == r {
+                    self.input(Input::A);
+                } else {
+                    self.srow = r;
                 }
             }
             // A row of the carnage report is only selected: A continues.
@@ -1794,6 +1981,7 @@ impl App {
             Screen::Failed => "OFFLINE",
             Screen::Record => "SERVICE RECORD",
             Screen::Friends => "FRIENDS",
+            Screen::Settings => "CONTROLLER",
         };
         p.text(60.0, 58.0, 36.0, WHITE, Align::Left, title);
         self.draw_header(p);
@@ -1810,6 +1998,7 @@ impl App {
             Screen::Failed => self.draw_failed(p),
             Screen::Record => self.draw_record(p),
             Screen::Friends => self.draw_friends(p),
+            Screen::Settings => self.draw_settings(p),
         }
         p.text(
             1220.0,
@@ -1817,7 +2006,7 @@ impl App {
             14.5,
             DIM,
             Align::Right,
-            "Keyboard: Enter = A, Esc = B, X, Y, Q = LB, E = RB, arrows",
+            "Keyboard: Enter or Space = A, Esc or Backspace = B, X, Y, Q = LB, E = RB, arrows",
         );
         if let Some(popup) = self.popup {
             match popup {
@@ -1947,7 +2136,11 @@ impl App {
             Align::Center,
             "Tab moves between the two.",
         );
-        p.hints(&[(Input::A, "Sign in"), (Input::B, "Quit")]);
+        p.hints(&[
+            (Input::A, "Sign in"),
+            (Input::X, "Controller settings"),
+            (Input::B, "Quit"),
+        ]);
     }
 
     fn draw_connecting(&self, p: &mut Pen) {
@@ -1973,6 +2166,7 @@ impl App {
         p.hints(&[
             (Input::A, "Try again"),
             (Input::Y, "Change gamertag or server"),
+            (Input::X, "Controller settings"),
             (Input::B, "Quit"),
         ]);
     }
@@ -2004,7 +2198,9 @@ impl App {
         } else {
             self.draw_playlists(p, v);
             let mut hints = Vec::new();
-            if self.leader() {
+            if self.sel == v.playlists.len() + 1 {
+                hints.push((Input::A, "Controller settings"));
+            } else if self.leader() {
                 let custom = self.sel == v.playlists.len();
                 hints.push((Input::A, if custom { "Custom game" } else { "Search" }));
             }
@@ -2027,14 +2223,18 @@ impl App {
         p.text(650.0, 142.0, 16.0, HEAD, Align::Center, "SEARCHING");
         p.text(735.0, 142.0, 16.0, HEAD, Align::Center, "PLAYING");
         let rows = 8;
-        // The playlists, then the custom game row.
-        let n = v.playlists.len() + 1;
+        // The playlists, then the custom game and settings rows.
+        let n = v.playlists.len() + 2;
         let first = first_row(self.sel, n, rows);
         for k in (first..n).take(rows) {
             let y = 156.0 + (k - first) as f32 * 50.0;
             let on = k == self.sel;
             p.row(72.0, y, 696.0, 46.0, on, Hit::Row(k));
             let col = if on { WHITE } else { TEXT };
+            if k == v.playlists.len() + 1 {
+                p.text(90.0, y + 32.0, 24.0, col, Align::Left, "Settings");
+                continue;
+            }
             let Some(pl) = v.playlists.get(k) else {
                 p.text(90.0, y + 32.0, 24.0, col, Align::Left, "Custom Game");
                 p.text(560.0, y + 32.0, 22.0, col, Align::Center, "-");
@@ -2074,7 +2274,16 @@ impl App {
                 "The server has no playlists for the launcher.",
             );
         }
-        if self.sel == v.playlists.len() {
+        if self.sel == v.playlists.len() + 1 {
+            let c = &self.settings.controls;
+            let line = format!(
+                "Controller settings: {} buttons, {} thumbsticks, look sensitivity {}.",
+                c.buttons.name(),
+                c.sticks.name(),
+                c.look_sensitivity
+            );
+            p.text(84.0, 600.0, 18.0, DIM, Align::Left, &line);
+        } else if self.sel == v.playlists.len() {
             let line = "Any map and game type, with your party. Unranked.";
             p.text(84.0, 600.0, 18.0, DIM, Align::Left, line);
         } else if let Some(pl) = v.playlists.get(self.sel) {
@@ -2345,6 +2554,133 @@ impl App {
             self.draw_party(p, v);
         }
         p.hints(&[(Input::A, "Start game"), (Input::B, "Back")]);
+    }
+
+    /// The controller settings: the rows on the left, and on the right
+    /// what the layout picked does (or, on the mouse's rows, the keys).
+    fn draw_settings(&self, p: &mut Pen) {
+        let c = &self.settings.controls;
+        p.panel(60.0, 110.0, 720.0, 530.0);
+        for (k, label) in SETTINGS_ROWS.iter().enumerate() {
+            let y = 120.0 + k as f32 * 52.0;
+            let on = self.srow == k;
+            p.row(72.0, y, 696.0, 48.0, on, Hit::Row(k));
+            let col = if on { WHITE } else { TEXT };
+            p.text(90.0, y + 33.0, 22.0, col, Align::Left, label);
+            let value = match k {
+                STICKS_ROW => c.sticks.name().to_string(),
+                BUTTONS_ROW => c.buttons.name().to_string(),
+                2 => controls::look_sensitivity_label(c.look_sensitivity),
+                3 => controls::enabled(c.look_inverted).into(),
+                4 => controls::enabled(c.auto_center).into(),
+                5 => controls::enabled(c.vibration).into(),
+                MOUSE_ROW => format!("{:.1}", c.mouse_sensitivity),
+                MOUSE_INVERT_ROW => controls::enabled(c.mouse_inverted).into(),
+                _ => continue,
+            };
+            p.text(600.0, y + 33.0, 22.0, col, Align::Center, &value);
+            for (x, text, forward) in [(455.0, "<", false), (745.0, ">", true)] {
+                let arrow = if on { SEL_EDGE } else { DIM };
+                p.text(x, y + 33.0, 24.0, arrow, Align::Center, text);
+                p.area(x - 22.0, y + 2.0, 44.0, 44.0, Hit::Step(k, forward));
+            }
+        }
+        let help = match self.srow {
+            STICKS_ROW => c.sticks.help(),
+            BUTTONS_ROW => c.buttons.help(),
+            2 => "How fast the controller turns and looks: 1 (low) to 10 (insane).",
+            3 => "Pushing the thumbstick up looks down.",
+            4 => "The view levels itself as you walk.",
+            5 => "The controller rumbles when you fire, take hits and drive.",
+            MOUSE_ROW => "How fast the mouse looks. Keys marked ? are MCC's and may not work yet.",
+            MOUSE_INVERT_ROW => "Pushing the mouse forward looks down.",
+            _ => "Every setting back to Halo 2's default.",
+        };
+        for (k, line) in p.wrap(17.0, 680.0, help).iter().take(2).enumerate() {
+            p.text(84.0, 610.0 + k as f32 * 22.0, 17.0, DIM, Align::Left, line);
+        }
+        p.panel(810.0, 110.0, 410.0, 530.0);
+        if matches!(self.srow, MOUSE_ROW | MOUSE_INVERT_ROW) {
+            self.draw_keys(p);
+        } else {
+            self.draw_bindings(p, c);
+        }
+        let mut hints = vec![(
+            Input::A,
+            if self.srow == RESTORE_ROW {
+                "Restore defaults"
+            } else {
+                "Change"
+            },
+        )];
+        hints.push((Input::B, "Back"));
+        p.hints(&hints);
+    }
+
+    /// The keyboard and mouse keys: halo2.dll's own, then MCC's (marked
+    /// `?`: they work only if the engine reads the profile's table).
+    fn draw_keys(&self, p: &mut Pen) {
+        p.text(834.0, 142.0, 16.0, HEAD, Align::Left, "KEYBOARD AND MOUSE");
+        for (k, (keys, what, the_games)) in controls::KEYBOARD_BINDINGS.iter().enumerate() {
+            let y = 172.0 + k as f32 * 25.0;
+            let (key_col, col) = if *the_games { (HEAD, TEXT) } else { (DIM, DIM) };
+            p.text(834.0, y, 17.0, key_col, Align::Left, keys);
+            let what = if *the_games {
+                what.to_string()
+            } else {
+                format!("{what} ?")
+            };
+            let what = p.fit(17.0, 236.0, &what);
+            p.text(960.0, y, 17.0, col, Align::Left, &what);
+        }
+        p.text(
+            834.0,
+            600.0,
+            15.0,
+            DIM,
+            Align::Left,
+            "? MCC's key: not yet known to work",
+        );
+        p.text(834.0, 620.0, 15.0, DIM, Align::Left, "in this engine.");
+    }
+
+    /// What each button of the layout picked does, and the thumbsticks.
+    fn draw_bindings(&self, p: &mut Pen, c: &Controls) {
+        p.text(834.0, 142.0, 16.0, HEAD, Align::Left, "BUTTONS");
+        p.text(1196.0, 142.0, 16.0, DIM, Align::Right, c.buttons.name());
+        let bindings = c.buttons.bindings();
+        // Up to 14 lines, and the thumbsticks under them.
+        let step = if bindings.len() > 12 { 25.0 } else { 28.0 };
+        let mut y = 176.0;
+        for (b, what) in bindings {
+            let face = match b {
+                button::A => Some(Input::A),
+                button::B => Some(Input::B),
+                button::X => Some(Input::X),
+                button::Y => Some(Input::Y),
+                button::LB => Some(Input::Lb),
+                button::RB => Some(Input::Rb),
+                _ => None,
+            };
+            match face {
+                Some(i) => p.button(852.0, y - 7.0, i),
+                None => {
+                    p.text(834.0, y, 17.0, HEAD, Align::Left, short_button(b));
+                }
+            }
+            let what = p.fit(18.0, 248.0, &what);
+            p.text(948.0, y, 18.0, TEXT, Align::Left, &what);
+            y += step;
+        }
+        y += 10.0;
+        p.text(834.0, y, 16.0, HEAD, Align::Left, "THUMBSTICKS");
+        p.text(1196.0, y, 16.0, DIM, Align::Right, c.sticks.name());
+        let [left, right] = c.sticks.sticks();
+        for (k, (stick, what)) in [("Left", left), ("Right", right)].iter().enumerate() {
+            let y = y + 30.0 + k as f32 * 28.0;
+            p.text(834.0, y, 17.0, HEAD, Align::Left, stick);
+            p.text(948.0, y, 18.0, TEXT, Align::Left, what);
+        }
     }
 
     fn draw_players(&self, p: &mut Pen) {
@@ -3001,6 +3337,16 @@ fn utc_date(unix: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// A button's name in the settings' list, short (the face buttons and the
+/// bumpers are drawn as buttons).
+fn short_button(b: u8) -> &'static str {
+    match b {
+        button::LS => "LS click",
+        button::RS => "RS click",
+        b => controls::button_name(b),
+    }
+}
+
 /// The first row to show so that row `sel` of `len` is in view, `rows` at a
 /// time.
 fn first_row(sel: usize, len: usize, rows: usize) -> usize {
@@ -3360,6 +3706,7 @@ mod tests {
             // Nothing listens on port 9 here, so the dial fails quickly.
             server: "127.0.0.1:9".into(),
             gamertag: "ALPHA".into(),
+            ..Settings::default()
         }
         .save(&dir.join("lobby.txt"))
         .unwrap();
@@ -3406,6 +3753,219 @@ mod tests {
         assert_eq!(a.label(), "custom");
         a.input(Input::B);
         assert_eq!(a.label(), "live");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_settings_screen_changes_and_saves_the_controls() {
+        use crate::controls::{ButtonLayout, StickLayout};
+        let dir = scratch("settings");
+        let mut a = app(&dir);
+        // From the sign-in screen: the controller's X (the letter is typed).
+        a.input(Input::Char('x'));
+        assert_eq!(a.label(), "signin");
+        assert_eq!(a.fields[0], "X");
+        a.input(Input::X);
+        assert_eq!(a.label(), "settings");
+        // Halo 2's order: the thumbsticks first; A steps on.
+        assert_eq!(a.srow, STICKS_ROW);
+        a.input(Input::A);
+        assert_eq!(a.settings.controls.sticks, StickLayout::Southpaw);
+        // Down to the buttons; right and left step the layout round.
+        a.input(Input::Down);
+        a.input(Input::Right);
+        assert_eq!(a.settings.controls.buttons, ButtonLayout::Southpaw);
+        a.input(Input::Left);
+        a.input(Input::Left);
+        assert_eq!(a.settings.controls.buttons, ButtonLayout::Recon);
+        a.input(Input::Left);
+        assert_eq!(a.settings.controls.buttons, ButtonLayout::BumperJumper);
+        // Look sensitivity stops at 10 with right, and A goes round.
+        a.input(Input::Down);
+        for _ in 0..12 {
+            a.input(Input::Right);
+        }
+        assert_eq!(a.settings.controls.look_sensitivity, 10);
+        a.input(Input::A);
+        assert_eq!(a.settings.controls.look_sensitivity, 1);
+        a.input(Input::Left);
+        assert_eq!(a.settings.controls.look_sensitivity, 1);
+        // The switches flip either way.
+        a.input(Input::Down);
+        a.input(Input::Left);
+        assert!(a.settings.controls.look_inverted);
+        a.input(Input::Down);
+        a.input(Input::Down);
+        a.input(Input::Right);
+        assert!(!a.settings.controls.vibration);
+        // Mouse sensitivity in tenths.
+        a.input(Input::Down);
+        assert_eq!(a.srow, MOUSE_ROW);
+        a.input(Input::Right);
+        a.input(Input::Right);
+        assert_eq!(a.settings.controls.mouse_sensitivity, 1.8);
+        // The mouse's inversion is its own.
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert!(a.settings.controls.mouse_inverted);
+        // Saved as it changes: a new lobby reads them back.
+        let saved = Settings::load(&dir.join("lobby.txt"));
+        assert_eq!(saved.controls, a.settings.controls);
+        assert_eq!(app(&dir).settings.controls, a.settings.controls);
+        // Down stops at Restore Defaults, whose A puts every one back.
+        for _ in 0..5 {
+            a.input(Input::Down);
+        }
+        assert_eq!(SETTINGS_ROWS[RESTORE_ROW], "Restore Defaults");
+        assert_eq!(a.srow, RESTORE_ROW);
+        a.input(Input::A);
+        assert_eq!(a.settings.controls, Controls::default());
+        assert_eq!(
+            Settings::load(&dir.join("lobby.txt")).controls,
+            Controls::default()
+        );
+        // B (or Backspace, which rubs nothing out here) goes back.
+        a.input(Input::Backspace);
+        assert_eq!(a.label(), "signin");
+        assert_eq!(a.fields[0], "X");
+        // The headless script's `set`.
+        assert!(a.set_control("button_layout", "bumper_jumper").is_ok());
+        assert_eq!(a.settings.controls.buttons, ButtonLayout::BumperJumper);
+        assert!(a.set_control("button_layout", "claw").is_err());
+        assert!(a.set_control("colour", "red").is_err());
+        assert_eq!(
+            Settings::load(&dir.join("lobby.txt")).controls.buttons,
+            ButtonLayout::BumperJumper
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_playlists_end_with_custom_game_and_settings() {
+        let dir = scratch("settings-row");
+        let (mut a, _server) = live_app(&dir);
+        view(&mut a).playlists = vec![PlaylistInfo {
+            id: 11,
+            key: "h2h".into(),
+            name: "Head to Head".into(),
+            ranked: true,
+            teams: false,
+            guests: false,
+            min: 2,
+            max: 2,
+            party_max: 1,
+            searching: 0,
+            playing: 0,
+            level: 1,
+            maps: Vec::new(),
+        }];
+        for _ in 0..5 {
+            a.input(Input::Down);
+        }
+        a.tick(a.now);
+        // Row 0 the playlist, 1 Custom Game, 2 Settings.
+        assert_eq!(a.sel, 2);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        a.input(Input::B);
+        assert_eq!(a.label(), "live");
+        assert_eq!(a.sel, 2);
+        // Escape still asks to quit from the playlists, and so does
+        // Backspace.
+        a.input(Input::Backspace);
+        assert_eq!(a.label(), "quit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_settings_screen_draws_each_layout_and_its_arrows_work() {
+        let Ok(mut text) = Text::system() else {
+            return;
+        };
+        let dir = scratch("settings-draw");
+        let mut a = app(&dir);
+        a.input(Input::X);
+        let mut c = Canvas::new(1280, 720);
+        for l in crate::controls::ButtonLayout::ALL {
+            a.settings.controls.buttons = l;
+            a.draw(&mut c, &mut text);
+            assert!(a.drawn().iter().any(|d| d == l.name()), "{l:?}");
+            assert!(a.drawn().iter().any(|d| d == "Fire"));
+        }
+        assert!(a.drawn().iter().any(|d| d == "Pause game"));
+        assert!(a.drawn().iter().any(|d| d == "Look / rotate"));
+        assert!(a.drawn().iter().any(|d| d == "CONTROLLER"));
+        for row in [MOUSE_ROW, MOUSE_INVERT_ROW] {
+            a.srow = row;
+            a.draw(&mut c, &mut text);
+            assert!(a.drawn().iter().any(|d| d == "KEYBOARD AND MOUSE"));
+            assert!(a.drawn().iter().any(|d| d == "W A S D"));
+            assert!(a.drawn().iter().any(|d| d == "Throw grenade"));
+            assert!(a.drawn().iter().any(|d| d == "Dual wield ?"));
+        }
+        // The arrows step the row they are on.
+        let (s, ox, oy) = a.view;
+        let arrow = a
+            .areas
+            .iter()
+            .find(|ar| ar.hit == Hit::Step(BUTTONS_ROW, true))
+            .copied()
+            .unwrap();
+        let before = a.settings.controls.buttons;
+        a.click(ox + (arrow.x + 5.0) * s, oy + (arrow.y + 5.0) * s);
+        assert_eq!(a.srow, BUTTONS_ROW);
+        assert_eq!(a.settings.controls.buttons, before.next(true));
+        // Every row and its arrows are on the panel, above the help line.
+        let last = a
+            .areas
+            .iter()
+            .find(|ar| ar.hit == Hit::Row(RESTORE_ROW))
+            .copied()
+            .unwrap();
+        assert!(last.y + last.h <= 600.0, "{}", last.y + last.h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_game_gets_the_pad_and_the_keys_while_the_engine_plays() {
+        let dir = scratch("ingame");
+        let mut a = app(&dir);
+        assert!(a.wants_pad());
+        assert!(
+            a.pad_is_the_lobbys(true),
+            "only the in-game screen gives it up"
+        );
+        a.screen = Screen::InGame;
+        // No engine: the lobby still takes the pad. An engine playing:
+        // the game has it.
+        assert!(a.wants_pad());
+        assert!(a.pad_is_the_lobbys(false));
+        assert!(!a.pad_is_the_lobbys(true));
+        // Space (A here, jump there) and letters do nothing on this screen.
+        a.key(Input::Char(' '));
+        a.key(Input::Char('b'));
+        assert_eq!(a.label(), "ingame");
+        assert!(a.popup.is_none());
+        // While the engine plays, Enter, Esc and Backspace are the game's
+        // too, on the screen and in its Leave Game popup; arrows aren't.
+        for i in [Input::A, Input::B, Input::Backspace, Input::Char('x')] {
+            assert!(a.keys_are_the_games(i, true), "{i:?}");
+        }
+        assert!(!a.keys_are_the_games(Input::Up, true));
+        a.popup = Some(Popup::LeaveGame);
+        assert!(a.keys_are_the_games(Input::A, true));
+        // A click on the popup's buttons still leaves (it goes to
+        // `input`); with no engine, Esc works as before.
+        a.popup = None;
+        assert!(!a.keys_are_the_games(Input::B, false));
+        a.key(Input::B);
+        assert_eq!(a.label(), "leave");
+        // Elsewhere the keys are the lobby's whether or not an engine runs.
+        a.popup = None;
+        a.screen = Screen::Live;
+        for i in [Input::A, Input::B, Input::Char('x')] {
+            assert!(!a.keys_are_the_games(i, true), "{i:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
