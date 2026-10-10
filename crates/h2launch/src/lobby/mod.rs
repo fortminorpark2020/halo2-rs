@@ -81,13 +81,26 @@ pub fn run(args: &Args) -> i32 {
         }
     };
     let (kind, maps) = engine_and_maps(args, &log);
-    let text = match Text::system() {
+    let fonts = halo2_fonts(args);
+    let text = match Text::halo2(fonts.as_deref()) {
         Ok(t) => t,
         Err(e) => {
             log(&format!("lobby: {e}"));
             return 1;
         }
     };
+    match (&fonts, text.halo2_slots()) {
+        (Some(dir), slots) if !slots.is_empty() => log(&format!(
+            "lobby: Halo 2's fonts from {} ({})",
+            dir.display(),
+            slots.join(", ")
+        )),
+        (Some(dir), _) => log(&format!(
+            "lobby: no Halo 2 fonts in {}; using the system font",
+            dir.display()
+        )),
+        (None, _) => log("lobby: using the system font"),
+    }
     let cfg = Config {
         folder,
         exe,
@@ -129,6 +142,30 @@ fn hide_own_console(log: &Log) {
 
 #[cfg(not(windows))]
 fn hide_own_console(_: &Log) {}
+
+/// Where Halo 2's fonts are: `H2LOBBY_H2FONTS` (a folder, or `off` for
+/// the system font), else MCC's `halo2\h2_fonts`.
+fn halo2_fonts(args: &Args) -> Option<PathBuf> {
+    match std::env::var_os("H2LOBBY_H2FONTS") {
+        Some(v) if v == "off" => None,
+        Some(v) => Some(PathBuf::from(v)),
+        None => mcc_fonts(args),
+    }
+}
+
+#[cfg(windows)]
+fn mcc_fonts(args: &Args) -> Option<PathBuf> {
+    let root = crate::win::mcc_root(args.mcc.as_deref())?;
+    Some(PathBuf::from(crate::mccroot::join(
+        &root,
+        r"halo2\h2_fonts",
+    )))
+}
+
+#[cfg(not(windows))]
+fn mcc_fonts(_: &Args) -> Option<PathBuf> {
+    None
+}
 
 /// Which engine matches are played on, and the maps the server is told
 /// this PC has.

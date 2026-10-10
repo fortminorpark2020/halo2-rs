@@ -55,7 +55,8 @@ install. No game files are included in this repository.
   the playlists) lets the party leader pick any game type and map for the
   party, unranked; it works alone too. Y on the playlists opens the party:
   its leader can hand the lead to another member, remove someone, or make
-  the party invite only, and anyone can leave it there. `--offline` starts
+  the party invite only, and anyone can leave it there. Its text is in Halo
+  2's own fonts, read from your MCC install. `--offline` starts
   an offline Slayer match on Lockout instead. It reads the game's
   `halo2.dll` and never changes any MCC file. It is not part of the game
   above. See `docs/notes/launcher/README.md`.

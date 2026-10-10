@@ -5,7 +5,7 @@
 //! Nothing here opens a window: `window`, or the headless loop in
 //! `mod.rs`, gives it input and time and shows what it draws.
 
-use super::canvas::{Align, Canvas, Color, Text};
+use super::canvas::{Align, Canvas, Color, Style, Text};
 use super::child::{Kind, Match, Running, Said};
 use super::names;
 use super::settings::{self, Settings, GAMERTAG_LEN};
@@ -1973,6 +1973,7 @@ impl Pen<'_> {
         let k = self.s;
         let w = self.c.text(
             self.t,
+            Style::for_size(size),
             self.ox + x * k,
             self.oy + y * k,
             size * k,
@@ -1984,11 +1985,12 @@ impl Pen<'_> {
     }
 
     fn measure(&mut self, size: f32, s: &str) -> f32 {
-        self.t.measure(size * self.s, s) / self.s
+        self.t.measure(Style::for_size(size), size * self.s, s) / self.s
     }
 
     fn fit(&mut self, size: f32, width: f32, s: &str) -> String {
-        self.t.fit(size * self.s, width * self.s, s)
+        self.t
+            .fit(Style::for_size(size), size * self.s, width * self.s, s)
     }
 
     /// `s` broken into lines no wider than `width`.

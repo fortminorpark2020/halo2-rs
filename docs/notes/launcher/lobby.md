@@ -49,11 +49,21 @@ the launcher doesn't do.
 
 ## Drawing and input
 
-- The window is drawn on the CPU into a pixel buffer (`softbuffer`), with
-  text from a font already on the PC (Bahnschrift, then Segoe UI or Arial
-  on Windows; DejaVu Sans or Liberation Sans on Linux) through `ab_glyph`.
-  No font or art is shipped or read from MCC. A screen is cheap to draw,
-  and the same code writes PNGs for tests without a GPU.
+- The window is drawn on the CPU into a pixel buffer (`softbuffer`). Text
+  is in Halo 2's own fonts, read at start from the owner's MCC
+  (`halo2\h2_fonts`, the same format as Halo 2 Vista's `maps\fonts`, read
+  by `blam_cache::font`; checked on the owner's PC 2026-10-10): by size,
+  conduit-9 for small print, Handel Gothic 11 for column headings,
+  conduit-13 for text, Handel Gothic 13 (the main menu's font) for names
+  and rows, and Handel Gothic 24 for titles. The glyphs are scaled from
+  their size in the file (ascent plus descent) to the text's. Characters
+  they lack, and everything when MCC isn't found, come from a font
+  already on the PC (Bahnschrift, then Segoe UI or Arial on Windows;
+  DejaVu Sans or Liberation Sans on Linux) through `ab_glyph`.
+  `H2LOBBY_H2FONTS` names another folder of them, or `off` for the system
+  font alone. No font or art is shipped. A screen is cheap to draw, and
+  the same code writes PNGs for tests without a GPU (with Halo 2's fonts
+  those PNGs hold MCC's glyphs: keep them on the owner's PC).
 - Layout is in units of 1/720 of the window's height, so it scales.
 - Keyboard (arrows, Enter for A, Esc for B, the X and Y keys), mouse (click
   a row to select it, again to pick it; click a button hint) and Xbox

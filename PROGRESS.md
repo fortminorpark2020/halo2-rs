@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 08:10 UTC. Any assistant that works on the project
+Last updated 2026-10-10 08:15 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -153,7 +153,10 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   no protocol change) was tested on Linux with three lobbies. The lobby
   now keeps each game's results block in `%LOCALAPPDATA%\h2launch\results`
   on the owner's PC (never upload them), so the first real games with
-  kills give the kills offset (Slayer: kills = score + suicides). Next:
+  kills give the kills offset (Slayer: kills = score + suicides). The
+  lobby's text is drawn in Halo 2's own fonts from MCC's `halo2\h2_fonts`
+  (same format as Vista's; `blam_cache::font`, taken from `menu-preview`
+  unchanged). Next:
   kills in the results block, a play session by the owner, then two PCs.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
