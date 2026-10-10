@@ -54,7 +54,7 @@ impl From<i16> for Format {
 
 impl Format {
     /// Bytes needed for the top mip level.
-    fn top_level_size(self, w: usize, h: usize) -> Option<usize> {
+    pub(crate) fn top_level_size(self, w: usize, h: usize) -> Option<usize> {
         let blocks = w.div_ceil(4) * h.div_ceil(4);
         Some(match self {
             Format::A8 | Format::Y8 | Format::AY8 | Format::P8Bump => w * h,

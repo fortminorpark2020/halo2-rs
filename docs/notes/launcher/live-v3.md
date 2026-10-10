@@ -17,7 +17,11 @@ Status (2026-10-10): parts A, B and C are built and committed on
 passing and the three-lobby run below passing on Linux. Not done yet: the
 Proxmox deploy, and a real game on the owner's PC to confirm the kills
 offsets (the engine's log line `result: kills: ...`). See "Part A as
-built" and "Part B and C as built" at the end.
+built" and "Part B and C as built" at the end. Since then the rank icons
+are read from MCC's own `mainmenu.map` first (cache format 13, through
+`blam_cache::mcc`; see `mcc-maps.md`), with Halo 2 Vista's as the second
+source, so players with only MCC get them; that hasn't run on the owner's
+PC yet (`reads_real_icons_from_mcc_maps`, ignored, does it there).
 
 All of it ships together at `LIVE_PROTOCOL` 3, with one Proxmox deploy
 at the end. The game's `PROTOCOL` stays 26, and the game (h2viewer) keeps
@@ -842,12 +846,13 @@ real alpha cut-out, one zlib stream each, no sequences:
 - `ui\global_bitmaps\rank_icons_sm`: 17 by 17.
 
 `shared.map` has the tag headers only, with the pixels pointing back into
-`mainmenu.map`, so `mainmenu.map` is what's read. MCC's own maps are cache
-format 13, which blam-cache doesn't read yet (`Header::parse` refuses any
-version but 8), so for now the icons come from a Halo 2 Vista install.
-Reading them from MCC's format-13 `mainmenu.map` is a later step, noted in
-lobby.md. Without a Vista `mainmenu.map` the lobby draws level numbers
-exactly as now.
+`mainmenu.map`, so `mainmenu.map` is what's read. MCC's own `mainmenu.map`
+(cache format 13) holds the same two tags, with the same images once B, G,
+R, A is turned into R, G, B, A; its pixels are in the `textures.dat`
+beside it. As first written (below) only Vista's was read; it is now read
+second, after MCC's (see "Rank icons from MCC" at the end, and
+`mcc-maps.md`). Without either the lobby draws level numbers exactly as
+now.
 
 ### 4.1 `crates/h2launch/src/lobby/ranks.rs` (part C)
 
@@ -1373,3 +1378,34 @@ Part B follows the note, with these choices (2026-10-10):
   asks at 13 s, once BRAVO is a friend; and each lobby waits 6 s after
   `wait failed` before `a`, as the server takes a moment to start again.
 
+## Rank icons from MCC
+
+Added after parts A to C (2026-10-10), so players with only MCC get the
+icons:
+
+- `blam_cache::mcc` (`crates/blam-cache/src/mcc.rs`) reads cache format 13
+  as far as this needs: the header, the chunk table, chunks inflated on
+  demand, the tag index and names, a tag's meta, a bitmap tag's 168-byte
+  image entries, and one image's pixels from `textures.dat`. The format is
+  in `mcc-maps.md`. Its `synthetic` module (a cargo feature, on for
+  h2launch's tests) builds made-up maps and textures.dat files.
+- `ranks::candidates(env, mcc_maps, exe_dir)` puts MCC's
+  `halo2\h2_maps_win64_dx11\mainmenu.map` first, then the Vista folders,
+  then beside the launcher. The lobby passes the MCC folder it finds as for
+  `h2_fonts` (`win::mcc_root`); on Linux there is none.
+- `ranks::read` tells the formats apart by the version word: 13 goes to
+  `blam_cache::mcc` with the `textures.dat` in the map's folder, anything
+  else to the Vista reader as before. `RankIcons::from_mcc` says which.
+- `ranks::first_readable` (which `load` calls) tries every candidate that
+  is a file, in order, until one reads, logging why each one before it
+  didn't. `find` became `existing`.
+
+`load`'s log lines are now:
+
+- `lobby: rank icons from <path> (MCC's, cache format 13)` or
+  `(Halo 2 Vista's)`
+- `lobby: rank icons: <error>` for each map that didn't read
+- `lobby: rank icons off (H2LOBBY_RANKS=off); levels show as numbers`
+- `lobby: no mainmenu.map found (MCC's or Halo 2 Vista's); levels show as
+  numbers`
+- `lobby: no rank icons could be read; levels show as numbers`

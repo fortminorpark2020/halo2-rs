@@ -104,7 +104,7 @@ pub fn run(args: &Args) -> i32 {
         )),
         (None, _) => log("lobby: using the system font"),
     }
-    let ranks = ranks::load(&*log).map(Arc::new);
+    let ranks = ranks::load(mcc_maps(args).as_deref(), &*log).map(Arc::new);
     let cfg = Config {
         folder,
         exe,
@@ -169,6 +169,18 @@ fn mcc_fonts(args: &Args) -> Option<PathBuf> {
 
 #[cfg(not(windows))]
 fn mcc_fonts(_: &Args) -> Option<PathBuf> {
+    None
+}
+
+/// MCC's Halo 2 maps folder, where the rank icons are looked for first.
+#[cfg(windows)]
+fn mcc_maps(args: &Args) -> Option<PathBuf> {
+    let root = crate::win::mcc_root(args.mcc.as_deref())?;
+    Some(PathBuf::from(crate::mccroot::join(&root, ranks::MCC_MAPS)))
+}
+
+#[cfg(not(windows))]
+fn mcc_maps(_: &Args) -> Option<PathBuf> {
     None
 }
 

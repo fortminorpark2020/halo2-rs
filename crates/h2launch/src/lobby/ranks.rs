@@ -1,22 +1,24 @@
-//! Halo 2's level icons, read from a Halo 2 Vista mainmenu.map: the 50
-//! rank icons Xbox Live showed beside a player's level, big and small. The
-//! design is in `docs/notes/launcher/live-v3.md` (section 4).
+//! Halo 2's level icons: the 50 rank icons Xbox Live showed beside a
+//! player's level, big and small. The design is in
+//! `docs/notes/launcher/live-v3.md` (section 4).
 //!
-//! They are two bitmap tags, 50 images each in level order (image index =
-//! level - 1), read through blam-cache as the old game's emblems are. MCC's
-//! own maps are cache format 13, which blam-cache doesn't read yet, so for
-//! now they come from a Halo 2 Vista install; without one the lobby draws
-//! level numbers. Nothing here draws or keeps lobby state, and no image is
-//! shipped: they are read from the player's own files each time.
+//! They are two bitmap tags in `mainmenu.map`, 50 images each in level
+//! order (image index = level - 1). MCC's own mainmenu.map (cache format
+//! 13, its pixels in the textures.dat beside it) is tried first, through
+//! `blam_cache::mcc`; then a Halo 2 Vista one (format 8), read as the old
+//! game's emblems are. Both hold the same icons. Without either the lobby
+//! draws level numbers. Nothing here draws or keeps lobby state, and no
+//! image is shipped: they are read from the player's own files each time.
 
 use blam_cache::bitmap::{self, Image};
-use blam_cache::{GroupTag, MapSet};
+use blam_cache::{mcc, GroupTag, MapSet};
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// The environment variable that names the map (a file, or a folder holding
-/// mainmenu.map), or `off`.
+/// mainmenu.map; MCC's or Halo 2 Vista's, told apart by its version), or
+/// `off`.
 pub const ENV: &str = "H2LOBBY_RANKS";
 /// Levels, and so icons in each tag.
 pub const LEVELS: u8 = 50;
@@ -30,8 +32,10 @@ pub const MAP_DIRS: [&str; 3] = [
 ];
 /// The map the icons are in.
 const MAP_NAME: &str = "mainmenu.map";
-/// MCC's Halo 2 maps' cache version (Halo 2 Vista's is 8).
-const MCC_VERSION: i32 = 13;
+/// Beside MCC's maps: their bitmaps' pixels.
+const TEXTURES_NAME: &str = "textures.dat";
+/// MCC's Halo 2 maps, inside the MCC folder.
+pub const MCC_MAPS: &str = r"halo2\h2_maps_win64_dx11";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Size {
@@ -56,6 +60,7 @@ pub struct RankIcons {
     big: Vec<Icon>,
     small: Vec<Icon>,
     from: PathBuf,
+    mcc: bool,
 }
 
 impl RankIcons {
@@ -67,6 +72,7 @@ impl RankIcons {
             big: icons(big, "rank_icons")?,
             small: icons(small, "rank_icons_sm")?,
             from,
+            mcc: false,
         })
     }
 
@@ -82,6 +88,12 @@ impl RankIcons {
     /// The map they were read from.
     pub fn from(&self) -> &Path {
         &self.from
+    }
+
+    /// Whether that map is MCC's (cache format 13) rather than Halo 2
+    /// Vista's.
+    pub fn from_mcc(&self) -> bool {
+        self.mcc
     }
 }
 
@@ -121,9 +133,14 @@ fn icons(images: Vec<Image>, tag: &str) -> Result<Vec<Icon>, String> {
 
 /// The maps to try, in order, or None when `H2LOBBY_RANKS` is `off`.
 /// With `env` set: only that (a folder means its mainmenu.map). Without:
-/// each of MAP_DIRS' mainmenu.map, then `maps\mainmenu.map` beside the
+/// MCC's mainmenu.map (`mcc_maps`, its `halo2\h2_maps_win64_dx11`), each
+/// of MAP_DIRS' mainmenu.map, then `maps\mainmenu.map` beside the
 /// launcher (`exe_dir`). An empty `env` counts as unset.
-pub fn candidates(env: Option<&OsStr>, exe_dir: Option<&Path>) -> Option<Vec<PathBuf>> {
+pub fn candidates(
+    env: Option<&OsStr>,
+    mcc_maps: Option<&Path>,
+    exe_dir: Option<&Path>,
+) -> Option<Vec<PathBuf>> {
     match env.filter(|v| !v.is_empty()) {
         Some(v) if v == "off" => None,
         Some(v) => {
@@ -135,10 +152,8 @@ pub fn candidates(env: Option<&OsStr>, exe_dir: Option<&Path>) -> Option<Vec<Pat
             }
         }
         None => {
-            let mut out: Vec<PathBuf> = MAP_DIRS
-                .iter()
-                .map(|d| Path::new(d).join(MAP_NAME))
-                .collect();
+            let mut out: Vec<PathBuf> = mcc_maps.map(|d| d.join(MAP_NAME)).into_iter().collect();
+            out.extend(MAP_DIRS.iter().map(|d| Path::new(d).join(MAP_NAME)));
             if let Some(dir) = exe_dir {
                 out.push(dir.join("maps").join(MAP_NAME));
             }
@@ -147,21 +162,19 @@ pub fn candidates(env: Option<&OsStr>, exe_dir: Option<&Path>) -> Option<Vec<Pat
     }
 }
 
-/// The first candidate that is a file.
-pub fn find(candidates: &[PathBuf]) -> Option<PathBuf> {
-    candidates.iter().find(|p| p.is_file()).cloned()
+/// The candidates that are files, in order.
+pub fn existing(candidates: &[PathBuf]) -> Vec<PathBuf> {
+    candidates.iter().filter(|p| p.is_file()).cloned().collect()
 }
 
-/// Both tags' 50 images from a Halo 2 Vista mainmenu.map. An error names
-/// the map and why: not a map, MCC's cache format 13 ("MCC's format
-/// (cache version 13) isn't read yet"), a tag missing, an image that
-/// won't decode.
+/// Both tags' 50 images from a mainmenu.map, MCC's or Halo 2 Vista's (told
+/// apart by the cache version in its first bytes). An error names the map
+/// and why: not a map, a version neither reader takes, a tag missing, an
+/// image that won't decode, MCC's textures.dat missing.
 pub fn read(map: &Path) -> Result<RankIcons, String> {
     let at = |why: String| format!("{}: {why}", map.display());
-    // The magic and the version word first, before blam-cache: it checks
-    // `foot` at 0x7FC before the version, and MCC's header may not be laid
-    // out that way past its version word, which would make an MCC map say
-    // "missing 'foot'" instead of what it is.
+    // The magic and the version word first: the two formats' headers part
+    // ways after them (Vista's `foot` is at 0x7FC, MCC's at 0x37C).
     let mut start = [0u8; 8];
     std::fs::File::open(map)
         .and_then(|mut f| f.read_exact(&mut start))
@@ -169,22 +182,58 @@ pub fn read(map: &Path) -> Result<RankIcons, String> {
             std::io::ErrorKind::UnexpectedEof => at("not a Halo 2 map (too short)".into()),
             _ => at(e.to_string()),
         })?;
-    // `head` as blam-cache's Header::parse checks it: the four letters read
-    // as a little-endian word, so the file holds them backwards.
-    if blam_cache::u32_at(&start, 0) != u32::from_be_bytes(*b"head") {
+    let Some(version) = blam_cache::cache_version(&start) else {
         return Err(at("not a Halo 2 map (no 'head')".into()));
-    }
-    let version = blam_cache::i32_at(&start, 4);
-    if version == MCC_VERSION {
-        return Err(at(format!(
-            "MCC's format (cache version {MCC_VERSION}) isn't read yet; \
-             the icons need a Halo 2 Vista mainmenu.map"
-        )));
+    };
+    if version == mcc::VERSION {
+        return read_mcc(map).map_err(|e| at(format!("MCC's map (cache format 13): {e}")));
     }
     let mut set = MapSet::open(map).map_err(|e| at(e.to_string()))?;
     let big = images(&mut set, BIG_TAG).map_err(at)?;
     let small = images(&mut set, SMALL_TAG).map_err(at)?;
     RankIcons::new(big, small, map.to_path_buf()).map_err(at)
+}
+
+/// From MCC's format-13 mainmenu.map, its pixels in the textures.dat in
+/// the same folder.
+fn read_mcc(map: &Path) -> Result<RankIcons, String> {
+    let dat = map.with_file_name(TEXTURES_NAME);
+    let mut tags = mcc::Map::open(map).map_err(|e| e.to_string())?;
+    let mut textures = mcc::Textures::open(&dat).map_err(|e| format!("{}: {e}", dat.display()))?;
+    let big = mcc_images(&mut tags, &mut textures, BIG_TAG)?;
+    let small = mcc_images(&mut tags, &mut textures, SMALL_TAG)?;
+    let mut icons = RankIcons::new(big, small, map.to_path_buf())?;
+    icons.mcc = true;
+    Ok(icons)
+}
+
+/// A bitmap tag's first LEVELS images from an MCC map, decoded.
+fn mcc_images<R, T>(
+    tags: &mut mcc::Map<R>,
+    textures: &mut mcc::Textures<T>,
+    name: &str,
+) -> Result<Vec<Image>, String>
+where
+    R: std::io::Read + std::io::Seek,
+    T: std::io::Read + std::io::Seek,
+{
+    let group = GroupTag::parse("bitm").expect("four letters");
+    let tag = tags
+        .find_tag(group, name)
+        .ok_or_else(|| format!("no bitmap {name} in it"))?
+        .clone();
+    let entries = tags.bitmaps(&tag).map_err(|e| format!("{name}: {e}"))?;
+    (0..usize::from(LEVELS))
+        .map(|i| {
+            let level = i + 1;
+            let entry = entries
+                .get(i)
+                .ok_or_else(|| format!("{name}, level {level}: the tag has no such image"))?;
+            textures
+                .read(entry)
+                .map_err(|e| format!("{name}, level {level}: {e}"))
+        })
+        .collect()
 }
 
 /// A bitmap tag's first LEVELS images, decoded.
@@ -202,31 +251,47 @@ fn images(set: &mut MapSet, name: &str) -> Result<Vec<Image>, String> {
         .collect()
 }
 
-/// What the lobby calls at start: `candidates` from the environment and
-/// the running launcher's folder, `find`, `read`, and one log line saying
-/// what came of it. None means levels are drawn as numbers.
-pub fn load(log: &dyn Fn(&str)) -> Option<RankIcons> {
+/// The first of `candidates` that reads, saying in the log which was used
+/// and why any before it weren't. None means levels are drawn as numbers.
+pub fn first_readable(candidates: &[PathBuf], log: &dyn Fn(&str)) -> Option<RankIcons> {
+    let found = existing(candidates);
+    if found.is_empty() {
+        log("lobby: no mainmenu.map found (MCC's or Halo 2 Vista's); levels show as numbers");
+        return None;
+    }
+    for map in &found {
+        match read(map) {
+            Ok(icons) => {
+                let kind = if icons.from_mcc() {
+                    "MCC's, cache format 13"
+                } else {
+                    "Halo 2 Vista's"
+                };
+                log(&format!(
+                    "lobby: rank icons from {} ({kind})",
+                    map.display()
+                ));
+                return Some(icons);
+            }
+            Err(e) => log(&format!("lobby: rank icons: {e}")),
+        }
+    }
+    log("lobby: no rank icons could be read; levels show as numbers");
+    None
+}
+
+/// What the lobby calls at start: `candidates` from the environment, MCC's
+/// maps folder (`mcc_maps`, when MCC was found) and the running launcher's
+/// folder, then `first_readable`. None means levels are drawn as numbers.
+pub fn load(mcc_maps: Option<&Path>, log: &dyn Fn(&str)) -> Option<RankIcons> {
     let env = std::env::var_os(ENV);
     let exe = std::env::current_exe().ok();
     let exe_dir = exe.as_deref().and_then(Path::parent);
-    let Some(list) = candidates(env.as_deref(), exe_dir) else {
+    let Some(list) = candidates(env.as_deref(), mcc_maps, exe_dir) else {
         log("lobby: rank icons off (H2LOBBY_RANKS=off); levels show as numbers");
         return None;
     };
-    let Some(map) = find(&list) else {
-        log("lobby: no Halo 2 Vista mainmenu.map found; levels show as numbers");
-        return None;
-    };
-    match read(&map) {
-        Ok(icons) => {
-            log(&format!("lobby: rank icons from {}", map.display()));
-            Some(icons)
-        }
-        Err(e) => {
-            log(&format!("lobby: rank icons: {e}; levels show as numbers"));
-            None
-        }
-    }
+    first_readable(&list, log)
 }
 
 #[cfg(test)]
@@ -303,41 +368,54 @@ mod tests {
 
     #[test]
     fn candidates_off_file_folder_and_unset() {
-        assert_eq!(candidates(Some(OsStr::new("off")), None), None);
+        let mcc_dir = Path::new(r"C:\MCC\halo2\h2_maps_win64_dx11");
+        assert_eq!(
+            candidates(Some(OsStr::new("off")), Some(mcc_dir), None),
+            None
+        );
         let dir = folder("candidates");
         let file = dir.join("other.map");
         std::fs::write(&file, b"x").unwrap();
         // A file is taken as it is, existing or not; nothing else is tried.
         let exe = Path::new("/launcher");
         assert_eq!(
-            candidates(Some(file.as_os_str()), Some(exe)),
+            candidates(Some(file.as_os_str()), Some(mcc_dir), Some(exe)),
             Some(vec![file.clone()])
         );
         let gone = dir.join("gone.map");
-        assert_eq!(candidates(Some(gone.as_os_str()), None), Some(vec![gone]));
+        assert_eq!(
+            candidates(Some(gone.as_os_str()), None, None),
+            Some(vec![gone])
+        );
         // A folder means its mainmenu.map.
         assert_eq!(
-            candidates(Some(dir.as_os_str()), Some(exe)),
+            candidates(Some(dir.as_os_str()), Some(mcc_dir), Some(exe)),
             Some(vec![dir.join("mainmenu.map")])
         );
-        // Unset, or empty: the Vista folders, then beside the launcher.
+        // Unset, or empty: MCC's maps, the Vista folders, then beside the
+        // launcher.
         let want: Vec<PathBuf> = vec![
+            mcc_dir.join("mainmenu.map"),
             Path::new(r"C:\Games\Halo 2 Project Cartographer\maps").join("mainmenu.map"),
             Path::new(r"C:\Program Files (x86)\Microsoft Games\Halo 2\maps").join("mainmenu.map"),
             Path::new(r"C:\Program Files\Microsoft Games\Halo 2\maps").join("mainmenu.map"),
             exe.join("maps").join("mainmenu.map"),
         ];
-        assert_eq!(candidates(None, Some(exe)), Some(want.clone()));
         assert_eq!(
-            candidates(Some(OsStr::new("")), Some(exe)),
+            candidates(None, Some(mcc_dir), Some(exe)),
             Some(want.clone())
         );
-        assert_eq!(candidates(None, None), Some(want[..3].to_vec()));
+        assert_eq!(
+            candidates(Some(OsStr::new("")), Some(mcc_dir), Some(exe)),
+            Some(want.clone())
+        );
+        // No MCC found, no launcher folder: the Vista folders alone.
+        assert_eq!(candidates(None, None, None), Some(want[1..4].to_vec()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn find_picks_the_first_file_there() {
+    fn existing_keeps_the_files_in_order() {
         let dir = folder("find");
         let [a, b, c] = ["a", "b", "c"].map(|n| dir.join(n).join("mainmenu.map"));
         for p in [&b, &c] {
@@ -347,10 +425,13 @@ mod tests {
         // A folder named like the map isn't a file.
         let folder_named = dir.join("d").join("mainmenu.map");
         std::fs::create_dir_all(&folder_named).unwrap();
-        assert_eq!(find(&[a.clone(), b.clone(), c.clone()]), Some(b.clone()));
-        assert_eq!(find(&[c.clone(), b]), Some(c));
-        assert_eq!(find(&[folder_named.clone(), a.clone()]), None);
-        assert_eq!(find(&[]), None);
+        assert_eq!(
+            existing(&[a.clone(), b.clone(), c.clone()]),
+            [b.clone(), c.clone()]
+        );
+        assert_eq!(existing(&[c.clone(), b.clone()]), [c, b]);
+        assert!(existing(&[folder_named.clone(), a.clone()]).is_empty());
+        assert!(existing(&[]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -364,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn read_refuses_what_isnt_a_vista_map_without_panicking() {
+    fn read_refuses_what_isnt_a_map_without_panicking() {
         let dir = folder("refuse");
         let missing = dir.join("mainmenu.map");
         let e = read(&missing).unwrap_err();
@@ -380,7 +461,8 @@ mod tests {
         let e = read(&tiny).unwrap_err();
         assert!(e.contains("not a Halo 2 map"), "{e}");
 
-        // MCC's maps: version 13 whether or not `foot` is where Vista's is.
+        // Version 13 goes to MCC's reader, which wants `foot` at 0x37C,
+        // not where Vista's is.
         let mut b = vec![0u8; 0x800];
         put(&mut b, 0, magic(b"head"));
         put(&mut b, 4, 13);
@@ -389,17 +471,19 @@ mod tests {
         std::fs::write(&with_foot, &b).unwrap();
         let e = read(&with_foot).unwrap_err();
         assert!(
-            e.contains("version 13") && e.contains("mcc-foot.map"),
+            e.contains("cache format 13") && e.contains("'foot'") && e.contains("mcc-foot.map"),
             "{e}"
         );
 
+        // MCC's header, but nothing after it.
         let mut b = vec![0u8; 0x1000];
         put(&mut b, 0, magic(b"head"));
         put(&mut b, 4, 13);
-        let no_foot = dir.join("mcc-nofoot.map");
-        std::fs::write(&no_foot, &b).unwrap();
-        let e = read(&no_foot).unwrap_err();
-        assert!(e.contains("version 13"), "{e}");
+        put(&mut b, 0x37C, magic(b"foot"));
+        let no_body = dir.join("mcc-nobody.map");
+        std::fs::write(&no_body, &b).unwrap();
+        let e = read(&no_body).unwrap_err();
+        assert!(e.contains("cache format 13"), "{e}");
 
         // Another version is left to blam-cache to refuse.
         put(&mut b, 4, 9);
@@ -527,8 +611,8 @@ mod tests {
             assert_eq!(small.rgba[4..8], [level, 2, 3, 255]);
         }
         // The same file found by its folder, as H2LOBBY_RANKS may name it.
-        let list = candidates(Some(dir.as_os_str()), None).unwrap();
-        assert_eq!(find(&list), Some(map.clone()));
+        let list = candidates(Some(dir.as_os_str()), None, None).unwrap();
+        assert_eq!(existing(&list), std::slice::from_ref(&map));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -543,6 +627,145 @@ mod tests {
         let e = read(&map).unwrap_err();
         assert!(e.contains("level 50"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// MCC's mainmenu.map and textures.dat (made up) in `dir`, holding the
+    /// two icon tags with `count` images each, in 4 KiB chunks so the tags
+    /// cross chunk boundaries. Pixels as in `vista_map`.
+    fn mcc_files(dir: &Path, count: u8, big_name: &str) {
+        use blam_cache::mcc::synthetic::{MapBuilder, Meta, Picture, TexturesDat};
+        let mut dat = TexturesDat::default();
+        let mut tag = |w: u16, h: u16, set: u8| -> Meta {
+            let entries = (0..count)
+                .map(|n| {
+                    let mut bgra = Vec::new();
+                    for _ in 0..h {
+                        for x in 0..w {
+                            bgra.extend([3, set, n + 1, if x == 0 { 0 } else { 255 }]);
+                        }
+                    }
+                    dat.push(&Picture {
+                        width: w,
+                        height: h,
+                        bgra,
+                    })
+                })
+                .collect();
+            Meta::Bitmaps(entries)
+        };
+        let big = tag(28, 26, 1);
+        let small = tag(17, 17, 2);
+        let map = MapBuilder::new(0x1000)
+            .tag("matg", r"globals\globals", Meta::Raw(vec![7; 0x900]))
+            .tag("bitm", big_name, big)
+            .tag("bitm", SMALL_TAG, small)
+            .build();
+        std::fs::write(dir.join("mainmenu.map"), map).unwrap();
+        std::fs::write(dir.join("textures.dat"), dat.bytes).unwrap();
+    }
+
+    #[test]
+    fn read_decodes_both_tags_from_an_mcc_map() {
+        let dir = folder("mcc");
+        mcc_files(&dir, 50, BIG_TAG);
+        let map = dir.join("mainmenu.map");
+        let icons = read(&map).unwrap();
+        assert!(icons.from_mcc());
+        assert_eq!(icons.from(), map.as_path());
+        for level in [1u8, 2, 37, 50] {
+            let big = icons.icon(level, Size::Big).unwrap();
+            assert_eq!((big.width, big.height), (28, 26));
+            assert_eq!(big.rgba[..8], [level, 1, 3, 0, level, 1, 3, 255]);
+            let small = icons.icon(level, Size::Small).unwrap();
+            assert_eq!((small.width, small.height), (17, 17));
+            assert_eq!(small.rgba[4..8], [level, 2, 3, 255]);
+        }
+        // A Vista map's icons say they aren't MCC's.
+        std::fs::write(&map, vista_map(50, BIG_TAG)).unwrap();
+        assert!(!read(&map).unwrap().from_mcc());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_names_what_an_mcc_map_lacks() {
+        let dir = folder("mcc-missing");
+        let map = dir.join("mainmenu.map");
+        mcc_files(&dir, 50, r"ui\global_bitmaps\emblems");
+        let e = read(&map).unwrap_err();
+        assert!(e.contains(BIG_TAG) && e.contains("cache format 13"), "{e}");
+        mcc_files(&dir, 49, BIG_TAG);
+        let e = read(&map).unwrap_err();
+        assert!(e.contains("level 50"), "{e}");
+        mcc_files(&dir, 50, BIG_TAG);
+        std::fs::remove_file(dir.join("textures.dat")).unwrap();
+        let e = read(&map).unwrap_err();
+        assert!(e.contains("textures.dat"), "{e}");
+        // A textures.dat cut short.
+        mcc_files(&dir, 50, BIG_TAG);
+        let dat = dir.join("textures.dat");
+        let bytes = std::fs::read(&dat).unwrap();
+        std::fs::write(&dat, &bytes[..bytes.len() / 2]).unwrap();
+        let e = read(&map).unwrap_err();
+        assert!(e.contains("level"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn first_readable_falls_back_to_vista_and_says_so() {
+        let dir = folder("first");
+        let (mcc_dir, vista_dir) = (dir.join("mcc"), dir.join("vista"));
+        for d in [&mcc_dir, &vista_dir] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        mcc_files(&mcc_dir, 50, BIG_TAG);
+        std::fs::write(vista_dir.join("mainmenu.map"), vista_map(50, BIG_TAG)).unwrap();
+        let list = vec![
+            dir.join("gone").join("mainmenu.map"),
+            mcc_dir.join("mainmenu.map"),
+            vista_dir.join("mainmenu.map"),
+        ];
+        let lines = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |l: &str| lines.borrow_mut().push(l.to_string());
+        // MCC's first when it reads.
+        let icons = first_readable(&list, &log).unwrap();
+        assert!(icons.from_mcc());
+        assert_eq!(lines.borrow().len(), 1);
+        assert!(lines.borrow()[0].contains("MCC's"), "{:?}", lines.borrow());
+        // MCC's without textures.dat: Vista's, and the log says why.
+        std::fs::remove_file(mcc_dir.join("textures.dat")).unwrap();
+        lines.borrow_mut().clear();
+        let icons = first_readable(&list, &log).unwrap();
+        assert!(!icons.from_mcc());
+        assert_eq!(icons.from(), list[2].as_path());
+        let got = lines.borrow().clone();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].contains("textures.dat"), "{got:?}");
+        assert!(got[1].contains("Halo 2 Vista's"), "{got:?}");
+        // Neither reads; none there.
+        std::fs::write(vista_dir.join("mainmenu.map"), b"daeh").unwrap();
+        lines.borrow_mut().clear();
+        assert!(first_readable(&list, &log).is_none());
+        assert!(lines.borrow().last().unwrap().contains("numbers"));
+        lines.borrow_mut().clear();
+        assert!(first_readable(&list[..1], &log).is_none());
+        assert!(lines.borrow()[0].contains("no mainmenu.map found"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reads the real icons from MCC's maps folder, named by `H2_MCC_MAPS`
+    /// (its `halo2\h2_maps_win64_dx11`, with textures.dat).
+    #[test]
+    #[ignore]
+    fn reads_real_icons_from_mcc_maps() {
+        let dir = std::env::var("H2_MCC_MAPS").expect("H2_MCC_MAPS names MCC's maps folder");
+        let icons = read(&Path::new(&dir).join("mainmenu.map")).unwrap();
+        assert!(icons.from_mcc());
+        for level in 1..=LEVELS {
+            let big = icons.icon(level, Size::Big).unwrap();
+            assert_eq!((big.width, big.height), (28, 26), "level {level}");
+            let small = icons.icon(level, Size::Small).unwrap();
+            assert_eq!((small.width, small.height), (17, 17), "level {level}");
+        }
     }
 
     /// Reads the real icons from `H2_MAPS` (a Halo 2 Vista maps folder).

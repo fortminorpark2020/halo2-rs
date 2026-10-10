@@ -63,9 +63,9 @@ install. No game files are included in this repository.
   record (yours from the playlists, anyone else's from the players list,
   the party, the friends list or the carnage report): their highest level,
   and their games, wins, kills, deaths and K/D in each ranked playlist. On
-  a keyboard, Q and E (or Page Up and Page Down) are LB and RB. If a Halo 2
-  Vista install is on the PC, levels show as Halo 2's own level icons
-  instead of numbers. Friends and service records need the matching
+  a keyboard, Q and E (or Page Up and Page Down) are LB and RB. Levels show
+  as Halo 2's own level icons, read from your MCC install (or from a Halo 2
+  Vista install if MCC's can't be read); without either they are numbers. Friends and service records need the matching
   server: an older launcher signing in to it is told UPDATE YOUR LAUNCHER.
   Its text is in Halo 2's own fonts, read from your MCC install.
   `--offline` starts

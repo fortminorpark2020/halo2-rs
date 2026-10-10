@@ -79,14 +79,18 @@ the launcher doesn't do.
   gamertag is typed (the sign-in screen, the add friend popup) letters are
   typed, not buttons.
 - Levels are drawn with Halo 2's own level icons (the 50 rank icons, big
-  and small) when a Halo 2 Vista `mainmenu.map` is found (`lobby/ranks.rs`):
-  `H2LOBBY_RANKS` names the map or its folder, or `off`; without it the
-  lobby looks in the three Vista folders the old h2viewer used, then
-  `maps\mainmenu.map` beside the launcher, and logs what it found. Without
-  one, levels are numbers, as before. Reading them from MCC's own
-  `mainmenu.map` (cache format 13, which blam-cache doesn't read yet) is a
-  later step. The icons are the game's: screenshots with them stay on the
-  PC.
+  and small) from a `mainmenu.map` (`lobby/ranks.rs`). MCC's own comes
+  first: `halo2\h2_maps_win64_dx11\mainmenu.map` in the MCC folder the
+  launcher finds (as for `h2_fonts`), with its pixels in the
+  `textures.dat` beside it (cache format 13, read by `blam_cache::mcc`;
+  see `mcc-maps.md`). Then the three Halo 2 Vista folders the old h2viewer
+  used, then `maps\mainmenu.map` beside the launcher. The first that reads
+  is used, and the log says which (`lobby: rank icons from <path> (MCC's,
+  cache format 13)` or `(Halo 2 Vista's)`) and why any before it failed.
+  `H2LOBBY_RANKS` names one map or its folder instead (either format: the
+  version word tells them apart), or `off`. Without icons, levels are
+  numbers, as before. The icons are the game's: screenshots with them stay
+  on the PC.
 - Files in the launcher's folder (`%LOCALAPPDATA%\h2launch`, or its
   `--instance` folder): `lobby.txt`, `lobby.log` (the lobby's log, with the
   engine's lines as `engine:`), `live-key.bin` and `live-card.txt` (the same
