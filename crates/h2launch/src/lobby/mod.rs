@@ -7,11 +7,14 @@
 //! `H2LOBBY_SCRIPT` (see `Step`), saving a PNG in `H2LOBBY_SHOTS` each
 //! time the screen changes. `H2LOBBY_FAKE=1` plays matches with
 //! `--fake-engine`, as the lobby always does where there is no MCC.
+//! Levels are drawn with Halo 2's icons when a Halo 2 Vista mainmenu.map is
+//! found (`ranks`, `H2LOBBY_RANKS`).
 
 pub mod app;
 pub mod canvas;
 pub mod child;
 pub mod names;
+pub mod ranks;
 pub mod settings;
 mod window;
 
@@ -101,6 +104,7 @@ pub fn run(args: &Args) -> i32 {
         )),
         (None, _) => log("lobby: using the system font"),
     }
+    let ranks = ranks::load(&*log).map(Arc::new);
     let cfg = Config {
         folder,
         exe,
@@ -109,6 +113,7 @@ pub fn run(args: &Args) -> i32 {
         server: args.live.clone(),
         instance: args.instance.clone(),
         log: log.clone(),
+        ranks,
     };
     let app = App::new(cfg);
     if std::env::var_os("H2LOBBY_HEADLESS").is_some() {
@@ -232,16 +237,31 @@ fn file_log(path: &Path) -> Log {
 
 /// One line of `H2LOBBY_SCRIPT`: `<seconds> <command>`, the seconds counted
 /// from the step before. The commands are a key (`up`, `down`, `left`,
-/// `right`, `a`, `b`, `x`, `y`, `tab`, `back`), `type <text>`,
+/// `right`, `a`, `b`, `x`, `y`, `lb`, `rb`, `tab`, `back`), `type <text>`,
 /// `wait <screen> [<seconds>]` (until the screen's label is `<screen>`, or
-/// starts with it if it ends in `*`; 120 s at most unless given), `shot <name>` and `quit`.
+/// starts with it if it ends in `*`; 120 s at most unless given),
+/// `see <text> [<seconds>]` (until text containing `<text>`, ignoring
+/// case, is drawn; the last word is the seconds when it is a number),
+/// `pick <gamertag>` (select their row on the players, friends, party or
+/// carnage screen; the run fails if there is none), `shot <name>` and
+/// `quit`.
 #[derive(Clone, Debug, PartialEq)]
 enum Step {
     Press(Input),
     Type(String),
     Wait(String, f64),
+    See(String, f64),
+    Pick(String),
     Shot(String),
     Quit,
+}
+
+/// What the script waits for.
+enum Want {
+    /// A screen, by its label (a `*` at the end matches the start).
+    Screen(String),
+    /// Text drawn on the screen, ignoring case.
+    Text(String),
 }
 
 fn parse_script(text: &str) -> Result<Vec<(f64, Step)>, String> {
@@ -266,6 +286,8 @@ fn parse_script(text: &str) -> Result<Vec<(f64, Step)>, String> {
             "b" => Step::Press(Input::B),
             "x" => Step::Press(Input::X),
             "y" => Step::Press(Input::Y),
+            "lb" => Step::Press(Input::Lb),
+            "rb" => Step::Press(Input::Rb),
             "tab" => Step::Press(Input::Tab),
             "back" => Step::Press(Input::Backspace),
             "type" => Step::Type(arg.to_string()),
@@ -278,6 +300,21 @@ fn parse_script(text: &str) -> Result<Vec<(f64, Step)>, String> {
                 };
                 Step::Wait(label.to_string(), most)
             }
+            "see" => {
+                if arg.is_empty() {
+                    return Err(bad("see what?"));
+                }
+                // The last word is the seconds when it reads as a number
+                // (and isn't all there is).
+                match arg.rsplit_once(char::is_whitespace) {
+                    Some((text, last)) if last.parse::<f64>().is_ok() => {
+                        Step::See(text.trim().to_string(), last.parse().unwrap_or(120.0))
+                    }
+                    _ => Step::See(arg.to_string(), 120.0),
+                }
+            }
+            "pick" if !arg.is_empty() => Step::Pick(arg.to_string()),
+            "pick" => return Err(bad("pick whom?")),
             "shot" => Step::Shot(arg.to_string()),
             "quit" => Step::Quit,
             _ => return Err(bad("unknown command")),
@@ -322,7 +359,7 @@ fn headless(mut app: App, mut text: Text, log: &Log) -> i32 {
     let mut steps = script.into_iter();
     let mut next = steps.next();
     let mut due = Instant::now() + secs(next.as_ref().map_or(0.0, |s| s.0));
-    let mut waiting: Option<(String, Instant)> = None;
+    let mut waiting: Option<(Want, Instant)> = None;
     let mut last = String::new();
     let mut code = 0;
     loop {
@@ -339,17 +376,28 @@ fn headless(mut app: App, mut text: Text, log: &Log) -> i32 {
             break;
         }
         if let Some((want, until)) = &waiting {
-            let met = match want.strip_suffix('*') {
-                Some(start) => label.starts_with(start),
-                None => label == *want,
+            let met = match want {
+                Want::Screen(want) => match want.strip_suffix('*') {
+                    Some(start) => label.starts_with(start),
+                    None => label == *want,
+                },
+                Want::Text(text) => {
+                    let text = text.to_lowercase();
+                    app.drawn().iter().any(|d| d.to_lowercase().contains(&text))
+                }
             };
             if met {
                 waiting = None;
                 due = now + secs(next.as_ref().map_or(0.0, |s| s.0));
             } else if now >= *until {
-                log(&format!(
-                    "lobby: script: no {want} screen in time (on {label})"
-                ));
+                match want {
+                    Want::Screen(want) => log(&format!(
+                        "lobby: script: no {want} screen in time (on {label})"
+                    )),
+                    Want::Text(text) => log(&format!(
+                        "lobby: script: {text:?} wasn't drawn in time (on {label})"
+                    )),
+                }
                 code = 1;
                 break;
             }
@@ -360,7 +408,15 @@ fn headless(mut app: App, mut text: Text, log: &Log) -> i32 {
             match step {
                 Step::Press(i) => app.input(i),
                 Step::Type(t) => t.chars().for_each(|c| app.input(Input::Char(c))),
-                Step::Wait(want, most) => waiting = Some((want, now + secs(most))),
+                Step::Wait(want, most) => waiting = Some((Want::Screen(want), now + secs(most))),
+                Step::See(text, most) => waiting = Some((Want::Text(text), now + secs(most))),
+                Step::Pick(who) => {
+                    if !app.pick(&who) {
+                        log(&format!("lobby: script: no {who} to pick on {label}"));
+                        code = 1;
+                        break;
+                    }
+                }
                 Step::Shot(name) => save(&canvas, &name),
                 Step::Quit => break,
             }
@@ -402,6 +458,26 @@ mod tests {
                 (2.0, Step::Quit),
             ]
         );
+        let s = parse_script(
+            "0 lb\n0 rb\n0 see Wants to be your friend 20\n0 see 12 of 100 120\n\
+             0 see CHARLIE\n0 see Head to Head: 60\n0 see 60\n0 pick bravo one\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s,
+            vec![
+                (0.0, Step::Press(Input::Lb)),
+                (0.0, Step::Press(Input::Rb)),
+                (0.0, Step::See("Wants to be your friend".into(), 20.0)),
+                (0.0, Step::See("12 of 100".into(), 120.0)),
+                (0.0, Step::See("CHARLIE".into(), 120.0)),
+                (0.0, Step::See("Head to Head:".into(), 60.0)),
+                (0.0, Step::See("60".into(), 120.0)),
+                (0.0, Step::Pick("bravo one".into())),
+            ]
+        );
+        assert!(parse_script("1 see\n").is_err());
+        assert!(parse_script("1 pick\n").is_err());
         assert!(parse_script("a\n").is_err());
         assert!(parse_script("1 jump\n").is_err());
         assert!(parse_script("1 wait\n").is_err());

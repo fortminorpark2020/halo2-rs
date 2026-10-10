@@ -55,8 +55,20 @@ install. No game files are included in this repository.
   the playlists) lets the party leader pick any game type and map for the
   party, unranked; it works alone too. Y on the playlists opens the party:
   its leader can hand the lead to another member, remove someone, or make
-  the party invite only, and anyone can leave it there. Its text is in Halo
-  2's own fonts, read from your MCC install. `--offline` starts
+  the party invite only, and anyone can leave it there. The carnage report
+  lists each player's score, kills, assists and deaths, as Halo 2 on Xbox
+  did. RB opens your friends list: send friend requests by gamertag (Y),
+  accept or decline the ones you get, see what your friends are doing,
+  invite them or join their party, and remove them. LB opens a service
+  record (yours from the playlists, anyone else's from the players list,
+  the party, the friends list or the carnage report): their highest level,
+  and their games, wins, kills, deaths and K/D in each ranked playlist. On
+  a keyboard, Q and E (or Page Up and Page Down) are LB and RB. If a Halo 2
+  Vista install is on the PC, levels show as Halo 2's own level icons
+  instead of numbers. Friends and service records need the matching
+  server: an older launcher signing in to it is told UPDATE YOUR LAUNCHER.
+  Its text is in Halo 2's own fonts, read from your MCC install.
+  `--offline` starts
   an offline Slayer match on Lockout instead. It reads the game's
   `halo2.dll` and never changes any MCC file. It is not part of the game
   above. See `docs/notes/launcher/README.md`.

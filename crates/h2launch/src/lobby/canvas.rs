@@ -131,6 +131,69 @@ impl Canvas {
         }
     }
 
+    /// Draws an image (`width` by `height`, RGBA8 with straight alpha, the
+    /// top row first) scaled into the rectangle at (`x`, `y`), `w` by `h`
+    /// window pixels, blended over what is there. Each pixel samples the
+    /// image bilinearly, weighting colours by their alpha so a see-through
+    /// pixel's colour doesn't bleed into its neighbours.
+    #[allow(clippy::too_many_arguments)]
+    pub fn image(&mut self, x: f32, y: f32, w: f32, h: f32, width: u32, height: u32, rgba: &[u8]) {
+        let (iw, ih) = (width as usize, height as usize);
+        if iw == 0 || ih == 0 || rgba.len() < iw * ih * 4 || w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let (x0, x1) = Self::span(x, x + w, self.w);
+        let (y0, y1) = Self::span(y, y + h, self.h);
+        // Where a pixel's centre falls in the image, as two neighbours and
+        // how far it is from the first to the second.
+        let at = |p: usize, start: f32, size: f32, n: usize| {
+            let u = ((p as f32 + 0.5 - start) / size * n as f32 - 0.5).clamp(0.0, (n - 1) as f32);
+            let a = u.floor() as usize;
+            (a, (a + 1).min(n - 1), u - a as f32)
+        };
+        let texel = |cx: usize, cy: usize| {
+            let o = (cy * iw + cx) * 4;
+            let a = f32::from(rgba[o + 3]) / 255.0;
+            [
+                f32::from(rgba[o]) * a,
+                f32::from(rgba[o + 1]) * a,
+                f32::from(rgba[o + 2]) * a,
+                a,
+            ]
+        };
+        for row in y0..y1 {
+            let (ya, yb, ty) = at(row, y, h, ih);
+            for col in x0..x1 {
+                let (xa, xb, tx) = at(col, x, w, iw);
+                let mut px = [0.0f32; 4];
+                for (cx, cy, k) in [
+                    (xa, ya, (1.0 - tx) * (1.0 - ty)),
+                    (xb, ya, tx * (1.0 - ty)),
+                    (xa, yb, (1.0 - tx) * ty),
+                    (xb, yb, tx * ty),
+                ] {
+                    if k > 0.0 {
+                        let t = texel(cx, cy);
+                        for i in 0..4 {
+                            px[i] += t[i] * k;
+                        }
+                    }
+                }
+                let a = px[3];
+                if a <= 0.0 {
+                    continue;
+                }
+                let dst = &mut self.px[row * self.w + col];
+                let mix =
+                    |d: u32, s: f32| (s + d as f32 * (1.0 - a)).round().clamp(0.0, 255.0) as u32;
+                let r = mix((*dst >> 16) & 0xFF, px[0]);
+                let g = mix((*dst >> 8) & 0xFF, px[1]);
+                let b = mix(*dst & 0xFF, px[2]);
+                *dst = (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+
     /// Draws `s` in `style` with its baseline at `y`, and returns its
     /// width.
     #[allow(clippy::too_many_arguments)]
@@ -694,6 +757,51 @@ mod tests {
         assert_eq!(up.len(), 4);
         assert!(up.windows(2).all(|w| w[0] <= w[1]));
         assert_eq!((up[0], up[3]), (0.0, 255.0));
+    }
+
+    #[test]
+    fn images_blend_by_their_alpha_and_scale() {
+        // Clear, opaque white; half white, opaque red.
+        let rgba = [
+            0, 0, 0, 0, 255, 255, 255, 255, //
+            255, 255, 255, 128, 255, 0, 0, 255,
+        ];
+        let bg = 0x20_4060;
+        let mut c = Canvas::new(6, 6);
+        c.px.fill(bg);
+        c.image(1.0, 1.0, 4.0, 4.0, 2, 2, &rgba);
+        let at = |c: &Canvas, x: usize, y: usize| c.px[y * 6 + x];
+        // The clear corner is left alone, and so is all around the image.
+        assert_eq!(at(&c, 1, 1), bg);
+        for k in 0..6 {
+            for (x, y) in [(k, 0), (k, 5), (0, k), (5, k)] {
+                assert_eq!(at(&c, x, y), bg, "({x}, {y})");
+            }
+        }
+        // The opaque corners are their own colours.
+        assert_eq!(at(&c, 4, 1), 0xFF_FFFF);
+        assert_eq!(at(&c, 4, 4), 0xFF_0000);
+        // Half white over the background.
+        let half = |d: u32| {
+            let a = 128.0 / 255.0;
+            (255.0 * a + d as f32 * (1.0 - a)).round() as u32
+        };
+        assert_eq!(
+            at(&c, 1, 4),
+            (half(0x20) << 16) | (half(0x40) << 8) | half(0x60)
+        );
+        // Between the clear and the white corners, white at a quarter.
+        let mid = at(&c, 2, 1);
+        let quarter = |d: u32| (255.0 * 0.25 + d as f32 * 0.75).round() as u32;
+        assert_eq!(
+            mid,
+            (quarter(0x20) << 16) | (quarter(0x40) << 8) | quarter(0x60)
+        );
+        // A bad image draws nothing.
+        let mut c = Canvas::new(2, 2);
+        c.image(0.0, 0.0, 2.0, 2.0, 2, 2, &rgba[..8]);
+        c.image(0.0, 0.0, 2.0, 2.0, 0, 0, &[]);
+        assert!(c.px.iter().all(|&p| p == 0));
     }
 
     #[test]

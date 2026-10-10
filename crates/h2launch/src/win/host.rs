@@ -674,6 +674,12 @@ fn game_result(block: usize) {
     for line in crate::results::describe(bytes) {
         log!("result: {line}");
     }
+    // In Slayer, each player's kills are their score plus their suicides:
+    // say whether the inferred offsets bear that out. A log line only.
+    if super::variant().is_some_and(crate::lobby::names::slayer) {
+        let line = crate::results::check_kills(&crate::results::players(bytes));
+        log!("result: {line}");
+    }
     // H2LAUNCH_RESULT_DUMP=<folder>: keep a copy of the block on this PC,
     // for working out more of its layout. It is the engine's data: never
     // commit or upload it.

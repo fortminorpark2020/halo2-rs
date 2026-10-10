@@ -12,6 +12,13 @@ lobby lacks.
 
 Not in this batch: clans, rank leaderboards, voice, recent players.
 
+Status (2026-10-10): parts A, B and C are built and committed on
+`launcher-friends` (A as `4835265`; B and C after it), with the gate
+passing and the three-lobby run below passing on Linux. Not done yet: the
+Proxmox deploy, and a real game on the owner's PC to confirm the kills
+offsets (the engine's log line `result: kills: ...`). See "Part A as
+built" and "Part B and C as built" at the end.
+
 All of it ships together at `LIVE_PROTOCOL` 3, with one Proxmox deploy
 at the end. The game's `PROTOCOL` stays 26, and the game (h2viewer) keeps
 signing in and playing against the new server as it does now.
@@ -1311,3 +1318,47 @@ Part A follows the note, with these additions and choices (2026-10-10):
   `requests_both_ways_make_friends_at_once` covers crossed requests. The
   version 2 refusal is `a_launcher_at_version_2_is_told_to_update` in
   `server/tests.rs`, and test 9 is in `four_players_play_double_team_through_the_relay`.
+
+## Part B and C as built
+
+Part B follows the note, with these choices (2026-10-10):
+
+- **Part C's `ranks.rs`** was reviewed and kept as written. Beyond the note
+  it treats an empty `H2LOBBY_RANKS` as unset, `load` takes
+  `&dyn Fn(&str)` (the lobby passes its log), and it has a test that
+  decodes both tags from a whole synthetic version-8 mainmenu.map.
+- **The add friend popup** draws its own box (`Pen::popup_box`, the one
+  `Pen::popup` now uses too) with the title at y 278 and the line 20 pt at
+  y 314, so the field at (380, 330) fits under them. The options popup's
+  rows are 40 high, and down from the last option goes to the first as up
+  from the first goes to the last.
+- **Levels without icons**: the header draws an icon left of the gamertag
+  only when there are icons (the line under it has the number already),
+  and the service record's "HIGHEST LEVEL" and number move to x 84, the
+  icon's place, without them.
+- **The carnage report**: a click on a row only selects it (A continues,
+  so a second click doesn't leave the report), and B continues as A
+  does. A service record opened from it goes back to it, or to the
+  playlists if the game is gone.
+- **The invitation popup** shows over the friends and service record
+  screens too, as over the other party screens.
+- **Selections** find their player again at the end of each tick, after
+  the server's messages are read, so no input falls between a new list
+  and the selection catching up.
+- **A friend in `Activity::Custom`** (which no launcher friend has) shows
+  as one playing.
+- **The stand-in engine alone** scores 1 with no kills, so the Slayer sum
+  is checked for two players or more only.
+- **Windows**: `cargo check` and `cargo clippy --all-targets -D warnings`
+  pass for `x86_64-pc-windows-gnu`; the kills check in `win/host.rs`
+  hasn't run on the owner's PC yet.
+- **The three-lobby run** passed (all three exit 0, and the files ended
+  as the note says) with these changes to its scripts: `see Friend
+  request sent` also matches the notice FRIEND REQUEST SENT TO BRAVO
+  (case is ignored), so the asker waits for `see 1 of 100` first;
+  `see Your party` also matches the toast "Invited BRAVO to your party.",
+  so ALPHA waits 7 s (the toast's 6 s) first; BRAVO waits 3 s before
+  accepting, so ALPHA's second request still finds one waiting; CHARLIE
+  asks at 13 s, once BRAVO is a friend; and each lobby waits 6 s after
+  `wait failed` before `a`, as the server takes a moment to start again.
+

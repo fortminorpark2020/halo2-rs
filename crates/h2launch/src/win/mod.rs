@@ -108,6 +108,15 @@ pub(crate) fn instance() -> Option<&'static str> {
     INSTANCE.get().map(|s| s.as_str())
 }
 
+/// The game variant being played (`--variant`, or the server's with
+/// `--live`): a bare name or a path. Set once the `--live` branch has run,
+/// for the kills check at the game's end (`host::game_result`).
+static VARIANT: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn variant() -> Option<&'static str> {
+    VARIANT.get().map(|s| s.as_str())
+}
+
 static SETUP: OnceLock<Setup> = OnceLock::new();
 
 pub(crate) fn setup() -> Option<&'static Setup> {
@@ -532,6 +541,9 @@ fn launch(mut args: Args) -> i32 {
         args.variant = Some(ready.variant.clone());
         ready
     });
+    if let Some(v) = &args.variant {
+        let _ = VARIANT.set(v.clone());
+    }
 
     let map = match &args.map {
         Some(m) => crate::maps::find(m).expect("checked by the parser"),
