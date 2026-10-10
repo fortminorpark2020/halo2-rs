@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::Diagnostics::Debug::{
-    AddVectoredExceptionHandler, RtlLookupFunctionEntry, RtlVirtualUnwind,
-    SetUnhandledExceptionFilter, CONTEXT, EXCEPTION_POINTERS, EXCEPTION_RECORD, UNW_FLAG_NHANDLER,
+    AddVectoredExceptionHandler, RtlCaptureStackBackTrace, RtlLookupFunctionEntry,
+    RtlVirtualUnwind, SetUnhandledExceptionFilter, CONTEXT, EXCEPTION_POINTERS, EXCEPTION_RECORD,
+    UNW_FLAG_NHANDLER,
 };
 use windows::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
@@ -195,6 +196,61 @@ pub fn where_is(addr: usize, out: &mut StackLine) {
         let _ = out.write_char(c.unwrap_or('?'));
     }
     let _ = write!(out, "+{:#x}", addr - h.0 as usize);
+}
+
+/// Our own exe's address range, to leave its frames out of `callers`.
+fn own_range() -> (usize, usize) {
+    static RANGE: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+    *RANGE.get_or_init(|| {
+        let mut info = MODULEINFO::default();
+        // SAFETY: GetModuleHandleW(None) is our exe; fills our struct.
+        let ok = unsafe {
+            let Ok(m) = windows::Win32::System::LibraryLoader::GetModuleHandleW(None) else {
+                return (0, 0);
+            };
+            K32GetModuleInformation(
+                GetCurrentProcess(),
+                m,
+                &mut info,
+                std::mem::size_of::<MODULEINFO>() as u32,
+            )
+        };
+        if !ok.as_bool() {
+            return (0, 0);
+        }
+        let base = info.lpBaseOfDll as usize;
+        (base, base + info.SizeOfImage as usize)
+    })
+}
+
+/// The engine code that called us: up to eight return addresses outside
+/// our exe, nearest first, as `halo2.dll+0x1234 < ...`. Read-only (a stack
+/// walk through the modules' unwind data), for the log.
+pub fn callers() -> String {
+    let mut frames = [std::ptr::null_mut::<c_void>(); 24];
+    // SAFETY: fills our array with return addresses of this thread's stack.
+    let n = unsafe { RtlCaptureStackBackTrace(1, &mut frames, None) } as usize;
+    let (lo, hi) = own_range();
+    let mut out = StackLine::new();
+    let mut shown = 0;
+    for &f in &frames[..n.min(frames.len())] {
+        let a = f as usize;
+        if (lo..hi).contains(&a) {
+            continue;
+        }
+        if shown > 0 {
+            let _ = out.write_str(" < ");
+        }
+        where_is(a, &mut out);
+        shown += 1;
+        if shown == 8 {
+            break;
+        }
+    }
+    if shown == 0 {
+        return "(no engine frames)".into();
+    }
+    out.text()
 }
 
 unsafe extern "system" fn vectored(info: *mut EXCEPTION_POINTERS) -> i32 {

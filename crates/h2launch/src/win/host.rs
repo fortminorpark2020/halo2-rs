@@ -66,9 +66,10 @@ fn record(slot: usize, a1: usize, a2: usize, a3: usize, a4: usize) {
     let diag = super::setup().is_some_and(|s| s.args.diag);
     if n == 0 {
         log!(
-            "host slot {slot} {} first call: a1={a1:#x} a2={a2:#x} a3={a3:#x} a4={a4:#x} (t {})",
+            "host slot {slot} {} first call: a1={a1:#x} a2={a2:#x} a3={a3:#x} a4={a4:#x} (t {}) from {}",
             host_slot_name(slot),
-            super::tid()
+            super::tid(),
+            super::crash::callers()
         );
     } else if fresh_thread && diag {
         log!(
@@ -328,6 +329,7 @@ unsafe extern "system" fn network_recvfrom(
     a4: usize,
 ) -> u32 {
     record(43, buf as usize, len as usize, id_out as usize, a4);
+    note_recv_caller(a4);
     panic_guard(43, || {
         let Some(n) = NET.get() else { return 0 };
         if buf.is_null() || len == 0 {
@@ -350,6 +352,26 @@ unsafe extern "system" fn network_recvfrom(
         }
         size as u32
     })
+}
+
+/// Logs which engine code polls each new value of the receive call's
+/// fourth argument (the first eight values).
+fn note_recv_caller(a4: usize) {
+    static SEEN: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    let fresh = SEEN.lock().is_ok_and(|mut v| {
+        if v.len() < 8 && !v.contains(&a4) {
+            v.push(a4);
+            true
+        } else {
+            false
+        }
+    });
+    if fresh {
+        log!(
+            "net: slot 43 with a4={a4:#x} polled from {}",
+            super::crash::callers()
+        );
+    }
 }
 
 /// Slot 44: `network_send(buf)`, meaning unknown: logged.
@@ -570,7 +592,7 @@ unsafe extern "system" fn set_game_state(_this: *mut c_void, state: i32) -> usiz
     record(3, state as usize, 0, 0, 0);
     panic_guard(3, move || {
         log!(
-            "set_game_state({state}){}",
+            "set_game_state({state}){} from {}",
             match state {
                 0 => " (initial)",
                 1 => " (map loaded)",
@@ -578,7 +600,8 @@ unsafe extern "system" fn set_game_state(_this: *mut c_void, state: i32) -> usiz
                 8 => " (enter leaderboard)",
                 9 => " (leave leaderboard)",
                 _ => "",
-            }
+            },
+            super::crash::callers()
         );
         if let Ok(mut s) = super::STATES.lock() {
             s.push(state);
@@ -603,7 +626,10 @@ unsafe extern "system" fn restart_game(
             super::crash::c_string(message as usize, &mut line);
             msg = line.text();
         }
-        log!("restart_game(reason={reason}, message={msg:?})");
+        log!(
+            "restart_game(reason={reason}, message={msg:?}) from {}",
+            super::crash::callers()
+        );
     });
     // Hand off to the window thread and return at once (C19).
     // SAFETY: posts to our window; non-blocking.

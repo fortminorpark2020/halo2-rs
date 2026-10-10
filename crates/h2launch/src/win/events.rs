@@ -27,7 +27,11 @@ static GUID_BYTES: [u8; 16] = [
 fn hit(slot: usize) {
     let n = COUNTS[slot].fetch_add(1, Ordering::Relaxed);
     if n == 0 && super::setup().is_some_and(|s| s.args.diag) {
-        log!("event-manager slot {slot} {} first call", event_name(slot));
+        log!(
+            "event-manager slot {slot} {} first call from {}",
+            event_name(slot),
+            super::crash::callers()
+        );
     }
 }
 
