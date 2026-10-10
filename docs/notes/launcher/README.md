@@ -1,10 +1,13 @@
 # h2launch
 
 `h2launch.exe` starts MCC's classic Halo 2 engine (`halo2\halo2.dll`) from
-your Master Chief Collection install, without MCC, straight into an offline
-multiplayer Slayer match on Lockout with one local player. A gamepad works;
-keyboard and mouse should. It is a Windows program; on other systems it
-prints that it runs on Windows only and exits (so the Linux CI build passes).
+your Master Chief Collection install, without MCC. With no flags it opens
+the lobby (see below and `lobby.md`): sign in to h2live, form a party,
+search a playlist, and each match runs on the engine in a second copy of
+the launcher. `--offline` starts an offline multiplayer Slayer match on
+Lockout with one local player instead. A gamepad works; keyboard and mouse
+should. The engine is Windows only; on other systems only the lobby runs,
+with a stand-in engine (so the Linux CI build and tests pass).
 
 This is milestone 1: it reaches a running match and reports in detail what
 happened, so the next step (running it on the owner's PC) can see what works
@@ -57,7 +60,8 @@ target\release\h2launch.exe --quit-after 120 --screenshot 30,60,90
 ```
 
 Watch the window, or come back and read the log and the screenshots. To play
-by hand instead, run it with no arguments and close the window to quit.
+by hand instead, run it with `--offline` and close the window to quit (with
+no flags at all it opens the lobby).
 
 The log is `%LOCALAPPDATA%\h2launch\h2launch.log` in cmd, or
 `$env:LOCALAPPDATA\h2launch\h2launch.log` in PowerShell (the previous run is
@@ -256,6 +260,23 @@ target\release\h2live.exe
 h2launch --live 127.0.0.1 --instance a --name Alpha
 h2launch --live 127.0.0.1 --instance b --name Bravo --pad none
 ```
+
+## The lobby (milestone 4, being built)
+
+`h2launch` with no flags (or `--lobby`) opens a window of its own: the
+sign-in screen the first time (a gamertag and the server, 192.168.8.102 by
+default, kept in `lobby.txt`), then the playlists with your level in each
+and the party. A searches (party leader), X lists the players online to
+invite or join, B quits. When the server makes a match the pregame lobby
+shows the map, the game and the players for five seconds, then the engine
+starts in its own window (`h2launch --session <file> --events ...`, which
+tells the lobby on its standard output what the engine does). When the game
+ends the carnage report comes up with each player's place, score, deaths
+and level, and the level change once the server has counted the game.
+Custom Game, the row after the playlists, lets the party leader pick a game
+type and a map; the server makes an unranked match of it for the party,
+with the leader hosting (LAUNCHER_CUSTOM). The details and how to test it
+without MCC are in `lobby.md`.
 
 ## Input script
 

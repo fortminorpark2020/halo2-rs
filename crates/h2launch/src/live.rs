@@ -337,7 +337,8 @@ fn read_until<T>(
     None
 }
 
-/// What the launcher tells the thread about the engine.
+/// What the launcher tells the thread (or, with `--events`, the lobby)
+/// about the engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Engine {
     /// The engine is running its online game (hosting it, on the host).
@@ -349,6 +350,72 @@ pub enum Engine {
     Ended(Vec<LauncherPlayerResult>),
     /// The launcher is closing.
     Closing,
+}
+
+/// How an engine event is written on the standard output with
+/// `--events`, for the lobby that started this launcher: `H2EVENT running`,
+/// `maploaded`, `closing`, or `ended` and then each player as
+/// `<relay id>,<team>,<place>,<score>,<kills>,<deaths>,<left>`.
+pub fn event_line(e: &Engine) -> String {
+    match e {
+        Engine::Running => format!("{EVENT} running"),
+        Engine::MapLoaded => format!("{EVENT} maploaded"),
+        Engine::Closing => format!("{EVENT} closing"),
+        Engine::Ended(players) => {
+            let mut line = format!("{EVENT} ended");
+            for p in players {
+                line += &format!(
+                    " {:x},{},{},{},{},{},{}",
+                    p.relay_id,
+                    p.team,
+                    p.place,
+                    p.score,
+                    p.kills,
+                    p.deaths,
+                    u8::from(p.left)
+                );
+            }
+            line
+        }
+    }
+}
+
+/// The start of every `--events` line.
+pub const EVENT: &str = "H2EVENT";
+
+/// Reads a line `event_line` wrote; `None` for any other line (the log
+/// goes to the same output).
+pub fn parse_event_line(line: &str) -> Option<Engine> {
+    let mut words = line.split_whitespace();
+    if words.next()? != EVENT {
+        return None;
+    }
+    let e = match words.next()? {
+        "running" => Engine::Running,
+        "maploaded" => Engine::MapLoaded,
+        "closing" => Engine::Closing,
+        "ended" => {
+            let mut players = Vec::new();
+            for w in words.by_ref() {
+                let f: Vec<&str> = w.split(',').collect();
+                let [id, team, place, score, kills, deaths, left] = f[..] else {
+                    return None;
+                };
+                players.push(LauncherPlayerResult {
+                    relay_id: u64::from_str_radix(id, 16).ok()?,
+                    team: team.parse().ok()?,
+                    place: place.parse().ok()?,
+                    score: score.parse().ok()?,
+                    kills: kills.parse().ok()?,
+                    deaths: deaths.parse().ok()?,
+                    left: left == "1",
+                });
+            }
+            Engine::Ended(players)
+        }
+        _ => return None,
+    };
+    words.next().is_none().then_some(e)
 }
 
 /// The thread keeping the sign-in alive during a match.
@@ -374,30 +441,59 @@ impl Link {
     }
 }
 
-static LINK: OnceLock<Link> = OnceLock::new();
+/// Where the engine's events go.
+enum Sink {
+    /// To the server, through the match's thread (`--live`).
+    Server(Link),
+    /// To the lobby that started this launcher, on the standard output
+    /// (`--events`).
+    Lobby,
+}
+
+static SINK: OnceLock<Sink> = OnceLock::new();
 
 /// Keep `link` for `tell` and `close` (once).
 pub fn install(link: Link) {
-    let _ = LINK.set(link);
+    let _ = SINK.set(Sink::Server(link));
 }
 
-/// Tell the match's thread about the engine, if there is a match.
+/// Write the engine's events on the standard output (once).
+pub fn install_events() {
+    let _ = SINK.set(Sink::Lobby);
+}
+
+fn say(what: &Engine) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{}", event_line(what));
+    let _ = out.flush();
+}
+
+/// Tell the match's thread, or the lobby, about the engine, if there is a
+/// match.
 pub fn tell(what: Engine) {
-    if let Some(link) = LINK.get() {
-        link.tell(what);
+    match SINK.get() {
+        Some(Sink::Server(link)) => link.tell(what),
+        Some(Sink::Lobby) => say(&what),
+        None => {}
     }
 }
 
-/// The launcher is closing: let the server know, if there is a match.
+/// The launcher is closing: let the server (or the lobby) know, if there
+/// is a match.
 pub fn close() {
-    if let Some(link) = LINK.get() {
-        link.close(VERDICT_WAIT + Duration::from_secs(1));
+    match SINK.get() {
+        Some(Sink::Server(link)) => link.close(VERDICT_WAIT + Duration::from_secs(1)),
+        Some(Sink::Lobby) => say(&Engine::Closing),
+        None => {}
     }
 }
 
-/// What the thread has told the server, so it says each thing once.
+/// What has been told to the server about a match, so each thing is said
+/// once: by the match's thread with `--live`, and by the lobby for the
+/// engine it started.
 #[derive(Debug, Default, PartialEq, Eq)]
-struct Told {
+pub struct Told {
     asked_to_host: bool,
     running: bool,
     hosting: bool,
@@ -411,9 +507,24 @@ struct Told {
 }
 
 impl Told {
+    /// The result went: the game ended on this PC.
+    pub fn reported(&self) -> bool {
+        self.reported
+    }
+
+    /// The server's MATCH_OVER came.
+    pub fn verdict(&self) -> bool {
+        self.verdict
+    }
+
+    /// LAUNCHER_RESULT or LEFT_MATCH went, or the server ended the match.
+    pub fn over(&self) -> bool {
+        self.over
+    }
+
     /// What to send after `event` (from the server) or `engine` (from the
     /// launcher), for match `id`, which this PC hosts if `host`.
-    fn next(
+    pub fn next(
         &mut self,
         id: u64,
         host: bool,
@@ -500,7 +611,7 @@ fn run(mut lobby: Lobby, id: u64, host: bool, rx: Receiver<Engine>, done: Sender
     }
 }
 
-fn describe(m: &ToServer) -> String {
+pub fn describe(m: &ToServer) -> String {
     match m {
         ToServer::Hosting(id) => format!("we host match {id:016x}"),
         ToServer::Joined(id) => format!("we joined match {id:016x}"),
@@ -515,7 +626,7 @@ fn describe(m: &ToServer) -> String {
     }
 }
 
-fn log_event(log: &Log, e: &LiveEvent) {
+pub fn log_event(log: &Log, e: &LiveEvent) {
     let line = match e {
         LiveEvent::LauncherMatch(m) => format!(
             "live: match {:016x} on {} ({}), {} players, host {:#018x}, us {:#018x}",
@@ -676,6 +787,44 @@ mod tests {
         assert_eq!(out, vec![ToServer::Hosting(0x77)]);
         // Nothing left: nothing picked.
         assert_eq!(read_until(&mut VecDeque::new(), &log, &mut pick), None);
+    }
+
+    #[test]
+    fn engine_events_go_to_the_lobby_as_lines() {
+        let player = |id: u64, score: i32, left: bool| LauncherPlayerResult {
+            relay_id: id,
+            team: 1,
+            place: 2,
+            score,
+            kills: 3,
+            deaths: 4,
+            left,
+        };
+        let ended = Engine::Ended(vec![player(0xB5A9, -2, false), player(0x5977, 7, true)]);
+        for e in [Engine::Running, Engine::MapLoaded, Engine::Closing, ended] {
+            let line = event_line(&e);
+            assert!(line.starts_with("H2EVENT "), "{line}");
+            assert_eq!(parse_event_line(&line), Some(e), "{line}");
+        }
+        assert_eq!(
+            event_line(&Engine::Ended(vec![player(0xB5A9, -2, false)])),
+            "H2EVENT ended b5a9,1,2,-2,3,4,0"
+        );
+        assert_eq!(
+            parse_event_line("H2EVENT ended"),
+            Some(Engine::Ended(Vec::new()))
+        );
+        for other in [
+            "",
+            "12:00:01 launch: starting",
+            "H2EVENT",
+            "H2EVENT jumped",
+            "H2EVENT running now",
+            "H2EVENT ended b5a9,1,2",
+            "H2EVENT ended zz,1,2,3,4,5,0",
+        ] {
+            assert_eq!(parse_event_line(other), None, "{other:?}");
+        }
     }
 
     #[test]

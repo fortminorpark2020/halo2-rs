@@ -11,10 +11,18 @@ h2relay = { path = "../h2relay" }
 # --live: signing in to h2live and playing the matches it makes.
 h2live = { path = "../h2live" }
 h2net = { path = "../h2net" }
+# The lobby's text in Halo 2's own fonts, read from MCC's halo2\h2_fonts.
+blam-cache = { path = "../blam-cache" }
 # --check: the SHA-256 of halo2.dll.
 sha2 = "0.10"
 # --screenshot: the back buffer written as a PNG.
 png = "0.17"
+# The lobby (docs/notes/launcher/lobby.md): its own window, drawn on the
+# CPU, with text from a font on the PC, and Xbox controllers.
+winit = "0.30"
+softbuffer = "0.4"
+ab_glyph = "0.2"
+gilrs = { version = "0.11.2", default-features = false, features = ["xinput"] }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"

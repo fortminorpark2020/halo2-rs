@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 06:50 UTC. Any assistant that works on the project
+Last updated 2026-10-10 17:35 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -106,7 +106,8 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   into halo2.dll; read-only diagnostics (`--diag`, `--watch`) only. If the
   only way forward needs more, ask the owner first.
 - Milestone 3 is on `launcher-live` (h2launch-m2 plus the merged
-  `live-launcher` WIP): h2live speaks `LIVE_PROTOCOL` 1 to launchers,
+  `live-launcher` WIP): h2live speaks `LIVE_PROTOCOL` 1 to launchers (2 on
+  `launcher-lobby`, which adds custom games),
   has launcher playlists 10-17, issues a relay room and key per match and
   sends LAUNCHER_MATCH; `h2launch --live <server>` signs in, searches,
   writes the session from that match, and tells the server HOSTING,
@@ -119,14 +120,48 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   The launcher playlists play MCC's own matchmaking variants, chosen from
   the `h2launch --variants` list; Team Snipers (opposite teams) and a
   three-player Rumble Pit worked (2026-10-10 06:30).
-- The Proxmox server (container 102) runs h2live from `launcher-live`
-  edc64b8 since 2026-10-10 06:45 (still `PROTOCOL` 26 for the Rust game;
-  rollback copy `/opt/h2live/h2live.prev`), with the relay on UDP 47050.
-  Two launchers on the owner's PC played a match through it
-  (`--live 192.168.8.102`). Players outside his network need TCP and UDP
-  47050 forwarded to 192.168.8.102 in his router (his step). The binary
-  went over on a temporary orphan branch `deploy-h2live`, which can be
-  deleted (the container proxy refuses branch deletes).
+- The Proxmox server (container 102) runs h2live from `launcher-lobby`
+  214ee4b since 2026-10-10 17:30 (`PROTOCOL` 26 for the Rust game,
+  `LIVE_PROTOCOL` 2 for launchers, so custom games work; rollback copy
+  `/opt/h2live/h2live.prev` is the 06:45 `launcher-live` edc64b8), with
+  the relay on UDP 47050. On the owner's PC, two lobbies played a custom
+  Team Slayer on Lockout (unranked) and a Head to Head match (counted)
+  through it (`--live 192.168.8.102`). Players outside his network need
+  TCP and UDP 47050 forwarded to 192.168.8.102 in his router (his step;
+  UPnP gets no answer). The binary goes over as a static musl build on a
+  temporary orphan branch `deploy-h2live`, which can be deleted (the
+  container proxy refuses branch deletes). The owner's PC safety check
+  may block the scp/ssh install until he approves it in his own words.
+- Milestone 4 (the lobby) is on `launcher-lobby`, based on
+  `launcher-live`: `h2launch` with no flags opens a window of its own
+  (winit, softbuffer, a system font through ab_glyph, gilrs pads) that signs
+  in to h2live, shows the playlists, the party, players online and
+  invitations, searches, shows the pregame lobby, runs each match's engine
+  as a child (`--session <file> --events`, which prints `H2EVENT` lines),
+  tells the server what the engine did, and shows the carnage report.
+  `--offline` is now how to start an offline match. Design, keys and the
+  headless test harness: `docs/notes/launcher/lobby.md`. Tested on Linux
+  with a local h2live and two headless lobbies on the stand-in engine
+  (`--fake-engine`), and on the owner's PC (07:45) with two lobbies
+  playing a real match on halo2.dll through the Proxmox h2live: counted,
+  carnage report on both, engines closed by themselves. Custom games
+  (LAUNCHER_CUSTOM, `LIVE_PROTOCOL` 2, so the Proxmox server needs the
+  new h2live): the party leader picks one of the launcher playlists'
+  variants (`names::CUSTOM_GAMES`) and a map, the server makes an unranked
+  match for the party with the leader hosting; tested on Linux with two
+  lobbies, and on the owner's PC with the real engine against a local
+  h2live (a party game and a solo game, 07:45), then through the Proxmox
+  server once it was updated (17:30). A party
+  screen (Y on the playlists: make leader, remove, invite only, leave;
+  no protocol change) was tested on Linux with three lobbies. The lobby
+  now keeps each game's results block in `%LOCALAPPDATA%\h2launch\results`
+  on the owner's PC (never upload them), so the first real games with
+  kills give the kills offset (Slayer: kills = score + suicides). The
+  lobby's text is drawn in Halo 2's own fonts from MCC's `halo2\h2_fonts`
+  (same format as Vista's; `blam_cache::font`, taken from `menu-preview`
+  unchanged; scaled by capital height, digits from conduit; checked on
+  the owner's PC 08:30). Next:
+  kills in the results block, a play session by the owner, then two PCs.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.

@@ -44,7 +44,14 @@
 //! the game finished. Levels change the same way. The room closes when
 //! the match is over, however it ends. A host lost to the others ends the
 //! match once its link to the server goes too (the relay can't say it saw
-//! it go). Launcher parties can't open custom games yet.
+//! it go).
+//!
+//! A launcher party's leader starts custom games (LAUNCHER_CUSTOM) with an
+//! MCC variant from the launcher playlists and a map every member has that
+//! they play. Each is a match of its own, made here rather than by the
+//! matchmaker: the leader hosts it, the others join, teams alternate down
+//! the party, and it changes no levels. The party is back in its lobby when
+//! it's over, for the leader to start another.
 
 use super::party::OTHER_PROGRAM;
 use super::relay::QUIET;
@@ -55,7 +62,7 @@ use crate::matchmaker::{self, Event, Member, Seat, Ticket};
 use crate::store::{self, Counted, GameRecord, RecordedPlayer, Stats};
 use h2net::live::{
     Activity, ClientKind, LauncherMatch, LauncherPlayer, LauncherResult, MatchInfo, MatchOver,
-    MatchPlayer, PlayerResult, RelaySeat, SearchStatus, Stage, ToPc, QUICKMATCH,
+    MatchPlayer, PlayerResult, RelaySeat, SearchStatus, Stage, ToPc, CUSTOM_GAME, QUICKMATCH,
 };
 use h2net::ANY_TEAM;
 
@@ -97,6 +104,8 @@ const UNFINISHED: &str = "THE GAME DIDN'T FINISH. IT DIDN'T COUNT.";
 /// Launchers' matches need the relay.
 const NO_RELAY: &str = "THIS SERVER HAS NO RELAY FOR ONLINE GAMES";
 const NO_CUSTOM_GAMES: &str = "CUSTOM GAMES AREN'T READY ON THE LAUNCHER YET";
+const NO_SUCH_GAME: &str = "THAT GAME TYPE ISN'T ON THIS SERVER";
+const NO_SUCH_MAP: &str = "NOT EVERYONE IN YOUR PARTY HAS THAT MAP";
 
 /// A player's id on the relay, and so their XUID in MCC's engine: their
 /// account (the same in every match), but for the two the relay keeps
@@ -1180,6 +1189,90 @@ impl Server {
         for account in members {
             self.join_custom(id, me, account);
         }
+    }
+
+    /// `me`, leading a party of launchers, starts a custom game of MCC
+    /// variant `variant` on `map` for everyone in it (see the top).
+    pub(super) fn launcher_custom(&mut self, me: u64, map: &str, variant: &str, now: f64) {
+        let Some((id, party)) = self.led_by(me) else {
+            return;
+        };
+        if !matches!(party.activity, Activity::Lobby | Activity::Searching) {
+            return self.notice(me, STILL_PLAYING);
+        }
+        let searching = party.activity == Activity::Searching;
+        // The leader first: they host.
+        let mut members = vec![me];
+        members.extend(party.members.iter().copied().filter(|&a| a != me));
+        if members.iter().any(|&a| self.busy(a)) {
+            return self.notice(me, STILL_PLAYING);
+        }
+        if members
+            .iter()
+            .any(|&a| self.client_of(a) != ClientKind::Launcher)
+        {
+            return self.notice(me, OTHER_PROGRAM);
+        }
+        if self.relay.is_none() {
+            return self.notice(me, NO_RELAY);
+        }
+        let launchers = || {
+            let playlists = self.playlists.iter();
+            playlists.filter(|p| p.client == ClientKind::Launcher)
+        };
+        let named = |v: &&crate::playlists::Variant| {
+            v.mcc
+                .as_deref()
+                .is_some_and(|m| m.eq_ignore_ascii_case(variant))
+        };
+        let Some(game) = launchers().find_map(|p| p.variants.iter().find(named).cloned()) else {
+            return self.notice(me, NO_SUCH_GAME);
+        };
+        let played = launchers().any(|p| p.maps.iter().any(|m| m.eq_ignore_ascii_case(map)));
+        let shared = self
+            .parties
+            .get(&id)
+            .map_or(Vec::new(), |p| self.shared_maps(p));
+        let map = shared
+            .into_iter()
+            .find(|m| played && m.eq_ignore_ascii_case(map));
+        let hash = self.pc_of(me).and_then(|k| {
+            let maps = self.pcs[k].maps.iter();
+            maps.filter(|(m, _)| map.as_ref().is_some_and(|map| m.eq_ignore_ascii_case(map)))
+                .map(|&(_, hash)| hash)
+                .next()
+        });
+        let (Some(map), Some(hash)) = (map, hash) else {
+            return self.notice(me, NO_SUCH_MAP);
+        };
+        if searching {
+            self.matchmaker.cancel(id);
+        }
+        let teams = game.game_type.teams();
+        let players = members.iter().enumerate().map(|(i, &account)| {
+            let level = self.accounts.get(&account).map_or(1, |a| a.best_level());
+            Seat {
+                account,
+                party: id,
+                team: if teams { (i % 2) as u8 } else { 0 },
+                level,
+                effective: level,
+                guests: 0,
+            }
+        });
+        let m = matchmaker::Match {
+            id: self.matchmaker.custom(me, now),
+            playlist: CUSTOM_GAME,
+            ranked: false,
+            map,
+            hash,
+            variant: game,
+            bots: 0,
+            host: me,
+            players: players.collect(),
+        };
+        log(format_args!("live: party {id} starts a custom game"));
+        self.formed(m);
     }
 
     /// `account` comes into party `id`'s custom game, which `leader` hosts.
