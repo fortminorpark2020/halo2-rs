@@ -4,23 +4,31 @@
 //! web requests: `/health` for a host's health check, and `/` for a page
 //! saying how many are on.
 //!
+//! Beside it, on UDP, it runs the relay that carries the launcher's game
+//! traffic between PCs (`h2relay`): on the same port number unless told
+//! otherwise, so 47050/tcp and 47050/udp. The relay admits only the rooms
+//! h2live issues for matches, each player with the member key h2live gives
+//! it, so it's no use to anyone else.
+//!
 //! Its settings come from the environment: PORT (47050 unless set),
 //! H2LIVE_DATA (the folder accounts are kept in, `h2live-data` unless set),
 //! H2LIVE_SECRET (what stat cards are signed with; without it, a key kept in
-//! `secret.txt` there), and H2LIVE_UPNP=0 to leave the router alone. So a
-//! double-click is enough at home, an `h2live.txt` next to the program can
-//! hold `port=` and `data=` lines too.
+//! `secret.txt` there), H2LIVE_RELAY (the relay's UDP port, or `off`), and
+//! H2LIVE_UPNP=0 to leave the router alone. So a double-click is enough at
+//! home, an `h2live.txt` next to the program can hold `port=`, `data=` and
+//! `relay=` lines too.
 //!
-//! At home it asks the router to pass the port on to this PC (UPnP), and
+//! At home it asks the router to pass the ports on to this PC (UPnP), and
 //! says how players reach it: READY with the address, FORWARD when the
 //! router has to be told by hand, or CGNAT when the internet provider
 //! shares one address between homes, so only a host online will do. The
-//! router opens it for an hour at a time, asked again while h2live runs,
-//! so it closes by itself however h2live stops. A host online sets PORT,
-//! and has its own way in.
+//! router opens them for an hour at a time, asked again while h2live runs,
+//! so they close by themselves however h2live stops. A host online sets
+//! PORT, and has its own way in.
 
 use h2live::server::{flush_log, log, log_in_background, say, Route, Server};
 use h2net::Request;
+use h2relay::{Admission, RelayServer, RelayThread, ServerConfig, RELAY_PROTOCOL};
 use igd_next::{AddPortError, Gateway, PortMappingProtocol, SearchOptions};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
@@ -59,11 +67,21 @@ const UPNP_TIMEOUT: Duration = Duration::from_secs(3);
 const LEASE: u32 = 3600;
 const RENEW: Duration = Duration::from_secs(20 * 60);
 
+/// Where the relay listens (UDP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Relay {
+    /// On the TCP port's number (so 0, any free port, gives it any too).
+    SamePort,
+    Port(u16),
+    Off,
+}
+
 /// How the program was told to run.
 struct Settings {
     port: u16,
     data: PathBuf,
     secret: Option<String>,
+    relay: Relay,
     /// On a host online (PORT was set): connections come through its proxy,
     /// so they're from where the proxy says, and there's no router to ask.
     hosted: bool,
@@ -76,6 +94,7 @@ impl Default for Settings {
             port: PORT,
             data: PathBuf::from(DATA),
             secret: None,
+            relay: Relay::SamePort,
             hosted: false,
             upnp: true,
         }
@@ -83,10 +102,10 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Take on the `port=` and `data=` lines of h2live.txt's `text`, in any
-    /// case. A data folder that isn't a whole path is in `folder`, the
-    /// program's. The lines it didn't take (but for blank ones and #
-    /// comments), to say so.
+    /// Take on the `port=`, `data=` and `relay=` lines of h2live.txt's
+    /// `text`, in any case. A data folder that isn't a whole path is in
+    /// `folder`, the program's. The lines it didn't take (but for blank
+    /// ones and # comments), to say so.
     fn read<'a>(&mut self, text: &'a str, folder: &Path) -> Result<Vec<&'a str>, String> {
         let mut ignored = Vec::new();
         // Notepad may start the file with a byte order mark.
@@ -103,6 +122,7 @@ impl Settings {
             match key.trim().to_ascii_lowercase().as_str() {
                 "port" => self.port = port(value)?,
                 "data" => self.data = folder.join(value),
+                "relay" => self.relay = relay(value)?,
                 _ => ignored.push(line),
             }
         }
@@ -114,6 +134,17 @@ fn port(text: &str) -> Result<u16, String> {
     text.trim()
         .parse()
         .map_err(|_| format!("{text} isn't a port number"))
+}
+
+/// The relay's port, or `off`.
+fn relay(text: &str) -> Result<Relay, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "off" | "no" | "none" => Ok(Relay::Off),
+        number => number
+            .parse()
+            .map(Relay::Port)
+            .map_err(|_| format!("{text} isn't a port number or off")),
+    }
 }
 
 fn main() {
@@ -160,18 +191,66 @@ fn run() -> Result<(), String> {
     ctrlc::set_handler(move || stopping.store(true, Ordering::SeqCst))
         .map_err(|e| e.to_string())?;
     log(format_args!("listening on port {port} (Ctrl+C stops)"));
-    let open = if settings.upnp { open_port(port) } else { None };
+    let relay = start_relay(settings.relay, port)?;
+    let relay_port = relay.as_ref().map(|r| r.local_addr().port());
+    let open = if settings.upnp {
+        open_ports(port, relay_port)
+    } else {
+        Vec::new()
+    };
 
     serve(&listener, &mut server, &stop, settings.hosted);
 
     // Accounts are saved as they change, so there's nothing left to save.
     let players = server.players_online();
     drop(server);
-    if let Some(open) = open {
+    drop(relay);
+    for open in open {
         open.close();
     }
     log(format_args!("stopped, with {players} players online"));
     Ok(())
+}
+
+/// Start the relay on its own thread, as `relay` says (on UDP `tcp`, the
+/// sign-in port's number, unless told otherwise). Without it h2live goes
+/// on, unless it was told a port and can't have it. It admits only rooms
+/// issued through its handle (`issue`, with `member_key` for each player),
+/// which the launcher's match flow is to do; until then no room opens.
+fn start_relay(relay: Relay, tcp: u16) -> Result<Option<RelayThread>, String> {
+    let (udp, asked) = match relay {
+        Relay::Off => {
+            log("relay off");
+            return Ok(None);
+        }
+        Relay::SamePort => (tcp, false),
+        Relay::Port(port) => (port, true),
+    };
+    let config = ServerConfig {
+        admission: Admission::Issued,
+        ..ServerConfig::default()
+    };
+    // `log` only queues the line (`log_in_background`), so it never holds
+    // the relay up.
+    let bound = RelayServer::bind((Ipv4Addr::UNSPECIFIED, udp), config)
+        .and_then(|relay| relay.with_log(Arc::new(|line: &str| log(line))).spawn());
+    match bound {
+        Ok(relay) => {
+            let port = relay.local_addr().port();
+            log(format_args!(
+                "relay on UDP port {port} (relay protocol {RELAY_PROTOCOL}, \
+                 only rooms h2live issues)"
+            ));
+            Ok(Some(relay))
+        }
+        Err(e) if !asked => {
+            log(format_args!(
+                "relay off: can't listen on UDP port {udp}: {e}"
+            ));
+            Ok(None)
+        }
+        Err(e) => Err(format!("can't listen on UDP port {udp} for the relay: {e}")),
+    }
 }
 
 /// The settings: from the environment, or else h2live.txt next to the
@@ -187,7 +266,7 @@ fn settings() -> Result<Settings, String> {
             log(format_args!("settings from {}", file.display()));
             for line in ignored {
                 log(format_args!(
-                    "ignored {line:?} (only port= and data= lines count)"
+                    "ignored {line:?} (only port=, data= and relay= lines count)"
                 ));
             }
         }
@@ -199,6 +278,9 @@ fn settings() -> Result<Settings, String> {
     }
     if let Some(data) = env("H2LIVE_DATA") {
         settings.data = data.into();
+    }
+    if let Some(r) = env("H2LIVE_RELAY") {
+        settings.relay = relay(&r).map_err(|why| format!("H2LIVE_RELAY: {why}"))?;
     }
     settings.secret = env("H2LIVE_SECRET");
     settings.upnp = !settings.hosted && env("H2LIVE_UPNP").as_deref() != Some("0");
@@ -312,17 +394,29 @@ fn page(server: &Server) -> String {
     )
 }
 
-/// Ask the router to pass `port` on to this PC (UPnP), and say how players
-/// reach the server. The port, if the router opened it (to close again).
-fn open_port(port: u16) -> Option<OpenPort> {
+/// The ports to forward, as the FORWARD line says them: the sign-in port
+/// (TCP) and the relay's (UDP), if it's on.
+fn ports_to_forward(tcp: u16, relay: Option<u16>) -> String {
+    match relay {
+        None => format!("TCP {tcp}"),
+        Some(udp) if udp == tcp => format!("TCP AND UDP {tcp}"),
+        Some(udp) => format!("TCP {tcp} AND UDP {udp}"),
+    }
+}
+
+/// Ask the router to pass `port` (TCP) and the relay's port (UDP) on to
+/// this PC (UPnP), and say how players reach the server. The ports the
+/// router opened (to close again).
+fn open_ports(port: u16, relay: Option<u16>) -> Vec<OpenPort> {
     let Some(IpAddr::V4(local)) = h2net::local_ip() else {
         log("this PC isn't on a network");
-        return None;
+        return Vec::new();
     };
-    let forward = || {
-        say(format_args!("FORWARD TCP {port} TO {local}"));
+    let forward = |what: &str| {
+        say(format_args!("FORWARD {what} TO {local}"));
         say("(the router didn't open the port itself: forward it in the router's settings)");
     };
+    let all = ports_to_forward(port, relay);
     let mut options = SearchOptions::default();
     options.timeout = Some(UPNP_TIMEOUT);
     options.single_search_timeout = Some(UPNP_TIMEOUT);
@@ -330,8 +424,8 @@ fn open_port(port: u16) -> Option<OpenPort> {
         Ok(router) => router,
         Err(e) => {
             log(format_args!("no router answered UPnP: {e}"));
-            forward();
-            return None;
+            forward(&all);
+            return Vec::new();
         }
     };
     let external = match router.get_external_ip() {
@@ -340,27 +434,43 @@ fn open_port(port: u16) -> Option<OpenPort> {
             log(format_args!("the router's own address is {ip}"));
             say("CGNAT: USE THE HOSTED OPTION");
             say("(the internet provider shares one address between homes, so players can't reach this PC)");
-            return None;
+            return Vec::new();
         }
         Err(e) => {
             log(format_args!("the router didn't say its address: {e}"));
-            forward();
-            return None;
+            forward(&all);
+            return Vec::new();
         }
     };
+    let tcp = PortMappingProtocol::TCP;
     let to = SocketAddr::new(local.into(), port);
-    match OpenPort::open(router, port, to, RENEW) {
-        Ok(open) => {
-            say(format_args!("READY: ws://{external}:{port}"));
-            say("(players sign in at this address)");
-            Some(open)
-        }
+    let open = match OpenPort::open(router.clone(), tcp, port, to, RENEW) {
+        Ok(open) => open,
         Err(e) => {
-            log(format_args!("the router didn't open port {port}: {e}"));
-            forward();
-            None
+            log(format_args!("the router didn't open TCP port {port}: {e}"));
+            forward(&all);
+            return Vec::new();
+        }
+    };
+    say(format_args!("READY: ws://{external}:{port}"));
+    say("(players sign in at this address)");
+    let mut opened = vec![open];
+    if let Some(udp) = relay {
+        let to = SocketAddr::new(local.into(), udp);
+        match OpenPort::open(router, PortMappingProtocol::UDP, udp, to, RENEW) {
+            Ok(open) => {
+                log(format_args!(
+                    "the router opened UDP port {udp} for the relay"
+                ));
+                opened.push(open);
+            }
+            Err(e) => {
+                log(format_args!("the router didn't open UDP port {udp}: {e}"));
+                forward(&format!("UDP {udp}"));
+            }
         }
     }
+    opened
 }
 
 /// A port the router passes on to this PC: kept open on a thread of its
@@ -375,15 +485,15 @@ impl OpenPort {
     /// again every `renew`; or for good, if that's all the router does.
     fn open(
         router: Gateway,
+        protocol: PortMappingProtocol,
         port: u16,
         to: SocketAddr,
         renew: Duration,
     ) -> Result<OpenPort, AddPortError> {
-        let tcp = PortMappingProtocol::TCP;
-        let lease = match router.add_port(tcp, port, to, LEASE, "h2live") {
+        let lease = match router.add_port(protocol, port, to, LEASE, "h2live") {
             Ok(()) => LEASE,
             Err(AddPortError::OnlyPermanentLeasesSupported) => {
-                router.add_port(tcp, port, to, 0, "h2live")?;
+                router.add_port(protocol, port, to, 0, "h2live")?;
                 0
             }
             Err(e) => return Err(e),
@@ -391,14 +501,18 @@ impl OpenPort {
         let (stop, stopped) = mpsc::channel();
         let keeper = std::thread::spawn(move || {
             while lease != 0 && stopped.recv_timeout(renew) == Err(RecvTimeoutError::Timeout) {
-                if let Err(e) = router.add_port(tcp, port, to, lease, "h2live") {
-                    log(format_args!("the router didn't keep port {port} open: {e}"));
+                if let Err(e) = router.add_port(protocol, port, to, lease, "h2live") {
+                    log(format_args!(
+                        "the router didn't keep {protocol} port {port} open: {e}"
+                    ));
                 }
             }
             // Until told to stop.
             let _ = stopped.recv();
-            if let Err(e) = router.remove_port(tcp, port) {
-                log(format_args!("the router kept port {port} open: {e}"));
+            if let Err(e) = router.remove_port(protocol, port) {
+                log(format_args!(
+                    "the router kept {protocol} port {port} open: {e}"
+                ));
             }
         });
         Ok(OpenPort { stop, keeper })
@@ -447,6 +561,41 @@ mod tests {
         assert_eq!(s.data, Path::new("/srv/h2live"));
         let why = Settings::default().read("port=forty\n", folder).err();
         assert_eq!(why.as_deref(), Some("forty isn't a port number"));
+    }
+
+    #[test]
+    fn the_relay_follows_the_port_unless_told_otherwise() {
+        let folder = Path::new("/games/h2live");
+        let mut s = Settings::default();
+        assert_eq!(s.relay, Relay::SamePort);
+        s.read("Relay = 47051\n", folder).unwrap();
+        assert_eq!(s.relay, Relay::Port(47051));
+        s.read("relay=OFF\n", folder).unwrap();
+        assert_eq!(s.relay, Relay::Off);
+        let why = Settings::default().read("relay=udp\n", folder).err();
+        assert_eq!(why.as_deref(), Some("udp isn't a port number or off"));
+        // What the FORWARD line asks for.
+        assert_eq!(ports_to_forward(47050, None), "TCP 47050");
+        assert_eq!(ports_to_forward(47050, Some(47050)), "TCP AND UDP 47050");
+        assert_eq!(
+            ports_to_forward(47050, Some(47051)),
+            "TCP 47050 AND UDP 47051"
+        );
+    }
+
+    #[test]
+    fn the_relay_starts_beside_the_sign_in_port() {
+        // A free port's number, as the sign-in port's.
+        let free = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let relay = start_relay(Relay::SamePort, port).unwrap().unwrap();
+        assert_eq!(relay.local_addr().port(), port);
+        // Taken: without it, unless it was asked for.
+        assert!(start_relay(Relay::SamePort, port).unwrap().is_none());
+        let why = start_relay(Relay::Port(port), 1).err().unwrap();
+        assert!(why.contains(&format!("UDP port {port}")), "{why}");
+        assert!(start_relay(Relay::Off, port).unwrap().is_none());
     }
 
     #[test]
@@ -569,8 +718,8 @@ mod tests {
             start.elapsed()
         );
     }
-    /// What a router is asked over UPnP: the action, and the lease asked
-    /// for (seconds).
+    /// What a router is asked over UPnP: the action and the protocol (as
+    /// "AddPortMapping TCP"), and the lease asked for (seconds).
     type Asked = (String, Option<u32>);
 
     const SERVICE: &str = "urn:schemas-upnp-org:service:WANIPConnection:1";
@@ -594,6 +743,8 @@ mod tests {
                 }
                 let action = request.split_once('#').unwrap().1;
                 let action = action.split('"').next().unwrap().to_string();
+                let protocol = request.split_once("<NewProtocol>").unwrap().1;
+                let protocol = protocol.split('<').next().unwrap();
                 let lease = request.split_once("<NewLeaseDuration>");
                 let lease = lease.and_then(|(_, rest)| rest.split('<').next()?.parse().ok());
                 let refused = !leases && lease.is_some_and(|l| l != 0);
@@ -613,7 +764,7 @@ mod tests {
                 } else {
                     "200 OK"
                 };
-                let _ = tx.send((action, lease));
+                let _ = tx.send((format!("{action} {protocol}"), lease));
                 let envelope = format!(
                     "<?xml version=\"1.0\"?><s:Envelope \
                      xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">\
@@ -660,9 +811,10 @@ mod tests {
     fn the_router_opens_the_port_for_a_while_at_a_time() {
         let (router, asked) = router(true);
         let to = SocketAddr::from(([192, 168, 1, 20], PORT));
-        let open = OpenPort::open(router, PORT, to, Duration::from_millis(20)).unwrap();
+        let (tcp, renew) = (PortMappingProtocol::TCP, Duration::from_millis(20));
+        let open = OpenPort::open(router, tcp, PORT, to, renew).unwrap();
         // For a while, and asked again before then...
-        let add: Asked = ("AddPortMapping".into(), Some(LEASE));
+        let add: Asked = ("AddPortMapping TCP".into(), Some(LEASE));
         for _ in 0..3 {
             assert_eq!(asked.recv_timeout(WAIT), Ok(add.clone()));
         }
@@ -670,22 +822,38 @@ mod tests {
         open.close();
         let rest: Vec<_> = asked.try_iter().collect();
         let (last, renewed) = rest.split_last().unwrap();
-        assert_eq!(*last, ("DeletePortMapping".into(), None));
+        assert_eq!(*last, ("DeletePortMapping TCP".into(), None));
         assert!(renewed.iter().all(|a| *a == add), "{rest:?}");
+    }
+
+    #[test]
+    fn the_router_opens_the_relay_port_for_udp() {
+        let (router, asked) = router(true);
+        let to = SocketAddr::from(([192, 168, 1, 20], PORT));
+        let (udp, renew) = (PortMappingProtocol::UDP, Duration::from_secs(60));
+        let open = OpenPort::open(router, udp, PORT, to, renew).unwrap();
+        open.close();
+        let asked: Vec<_> = asked.try_iter().collect();
+        let expected: [Asked; 2] = [
+            ("AddPortMapping UDP".into(), Some(LEASE)),
+            ("DeletePortMapping UDP".into(), None),
+        ];
+        assert_eq!(asked, expected);
     }
 
     #[test]
     fn routers_that_only_open_ports_for_good_are_asked_for_that() {
         let (router, asked) = router(false);
         let to = SocketAddr::from(([192, 168, 1, 20], PORT));
-        let open = OpenPort::open(router, PORT, to, Duration::from_millis(20)).unwrap();
+        let (tcp, renew) = (PortMappingProtocol::TCP, Duration::from_millis(20));
+        let open = OpenPort::open(router, tcp, PORT, to, renew).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         open.close();
         let asked: Vec<_> = asked.try_iter().collect();
         let expected: [Asked; 3] = [
-            ("AddPortMapping".into(), Some(LEASE)),
-            ("AddPortMapping".into(), Some(0)),
-            ("DeletePortMapping".into(), None),
+            ("AddPortMapping TCP".into(), Some(LEASE)),
+            ("AddPortMapping TCP".into(), Some(0)),
+            ("DeletePortMapping TCP".into(), None),
         ];
         assert_eq!(asked, expected);
     }

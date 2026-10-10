@@ -374,15 +374,20 @@ Multiplayer maps only store the tags unique to them; the rest live in
 `h2live.exe` is the online service: accounts, parties, matchmaking and the
 relay that carries online games. It reads no map files. Double-click it on
 the PC that hosts it (allow it through Windows Firewall when asked): it
-listens on port 47050, keeps accounts in `h2live-data` (back that folder
-up), asks the router to open the port (UPnP), and says how players reach
-it: `READY: ws://<address>:47050`, `FORWARD TCP 47050 TO <this PC>` when
-the router needs a port forward set by hand, or `CGNAT: USE THE HOSTED
-OPTION` when the internet provider makes that impossible. Ctrl+C stops it.
-An `h2live.txt` next to it can set `port=` and `data=`. On a host online,
-`PORT`, `H2LIVE_DATA` and `H2LIVE_SECRET` (what signs players' stat cards)
-set the same; `/health` answers health checks, and `/` says how many
-players are online. `H2LIVE_UPNP=0` leaves the router alone.
+listens on port 47050 (TCP for signing in, and UDP for the relay that
+carries the launcher's games), keeps accounts in `h2live-data` (back that
+folder up), asks the router to open the port (UPnP), and says how players
+reach it: `READY: ws://<address>:47050`, `FORWARD TCP AND UDP 47050 TO
+<this PC>` when the router needs port forwards set by hand, or `CGNAT: USE
+THE HOSTED OPTION` when the internet provider makes that impossible. Ctrl+C
+stops it. An `h2live.txt` next to it can set `port=`, `data=` and `relay=`
+(the relay's UDP port, or `off`). On a host online, `PORT`, `H2LIVE_DATA`,
+`H2LIVE_RELAY` and `H2LIVE_SECRET` (what signs players' stat cards) set the
+same; `/health` answers health checks, and `/` says how many players are
+online. `H2LIVE_UPNP=0` leaves the router alone. The relay only lets in
+the players of matches h2live sets up. `h2relay.exe` runs a relay on its
+own for tests on one PC or a home network (`h2relay [port]`); it lets
+anyone in, so don't forward its port.
 
 Games sign in to h2live on the same PC if it's running, or else the server a
 `server=` line in `profile.txt` names, or else the one built into the game;

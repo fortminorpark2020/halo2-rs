@@ -4,9 +4,12 @@
 # one.
 #
 #   docker build -f Dockerfile.live -t h2live .
-#   docker run -p 47050:47050 h2live
+#   docker run -p 47050:47050 -p 47050:47050/udp h2live
 #
-# A host sets PORT, and h2live listens there instead.
+# A host sets PORT, and h2live listens there instead. The relay for the
+# launcher's games listens on UDP at the same port number (H2LIVE_RELAY
+# changes it); a host that only carries TCP, like Render's free web
+# services, can't reach it.
 
 FROM rust:1.99-slim-trixie AS build
 WORKDIR /src
@@ -26,5 +29,5 @@ WORKDIR /home/h2live
 COPY --from=build /src/target/release/h2live /usr/local/bin/h2live
 # There's no router to ask for the port from inside a container.
 ENV H2LIVE_UPNP=0
-EXPOSE 47050
+EXPOSE 47050/tcp 47050/udp
 CMD ["h2live"]

@@ -57,6 +57,13 @@ and mouse or an Xbox controller, and just runs the .exe.
   and the game and the online server must use the same number.
 - `crates/h2live`: the online matchmaking server (levels 1-50, playlists,
   parties). Deployed to a Linux container; see `deploy/proxmox/` and `docs/ONLINE.md`.
+- `crates/h2relay`: the UDP relay that carries halo2.dll's packets between
+  launchers (client for h2launch, server run inside h2live on UDP 47050, and
+  a standalone `h2relay` program). Its wire format has its own
+  `RELAY_PROTOCOL` (in `src/frame.rs`), separate from h2net's `PROTOCOL`:
+  bump it whenever the relay's frames change. h2live's relay admits only
+  rooms it issues (`RelayHandle::issue`, with a `member_key` per player);
+  the standalone one has open rooms and is for tests on a LAN only.
 - `crates/h2viewer`: the from-scratch game (wgpu + winit): menus, HUD,
   rendering, input (keyboard, mouse, XInput controllers through gilrs),
   splitscreen, LAN and online clients.
