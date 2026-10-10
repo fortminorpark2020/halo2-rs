@@ -55,8 +55,13 @@ the launcher doesn't do.
   by `blam_cache::font`; checked on the owner's PC 2026-10-10): by size,
   conduit-9 for small print, Handel Gothic 11 for column headings,
   conduit-13 for text, Handel Gothic 13 (the main menu's font) for names
-  and rows, and Handel Gothic 24 for titles. The glyphs are scaled from
-  their size in the file (ascent plus descent) to the text's. Characters
+  and rows, and Handel Gothic 24 for titles; digits always from conduit,
+  as Handel Gothic's 1 is a bare stroke like its I. The glyphs are scaled
+  so their capitals are 0.65 of the text's size, as the system font's are
+  (their ascent and descent leave different room above the capitals).
+  Each glyph's image goes its origin x right of the pen, and the next one
+  its advance past that (from the pen, L's foot runs into a following I);
+  kerning pairs are code points, in the file's pixels. Characters
   they lack, and everything when MCC isn't found, come from a font
   already on the PC (Bahnschrift, then Segoe UI or Arial on Windows;
   DejaVu Sans or Liberation Sans on Linux) through `ab_glyph`.

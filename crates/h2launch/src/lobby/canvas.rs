@@ -258,9 +258,36 @@ enum Key {
 /// everything, without them). Glyphs are kept per size once drawn.
 pub struct Text {
     vector: Option<FontArc>,
-    /// Each Halo 2 font slot's font, by `blam_cache::font::Font::index`.
+    /// Each Halo 2 font slot's font, by `blam_cache::font::Font::index`,
+    /// and its capitals' height in the file's pixels.
     halo: Vec<Option<FontFile>>,
+    caps: Vec<f32>,
     cache: HashMap<Key, GlyphBitmap>,
+}
+
+/// A capital's height as a share of the text size: what the system font's
+/// are (about; DejaVu Sans's is 0.63, Segoe UI's 0.65). Halo 2's fonts are
+/// scaled so theirs match, as their ascent and descent leave different
+/// room above the capitals (conduit's capitals are well under half of
+/// its ascent plus descent).
+const CAP_HEIGHT: f32 = 0.65;
+
+/// How tall `f`'s capitals are, in its pixels: from the top of an H (or
+/// another capital) to the baseline.
+fn cap_height(f: &FontFile) -> f32 {
+    let fallback = f32::from(f.ascent.max(1)) * 0.7;
+    let Some(g) = ['H', 'E', 'I', 'T'].iter().find_map(|&c| f.glyph(c)) else {
+        return fallback;
+    };
+    let w = usize::from(g.width).max(1);
+    let top = g
+        .rgba
+        .chunks(4 * w)
+        .position(|row| row.chunks(4).any(|p| p[3] >= 128));
+    match top {
+        Some(top) if (top as f32) < f32::from(g.origin[1]) => f32::from(g.origin[1]) - top as f32,
+        _ => fallback,
+    }
 }
 
 /// Fonts tried in order: `H2LOBBY_FONT`, then fonts Windows and common
@@ -345,6 +372,7 @@ impl Text {
         Ok(Text {
             vector: Some(font),
             halo: Vec::new(),
+            caps: Vec::new(),
             cache: HashMap::new(),
         })
     }
@@ -377,9 +405,14 @@ impl Text {
         if !halo.iter().any(Option::is_some) {
             return system;
         }
+        let caps = halo
+            .iter()
+            .map(|f| f.as_ref().map_or(1.0, cap_height))
+            .collect();
         Ok(Text {
             vector: system.ok().and_then(|t| t.vector),
             halo,
+            caps,
             cache: HashMap::new(),
         })
     }
@@ -402,9 +435,15 @@ impl Text {
         let quarter = (size * 4.0).round() as u32;
         let cache = &mut self.cache;
         for ch in s.chars() {
+            // Handel Gothic's 1 is a bare stroke, like its I: digits come
+            // from conduit, whose numbers read plainly.
+            let style = match style {
+                Style::Heading | Style::Menu | Style::Large if ch.is_ascii_digit() => Style::Body,
+                other => other,
+            };
             let halo = halo_font(&self.halo, style).and_then(|(slot, f)| {
                 let g = f.glyph(ch)?;
-                let k = size / f32::from((f.ascent + f.descent).max(1));
+                let k = size * CAP_HEIGHT / self.caps.get(slot).copied().unwrap_or(1.0).max(1.0);
                 let kern = match prev {
                     Some(Key::Halo(p, c, _)) if p == slot => f32::from(f.kern(c, ch)) * k,
                     _ => 0.0,
@@ -413,7 +452,10 @@ impl Text {
             });
             if let Some((slot, g, k, kern)) = halo {
                 let key = Key::Halo(slot, ch, quarter);
-                let advance = f32::from(g.advance) * k;
+                // The advance counts from the glyph's left edge, which is
+                // its origin x right of the pen (with the advance from the
+                // pen, L's foot runs into a following I: "LI" reads "U").
+                let advance = (f32::from(g.advance) + f32::from(g.origin[0])) * k;
                 cache.entry(key).or_insert_with(|| scale_glyph(g, k));
                 pen += kern;
                 out.push((pen, key));
@@ -521,39 +563,49 @@ mod tests {
         assert_eq!(c.px[2 * 5 + 4], 0xFF0000);
     }
 
-    /// A Halo 2 font file (the layout `blam_cache::font` reads) with one
-    /// glyph: an 'I' two pixels wide and ten high, all opaque, advancing
-    /// four, drawn a pixel right of the pen; ascent 8 and descent 2.
-    fn one_glyph_font() -> Vec<u8> {
+    /// A Halo 2 font file (the layout `blam_cache::font` reads), ascent 8
+    /// and descent 2, whose glyphs (`chars`) are all an opaque bar two
+    /// pixels wide and ten high, drawn a pixel right of the pen, so
+    /// capitals are 8 pixels high; the next glyph goes `advance` past the
+    /// bar's left edge.
+    fn font_file(chars: &[char], advance: u16) -> Vec<u8> {
         let put16 =
             |b: &mut Vec<u8>, o: usize, v: u16| b[o..o + 2].copy_from_slice(&v.to_le_bytes());
         let put32 =
             |b: &mut Vec<u8>, o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
-        let mut b = vec![0u8; 0x40400 + 2 * 16];
+        let n = chars.len() + 1;
+        let mut b = vec![0u8; 0x40400 + n * 16];
         put32(&mut b, 0x200, 0xF000_0001);
         put16(&mut b, 0x204, 8);
         put16(&mut b, 0x206, 2);
-        put32(&mut b, 0x20C, 2);
-        put32(&mut b, 0x400 + 4 * 'I' as usize, 1);
-        let r = 0x40400 + 16;
-        put16(&mut b, r, 4);
-        put16(&mut b, r + 2, 1);
-        put16(&mut b, r + 4, 2);
-        put16(&mut b, r + 6, 10);
-        put16(&mut b, r + 8, 1);
-        put16(&mut b, r + 0xA, 8);
-        let at = b.len() as u32;
-        put32(&mut b, r + 0xC, at);
-        // Twenty opaque pixels of the current colour (white).
+        put32(&mut b, 0x20C, n as u32);
+        let data = b.len() as u32;
+        // Twenty opaque pixels of the current colour (white), shared.
         b.push(0x40 | 20);
+        for (k, &c) in chars.iter().enumerate() {
+            put32(&mut b, 0x400 + 4 * c as usize, k as u32 + 1);
+            let r = 0x40400 + 16 * (k + 1);
+            put16(&mut b, r, advance);
+            put16(&mut b, r + 2, 1);
+            put16(&mut b, r + 4, 2);
+            put16(&mut b, r + 6, 10);
+            put16(&mut b, r + 8, 1);
+            put16(&mut b, r + 0xA, 8);
+            put32(&mut b, r + 0xC, data);
+        }
         b
     }
 
+    /// Halo 2 fonts in a folder: conduit (the large body slot) and Handel
+    /// Gothic (every other slot), told apart by their advances.
     fn halo_text(name: &str) -> (Text, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("h2lobby-fonts-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("conduit-13"), one_glyph_font()).unwrap();
-        std::fs::write(dir.join("font_table.txt"), "conduit-13\r\n".repeat(12)).unwrap();
+        std::fs::write(dir.join("conduit-13"), font_file(&['I', '1'], 6)).unwrap();
+        std::fs::write(dir.join("handel_gothic-13"), font_file(&['I', '1'], 4)).unwrap();
+        let mut table: Vec<&str> = vec!["handel_gothic-13"; 12];
+        table[H2Font::LargeBody.index()] = "conduit-13";
+        std::fs::write(dir.join("font_table.txt"), table.join("\r\n")).unwrap();
         let text = Text::halo2(Some(&dir)).unwrap();
         (text, dir)
     }
@@ -562,22 +614,28 @@ mod tests {
     fn halo2_fonts_give_their_glyphs_at_any_size() {
         let (mut text, dir) = halo_text("draw");
         assert_eq!(text.halo2_slots().len(), 12);
-        // Ascent and descent make 10 pixels: at size 10 the glyph is as
-        // it is in the file, at 20 twice as big.
-        assert_eq!(text.measure(Style::Menu, 10.0, "II"), 8.0);
-        assert_eq!(text.measure(Style::Body, 20.0, "I"), 8.0);
+        // Capitals 8 pixels high in the file: at this size the glyphs are
+        // as they are there, at twice it twice as big.
+        let one = 8.0 / CAP_HEIGHT;
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        // Each glyph takes its origin x and advance.
+        assert!(near(text.measure(Style::Menu, one, "II"), 10.0));
+        assert!(near(text.measure(Style::Menu, 2.0 * one, "I"), 10.0));
+        // Digits in Handel Gothic's styles come from conduit.
+        assert!(near(text.measure(Style::Menu, one, "1"), 7.0));
+        assert!(near(text.measure(Style::Body, one, "I"), 7.0));
         let mut c = Canvas::new(40, 40);
         let w = c.text(
             &mut text,
             Style::Menu,
             10.0,
             20.0,
-            10.0,
+            one,
             Color::rgb(0xFFFFFF),
             Align::Left,
             "I",
         );
-        assert_eq!(w, 4.0);
+        assert!(near(w, 5.0));
         // Its two columns start a pixel right of the pen, from 8 above the
         // baseline down to 2 below it.
         assert_eq!(c.px[12 * 40 + 11], 0xFFFFFF);
@@ -586,13 +644,14 @@ mod tests {
         assert_eq!(c.px[11 * 40 + 11], 0);
         assert_eq!(c.px[22 * 40 + 11], 0);
         let mut c = Canvas::new(40, 40);
+        let red = Color::rgb(0xFF0000);
         c.text(
             &mut text,
             Style::Menu,
             10.0,
             30.0,
-            20.0,
-            Color::rgb(0xFF0000),
+            2.0 * one,
+            red,
             Align::Left,
             "I",
         );
@@ -601,9 +660,9 @@ mod tests {
         assert_eq!(c.px[14 * 40 + 16], 0);
         // A character the font lacks comes from the system font, if any.
         if Text::system().is_ok() {
-            assert!(text.measure(Style::Menu, 10.0, "IA") > 4.0);
+            assert!(text.measure(Style::Menu, one, "IA") > 5.5);
         } else {
-            assert_eq!(text.measure(Style::Menu, 10.0, "IA"), 4.0);
+            assert!(near(text.measure(Style::Menu, one, "IA"), 5.0));
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
