@@ -141,7 +141,9 @@ the launcher doesn't do.
 7. Carnage report: each player's place, team, score, kills, assists,
    deaths and level, in Halo 2 Xbox's columns (PLACE, PLAYER, SCORE,
    KILLS, ASSISTS, DEATHS, LEVEL), sorted by place, then team, then score,
-   and the level changes MATCH_OVER gives. Up and down select a player
+   and the level changes MATCH_OVER gives. Until `results::COUNTS_SEEN`,
+   a KILLS or ASSISTS column that is 0 for everyone says "-", as it may
+   only mean the numbers weren't sent. Up and down select a player
    (starting on yours): LB opens their service record, Y sends them a
    friend request. A (or B) goes back to the party (the leader of a custom
    game goes back to the custom game screen, to pick the next).

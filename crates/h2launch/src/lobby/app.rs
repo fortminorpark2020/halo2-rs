@@ -2558,6 +2558,20 @@ impl App {
             p.text(x, 228.0, 16.0, HEAD, a, h);
         }
         let rows = carnage_rows(g);
+        // Until the engine's kills and assists are seen right
+        // (`results::COUNTS_SEEN`), a column that is 0 for everyone may
+        // only mean they weren't sent, so it says "-" rather than 0.
+        let unsent = |count: fn(&LauncherPlayerResult) -> u16| {
+            !crate::results::COUNTS_SEEN && rows.iter().all(|r| count(r) == 0)
+        };
+        let (no_kills, no_assists) = (unsent(|r| r.kills), unsent(|r| r.assists));
+        let shown = |unsent: bool, n: u16| {
+            if unsent {
+                "-".to_string()
+            } else {
+                n.to_string()
+            }
+        };
         let h = (380.0 / rows.len().max(1) as f32).min(44.0);
         for (k, r) in rows.iter().enumerate() {
             let y = 242.0 + k as f32 * h;
@@ -2587,8 +2601,8 @@ impl App {
             p.text(200.0, base, size, col, Align::Left, &name);
             for (x, n) in [
                 (700.0, r.score.to_string()),
-                (790.0, r.kills.to_string()),
-                (880.0, r.assists.to_string()),
+                (790.0, shown(no_kills, r.kills)),
+                (880.0, shown(no_assists, r.assists)),
                 (970.0, r.deaths.to_string()),
             ] {
                 p.text(x, base, size, col, Align::Center, &n);
@@ -3859,6 +3873,36 @@ mod tests {
         });
         a.screen = Screen::Carnage;
         a.csel = 1;
+    }
+
+    #[test]
+    fn kills_and_assists_no_one_has_say_dash_until_the_counts_are_seen() {
+        let dir = scratch("carnage-dash");
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        let Ok(mut text) = Text::system() else {
+            return;
+        };
+        let cells = |a: &mut App, text: &mut Text| {
+            a.draw(&mut Canvas::new(640, 360), text);
+            let d = a.drawn();
+            (
+                d.iter().filter(|t| *t == "-").count(),
+                d.iter().any(|t| t == "5"),
+            )
+        };
+        // Counts someone has show as they are.
+        let (dashes, five) = cells(&mut a, &mut text);
+        assert!(five);
+        // Kills and assists 0 for everyone may not have been sent.
+        for r in a.game.as_mut().unwrap().results.iter_mut().flatten() {
+            r.kills = 0;
+            r.assists = 0;
+        }
+        let (more, _) = cells(&mut a, &mut text);
+        let expected = if crate::results::COUNTS_SEEN { 0 } else { 4 };
+        assert_eq!(more - dashes, expected);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
