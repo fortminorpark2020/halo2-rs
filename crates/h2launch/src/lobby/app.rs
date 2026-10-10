@@ -746,10 +746,14 @@ impl App {
         }
     }
 
-    /// The playlist the party panel shows levels for: the one the party
-    /// searches while it searches, else the one selected (None on the
-    /// custom game row).
+    /// The playlist the party panel and the party screen show levels for:
+    /// the one the party searches while it searches, else the one selected
+    /// on the playlists screen (None on the custom game row, and on the
+    /// custom game screen, whatever row was selected before it).
     fn panel_playlist(&self) -> Option<&PlaylistInfo> {
+        if self.screen == Screen::Custom {
+            return None;
+        }
         let v = self.view()?;
         if self.searching() {
             let id = v.party.as_ref()?.playlist;
@@ -784,9 +788,10 @@ impl App {
     }
 
     /// Ask for the service records the party panel needs for the levels
-    /// PARTY doesn't give (`member_level`), on the playlists screen.
+    /// PARTY doesn't give (`member_level`), on the playlists and party
+    /// screens.
     fn ask_member_records(&mut self) {
-        if self.screen != Screen::Live || self.popup.is_some() {
+        if !matches!(self.screen, Screen::Live | Screen::Party) || self.popup.is_some() {
             return;
         }
         let Some(id) = self.panel_playlist().filter(|p| p.ranked).map(|p| p.id) else {
@@ -2213,7 +2218,8 @@ impl App {
             }
             let name = p.fit(24.0, 400.0, &m.gamertag);
             p.text(108.0, y + 32.0, 24.0, col, Align::Left, &name);
-            let level = if m.level > 0 { m.level } else { m.best.max(1) };
+            // As the party panel shows it, so the two agree.
+            let level = self.member_level(pt, m);
             p.level(
                 560.0,
                 y + 32.0,
@@ -4162,6 +4168,69 @@ mod tests {
         searching.members[1].level = 1;
         view(&mut a).party = Some(searching);
         assert_eq!(levels(&a), (1, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_party_and_custom_screens_agree_with_the_panel() {
+        let dir = scratch("panel-screens");
+        let (mut a, mut server) = live_app(&dir);
+        let rumble = PlaylistInfo {
+            id: 12,
+            key: "rumble".into(),
+            name: "Rumble Pit".into(),
+            ranked: true,
+            teams: false,
+            guests: false,
+            min: 2,
+            max: 8,
+            party_max: 8,
+            searching: 0,
+            playing: 0,
+            level: 1,
+            maps: Vec::new(),
+        };
+        let mut h2h = rumble.clone();
+        (h2h.id, h2h.key, h2h.name, h2h.level) = (11, "h2h".into(), "Head to Head".into(), 3);
+        view(&mut a).playlists = vec![h2h, rumble];
+        // The party last played Head to Head, where BRAVO is level 2.
+        let mut pt = party(500, Activity::Lobby);
+        pt.members.push(PartyMember {
+            account: 2,
+            gamertag: "BRAVO".into(),
+            look: Default::default(),
+            best: 2,
+            level: 2,
+            guests: 0,
+        });
+        view(&mut a).party = Some(pt);
+        let bravo = |a: &App| {
+            let pt = a.party().unwrap();
+            a.member_level(pt, &pt.members[1])
+        };
+        // Rumble Pit selected, then the party screen (Y): his record is
+        // asked for there too, and until it comes he shows "-" as in the
+        // panel, not PARTY's 2 from Head to Head.
+        a.input(Input::Down);
+        a.input(Input::Y);
+        assert_eq!(a.label(), "party");
+        a.tick(a.now);
+        assert_eq!(sent(&mut server), [ToServer::Record(2)]);
+        assert_eq!(bravo(&a), 0);
+        if let Ok(mut text) = Text::system() {
+            let mut c = Canvas::new(1280, 720);
+            a.draw(&mut c, &mut text);
+            assert!(a.drawn().iter().any(|d| d == "-"));
+            assert!(!a.drawn().iter().any(|d| d == "2"));
+        }
+        // The custom game screen shows the highest levels whatever row was
+        // selected before it (a member made leader after a custom game
+        // comes back to it from the carnage report), and asks nothing.
+        a.screen = Screen::Custom;
+        a.tick(a.now);
+        assert_eq!(a.label(), "custom");
+        assert_eq!(bravo(&a), 2);
+        assert!(sent(&mut server).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

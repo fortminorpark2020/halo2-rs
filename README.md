@@ -65,7 +65,8 @@ install. No game files are included in this repository.
   the party, the friends list or the carnage report): their highest level,
   and their games, wins, kills, deaths and K/D in each ranked playlist. The
   levels the launcher shows count the launcher's playlists only, and the
-  party panel shows each member's level in the playlist you have selected. On
+  party panel and the party screen show each member's level in the playlist
+  you have selected. On
   a keyboard, Q and E (or Page Up and Page Down) are LB and RB. Levels show
   as Halo 2's own level icons, read from your MCC install (or from a Halo 2
   Vista install if MCC's can't be read); without either they are numbers. Friends and service records need the matching

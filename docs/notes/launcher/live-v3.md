@@ -1456,6 +1456,8 @@ changed: `LIVE_PROTOCOL` stays 3 and `PROTOCOL` 26.
   searched while searching): its own from PLAYLISTS, the server's if the
   party's playlist is that one, else from the member's service record,
   which it asks for (RECORD, cached as the record screen's are; 1 for a
-  playlist they haven't played, "-" until it comes). The custom game row
-  and unranked playlists show the highest level. A fix on the server
+  playlist they haven't played, "-" until it comes). The custom game row,
+  the custom game screen and unranked playlists show the highest level,
+  and the party screen (Y) shows the same levels as the panel, asking for
+  records there too, so the two never disagree. A fix on the server
   alone would have needed the selection sent to it, a new message.

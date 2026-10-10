@@ -490,7 +490,12 @@ fn inflate<R: Read + Seek>(
     most: usize,
 ) -> std::io::Result<Vec<u8>> {
     r.seek(SeekFrom::Start(offset))?;
-    let mut out = Vec::with_capacity(most);
+    // zlib inflates at most about 1032 times, so a short stream that claims
+    // a big result doesn't get that much reserved for it up front.
+    let likely = usize::try_from(compressed)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(1032);
+    let mut out = Vec::with_capacity(most.min(likely));
     flate2::read::ZlibDecoder::new(r.take(compressed))
         .take(most as u64 + 1)
         .read_to_end(&mut out)?;
@@ -547,6 +552,14 @@ impl<R: Read + Seek> Textures<R> {
         let (w, h) = (e.width, e.height);
         if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE {
             return Err(Error::Corrupt(format!("a bitmap {w} by {h}")));
+        }
+        // The decoded image is 4 bytes a pixel whatever the format, and no
+        // stored level is bigger, so this bounds every buffer below.
+        let rgba = usize::from(w) * usize::from(h) * 4;
+        if rgba > MAX_READ {
+            return Err(Error::Corrupt(format!(
+                "a bitmap {w} by {h} is {rgba} bytes decoded, more than {MAX_READ}"
+            )));
         }
         let need = e
             .format
@@ -1108,6 +1121,28 @@ mod tests {
             ..good
         };
         assert!(bad(e, &mut textures).contains("unsupported"));
+        // Sides within the limit but too big decoded (256 MiB, or 64 MiB
+        // and a byte as DXT1): refused before the record is read, so
+        // nothing that size is reserved. 4096 square is just allowed.
+        for (w, h, format) in [
+            (8192, 8192, Format::A8R8G8B8),
+            (8192, 8192, Format::Dxt1),
+            (4097, 4096, Format::A8R8G8B8),
+        ] {
+            let e = BitmapEntry {
+                width: w,
+                height: h,
+                format,
+                ..good
+            };
+            assert!(bad(e, &mut textures).contains("more than"), "{w} {h}");
+        }
+        let e = BitmapEntry {
+            width: 4096,
+            height: 4096,
+            ..good
+        };
+        assert!(bad(e, &mut textures).contains("of 67108864 bytes"));
         for pointer in [
             0x8000_0000,
             0x4000_0010,

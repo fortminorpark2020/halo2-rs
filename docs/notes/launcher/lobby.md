@@ -118,7 +118,7 @@ the launcher doesn't do.
 2. Xbox Live: the playlists (name, your level in it, people searching and
    playing) and the party (members and their levels in the playlist
    selected, or the one searched while searching; their highest on the
-   custom game row or an unranked playlist). PARTY gives the others'
+   custom game row, the custom game screen or an unranked playlist). PARTY gives the others'
    levels only in the playlist the party last searched or played, so for
    another playlist the lobby asks for the members' service records and
    reads the level there (level 1 in one they haven't played; "-" until
@@ -154,8 +154,9 @@ the launcher doesn't do.
    launcher playlist plays, then makes an unranked match for the party
    with the leader hosting and teams alternating down the party; from
    there it goes as a playlist's match does. It works alone too.
-9. Party: the members, each one's level and role (leader, member, you,
-   guests) and whether anyone can join. The leader picks another member
+9. Party: the members, each one's level (as the party panel shows it: in
+   the playlist selected on the playlists screen) and role (leader,
+   member, you, guests) and whether anyone can join. The leader picks another member
    and makes them leader (A, PROMOTE) or removes them (X, asked first;
    KICK, after which they come back only if invited), and Y switches
    between open and invite only (PRIVACY). Anyone picks their own row to

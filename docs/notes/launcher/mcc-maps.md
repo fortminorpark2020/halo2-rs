@@ -115,7 +115,9 @@ and chunk size; the chunk table and every chunk must lie inside the file,
 each chunk's compressed size at most one and a half times the chunk size;
 every chunk must inflate to exactly its share of the image; at most 65,536
 tags and names and 64 MiB of names; one read of the image at most 64 MiB;
-at most 65,535 images in a bitmap tag; images at most 8192 pixels a side.
+at most 65,535 images in a bitmap tag; images at most 8192 pixels a side
+and 64 MiB decoded (4096 by 4096). A short pixel stream that claims a big
+image gets no more reserved for it than zlib could inflate it to.
 Chunks are inflated when a read first needs them, and the last eight are
 kept.
 
@@ -124,7 +126,13 @@ kept.
 `blam_cache::mcc::synthetic` builds made-up format-13 maps (with small
 chunks, so tags cross chunk boundaries) and textures.dat files; the tests
 in `mcc.rs` and `ranks.rs` use them, and nothing in them comes from a real
-file. Two ignored tests read the real icons on the owner's PC:
-`H2_MCC_MAPS=<MCC>\halo2\h2_maps_win64_dx11 cargo test -p h2launch --release
-reads_real_icons_from_mcc_maps -- --ignored`, and the Vista one with
-`H2_MAPS`.
+file. Two ignored tests read the real icons on the owner's PC. In
+PowerShell, from the clone:
+
+```
+$env:H2_MCC_MAPS = "<MCC>\halo2\h2_maps_win64_dx11"
+cargo test -p h2launch --release reads_real_icons_from_mcc_maps -- --ignored
+```
+
+(in cmd, `set H2_MCC_MAPS=<MCC>\halo2\h2_maps_win64_dx11` first), and the
+Vista one the same way with `H2_MAPS`.
