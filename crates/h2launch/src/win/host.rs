@@ -235,6 +235,7 @@ pub fn start_net(s: &Setup) {
     let settings = |machines: Vec<u64>| net::Settings {
         recv_port: s.args.recv_port,
         send_return: s.args.send_return,
+        self_send: s.args.self_send,
         machines,
     };
     let n = match &s.session {

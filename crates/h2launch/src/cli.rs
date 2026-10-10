@@ -1,6 +1,6 @@
 //! Command-line flags. Every flag takes `--flag value` or `--flag=value`.
 
-use crate::net::{RecvPort, SendReturn};
+use crate::net::{RecvPort, SelfSend, SendReturn};
 use crate::options::RawWrite;
 use crate::profile::PadMap;
 
@@ -53,6 +53,12 @@ Usage: h2launch [flags]
                           read: auto (default), value, pointer or ignore.
   --send-return <len|0|1> What the engine's send calls get back for a packet
                           that went (default len).
+  --self-send <oob|all|loop>  What the engine's sends to its own machine id
+                          do: oob (default) sends those on the out-of-band
+                          port 1002 (its 'looking for games' broadcast) to
+                          every launcher in the match and back to us; all
+                          does that on every port; loop only hands them
+                          back to us.
   --instance <name>       Keep this launcher's log, screenshots and engine
                           files in their own folder (for two launchers on one
                           PC), and put the name in the window title.
@@ -122,6 +128,7 @@ pub struct Args {
     pub relay_wait: f64,
     pub recv_port: RecvPort,
     pub send_return: SendReturn,
+    pub self_send: SelfSend,
     pub instance: Option<String>,
     pub pad: Pad,
     pub slot_return: Vec<(usize, u64)>,
@@ -160,6 +167,7 @@ impl Default for Args {
             relay_wait: 15.0,
             recv_port: RecvPort::Auto,
             send_return: SendReturn::Len,
+            self_send: SelfSend::Oob,
             instance: None,
             pad: Pad::Any,
             slot_return: Vec::new(),
@@ -319,6 +327,11 @@ where
                 let v = value()?;
                 a.send_return = SendReturn::parse(&v)
                     .ok_or_else(|| format!("--send-return: {v:?} should be len, 0 or 1"))?;
+            }
+            "--self-send" => {
+                let v = value()?;
+                a.self_send = SelfSend::parse(&v)
+                    .ok_or_else(|| format!("--self-send: {v:?} should be oob, all or loop"))?;
             }
             "--instance" => {
                 let v = value()?;

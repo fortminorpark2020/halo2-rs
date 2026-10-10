@@ -74,6 +74,45 @@ impl SendReturn {
     }
 }
 
+/// The engine's out-of-band port: transport and session messages, and the
+/// first contact (a broadcast search for games). Its game links use 1000.
+/// Static read of halo2.dll 1.3528 on the owner's PC (2026-10-10).
+pub const OOB_PORT: u32 = 1002;
+
+/// What an unreliable send addressed to this machine's own id does. The
+/// engine sends its system-link "looking for games" broadcast to its own
+/// id on the out-of-band port (seen on the owner's PC, 2026-10-10), the
+/// way a broadcast on a real network also reaches the sender.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfSend {
+    /// On the out-of-band port: to every other member and back to us. On
+    /// other ports: only back to us.
+    Oob,
+    /// On every port: to every other member and back to us.
+    All,
+    /// Only back to us (no broadcast).
+    Loop,
+}
+
+impl SelfSend {
+    pub fn parse(s: &str) -> Option<SelfSend> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "oob" => SelfSend::Oob,
+            "all" => SelfSend::All,
+            "loop" => SelfSend::Loop,
+            _ => return None,
+        })
+    }
+
+    fn broadcasts(self, port: u32) -> bool {
+        match self {
+            SelfSend::Oob => port == OOB_PORT,
+            SelfSend::All => true,
+            SelfSend::Loop => false,
+        }
+    }
+}
+
 /// Packets kept for the engine at most; the oldest go first.
 const QUEUE: usize = 1024;
 /// Calls of each slot logged in full.
@@ -86,6 +125,7 @@ const HEAD: usize = 16;
 pub struct Settings {
     pub recv_port: RecvPort,
     pub send_return: SendReturn,
+    pub self_send: SelfSend,
     /// The match's machine ids, to name destinations in the log.
     pub machines: Vec<u64>,
 }
@@ -127,6 +167,7 @@ pub struct Net {
     calls: [AtomicU64; 4],
     sent_ok: AtomicU64,
     sent_failed: AtomicU64,
+    broadcasts: AtomicU64,
     bytes_out: AtomicU64,
     delivered: AtomicU64,
     bytes_in: AtomicU64,
@@ -193,6 +234,7 @@ impl Net {
             calls: Default::default(),
             sent_ok: AtomicU64::new(0),
             sent_failed: AtomicU64::new(0),
+            broadcasts: AtomicU64::new(0),
             bytes_out: AtomicU64::new(0),
             delivered: AtomicU64::new(0),
             bytes_in: AtomicU64::new(0),
@@ -242,9 +284,18 @@ impl Net {
     pub fn send(&self, reliable: bool, dst: u64, data: &[u8], port: u32) -> u32 {
         let slot = if reliable { 42 } else { 41 };
         let n = self.calls[usize::from(reliable)].fetch_add(1, Relaxed);
+        let broadcast = !reliable && dst == self.me && self.settings.self_send.broadcasts(port);
         let result = match &self.client {
             None => Err(None),
             Some(c) if reliable => c.send_reliable(dst, port, data).map_err(Some),
+            Some(c) if broadcast => {
+                self.broadcasts.fetch_add(1, Relaxed);
+                // Back to us as well, as on a real network; that copy can't
+                // fail in a way the engine needs to hear about.
+                let _ = c.send_unreliable(self.me, port, data);
+                c.send_unreliable(h2relay::BROADCAST, port, data)
+                    .map_err(Some)
+            }
             Some(c) => c.send_unreliable(dst, port, data).map_err(Some),
         };
         let back = match result {
@@ -263,6 +314,7 @@ impl Net {
             }
         };
         let why = match &result {
+            Ok(()) if broadcast => "sent to everyone (a broadcast)".to_string(),
             Ok(()) => "sent".to_string(),
             Err(None) => "no relay (solo)".to_string(),
             Err(Some(SendError::Full)) => "dropped: no room to send".to_string(),
@@ -424,13 +476,14 @@ impl Net {
     /// The end-of-run summary.
     pub fn summary(&self) -> Vec<String> {
         let mut out = vec![format!(
-            "net summary: slot 41 {} calls, slot 42 {}, slot 43 {} polls, slot 44 {}; {} packets sent ({} bytes), {} failed; {} delivered ({} bytes)",
+            "net summary: slot 41 {} calls, slot 42 {}, slot 43 {} polls, slot 44 {}; {} packets sent ({} bytes, {} as broadcasts), {} failed; {} delivered ({} bytes)",
             self.calls[0].load(Relaxed),
             self.calls[1].load(Relaxed),
             self.calls[2].load(Relaxed),
             self.calls[3].load(Relaxed),
             self.sent_ok.load(Relaxed),
             self.bytes_out.load(Relaxed),
+            self.broadcasts.load(Relaxed),
             self.sent_failed.load(Relaxed),
             self.delivered.load(Relaxed),
             self.bytes_in.load(Relaxed),
@@ -522,6 +575,7 @@ mod tests {
         Settings {
             recv_port,
             send_return: SendReturn::Len,
+            self_send: SelfSend::Oob,
             machines: vec![HOST, GUEST],
         }
     }
@@ -586,6 +640,39 @@ mod tests {
         );
         let s = host.summary();
         assert!(s[0].contains("1 delivered"), "{s:?}");
+    }
+
+    #[test]
+    fn a_send_to_our_own_id_on_the_oob_port_is_a_broadcast() {
+        let (_server, host, guest) = pair(RecvPort::Auto);
+        // The guest's "looking for games", addressed to itself.
+        assert_eq!(guest.send(false, GUEST, b"blam search", OOB_PORT), 11);
+        assert_eq!(
+            poll(&host, OOB_PORT as u64),
+            Some((GUEST, OOB_PORT, b"blam search".to_vec()))
+        );
+        // It comes back to the sender too, as on a real network.
+        assert_eq!(
+            poll(&guest, OOB_PORT as u64),
+            Some((GUEST, OOB_PORT, b"blam search".to_vec()))
+        );
+        assert!(guest.summary()[0].contains("1 as broadcasts"));
+        // On the game port, a send to ourselves stays with us.
+        assert_eq!(guest.send(false, GUEST, b"local", 1000), 5);
+        assert_eq!(poll(&guest, 1000), Some((GUEST, 1000, b"local".to_vec())));
+        let mut buf = [0u8; 64];
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(host.recv(&mut buf, 1000), None);
+    }
+
+    #[test]
+    fn self_send_modes() {
+        assert!(SelfSend::Oob.broadcasts(OOB_PORT));
+        assert!(!SelfSend::Oob.broadcasts(1000));
+        assert!(SelfSend::All.broadcasts(1000));
+        assert!(!SelfSend::Loop.broadcasts(OOB_PORT));
+        assert_eq!(SelfSend::parse("LOOP"), Some(SelfSend::Loop));
+        assert_eq!(SelfSend::parse("x"), None);
     }
 
     #[test]

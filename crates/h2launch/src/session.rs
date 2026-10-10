@@ -20,8 +20,9 @@
 //! player: the profile, input and `--xuid` belong to them.
 //!
 //! Every launcher writes the same roster, the way an MCC matchmade game
-//! knows all its players before it loads; only the flags (host or not) and
-//! the local network id differ. The engine's meaning of these fields is
+//! knows all its players before it loads; only the flags (host, or a
+//! machine that searches for the host's game and joins it) and the local
+//! network id differ. The engine's meaning of these fields is
 //! partly inferred (research 3.5): which values work is what the test
 //! stages find out, and `--set-option` can still override any of them.
 
@@ -284,15 +285,24 @@ impl Session {
     }
 
     /// Writes the session into the options, after the variant copy and the
-    /// offline match fields and before `--set-option`: flags (bit 6 on the
-    /// host only), the threshold, the host's secure address and id, the
-    /// machine list, every player, and this machine's id.
+    /// offline match fields and before `--set-option`: flags (bits 3 and 6
+    /// on the host, both clear elsewhere), the threshold, the host's secure
+    /// address and id, the machine list, every player, and this machine's
+    /// id.
+    ///
+    /// Bit 3 makes the engine create a session it hosts as it starts; with
+    /// it clear, a networked launch starts a system-link search for a game
+    /// to join instead (static read of 1.3528 and a test on the owner's PC,
+    /// 2026-10-10: with bit 3 on both, each launcher hosted its own empty
+    /// game). What bit 6 does in Halo 2 is not known; it stays on the host
+    /// as in Reach.
     pub fn apply(&self, opts: &mut GameOptions, me: usize) {
-        let mut flags = opts.get_u16(off::FLAGS) | options::flags::MULTIPLAYER;
+        let host_bits = options::flags::MULTIPLAYER | options::flags::LISTEN_SERVER;
+        let mut flags = opts.get_u16(off::FLAGS);
         if self.is_host(me) {
-            flags |= options::flags::LISTEN_SERVER;
+            flags |= host_bits;
         } else {
-            flags &= !options::flags::LISTEN_SERVER;
+            flags &= !host_bits;
         }
         opts.put_u16(off::FLAGS, flags);
         if let Some(t) = self.threshold {
@@ -424,7 +434,7 @@ threshold = 2
             o.apply_match(&options::Launch::offline(44, 0x0009_0000_0000_0001));
             s.apply(&mut o, me);
             let flags = o.get_u16(off::FLAGS);
-            assert_eq!(flags, if me == 0 { 0x48 } else { 0x08 }, "machine {me}");
+            assert_eq!(flags, if me == 0 { 0x48 } else { 0x00 }, "machine {me}");
             assert_eq!(o.bytes()[off::UN_0], 2);
             assert_eq!(o.get_u64(0x50), 0x1234_5678_90AB_CDEF);
             assert_eq!(o.get_u64(0x58), 0x4832_0000_0000_0001);

@@ -108,7 +108,10 @@ pub mod player {
 
 /// Bits of the u16 at 0x00.
 pub mod flags {
-    /// "Multiplayer" (set by HaloX for every mode; halo2 needs it).
+    /// Named "multiplayer" after HaloX, which sets it for every mode. In
+    /// halo2 1.3528 it makes the engine create and host its own session as
+    /// it starts; a networked machine that should join the host's game
+    /// leaves it clear and searches instead (owner's PC, 2026-10-10).
     pub const MULTIPLAYER: u16 = 1 << 3;
     /// Local multiplayer / splitscreen.
     pub const LOCAL_MULTIPLAYER: u16 = 1 << 4;
