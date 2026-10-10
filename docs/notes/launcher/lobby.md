@@ -155,3 +155,13 @@ engine and showed the carnage report with "Unranked: levels don't change",
 and ALPHA was back on the custom game screen after it. The server's side
 is also covered by `a_launcher_party_plays_custom_games` in
 `crates/h2live/src/server/tests.rs`.
+
+On the owner's PC (2026-10-10 07:42 to 07:45), the same with the real
+engine against a local h2live (`127.0.0.1:47260`), with a 60 s time limit:
+the party played Team Slayer on Lockout (red against blue, the leader
+hosting, about 1.3 MB of game traffic each way through the relay), both
+engines ended the game together and closed by themselves, both carnage
+reports said "Unranked: levels don't change", and the leader was back on
+the custom game screen. Then, alone, the leader played a second custom
+game: one PC hosting, the map loaded in 6 s, the game ended at 60 s and the
+engine closed by itself.

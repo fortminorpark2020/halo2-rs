@@ -145,7 +145,10 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   new h2live): the party leader picks one of the launcher playlists'
   variants (`names::CUSTOM_GAMES`) and a map, the server makes an unranked
   match for the party with the leader hosting; tested on Linux with two
-  lobbies. Next: kills in the results block, a play session by the owner,
+  lobbies, and on the owner's PC with the real engine against a local
+  h2live (a party game and a solo game, 07:45). The Proxmox server still
+  runs `LIVE_PROTOCOL` 1 (its update waits on the owner's OK, asked
+  08:00), so lobbies from this branch can't sign in there yet. Next: kills in the results block, a play session by the owner,
   then two PCs.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
