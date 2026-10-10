@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 08:15 UTC. Any assistant that works on the project
+Last updated 2026-10-10 17:35 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -120,14 +120,18 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   The launcher playlists play MCC's own matchmaking variants, chosen from
   the `h2launch --variants` list; Team Snipers (opposite teams) and a
   three-player Rumble Pit worked (2026-10-10 06:30).
-- The Proxmox server (container 102) runs h2live from `launcher-live`
-  edc64b8 since 2026-10-10 06:45 (still `PROTOCOL` 26 for the Rust game;
-  rollback copy `/opt/h2live/h2live.prev`), with the relay on UDP 47050.
-  Two launchers on the owner's PC played a match through it
-  (`--live 192.168.8.102`). Players outside his network need TCP and UDP
-  47050 forwarded to 192.168.8.102 in his router (his step). The binary
-  went over on a temporary orphan branch `deploy-h2live`, which can be
-  deleted (the container proxy refuses branch deletes).
+- The Proxmox server (container 102) runs h2live from `launcher-lobby`
+  214ee4b since 2026-10-10 17:30 (`PROTOCOL` 26 for the Rust game,
+  `LIVE_PROTOCOL` 2 for launchers, so custom games work; rollback copy
+  `/opt/h2live/h2live.prev` is the 06:45 `launcher-live` edc64b8), with
+  the relay on UDP 47050. On the owner's PC, two lobbies played a custom
+  Team Slayer on Lockout (unranked) and a Head to Head match (counted)
+  through it (`--live 192.168.8.102`). Players outside his network need
+  TCP and UDP 47050 forwarded to 192.168.8.102 in his router (his step;
+  UPnP gets no answer). The binary goes over as a static musl build on a
+  temporary orphan branch `deploy-h2live`, which can be deleted (the
+  container proxy refuses branch deletes). The owner's PC safety check
+  may block the scp/ssh install until he approves it in his own words.
 - Milestone 4 (the lobby) is on `launcher-lobby`, based on
   `launcher-live`: `h2launch` with no flags opens a window of its own
   (winit, softbuffer, a system font through ab_glyph, gilrs pads) that signs
@@ -146,9 +150,8 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   variants (`names::CUSTOM_GAMES`) and a map, the server makes an unranked
   match for the party with the leader hosting; tested on Linux with two
   lobbies, and on the owner's PC with the real engine against a local
-  h2live (a party game and a solo game, 07:45). The Proxmox server still
-  runs `LIVE_PROTOCOL` 1 (its update waits on the owner's OK, asked
-  07:41), so lobbies from this branch can't sign in there yet. A party
+  h2live (a party game and a solo game, 07:45), then through the Proxmox
+  server once it was updated (17:30). A party
   screen (Y on the playlists: make leader, remove, invite only, leave;
   no protocol change) was tested on Linux with three lobbies. The lobby
   now keeps each game's results block in `%LOCALAPPDATA%\h2launch\results`
