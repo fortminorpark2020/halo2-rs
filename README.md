@@ -59,10 +59,13 @@ install. No game files are included in this repository.
   lists each player's score, kills, assists and deaths, as Halo 2 on Xbox
   did. RB opens your friends list: send friend requests by gamertag (Y),
   accept or decline the ones you get, see what your friends are doing,
-  invite them or join their party, and remove them. LB opens a service
+  invite them or join their party (if you can't, it says why: invite only,
+  full, in a match), and remove them. LB opens a service
   record (yours from the playlists, anyone else's from the players list,
   the party, the friends list or the carnage report): their highest level,
-  and their games, wins, kills, deaths and K/D in each ranked playlist. On
+  and their games, wins, kills, deaths and K/D in each ranked playlist. The
+  levels the launcher shows count the launcher's playlists only, and the
+  party panel shows each member's level in the playlist you have selected. On
   a keyboard, Q and E (or Page Up and Page Down) are LB and RB. Levels show
   as Halo 2's own level icons, read from your MCC install (or from a Halo 2
   Vista install if MCC's can't be read); without either they are numbers. Friends and service records need the matching

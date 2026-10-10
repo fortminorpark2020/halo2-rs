@@ -325,19 +325,23 @@ impl Server {
 
     fn party_info(&self, id: u64, party: &Party) -> PartyInfo {
         let playlist = self.playlists.iter().find(|p| p.id == party.playlist);
+        // Parties never mix programs: its members see levels as the
+        // leader's program does.
+        let client = self.client_of(party.leader);
         let members = party.members.iter().filter_map(|&a| {
             let account = self.accounts.get(&a)?;
+            let best = self.best_for(account, client);
             // Their level in the ranked playlist the party searches, plays
             // or just played, if it does; otherwise their best.
             let level = match playlist.filter(|p| p.ranked) {
                 Some(p) => account.stats(&p.key).map_or(1, |s| s.rank.level),
-                None => account.best_level(),
+                None => best,
             };
             Some(PartyMember {
                 account: a,
                 gamertag: account.gamertag.clone(),
                 look: account.look,
-                best: account.best_level(),
+                best,
                 level,
                 guests: self.guests(a) as u8,
             })
@@ -416,7 +420,7 @@ impl Server {
                 account: account.id,
                 gamertag: account.gamertag.clone(),
                 look: account.look,
-                best: account.best_level(),
+                best: self.best_for(account, client),
                 activity: party.activity,
                 party: pc.party,
                 open,

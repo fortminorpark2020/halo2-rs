@@ -1325,7 +1325,8 @@ impl Server {
         }
         let teams = game.game_type.teams();
         let players = members.iter().enumerate().map(|(i, &account)| {
-            let level = self.accounts.get(&account).map_or(1, |a| a.best_level());
+            let level = self.accounts.get(&account);
+            let level = level.map_or(1, |a| self.best_for(a, ClientKind::Launcher));
             Seat {
                 account,
                 party: id,
@@ -1335,6 +1336,7 @@ impl Server {
                 guests: 0,
             }
         });
+        let players = players.collect();
         let m = matchmaker::Match {
             id: self.matchmaker.custom(me, now),
             playlist: CUSTOM_GAME,
@@ -1344,7 +1346,7 @@ impl Server {
             variant: game,
             bots: 0,
             host: me,
-            players: players.collect(),
+            players,
         };
         log(format_args!("live: party {id} starts a custom game"));
         self.formed(m);

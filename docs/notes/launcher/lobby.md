@@ -70,6 +70,10 @@ the launcher doesn't do.
   the same code writes PNGs for tests without a GPU (with Halo 2's fonts
   those PNGs hold MCC's glyphs: keep them on the owner's PC).
 - Layout is in units of 1/720 of the window's height, so it scales.
+- Notices (the server's NOTICEs and the lobby's own) stay up 6 s, at most
+  three at once, stacked above the button hints, newest lowest. They are
+  drawn last and below every popup's box (y 524 to 652), so a popup
+  neither hides nor dims them.
 - Keyboard (arrows, Enter for A, Esc for B, the X and Y keys, Q or Page Up
   for LB and E or Page Down for RB), mouse (click a row to select it, again
   to pick it; click a button hint) and Xbox controllers (gilrs: d-pad or
@@ -112,8 +116,13 @@ the launcher doesn't do.
 1. Sign in: type a gamertag the first time; kept in `lobby.txt` in the
    launcher's folder with the server's address.
 2. Xbox Live: the playlists (name, your level in it, people searching and
-   playing) and the party (members and their levels in the chosen
-   playlist). A searches (party leader only), X opens the players list, Y
+   playing) and the party (members and their levels in the playlist
+   selected, or the one searched while searching; their highest on the
+   custom game row or an unranked playlist). PARTY gives the others'
+   levels only in the playlist the party last searched or played, so for
+   another playlist the lobby asks for the members' service records and
+   reads the level there (level 1 in one they haven't played; "-" until
+   the record comes). A searches (party leader only), X opens the players list, Y
    the party screen, RB the friends list ("Friends (2)" while two friend
    requests wait for an answer), LB your own service record, B quits.
 3. Players: everyone signed in. A invites them, X joins their open party,
@@ -164,17 +173,22 @@ the launcher doesn't do.
    Gemini", "Custom game: ...", "Online (h2viewer)", "Offline"), and the
    right side whether their party is yours, open to you, or invite only.
    On a request to you A accepts and X declines; on a request you sent X
-   takes it back; on a friend X joins their party when it's open to you,
-   and A opens the options: Invite to party, Join party, Service record,
+   takes it back; on a friend X joins their party when it's open to you
+   (otherwise it says why, as a notice: "DAN'S PARTY IS INVITE ONLY",
+   "... IS FULL", "... IS IN A MATCH", "DAN IS OFFLINE" and so on; a join
+   the server still turns down, on a flag a second old, gets the server's
+   own notice), and A opens the options: Invite to party, Join party, Service record,
    Remove friend (only those that apply; removing asks first, and they
    aren't told). Y types a gamertag to ask (the keyboard is needed for
    that; with a controller alone, Y on the players list or the carnage
    report asks the player selected). LB opens the selected player's
-   service record, B goes back to the playlists. A list can come every
-   second; the selection, and a popup naming a friend, stay on that
+   service record, B goes back to the playlists. A list comes with the
+   notice of a friend action (the server sends it at once), and otherwise
+   at most every second; the selection, and a popup naming a friend, stay on that
    player (a popup closes if they leave the list). The answers come as
    notices.
-12. Service record (LB): the player's gamertag, highest level, totals over
+12. Service record (LB): the player's gamertag, highest level (over the
+   launcher's ranked playlists: levels from h2viewer's don't count), totals over
    their ranked playlists (games, wins, kills, deaths, assists, K/D) and
    when they signed up, and a row per ranked playlist they've played (its
    level, games, wins, kills, deaths, assists and K/D; up and down scroll).

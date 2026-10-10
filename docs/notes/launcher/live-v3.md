@@ -368,7 +368,7 @@ found     bool
 -- only when found:
 gamertag  str
 look      8 bytes (Look::write)
-best      u8      (highest level in any ranked playlist, 1 if none)
+best      u8      (highest level in the launcher's ranked playlists, 1 if none)
 created   u64     (Unix time the account was made)
 count     u8      (at most MAX_RECORD_PLAYLISTS)
 each playlist:
@@ -422,7 +422,11 @@ limit.
 - The playlists listed are the asker's program's ranked playlists that the
   account has played (`games > 0`), in the server's playlist order. So a
   launcher sees only launcher playlists.
-- `best` is `Account::best_level`, as ONLINE gives it.
+- `best` is the highest level over the asker's program's ranked playlists
+  (`Server::best_for`), as ONLINE gives it to that program. (Review fix:
+  it was `Account::best_level`, over every playlist, so a launcher player
+  with levels only from h2viewer's playlists showed "level 12" beside
+  "Ranked games 0". The game's players still get `best_level`.)
 
 ### 2.3 The client (part A, `h2live::client`)
 
@@ -564,7 +568,7 @@ each entry:
   account   u64
   gamertag  str
   relation  u8   0 friend, 1 asked us, 2 we asked them
-  best      u8   their highest level
+  best      u8   their highest level (launcher playlists only, as 2.2)
   online    u8   0 offline, 1 on the launcher, 2 on the game (h2viewer)
   -- meaningful only for a friend on the launcher; 0 and empty otherwise:
   activity  u8   Activity
@@ -688,6 +692,13 @@ than their window as they go, so they don't grow.
 
 ### 3.4 Status updates, without flooding
 
+- A friend action (a request, an answer or a removal, 3.1) sends both
+  players' lists at the end of the poll that handled it, after its
+  notices, so the list never lags them (review fix: "CHARLIE ACCEPTED"
+  showed for up to a second beside "Friend request sent"). A player still
+  gets one list for any number of actions in one poll, and the actions
+  are rate limited (30 a minute). Such a list shows each friend as the
+  last pass saw them, or as they are now for one who signed in since.
 - Each second at most (`FRIENDS_EVERY`, 1.0 s, as ONLINE goes), the server
   works out the presence of every signed-in account: online (and on which
   program), gamertag, best level, activity, playlist, map and variant, party,
@@ -702,8 +713,7 @@ than their window as they go, so they don't grow.
   has a friend request with either way, whose rows show its gamertag and
   level. It marks itself too: each `joinable` flag in its own list depends
   on its own party and guests.
-- A change to a list (a request, an accept, a decline, a removal) marks both
-  players. Signing in marks the player. An INVITE marks the one invited, as
+- Signing in marks the player. An INVITE marks the one invited, as
   it can make an invite-only party joinable for them; and (review fix)
   declining an invite marks the one declining, an invite pushed out by the
   32-invite cap marks its invitee, and a removed player pushed out of a
@@ -1409,3 +1419,43 @@ icons:
 - `lobby: no mainmenu.map found (MCC's or Halo 2 Vista's); levels show as
   numbers`
 - `lobby: no rank icons could be read; levels show as numbers`
+
+## Polish after the end-to-end run
+
+What the v3 end-to-end tester left over, fixed (2026-10-10). No message
+changed: `LIVE_PROTOCOL` stays 3 and `PROTOCOL` 26.
+
+- **X on a friend who can't be joined** said nothing. The lobby now says
+  why, as a notice in the server's style, from what it has: "<X>'S PARTY
+  IS INVITE ONLY" (the ONLINE list says the party isn't open), "... IS
+  FULL" (no openings), "... IS IN A MATCH", "<X> IS ALREADY IN YOUR
+  PARTY", "<X> IS OFFLINE", "<X> IS ON ANOTHER VERSION OF THE GAME", else
+  "<X>'S PARTY CAN'T BE JOINED" (removed from it, say). A JOIN_PARTY the
+  server turns down still gets `can_join`'s notice, which the lobby shows
+  like any other.
+- **Levels in launcher views** counted h2viewer's playlists, so a launcher
+  player could show level 12 beside "Ranked games 0". `Server::best_for`
+  gives the highest level over the ranked playlists of the program that
+  sees it: every playlist for the game (`Account::best_level`, unchanged),
+  the launcher's for launchers. It is used for FRIENDS entries and the
+  presence pass, SERVICE_RECORD, a launcher custom game's seats, and the
+  launcher's WELCOME, PARTY and ONLINE. Those three go to both programs,
+  but each is built for one program (WELCOME for the player signing in,
+  ONLINE per program, PARTY per party, and parties never mix programs), so
+  the game's players get exactly what they got before.
+- **Lists lagged notices** by up to a second. A friend action's lists now
+  go at the end of the poll that handled it (3.4); presence changes still
+  go at most once a second.
+- **Notices behind popups**: notices are drawn after popups, stacked from
+  y 524 to 652, clear of every popup's box (the lowest ends at 520) and of
+  the button hints.
+- **Party panel levels**: the server's PARTY gives each member's level in
+  the playlist the party last searched or played (or their highest), so
+  with another playlist selected the panel showed the wrong one. The
+  lobby now shows each member's level in the playlist selected (the one
+  searched while searching): its own from PLAYLISTS, the server's if the
+  party's playlist is that one, else from the member's service record,
+  which it asks for (RECORD, cached as the record screen's are; 1 for a
+  playlist they haven't played, "-" until it comes). The custom game row
+  and unranked playlists show the highest level. A fix on the server
+  alone would have needed the selection sent to it, a new message.

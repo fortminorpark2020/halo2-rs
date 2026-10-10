@@ -15,8 +15,8 @@ use crate::session::Session;
 use h2live::client::{LiveClient, LiveEvent, Profile, View};
 use h2net::live::{
     Activity, Friend, LauncherMatch, LauncherPlayerResult, MatchOver, Online, OnlinePlayer,
-    PartyInfo, PartyMember, Privacy, Relation, ServiceRecord, Stage, ToServer, CUSTOM_GAME,
-    GAMERTAG_TAKEN, MAX_FRIENDS, QUICKMATCH,
+    PartyInfo, PartyMember, PlaylistInfo, Privacy, Relation, ServiceRecord, Stage, ToServer,
+    CUSTOM_GAME, GAMERTAG_TAKEN, MAX_FRIENDS, QUICKMATCH,
 };
 use h2net::Connection;
 use std::collections::VecDeque;
@@ -635,6 +635,34 @@ impl App {
         Some(account) != self.account() && self.friend(account).is_none()
     }
 
+    /// What X (join) on friend `f`, whose party can't be joined, says, in
+    /// the server's notices' style. The server's reasons (`can_join`)
+    /// aren't all sent: the ONLINE list says whether the party is open and
+    /// how much room it has, and anything else (removed from it, say, or
+    /// no room for our guests) is "can't be joined".
+    fn cannot_join(&self, f: &Friend) -> String {
+        let tag = f.gamertag.to_uppercase();
+        let theirs = self
+            .view()
+            .and_then(|v| v.online.iter().find(|o| o.account == f.account));
+        match f.online {
+            Online::Offline => return format!("{tag} IS OFFLINE"),
+            Online::Game => return format!("{tag} IS ON ANOTHER VERSION OF THE GAME"),
+            Online::Launcher => {}
+        }
+        if self.party().is_some_and(|pt| pt.id == f.party) {
+            format!("{tag} IS ALREADY IN YOUR PARTY")
+        } else if f.activity == Activity::Playing {
+            format!("{tag}'S PARTY IS IN A MATCH")
+        } else if theirs.is_some_and(|o| !o.open) {
+            format!("{tag}'S PARTY IS INVITE ONLY")
+        } else if theirs.is_some_and(|o| o.openings == 0) {
+            format!("{tag}'S PARTY IS FULL")
+        } else {
+            format!("{tag}'S PARTY CAN'T BE JOINED")
+        }
+    }
+
     /// Send a friend request to `gamertag` (it's cleaned first; nothing
     /// goes for an empty one).
     fn ask_friend(&mut self, gamertag: &str) {
@@ -715,6 +743,63 @@ impl App {
             RecordView::Loading
         } else {
             RecordView::NoAnswer
+        }
+    }
+
+    /// The playlist the party panel shows levels for: the one the party
+    /// searches while it searches, else the one selected (None on the
+    /// custom game row).
+    fn panel_playlist(&self) -> Option<&PlaylistInfo> {
+        let v = self.view()?;
+        if self.searching() {
+            let id = v.party.as_ref()?.playlist;
+            return v.playlists.iter().find(|p| p.id == id);
+        }
+        v.playlists.get(self.sel)
+    }
+
+    /// The level the party panel shows beside member `m` of party `pt`:
+    /// their level in the panel's playlist when it's ranked, else their
+    /// highest. Ours is in the playlists list. PARTY gives the others'
+    /// only in the playlist the party last searched or played, so for
+    /// another a service record kept (`ask_member_records`) gives it; with
+    /// neither, 0 (drawn "-") until the record comes.
+    fn member_level(&self, pt: &PartyInfo, m: &PartyMember) -> u8 {
+        let Some(pl) = self.panel_playlist().filter(|p| p.ranked) else {
+            return m.best.max(1);
+        };
+        if Some(m.account) == self.account() {
+            return pl.level.max(1);
+        }
+        if pt.playlist == pl.id && m.level > 0 {
+            return m.level;
+        }
+        match self.cached_record(m.account) {
+            Some((r, _)) => r.found.as_ref().map_or(1, |f| {
+                let played = f.playlists.iter().find(|p| p.playlist == pl.id);
+                played.map_or(1, |p| p.level.max(1))
+            }),
+            None => 0,
+        }
+    }
+
+    /// Ask for the service records the party panel needs for the levels
+    /// PARTY doesn't give (`member_level`), on the playlists screen.
+    fn ask_member_records(&mut self) {
+        if self.screen != Screen::Live || self.popup.is_some() {
+            return;
+        }
+        let Some(id) = self.panel_playlist().filter(|p| p.ranked).map(|p| p.id) else {
+            return;
+        };
+        let me = self.account();
+        let wanted: Vec<u64> = self.party().map_or(Vec::new(), |pt| {
+            let others = pt.members.iter().filter(|m| Some(m.account) != me);
+            let unknown = others.filter(|m| pt.playlist != id || m.level == 0);
+            unknown.map(|m| m.account).collect()
+        });
+        for account in wanted {
+            self.ask_record(account);
         }
     }
 
@@ -971,6 +1056,7 @@ impl App {
         self.follow();
         self.record_asks
             .retain(|(_, at)| now.saturating_duration_since(*at) < RECORD_WAIT);
+        self.ask_member_records();
     }
 
     /// Keep the selections on the friends and players screens on the
@@ -1307,6 +1393,10 @@ impl App {
                 self.log(&format!("lobby: joining {}'s party", f.gamertag));
                 self.send(ToServer::JoinParty(f.party));
                 self.screen = Screen::Live;
+            }
+            (Input::X, Some(f)) if f.relation == Relation::Friend => {
+                let why = self.cannot_join(&f);
+                self.toast(why);
             }
             (Input::X, Some(f)) if f.relation == Relation::WeAsked => {
                 self.log(&format!(
@@ -1724,7 +1814,6 @@ impl App {
             Align::Right,
             "Keyboard: Enter = A, Esc = B, X, Y, Q = LB, E = RB, arrows",
         );
-        self.draw_toasts(p);
         if let Some(popup) = self.popup {
             match popup {
                 Popup::Quit => {
@@ -1772,6 +1861,8 @@ impl App {
                 &[(Input::A, "Accept"), (Input::B, "Decline")],
             );
         }
+        // Last, so a popup's shade doesn't dim them.
+        self.draw_toasts(p);
     }
 
     fn draw_header(&self, p: &mut Pen) {
@@ -2072,7 +2163,7 @@ impl App {
             }
             let name = p.fit(24.0, 260.0, &m.gamertag);
             p.text(860.0, y + 32.0, 24.0, TEXT, Align::Left, &name);
-            let level = if m.level > 0 { m.level } else { m.best.max(1) };
+            let level = self.member_level(pt, m);
             p.level(
                 1196.0,
                 y + 32.0,
@@ -2818,21 +2909,35 @@ impl App {
         p.hint_row(&hints, 640.0 - width / 2.0, 492.0);
     }
 
+    /// The notices, newest at the bottom, stacked up from just above the
+    /// button hints and clear of every popup's box (the lowest ends at
+    /// y 520), so none is hidden behind one.
     fn draw_toasts(&self, p: &mut Pen) {
         for (k, (text, _)) in self.toasts.iter().rev().enumerate() {
-            let y = 600.0 - k as f32 * 46.0;
+            let top = toast_top(k);
             let w = p.measure(20.0, text) + 48.0;
             p.fill(
                 640.0 - w / 2.0,
-                y - 30.0,
+                top,
                 w,
-                40.0,
+                TOAST_H,
                 Color::rgb(0x0A_1830).alpha(235),
             );
-            p.outline(640.0 - w / 2.0, y - 30.0, w, 40.0, 2.0, SEL_EDGE);
-            p.text(640.0, y - 3.0, 20.0, WHITE, Align::Center, text);
+            p.outline(640.0 - w / 2.0, top, w, TOAST_H, 2.0, SEL_EDGE);
+            p.text(640.0, top + 27.0, 20.0, WHITE, Align::Center, text);
         }
     }
+}
+
+/// A notice's height, in layout units.
+const TOAST_H: f32 = 40.0;
+
+/// The top of the `k`th notice up from the newest (layout units): the
+/// newest ends at y 652, above the button hints (from about 656), and the
+/// third starts at y 524, below the lowest popup's box (the friend options
+/// popup ends at 520).
+fn toast_top(k: usize) -> f32 {
+    612.0 - k as f32 * 44.0
 }
 
 /// The carnage report's rows: the game's results by place, then team
@@ -3906,5 +4011,183 @@ mod tests {
         assert_eq!(follow(&[1, 2, 3], Some(3), 0), 2);
         assert_eq!(follow(&[1, 2], Some(9), 5), 1);
         assert_eq!(follow(&[], Some(9), 5), 0);
+    }
+
+    #[test]
+    fn x_on_a_friend_who_cant_be_joined_says_why() {
+        let dir = scratch("cant-join");
+        let (mut a, mut server) = live_app(&dir);
+        view(&mut a).party = Some(party(500, Activity::Lobby));
+        let dan = friend(14, "Dan", Relation::Friend, Online::Launcher);
+        view(&mut a).friends = vec![
+            dan,
+            friend(11, "BOB", Relation::Friend, Online::Offline),
+            friend(13, "CAT", Relation::Friend, Online::Game),
+        ];
+        view(&mut a).online = vec![OnlinePlayer {
+            account: 14,
+            gamertag: "Dan".into(),
+            look: Default::default(),
+            best: 2,
+            activity: Activity::Lobby,
+            party: 114,
+            open: false,
+            size: 1,
+            openings: 0,
+        }];
+        a.input(Input::Rb);
+        a.tick(a.now);
+        let last = |a: &App| a.toasts.back().map(|(t, _)| t.clone());
+        assert!(a.pick("DAN"));
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS INVITE ONLY"));
+        view(&mut a).online[0].open = true;
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS FULL"));
+        view(&mut a).online[0].openings = 3;
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY CAN'T BE JOINED"));
+        view(&mut a).friends[0].activity = Activity::Playing;
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS IN A MATCH"));
+        view(&mut a).friends[0].party = 500;
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("DAN IS ALREADY IN YOUR PARTY"));
+        assert!(a.pick("BOB"));
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("BOB IS OFFLINE"));
+        assert!(a.pick("CAT"));
+        a.input(Input::X);
+        assert_eq!(
+            last(&a).as_deref(),
+            Some("CAT IS ON ANOTHER VERSION OF THE GAME")
+        );
+        assert_eq!(a.label(), "friends");
+        assert!(sent(&mut server).is_empty());
+        // A join the server turns down (the flag was a second old) is told
+        // too: its notice is a toast like any other.
+        view(&mut a).friends[0].joinable = true;
+        assert!(a.pick("DAN"));
+        a.input(Input::X);
+        assert_eq!(sent(&mut server), [ToServer::JoinParty(500)]);
+        a.on_event(LiveEvent::Notice("THAT PARTY IS INVITE ONLY".into()));
+        assert_eq!(last(&a).as_deref(), Some("THAT PARTY IS INVITE ONLY"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_party_panel_shows_levels_in_the_playlist_selected() {
+        let dir = scratch("panel-levels");
+        let (mut a, mut server) = live_app(&dir);
+        let playlist = |id: u8, name: &str, ranked: bool, level: u8| PlaylistInfo {
+            id,
+            key: name.to_lowercase(),
+            name: name.into(),
+            ranked,
+            teams: false,
+            guests: false,
+            min: 2,
+            max: 8,
+            party_max: 8,
+            searching: 0,
+            playing: 0,
+            level,
+            maps: Vec::new(),
+        };
+        view(&mut a).playlists = vec![
+            playlist(11, "Head to Head", true, 3),
+            playlist(12, "Rumble Pit", true, 1),
+            playlist(13, "Social", false, 0),
+        ];
+        // The party last played Head to Head: PARTY gives each member's
+        // level there (BRAVO's 2).
+        let mut pt = party(500, Activity::Lobby);
+        pt.members.push(PartyMember {
+            account: 2,
+            gamertag: "BRAVO".into(),
+            look: Default::default(),
+            best: 2,
+            level: 2,
+            guests: 0,
+        });
+        view(&mut a).party = Some(pt.clone());
+        let levels = |a: &App| {
+            let pt = a.party().unwrap();
+            (
+                a.member_level(pt, &pt.members[0]),
+                a.member_level(pt, &pt.members[1]),
+            )
+        };
+        a.tick(a.now);
+        assert_eq!(levels(&a), (3, 2));
+        assert!(sent(&mut server).is_empty());
+        // Rumble Pit: ours from the playlists, BRAVO's from his service
+        // record, asked for once; "-" until it comes.
+        a.input(Input::Down);
+        a.tick(a.now);
+        assert_eq!(levels(&a), (1, 0));
+        assert_eq!(sent(&mut server), [ToServer::Record(2)]);
+        a.tick(a.now);
+        assert!(sent(&mut server).is_empty());
+        let row = h2net::live::PlaylistRecord {
+            playlist: 11,
+            level: 2,
+            games: 4,
+            wins: 3,
+            tally: Default::default(),
+        };
+        a.on_event(LiveEvent::ServiceRecord(ServiceRecord {
+            account: 2,
+            found: Some(h2net::live::Record {
+                gamertag: "BRAVO".into(),
+                look: Default::default(),
+                best: 2,
+                created: 0,
+                playlists: vec![row],
+            }),
+        }));
+        // He hasn't played Rumble Pit: level 1 there, not his 2.
+        assert_eq!(levels(&a), (1, 1));
+        // Unranked, and the custom game row: the highest levels.
+        a.input(Input::Down);
+        assert_eq!(levels(&a), (3, 2));
+        a.input(Input::Down);
+        assert_eq!(levels(&a), (3, 2));
+        a.tick(a.now);
+        assert!(sent(&mut server).is_empty());
+        // Searching, the playlist searched.
+        let mut searching = pt;
+        searching.activity = Activity::Searching;
+        searching.playlist = 12;
+        searching.members[1].level = 1;
+        view(&mut a).party = Some(searching);
+        assert_eq!(levels(&a), (1, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notices_are_drawn_above_popups() {
+        // Clear of every popup's box (the lowest ends at 520) and of the
+        // button hints along the bottom (from about 656).
+        assert!(toast_top(2) >= 520.0);
+        assert!(toast_top(0) + TOAST_H <= 656.0);
+        let Ok(mut text) = Text::system() else {
+            return;
+        };
+        let dir = scratch("toasts");
+        let mut a = app(&dir);
+        for n in ["ONE", "TWO", "THREE"] {
+            a.toast(n.into());
+        }
+        a.popup = Some(Popup::Quit);
+        let mut c = Canvas::new(1280, 720);
+        a.draw(&mut c, &mut text);
+        // Each notice's top edge is drawn at full brightness: not under
+        // the popup's shade.
+        for k in 0..3 {
+            let y = toast_top(k) as usize;
+            assert_eq!(c.px[y * 1280 + 640], 0x9F_D0FF, "notice {k}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

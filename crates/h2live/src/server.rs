@@ -235,10 +235,12 @@ pub struct Server {
     slowed: HashMap<u64, f64>,
     asked_you: HashMap<(u64, u64), f64>,
     /// Each signed-in account as their friends last saw them; accounts
-    /// whose friends list is to be sent at the next pass; and when the last
-    /// pass was.
+    /// whose friends list is to be sent at the next pass; those whose list
+    /// a friend action changed, sent at the end of this poll; and when the
+    /// last pass was.
     presences: HashMap<u64, social::Presence>,
     friends_marked: HashSet<u64>,
+    friends_now: HashSet<u64>,
     friends_passed: f64,
 }
 
@@ -295,6 +297,7 @@ impl Server {
             asked_you: HashMap::new(),
             presences: HashMap::new(),
             friends_marked: HashSet::new(),
+            friends_now: HashSet::new(),
             friends_passed: f64::NEG_INFINITY,
         })
     }
@@ -425,6 +428,23 @@ impl Server {
     fn client_of(&self, account: u64) -> ClientKind {
         self.pc_of(account)
             .map_or(ClientKind::Viewer, |k| self.pcs[k].client)
+    }
+
+    /// `account`'s highest level as players on `client` see it. The game
+    /// sees it as it always has, over every playlist the account played;
+    /// launchers see it over the launcher's ranked playlists only, so a
+    /// level earned in the game's playlists never shows beside a service
+    /// record with no ranked games. 1 if none.
+    fn best_for(&self, account: &Account, client: ClientKind) -> u8 {
+        if client == ClientKind::Viewer {
+            return account.best_level();
+        }
+        let theirs = self
+            .playlists
+            .iter()
+            .filter(|p| p.ranked && p.client == client);
+        let levels = theirs.filter_map(|p| Some(account.stats(&p.key)?.rank.level));
+        levels.max().unwrap_or(1)
     }
 
     /// Send a signed-in player `message`.
@@ -718,7 +738,7 @@ impl Server {
             account: id,
             gamertag: account.gamertag.clone(),
             card: card::sign(account, &self.key),
-            best: account.best_level(),
+            best: self.best_for(account, client),
             levels: levels.collect(),
         };
         self.tell(id, &ToPc::Welcome(welcome));

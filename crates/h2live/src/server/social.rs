@@ -14,14 +14,17 @@
 //! before) gets no notice, and the list is sent again.
 //!
 //! Each launcher player has their whole list sent (FRIENDS) when it
-//! changes, at most once a second: every second the server works out
+//! changes. A friend action (a request, an answer or a removal) sends the
+//! lists of both players at the end of the poll that handled it (one list
+//! each, however many actions came in that poll), so the list never lags
+//! the notice. Everything else goes at most once a second: every second
+//! the server works out
 //! everyone's presence (where they're signed in, gamertag, highest level,
 //! what their party is doing and where, and how open and full it is), and
 //! an account whose presence changed marks each of its friends, those it
 //! has a request with either way, and itself, as needing a new list
 //! (whether a friend's party can be joined depends on its own party too).
-//! A request, an answer or a removal marks both players, signing in marks
-//! the player, an invite marks the one invited (and any invite it pushed
+//! Signing in marks the player, an invite marks the one invited (and any invite it pushed
 //! out), and so does declining one, and a removal from a party marks any
 //! removed player it pushed out. A list the same as the last one sent to
 //! that PC isn't sent again.
@@ -108,6 +111,12 @@ impl Server {
     /// `account`'s friends list needs sending again, at the next pass.
     pub(super) fn friends_changed(&mut self, account: u64) {
         self.friends_marked.insert(account);
+    }
+
+    /// `account`'s friends list needs sending again at the end of this
+    /// poll: a friend action changed it, and its notice goes now.
+    fn friends_changed_now(&mut self, account: u64) {
+        self.friends_now.insert(account);
     }
 
     /// Whether `me` may make another friend action now: if not, they're
@@ -198,17 +207,17 @@ impl Server {
     }
 
     /// What's between `me` and `other` changed (`changed`): both get new
-    /// lists, and friends.txt is saved. If nothing changed, `me` acted on
-    /// an old list: they're sent it again.
+    /// lists at the end of this poll, and friends.txt is saved. If nothing
+    /// changed, `me` acted on an old list: they're sent it again.
     fn friendship_changed(&mut self, me: u64, other: u64, changed: bool) {
-        self.friends_changed(me);
+        self.friends_changed_now(me);
         if !changed {
             if let Some(k) = self.pc_of(me) {
                 self.pcs[k].friends_sent = None;
             }
             return;
         }
-        self.friends_changed(other);
+        self.friends_changed_now(other);
         let path = self.dir.join("friends.txt");
         if let Err(e) = self.friends.save(&path) {
             log(format_args!("live: can't save {}: {e}", path.display()));
@@ -242,7 +251,7 @@ impl Server {
             Record {
                 gamertag: a.gamertag.clone(),
                 look: a.look,
-                best: a.best_level(),
+                best: self.best_for(a, client),
                 created: a.created,
                 playlists: playlists.take(MAX_RECORD_PLAYLISTS).collect(),
             }
@@ -250,14 +259,23 @@ impl Server {
         self.tell(me, &ToPc::ServiceRecord(ServiceRecord { account, found }));
     }
 
-    /// Once a second at most: work out everyone's presence, mark the lists
-    /// that changed, and send each launcher player marked their list (if it
-    /// isn't the one they have).
+    /// Send the lists a friend action changed in this poll; and once a
+    /// second at most, work out everyone's presence, mark the lists that
+    /// changed, and send each launcher player marked their list. A list
+    /// the same as the one a PC has isn't sent again.
     pub(super) fn send_friends(&mut self, now: f64) {
         if now - self.friends_passed < FRIENDS_EVERY {
+            let urgent = std::mem::take(&mut self.friends_now);
+            for id in urgent {
+                if let Some(k) = self.pc_of(id).filter(|&k| self.pcs[k].gone.is_none()) {
+                    self.send_list(id, k);
+                }
+            }
             return;
         }
         self.friends_passed = now;
+        let urgent = std::mem::take(&mut self.friends_now);
+        self.friends_marked.extend(urgent);
         self.forget_old_actions(now);
         let mut sizes: HashMap<u64, usize> = HashMap::new();
         for pc in self.pcs.iter().filter(|pc| pc.account.is_some()) {
@@ -299,18 +317,23 @@ impl Server {
         // (Those who signed out are passed on now, and dropped.)
         self.presences = presences;
         for id in std::mem::take(&mut self.friends_marked) {
-            let Some(&k) = pcs.get(&id) else {
-                continue;
-            };
-            if self.pcs[k].client != ClientKind::Launcher {
-                continue;
+            if let Some(&k) = pcs.get(&id) {
+                self.send_list(id, k);
             }
-            let (kind, body) = ToPc::Friends(self.friends_list(id)).write();
-            let pc = &mut self.pcs[k];
-            if pc.friends_sent.as_ref() != Some(&body) {
-                pc.conn.send(kind, &body);
-                pc.friends_sent = Some(body);
-            }
+        }
+    }
+
+    /// Send `id`, signed in on PC `k`, their friends list, if that's a
+    /// launcher and the list isn't the one it has.
+    fn send_list(&mut self, id: u64, k: usize) {
+        if self.pcs[k].client != ClientKind::Launcher {
+            return;
+        }
+        let (kind, body) = ToPc::Friends(self.friends_list(id)).write();
+        let pc = &mut self.pcs[k];
+        if pc.friends_sent.as_ref() != Some(&body) {
+            pc.conn.send(kind, &body);
+            pc.friends_sent = Some(body);
         }
     }
 
@@ -336,7 +359,8 @@ impl Server {
         let mut p = Presence {
             client: pc.client,
             gamertag: account.gamertag.clone(),
-            best: account.best_level(),
+            // As their friends, all on launchers, see it.
+            best: self.best_for(account, ClientKind::Launcher),
             activity: Activity::Lobby,
             playlist: 0,
             map: String::new(),
@@ -363,6 +387,16 @@ impl Server {
         Some(p)
     }
 
+    /// How `account` looks to their friends now, if they're signed in.
+    /// (Its `room` isn't worked out: a friends list doesn't show it.)
+    fn presence_now(&self, account: u64) -> Option<Presence> {
+        let pc = &self.pcs[self.pc_of(account)?];
+        if pc.gone.is_some() {
+            return None;
+        }
+        self.presence(account, pc, &HashMap::new())
+    }
+
     /// `me`'s friends list as it is now: requests to them (oldest first),
     /// friends (by gamertag, whatever the case), then requests they sent
     /// (oldest first). Accounts the server doesn't have are left out.
@@ -373,7 +407,7 @@ impl Server {
                 account,
                 gamertag: a.gamertag.clone(),
                 relation,
-                best: a.best_level(),
+                best: self.best_for(a, ClientKind::Launcher),
                 online: Online::Offline,
                 activity: Activity::Lobby,
                 playlist: 0,
@@ -382,8 +416,13 @@ impl Server {
                 party: 0,
                 joinable: false,
             };
-            // Only friends show where they are.
-            let presence = self.presences.get(&account);
+            // Only friends show where they are: as the last pass saw them,
+            // or, for one who signed in since (a list sent at once after a
+            // friend action can come before the next pass), as they are.
+            let presence = match self.presences.get(&account) {
+                Some(p) => Some(std::borrow::Cow::Borrowed(p)),
+                None => self.presence_now(account).map(std::borrow::Cow::Owned),
+            };
             match presence.filter(|_| relation == Relation::Friend) {
                 Some(p) if p.client == ClientKind::Launcher => {
                     f.online = Online::Launcher;

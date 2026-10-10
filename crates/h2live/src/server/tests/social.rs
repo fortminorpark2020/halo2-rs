@@ -506,6 +506,58 @@ fn friend_lists_come_at_most_once_a_second() {
 }
 
 #[test]
+fn friend_actions_send_lists_with_their_notices() {
+    let mut w = World::new("friends-at-once");
+    let a = launcher(&mut w, 1, "Alpha");
+    let b = launcher(&mut w, 2, "Bravo");
+    w.run(1.5);
+    // The lists come in the same poll as the notices, not up to a second
+    // later: one each, however many actions that poll had.
+    let (la, lb) = (lists(&w, a), lists(&w, b));
+    w.send(a, ToServer::FriendRequest("BRAVO".into()));
+    w.until(|w| !w.notices(a).is_empty() && !w.notices(b).is_empty());
+    assert_eq!(listed(&w, a, "BRAVO").unwrap().relation, Relation::WeAsked);
+    assert_eq!(listed(&w, b, "ALPHA").unwrap().relation, Relation::AskedUs);
+    assert_eq!((lists(&w, a), lists(&w, b)), (la + 1, lb + 1));
+    w.run(1.5);
+    w.send(b, ToServer::FriendAccept(w.id(a)));
+    w.until(|w| w.notices(a).len() == 2);
+    assert_eq!(w.notices(a)[1], "BRAVO ACCEPTED YOUR FRIEND REQUEST");
+    for (i, tag) in [(a, "BRAVO"), (b, "ALPHA")] {
+        let f = listed(&w, i, tag).unwrap();
+        assert_eq!((f.relation, f.online), (Relation::Friend, Online::Launcher));
+    }
+    // A removal is unsaid, but both lists change at once.
+    w.run(1.5);
+    w.send(a, ToServer::FriendRemove(w.id(b)));
+    w.until(|w| listed(w, a, "BRAVO").is_none());
+    assert!(listed(&w, b, "ALPHA").is_none());
+}
+
+#[test]
+fn launchers_see_levels_from_launcher_playlists_only() {
+    let mut w = World::new("launcher-best");
+    // Level 13 in the game's Double Team, and no launcher games.
+    veteran(&mut w);
+    let v = launcher(&mut w, 1, "Veteran");
+    let b = launcher(&mut w, 2, "Bravo");
+    assert_eq!(w.welcome(v).best, 1);
+    assert_eq!(w.party(v).members[0].best, 1);
+    befriend(&mut w, v, b);
+    assert_eq!(listed(&w, b, "VETERAN").unwrap().best, 1);
+    w.until(|w| w.pcs[b].view.online.len() == 2);
+    let online = &w.pcs[b].view.online;
+    let seen = online.iter().find(|o| o.gamertag == "VETERAN").unwrap();
+    assert_eq!(seen.best, 1);
+    w.send(b, ToServer::Record(w.id(v)));
+    w.until(|w| !records(w, b).is_empty());
+    let found = records(&w, b).remove(0).found.unwrap();
+    assert_eq!((found.best, found.playlists.len()), (1, 0));
+    // On the game, the same account is level 13, as it always was.
+    assert_eq!(w.server.account(w.id(v)).unwrap().best_level(), 13);
+}
+
+#[test]
 fn friend_limits_outlast_signing_in_again() {
     let mut w = World::new("friends-limits");
     let a = launcher(&mut w, 1, "Alpha");
