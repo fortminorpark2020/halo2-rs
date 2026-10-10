@@ -1282,3 +1282,32 @@ A review of this note against the code (2026-10-10) changed:
 18. Deploy: the server goes first (a version 3 launcher is told UPDATE YOUR
     LAUNCHER by the old server), after trying the new one on a copy of the
     live data folder.
+
+## Part A as built
+
+Part A follows the note, with these additions and choices (2026-10-10):
+
+- **Friend notices** are constants in `live.rs` with `{X}` where the
+  gamertag goes (`FRIEND_ASKED`, `ASKED_YOU` and the rest of 3.1's table,
+  all in `FRIEND_NOTICES`). `live::friend_notice(template, gamertag)` fills
+  one in, and `live::is_friend_notice(text)` is what the lobby uses to keep
+  them from clearing `App::asked` (3.5).
+- **`can_join`** returns `Err("")` for the player's own party: JOIN_PARTY
+  says nothing then, as before, and the flag is false.
+- **"Sent again"** (3.1): an accept, decline or remove that finds nothing
+  to change forgets the last list sent to that PC, so the next pass sends
+  the list even though it is byte for byte the same.
+- **Presence of the game's players** holds only the program, gamertag and
+  highest level, so what their party does sends their launcher friends
+  nothing (they show only as "Online (h2viewer)").
+- **`Server::playing(account)`** (matches.rs) gives the map and variant of
+  the match a player is in, for presence.
+- **h2launch**: `results.rs`'s `for_server` already sends `suicides` (the
+  block has them at +0x34); kills, assists and betrayals go as 0 until
+  part B. The `ended` event line and `fake_results` send zeros.
+- **Tests**: the friends integration tests are in
+  `crates/h2live/src/server/tests/social.rs`. Test 4 is split in two
+  (`friends_outlive_a_restart`, `todays_data_folder_opens_as_it_is`), and
+  `requests_both_ways_make_friends_at_once` covers crossed requests. The
+  version 2 refusal is `a_launcher_at_version_2_is_told_to_update` in
+  `server/tests.rs`, and test 9 is in `four_players_play_double_team_through_the_relay`.

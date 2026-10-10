@@ -24,13 +24,19 @@
 //! results (`ToServer::LauncherResult`, everyone, the host's counting),
 //! or that it left (`ToServer::LeftMatch`). Then the levels come
 //! (`MatchOver`).
+//!
+//! A launcher also has a friends list, which the server sends whole when
+//! it changes (at most once a second; `View::friends`, and
+//! `LiveEvent::Friends`), and asks for players' service records
+//! (`ToServer::Record`, answered with `LiveEvent::ServiceRecord`). The game
+//! is never sent either.
 
 use crate::levels::{self, Finish};
 use crate::store;
 use ed25519_dalek::{Signer, SigningKey};
 use h2net::live::{
-    self, LauncherMatch, LinkInfo, Login, LoginClient, MatchInfo, MatchOver, OnlinePlayer,
-    PartyInfo, PlayerResult, PlaylistInfo, SearchStatus, ToPc, ToServer, Welcome,
+    self, Friend, LauncherMatch, LinkInfo, Login, LoginClient, MatchInfo, MatchOver, OnlinePlayer,
+    PartyInfo, PlayerResult, PlaylistInfo, SearchStatus, ServiceRecord, ToPc, ToServer, Welcome,
 };
 use h2net::Connection;
 use h2relay::{ClientConfig, MemberKey, RelayClient};
@@ -82,6 +88,9 @@ pub struct View {
     pub notices: Vec<String>,
     /// The latest round trip to the server, in milliseconds.
     pub round_trip: Option<u32>,
+    /// A launcher's friends list, as the server last sent it: requests to
+    /// us (oldest first), friends (by gamertag), then requests we sent.
+    pub friends: Vec<Friend>,
 }
 
 /// What happened, for the game to act on.
@@ -124,6 +133,11 @@ pub enum LiveEvent {
     /// (`join_relay`) and host it or join its host. It comes again, with
     /// another host, if the one asked didn't start hosting.
     LauncherMatch(LauncherMatch),
+    /// A launcher's friends list came (it's in `View::friends`).
+    Friends,
+    /// A player's service record, as asked for (`ToServer::Record`). The
+    /// view doesn't keep them.
+    ServiceRecord(ServiceRecord),
 }
 
 /// One end of a game relayed through the server: a connection to the
@@ -500,6 +514,11 @@ impl LiveClient {
                 view.launcher_game = Some(game.clone());
                 events.push(LiveEvent::LauncherMatch(game));
             }
+            ToPc::Friends(friends) => {
+                view.friends = friends;
+                events.push(LiveEvent::Friends);
+            }
+            ToPc::ServiceRecord(record) => events.push(LiveEvent::ServiceRecord(record)),
             // Only relay legs are told they're linked.
             ToPc::Linked => {}
         }

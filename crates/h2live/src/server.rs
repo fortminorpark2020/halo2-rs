@@ -23,8 +23,12 @@
 //! server signed (see `card`), and show it the next time. A card newer than
 //! what the server has brings the account back, after the server lost its
 //! data folder, say.
+//!
+//! Launcher players also have friends lists, kept in `friends.txt`, and
+//! can look at anyone's service record (see `social`).
 
 use crate::card;
+use crate::friends::Friends;
 use crate::matchmaker::Matchmaker;
 use crate::playlists::{self, Playlist};
 use crate::store::{self, Account};
@@ -36,7 +40,7 @@ use h2net::live::{
 use h2net::Connection;
 use h2relay::RelayHandle;
 use h2sim::game::{clean_name, Look};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::net::{IpAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -48,6 +52,7 @@ use std::time::{Duration, Instant};
 mod matches;
 mod party;
 mod relay;
+mod social;
 
 /// Most connections at once.
 pub const MAX_CONNECTIONS: usize = 500;
@@ -108,6 +113,8 @@ struct Pc {
     round_trips: VecDeque<u32>,
     /// Why it's being dropped, once it is.
     gone: Option<String>,
+    /// The last FRIENDS sent to it (a launcher), as written.
+    friends_sent: Option<Vec<u8>>,
 }
 
 impl Pc {
@@ -130,6 +137,7 @@ impl Pc {
             pings: VecDeque::new(),
             round_trips: VecDeque::new(),
             gone: None,
+            friends_sent: None,
         }
     }
 
@@ -216,6 +224,22 @@ pub struct Server {
     /// The game's `PROTOCOL` it takes: this build's. (A test pretends it
     /// was bumped.)
     game_protocol: u32,
+    /// Friendships and friend requests (friends.txt; see `social`).
+    friends: Friends,
+    /// The times of each account's recent friend actions and RECORDs (for
+    /// their limits), when each was last told to slow down, and when each
+    /// asker (first) last had ASKED_YOU sent to each player. Each drops
+    /// what is older than its window as it goes.
+    friend_actions: HashMap<u64, VecDeque<f64>>,
+    record_asks: HashMap<u64, VecDeque<f64>>,
+    slowed: HashMap<u64, f64>,
+    asked_you: HashMap<(u64, u64), f64>,
+    /// Each signed-in account as their friends last saw them; accounts
+    /// whose friends list is to be sent at the next pass; and when the last
+    /// pass was.
+    presences: HashMap<u64, social::Presence>,
+    friends_marked: HashSet<u64>,
+    friends_passed: f64,
 }
 
 impl Server {
@@ -229,6 +253,7 @@ impl Server {
         let key = card::server_key(dir, secret)?;
         let playlists = playlists::load(&dir.join("playlists.txt"))?;
         let accounts = store::load(&dir.join("accounts.txt"))?;
+        let friends = Friends::load(&dir.join("friends.txt"))?;
         let motd = std::fs::read_to_string(dir.join("motd.txt")).unwrap_or_default();
         let epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -263,6 +288,14 @@ impl Server {
             epoch,
             relay: None,
             game_protocol: h2net::PROTOCOL,
+            friends,
+            friend_actions: HashMap::new(),
+            record_asks: HashMap::new(),
+            slowed: HashMap::new(),
+            asked_you: HashMap::new(),
+            presences: HashMap::new(),
+            friends_marked: HashSet::new(),
+            friends_passed: f64::NEG_INFINITY,
         })
     }
 
@@ -365,6 +398,7 @@ impl Server {
         }
         self.send_parties();
         self.send_online(now);
+        self.send_friends(now);
         self.send_playlists(now);
         for pc in &mut self.pcs {
             // A failure shows up when reading, next time.
@@ -485,6 +519,7 @@ impl Server {
     /// Act on a message from PC `k`. False if it shouldn't have sent it.
     fn handle(&mut self, k: usize, message: ToServer, now: f64) -> bool {
         let pc = &mut self.pcs[k];
+        let launcher = pc.client == ClientKind::Launcher;
         match (pc.account, message) {
             (_, ToServer::Ping(n)) => ToPc::Pong(n).send(&mut pc.conn),
             (_, ToServer::Pong(n)) => pc.pong(n, now),
@@ -529,6 +564,15 @@ impl Server {
                 self.left_match(me, id, host_lost);
             }
             (Some(me), ToServer::Back) => self.back(me),
+            // Launchers' only: from the game, they're unexpected.
+            (
+                Some(me),
+                message @ (ToServer::Record(_)
+                | ToServer::FriendRequest(_)
+                | ToServer::FriendAccept(_)
+                | ToServer::FriendDecline(_)
+                | ToServer::FriendRemove(_)),
+            ) if launcher => self.social(me, message, now),
             _ => return false,
         }
         true
@@ -581,6 +625,9 @@ impl Server {
             "live: {} signed in from {}{program}",
             self.accounts[&id].gamertag, pc.ip
         ));
+        if pc.client == ClientKind::Launcher {
+            self.friends_changed(id);
+        }
         self.welcome(id);
         let playlists = ToPc::Playlists(self.playlists_for(id, &self.playlist_counts()));
         self.tell(id, &playlists);

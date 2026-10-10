@@ -158,30 +158,47 @@ impl Server {
         }
         party.invited.push((who, me));
         self.tell(who, &ToPc::Invited { party: id, from });
+        // An invite-only party may be one they can join now.
+        self.friends_changed(who);
     }
 
-    /// `me` joins party `id`, leaving their own: by invite, or because it's
-    /// open (and they weren't removed from it). In a custom game, they're
-    /// linked to its host.
-    pub(super) fn join_party(&mut self, me: u64, id: u64) {
+    /// Whether `me` could join party `id` now, and if not what they're told
+    /// (nothing, if it's their own party already): the party is there, isn't
+    /// playing a match, is on their program, is open and hasn't removed them
+    /// or else has invited them, and has room for them and their guests.
+    /// JOIN_PARTY goes by this, and so does the `joinable` flag of a
+    /// FRIENDS entry, so the two never differ.
+    pub(super) fn can_join(&self, me: u64, id: u64) -> Result<(), &'static str> {
         let Some(party) = self.parties.get(&id) else {
-            return self.notice(me, PARTY_GONE);
+            return Err(PARTY_GONE);
         };
         if party.members.contains(&me) {
-            return;
+            return Err("");
         }
         if party.activity == Activity::Playing {
-            return self.notice(me, IN_A_MATCH);
+            return Err(IN_A_MATCH);
         }
         if self.client_of(party.leader) != self.client_of(me) {
-            return self.notice(me, OTHER_PROGRAM);
+            return Err(OTHER_PROGRAM);
         }
         let closed = party.privacy == Privacy::InviteOnly || party.booted.contains(&me);
         if closed && !party.has_invited(me) {
-            return self.notice(me, INVITE_ONLY);
+            return Err(INVITE_ONLY);
         }
         if self.size(party) + 1 + self.guests(me) > MAX_PARTY {
-            return self.notice(me, PARTY_FULL);
+            return Err(PARTY_FULL);
+        }
+        Ok(())
+    }
+
+    /// `me` joins party `id`, leaving their own, if they can (`can_join`):
+    /// by invite, or because it's open. In a custom game, they're linked to
+    /// its host.
+    pub(super) fn join_party(&mut self, me: u64, id: u64) {
+        match self.can_join(me, id) {
+            Ok(()) => {}
+            Err("") => return,
+            Err(why) => return self.notice(me, why),
         }
         let Some(k) = self.pc_of(me) else {
             return;

@@ -4,7 +4,7 @@
 use super::*;
 use crate::client::{results, RelayLeg};
 use crate::levels::{min_xp, Placed};
-use crate::store::RecordedPlayer;
+use crate::store::{RecordedPlayer, Tally};
 use h2net::live::{End, LinkInfo, MatchInfo, MatchOver, PlayerResult, Stage, QUICKMATCH};
 use h2net::{Client, ClientEvent, Host, HostEvent, Lobby, Verified};
 use h2sim::testing::{floor, game};
@@ -66,8 +66,9 @@ struct Gamer {
     failed_legs: Vec<String>,
     hosted: Option<Hosted>,
     joined: Option<Joined>,
-    /// It said how the match went, or that it left.
+    /// It said how the match went, or that it left; and what it said.
     reported: bool,
+    sent: Option<Vec<PlayerResult>>,
     over: Vec<MatchOver>,
 }
 
@@ -183,6 +184,7 @@ fn at_levels(w: &mut World, levels: &[(&str, &[u8])]) {
                     },
                     games: 10,
                     wins: 5,
+                    tally: Default::default(),
                 });
             }
             a
@@ -483,6 +485,7 @@ impl Arena {
                 }
             }
             g.reported = true;
+            g.sent = Some(players.clone());
             w.send(i, ToServer::Result { id, players });
         }
     }
@@ -608,6 +611,18 @@ impl Arena {
                     xp: f[5].parse().unwrap(),
                     level: f[7].parse().unwrap(),
                 },
+                // The host's numbers for them, if it gave any.
+                result: (f.len() == 14).then(|| {
+                    let n = |i: usize| f[i].parse().unwrap();
+                    let tally = Tally {
+                        kills: n(9),
+                        assists: n(10),
+                        deaths: n(11),
+                        betrayals: n(12),
+                        suicides: n(13),
+                    };
+                    (f[8].parse().unwrap(), tally)
+                }),
             }
         });
         (words[5].parse().unwrap(), players.collect())
@@ -844,6 +859,24 @@ fn four_players_play_double_team_through_the_relay() {
         let won = (i == 0 || i == 3) == alpha_won;
         assert_eq!((stats.games, stats.wins), (11, 5 + u32::from(won)));
     }
+    // Each player's tally has the kills and deaths of the host's result
+    // (the game's results have nothing else), and games.log its numbers.
+    let hosts = a.gamers[host].sent.clone().unwrap();
+    let (_, logged) = a.logged(m.id);
+    let mut killed = 0;
+    for i in 0..4 {
+        let theirs = hosts.iter().find(|r| r.account == a.id(i)).unwrap();
+        let tally = Tally {
+            kills: u32::from(theirs.kills),
+            deaths: u32::from(theirs.deaths),
+            ..Tally::default()
+        };
+        assert_eq!(a.account(i).stats("double_team").unwrap().tally, tally);
+        let entry = logged.iter().find(|p| p.account == a.id(i)).unwrap();
+        assert_eq!(entry.result, Some((theirs.score, tally)));
+        killed += theirs.kills;
+    }
+    assert!(killed > 0, "no one killed anyone");
     // Each PC sees its new level, and its party is back in the lobby.
     a.until(5.0, |a| {
         (0..4).all(|i| a.w.party(i).activity == Activity::Lobby)

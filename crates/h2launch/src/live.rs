@@ -407,7 +407,10 @@ pub fn parse_event_line(line: &str) -> Option<Engine> {
                     place: place.parse().ok()?,
                     score: score.parse().ok()?,
                     kills: kills.parse().ok()?,
+                    assists: 0,
                     deaths: deaths.parse().ok()?,
+                    betrayals: 0,
+                    suicides: 0,
                     left: left == "1",
                 });
             }
@@ -797,7 +800,10 @@ mod tests {
             place: 2,
             score,
             kills: 3,
+            assists: 0,
             deaths: 4,
+            betrayals: 0,
+            suicides: 0,
             left,
         };
         let ended = Engine::Ended(vec![player(0xB5A9, -2, false), player(0x5977, 7, true)]);
@@ -836,7 +842,10 @@ mod tests {
             place: 0,
             score: 3,
             kills: 0,
+            assists: 0,
             deaths: 1,
+            betrayals: 0,
+            suicides: 0,
             left: false,
         };
         let out = t.next(7, true, None, Some(Engine::Ended(vec![player])));

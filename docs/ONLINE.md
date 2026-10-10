@@ -64,7 +64,13 @@ internet address.
    - `relay on UDP port 47050`: the relay for the launcher's games is
      running beside it.
    - `accounts are kept in ...`: the folder (`h2live-data`) holding everyone's
-     accounts. Back it up now and then.
+     accounts. Back it up now and then. Besides `accounts.txt` (accounts,
+     levels, and kills, assists, deaths, betrayals and suicides in each
+     ranked playlist) it holds `friends.txt` (launcher players' friends and
+     friend requests) and `games.log` (every match played). A server from
+     before friends opens the folder as it is; once a newer server has
+     written to it, an older one can't read it, so keep a copy before
+     updating.
    - Then one of these:
      - `READY: ws://203.0.113.5:47050`: players can reach it. Paste that
        address to Claude. (The router opened UDP 47050 for the relay too,

@@ -49,7 +49,10 @@ impl PlayerResult {
             place: byte(self.standing),
             score: self.score,
             kills: 0,
+            assists: 0,
             deaths: self.deaths.min(u32::from(u16::MAX)) as u16,
+            betrayals: 0,
+            suicides: self.suicides.min(u32::from(u16::MAX)) as u16,
             left: false,
         }
     }

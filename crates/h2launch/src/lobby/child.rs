@@ -254,7 +254,10 @@ pub fn fake_results(s: &Session) -> Vec<LauncherPlayerResult> {
             place: team_place(p.team).min(255) as u8,
             score: (n - i) as i32,
             kills: (n - i) as u16,
+            assists: 0,
             deaths: i as u16,
+            betrayals: 0,
+            suicides: 0,
             left: false,
         })
         .collect()
