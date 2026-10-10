@@ -1,8 +1,8 @@
 //! Command-line flags. Every flag takes `--flag value` or `--flag=value`.
 
+use crate::controls::{ButtonLayout, ControlFlags, PadMap, StickLayout};
 use crate::net::{RecvPort, SelfSend, SendReturn};
 use crate::options::RawWrite;
-use crate::profile::PadMap;
 
 pub const USAGE: &str = "\
 h2launch: starts MCC's classic Halo 2 engine from your MCC install, without
@@ -46,7 +46,24 @@ Usage: h2launch [flags]
   --host-fonts            Tell the engine the host draws text (setting 6).
                           Fonts are not served yet, so the font calls still
                           answer no; they are logged.
-  --pad-map <zero|h2>     Gamepad mapping handed to the engine (default zero).
+  --layout <name>         Button layout: default, southpaw, boxer,
+                          green_thumb, bumper_jumper or recon. This flag
+                          and the seven below default to what the lobby's
+                          Settings saved in lobby.txt, else Halo 2's
+                          defaults.
+  --sticks <name>         Thumbstick layout: default, southpaw, legacy or
+                          legacy_southpaw.
+  --look-sensitivity <n>  Look sensitivity, 1 to 10 (Halo 2's default 3).
+  --invert-look           Look inversion on (--no-invert-look: off).
+  --auto-center           Automatic look centering on (--no-auto-center).
+  --no-vibration          Controller vibration off (--vibration: on).
+  --mouse-sensitivity <f> Mouse sensitivity, 0.1 to 10 (default 1.6).
+  --invert-mouse          Mouse look inversion on (--no-invert-mouse: off).
+  --pad-map <layout|zero> Gamepad mapping handed to the engine: the button
+                          layout's (default), or all zero, every action on
+                          LT, as HaloX has it (for diagnosis).
+  --no-key-bindings       Leave the profile's keyboard and mouse bindings
+                          empty, as before (for diagnosis).
   --set-option <o>=<t>:<v>   Write a value into the game options before the
                           start, e.g. 0x03=u8:0 (repeatable; for testing).
   --set-profile <o>=<t>:<v>  The same for the player profile.
@@ -90,7 +107,8 @@ Usage: h2launch [flags]
                           (repeatable; for testing what the engine waits for).
   --event-return <n>=<v>  The same for an event-manager slot.
   --pad <0-3|none|any>    Which XInput controller is player 1's (default any:
-                          the first connected).
+                          the first connected, until another one's button
+                          is pressed while it has been idle for 2 s).
   --watch <name>=<path>:<type>  Read an engine value at an RVA in halo2.dll
                           ten times a second and log it when it changes
                           (read only; repeatable). The path is an RVA, then
@@ -117,7 +135,8 @@ pub const DEFAULT_PLAYLIST: u8 = 11;
 /// Which controller is player 1's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pad {
-    /// The first one connected.
+    /// The one in use: the first connected, until another one is used
+    /// while it has been idle (`crate::padpick`).
     Any,
     /// None: keyboard and mouse only.
     None,
@@ -149,6 +168,10 @@ pub struct Args {
     pub attach_input: bool,
     pub host_fonts: bool,
     pub pad_map: PadMap,
+    /// The controls given on the command line (over lobby.txt's).
+    pub controls: ControlFlags,
+    /// `--no-key-bindings` clears it.
+    pub key_bindings: bool,
     pub set_option: Vec<RawWrite>,
     pub set_profile: Vec<RawWrite>,
     pub diag: bool,
@@ -200,7 +223,9 @@ impl Default for Args {
             groundhog: false,
             attach_input: true,
             host_fonts: false,
-            pad_map: PadMap::Zero,
+            pad_map: PadMap::Layout,
+            controls: ControlFlags::default(),
+            key_bindings: true,
             set_option: Vec::new(),
             set_profile: Vec::new(),
             diag: false,
@@ -306,6 +331,45 @@ where
             "--diag" => switch(&mut a, |a| a.diag = true)?,
             "--no-variant" => switch(&mut a, |a| a.no_variant = true)?,
             "--no-watchdog" => switch(&mut a, |a| a.watchdog = false)?,
+            "--no-key-bindings" => switch(&mut a, |a| a.key_bindings = false)?,
+            "--invert-look" => switch(&mut a, |a| a.controls.look_inverted = Some(true))?,
+            "--no-invert-look" => switch(&mut a, |a| a.controls.look_inverted = Some(false))?,
+            "--auto-center" => switch(&mut a, |a| a.controls.auto_center = Some(true))?,
+            "--no-auto-center" => switch(&mut a, |a| a.controls.auto_center = Some(false))?,
+            "--vibration" => switch(&mut a, |a| a.controls.vibration = Some(true))?,
+            "--no-vibration" => switch(&mut a, |a| a.controls.vibration = Some(false))?,
+            "--invert-mouse" => switch(&mut a, |a| a.controls.mouse_inverted = Some(true))?,
+            "--no-invert-mouse" => switch(&mut a, |a| a.controls.mouse_inverted = Some(false))?,
+            "--layout" => {
+                let v = value()?;
+                a.controls.buttons = Some(ButtonLayout::from_key(&v).ok_or_else(|| {
+                    format!(
+                        "--layout: {v:?} should be default, southpaw, boxer, green_thumb, bumper_jumper or recon"
+                    )
+                })?);
+            }
+            "--sticks" => {
+                let v = value()?;
+                a.controls.sticks = Some(StickLayout::from_key(&v).ok_or_else(|| {
+                    format!(
+                        "--sticks: {v:?} should be default, southpaw, legacy or legacy_southpaw"
+                    )
+                })?);
+            }
+            "--look-sensitivity" => {
+                let v = value()?;
+                a.controls.look_sensitivity = Some(
+                    crate::controls::parse_look_sensitivity(&v)
+                        .ok_or_else(|| format!("--look-sensitivity: {v:?} should be 1 to 10"))?,
+                );
+            }
+            "--mouse-sensitivity" => {
+                let v = value()?;
+                a.controls.mouse_sensitivity =
+                    Some(crate::controls::parse_mouse_sensitivity(&v).ok_or_else(|| {
+                        format!("--mouse-sensitivity: {v:?} should be 0.1 to 10")
+                    })?);
+            }
             "--mcc" => a.mcc = Some(value()?),
             "--map" => {
                 let v = value()?;
@@ -345,8 +409,9 @@ where
                 let v = value()?;
                 a.pad_map = match v.to_ascii_lowercase().as_str() {
                     "zero" => PadMap::Zero,
-                    "h2" | "halo2" => PadMap::Halo2,
-                    _ => return Err(format!("--pad-map: {v:?} should be zero or h2")),
+                    // h2 was the Default layout's name before layouts.
+                    "layout" | "h2" | "halo2" => PadMap::Layout,
+                    _ => return Err(format!("--pad-map: {v:?} should be layout or zero")),
                 };
             }
             "--set-option" => {
@@ -509,7 +574,9 @@ mod tests {
         assert!(a.attach_input);
         assert!(a.watchdog);
         assert_eq!((a.width, a.height), (1280, 720));
-        assert_eq!(a.pad_map, PadMap::Zero);
+        assert_eq!(a.pad_map, PadMap::Layout);
+        assert!(a.key_bindings);
+        assert!(!a.controls.any());
         assert_eq!(a.pad, Pad::Any);
         assert!(!a.name_set);
         assert_eq!(a.relay_wait, 15.0);
@@ -542,7 +609,8 @@ mod tests {
             "--no-attach-input",
             "--host-fonts",
             "--pad-map",
-            "h2",
+            "zero",
+            "--no-key-bindings",
             "--set-option",
             "0x03=u8:0",
             "--set-profile=0x1B5=u8:5",
@@ -595,7 +663,8 @@ mod tests {
         assert_eq!(a.quit_after, Some(120.0));
         assert_eq!(a.screenshots, vec![30.0, 60.0, 90.0]);
         assert_eq!(a.input_script.as_deref(), Some("walk.txt"));
-        assert_eq!(a.pad_map, PadMap::Halo2);
+        assert_eq!(a.pad_map, PadMap::Zero);
+        assert!(!a.key_bindings);
         assert_eq!(a.set_option[0].offset, 3);
         assert_eq!(a.set_option[0].bytes, vec![0]);
         assert_eq!(a.set_profile[0].offset, 0x1B5);
@@ -616,6 +685,14 @@ mod tests {
             vec!["--name", ""],
             vec!["--name", "a name far too long"],
             vec!["--pad-map", "mine"],
+            vec!["--layout", "claw"],
+            vec!["--layout"],
+            vec!["--sticks", "inverted"],
+            vec!["--look-sensitivity", "0"],
+            vec!["--look-sensitivity", "11"],
+            vec!["--mouse-sensitivity", "0"],
+            vec!["--mouse-sensitivity", "fast"],
+            vec!["--invert-look=yes"],
             vec!["--check=yes"],
             vec!["--set-option", "0x2BF30=u8:1"],
             vec!["--set-profile", "0xACB=u16:1"],
@@ -639,6 +716,66 @@ mod tests {
         // The last of a repeated flag wins; switches can be undone.
         let a = parse(["--no-attach-input", "--attach-input"]).unwrap();
         assert!(a.attach_input);
+    }
+
+    #[test]
+    fn control_flags() {
+        use crate::controls::Controls;
+        let a = parse([
+            "--layout",
+            "bumper_jumper",
+            "--sticks=legacy_southpaw",
+            "--look-sensitivity",
+            "7",
+            "--invert-look",
+            "--auto-center",
+            "--no-vibration",
+            "--mouse-sensitivity",
+            "2.5",
+            "--invert-mouse",
+        ])
+        .unwrap();
+        let c = a.controls.over(Controls::default());
+        assert!(c.mouse_inverted);
+        assert_eq!(c.buttons, ButtonLayout::BumperJumper);
+        assert_eq!(c.sticks, StickLayout::LegacySouthpaw);
+        assert_eq!(c.look_sensitivity, 7);
+        assert!(c.look_inverted && c.auto_center && !c.vibration);
+        assert_eq!(c.mouse_sensitivity, 2.5);
+        // Names as the lobby shows them work too.
+        let a = parse(["--layout", "Green Thumb", "--pad-map", "h2"]).unwrap();
+        assert_eq!(a.controls.buttons, Some(ButtonLayout::GreenThumb));
+        assert_eq!(a.pad_map, PadMap::Layout);
+        // The flags the lobby writes read back as the same controls.
+        let want = Controls {
+            buttons: ButtonLayout::Recon,
+            sticks: StickLayout::Southpaw,
+            look_sensitivity: 2,
+            look_inverted: false,
+            auto_center: false,
+            vibration: true,
+            mouse_sensitivity: 0.7,
+            mouse_inverted: false,
+        };
+        let a = parse(want.args()).unwrap();
+        let base = Controls {
+            look_inverted: true,
+            auto_center: true,
+            vibration: false,
+            mouse_inverted: true,
+            ..Controls::default()
+        };
+        assert_eq!(a.controls.over(base), want);
+        // Off, then on again: the last wins.
+        let a = parse([
+            "--no-vibration",
+            "--vibration",
+            "--invert-look",
+            "--no-invert-look",
+        ])
+        .unwrap();
+        assert_eq!(a.controls.vibration, Some(true));
+        assert_eq!(a.controls.look_inverted, Some(false));
     }
 
     #[test]

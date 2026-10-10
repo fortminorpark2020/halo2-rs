@@ -74,14 +74,35 @@ the launcher doesn't do.
   three at once, stacked above the button hints, newest lowest. They are
   drawn last and below every popup's box (y 524 to 652), so a popup
   neither hides nor dims them.
-- Keyboard (arrows, Enter for A, Esc for B, the X and Y keys, Q or Page Up
-  for LB and E or Page Down for RB), mouse (click a row to select it, again
-  to pick it; click a button hint) and Xbox controllers (gilrs: d-pad or
-  left stick, A, B, X, Y, the bumpers LB and RB; Start is A and Back is
-  B). Where the screens below say so, LB opens a service record (yours,
-  or the selected player's) and RB the friends list. Where a
-  gamertag is typed (the sign-in screen, the add friend popup) letters are
-  typed, not buttons.
+- Keyboard (arrows, Enter or Space for A, Esc or Backspace for B, the X
+  and Y keys, Q or Page Up for LB and E or Page Down for RB), mouse (click
+  a row to select it, again to pick it; click a button hint or a `<` `>`
+  arrow) and Xbox controllers (gilrs: d-pad or left stick, both ways, A,
+  B, X, Y, the bumpers LB and RB; Start is A and Back is B). Where the
+  screens below say so, LB opens a service record (yours, or the selected
+  player's) and RB the friends list. Where a gamertag is typed (the
+  sign-in screen, the add friend popup) letters are typed, not buttons,
+  and Backspace rubs one out. W A S D don't move the selection: A is a
+  button.
+- While the engine plays (the in-game screen), the lobby ignores the
+  controller, the letter keys, and Enter, Esc and Backspace (A and B) on
+  that screen and in its Leave Game popup: its window may still be in
+  front if the engine's didn't come forward, and B then A (melee, jump),
+  Esc (Halo 2's pause) then Enter, or Esc then Space would otherwise leave
+  the game. Leaving takes a click on the B hint and then on the popup's
+  A. The window's keys come through `App::key`, which does this; clicks,
+  the controller and the headless script's `press` go to `App::input`.
+- The engine's window should take the foreground when it opens (not yet
+  seen on a PC): the lobby, being in front, passes the right to it
+  (`AllowSetForegroundWindow` with the child's process id, at the start
+  and again when the engine says running and maploaded), and the window
+  asks for the foreground once a second for 30 s until it has had it,
+  restoring itself first if it is minimised, and stopping if some other
+  window than the one in front at the start (the lobby) is brought to the
+  front. Keys and the mouse reach only the window in front; the
+  controller works either way.
+- The left stick moves the selection by its stronger axis only, so a
+  sloppy diagonal push doesn't also change the value on a row.
 - Levels are drawn with Halo 2's own level icons (the 50 rank icons, big
   and small) from a `mainmenu.map` (`lobby/ranks.rs`). MCC's own comes
   first: `halo2\h2_maps_win64_dx11\mainmenu.map` in the MCC folder the
@@ -96,7 +117,11 @@ the launcher doesn't do.
   numbers, as before. The icons are the game's: screenshots with them stay
   on the PC.
 - Files in the launcher's folder (`%LOCALAPPDATA%\h2launch`, or its
-  `--instance` folder): `lobby.txt`, `lobby.log` (the lobby's log, with the
+  `--instance` folder): `lobby.txt` (the server, the gamertag and the
+  controller settings: `button_layout`, `thumbstick_layout`,
+  `look_sensitivity`, `look_inversion`, `auto_look_centering`, `vibration`,
+  `mouse_sensitivity` and `mouse_inversion`; a file from before them reads
+  with Halo 2's defaults, and unknown lines are skipped), `lobby.log` (the lobby's log, with the
   engine's lines as `engine:`), `live-key.bin` and `live-card.txt` (the same
   account as `--live`), `match-session.txt` (the last match's session),
   and `results\` (the engine's results blocks of the last 30 games,
@@ -137,7 +162,8 @@ the launcher doesn't do.
 5. Pregame: the map, the game type and the players with their teams and
    levels for a few seconds, then the engine starts.
 6. In game: the lobby window waits while the engine's window is up, saying
-   whether the engine is starting, loading or playing. B leaves the game.
+   whether the engine is starting, loading or playing. B leaves the game
+   (while the engine plays, only a click on the B hint and then on A).
 7. Carnage report: each player's place, team, score, kills, assists,
    deaths and level, in Halo 2 Xbox's columns (PLACE, PLAYER, SCORE,
    KILLS, ASSISTS, DEATHS, LEVEL), sorted by place, then team, then score,
@@ -165,7 +191,8 @@ the launcher doesn't do.
    leave (A, LEAVE_PARTY), and LB opens the selected member's service
    record. It goes back to the playlists while the party searches.
 10. Offline: the server couldn't be reached or was lost. A tries again, Y
-   goes back to the sign-in screen, B quits. B on the party screen asks
+   goes back to the sign-in screen, X opens the controller settings, B
+   quits. B on the party screen asks
    before quitting, and offers Y to sign out.
 11. Friends (RB; `LIVE_PROTOCOL` 3, `docs/notes/launcher/live-v3.md`):
    requests to you first, then friends on the launcher (a green dot),
@@ -200,6 +227,29 @@ the launcher doesn't do.
    says the server didn't answer (A tries again). The end of a match drops
    the kept records of everyone in it. B goes back.
 
+13. Controller settings ("Settings", the row after Custom Game, for
+   anyone; or the controller's X on the sign-in and offline screens, and
+   the hint there can be clicked): CONTROLLER, with the rows of Halo 2's
+   CONTROLLER screen (in a profile's settings) in its order and words:
+   Thumbstick Layout (Default, Southpaw, Legacy, Legacy Southpaw), Button
+   Layout (Default, Southpaw, Boxer, Green Thumb, Bumper Jumper, Recon),
+   Look Sensitivity (1 to 10, "3 (Default)"), Look Inversion (the
+   thumbstick's), Automatic Look Centering, Controller Vibration; then the
+   mouse's Mouse Sensitivity (0.1 to 10 in tenths, default 1.6) and Mouse
+   Inversion (its own, off by default, as MCC keeps it); and Halo 2's last
+   row, Restore Defaults. Up and down pick a row, left and right (or the
+   arrows) change it, A moves it on (and numbers go round), A on Restore
+   Defaults puts them all back. The right side lists what each button does
+   in the layout picked, in Halo 2's words ("Melee attack", "Zoom view",
+   "Multiplayer score", Start "Pause game"), and what each stick does (on
+   the mouse's rows, the keyboard and mouse keys instead: halo2.dll's own
+   plainly, MCC's marked `?`), and the line under the rows says what the
+   row is for. Every change is saved to `lobby.txt` at once and passed to
+   every engine the lobby starts (`--layout ... --sticks ...
+   --look-sensitivity ...`); `--offline` reads `lobby.txt` too. B goes
+   back. See "Controls" in `README.md` for what the engine is given and
+   what is an estimate.
+
 ## Testing without MCC
 
 `--fake-engine` stands in for the engine on any platform: it reads the
@@ -232,16 +282,18 @@ line (`--set-option 0x354=i32:60 --pad none`, say). A script line is
 0 pick CHARLIE        # select their row (players, friends, party, carnage)
 0.3 lb
 0 see Head to Head 10 # until that text is drawn (any case; at most 10 s)
+0 set button_layout bumper_jumper   # a controller setting, by its lobby.txt name
 3 quit
 ```
 
 `see` takes its last word as the seconds when it is a number (so
 `see 12 of 100 120` waits for "12 of 100"), and fails the run as `wait`
-does; `pick` fails it when there is no such row.
+does; `pick` fails it when there is no such row, and `set` when the
+setting or its value is wrong.
 
 The screens are `signin`, `connecting`, `live`, `searching`, `players`,
 `party`, `custom`, `pregame`, `ingame`, `carnage-waiting`, `carnage`,
-`failed`, `friends` and `record`, and the popups `invite`, `quit`,
+`failed`, `friends`, `record` and `settings`, and the popups `invite`, `quit`,
 `leave`, `remove` (a party member), `addfriend`, `friend` (a friend's
 options) and `unfriend`.
 

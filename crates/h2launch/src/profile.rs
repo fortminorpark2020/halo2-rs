@@ -1,7 +1,8 @@
 //! The other byte layouts the host hands the engine: the player profile
-//! (host slot 34), the per-frame input state (slots 36/37), the gamepad
-//! mapping (slot 116), the language settings (`SetLibrarySettings`) and the
-//! sizes of the video and audio settings (slots 32/33). Offsets are from
+//! (host slot 34), the per-frame input state (slots 36/37), the size of
+//! the gamepad mapping (slot 116; its contents are in `crate::controls`),
+//! the language settings (`SetLibrarySettings`) and the sizes of the video
+//! and audio settings (slots 32/33). Offsets are from
 //! host-interface.md section 8, recomputed under MSVC rules by its verify
 //! file.
 
@@ -73,12 +74,15 @@ pub mod prof {
     pub const HUD_SCALE: usize = 0xAC8;
 }
 
-/// What we put in the profile. Everything not named here is 0.
+/// What we put in the profile. Everything not named here is 0, including
+/// `button_preset` (0x1C8), `stick_preset` (0x1C9), `lefty_toggle` (0x1CA)
+/// and `swap_triggers_and_bumpers` (0x1D7), so the engine applies no swap
+/// of its own over the mapping and the sticks the launcher gives it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProfileSettings {
-    /// Stick look sensitivity bytes. HaloX only ever served MCC's ini
-    /// values here; with none they would be 0, which may mean no turning.
-    /// 3 is an estimate of Halo 2's default slider position.
+    /// Stick look sensitivity, Halo 2's 1 to 10 (3 is its default),
+    /// written to both axes as Halo 2 sets them together. That MCC's byte
+    /// uses the same scale is an estimate; with 0 there may be no turning.
     pub look_sensitivity: u8,
     /// MCC's mouse sensitivity scale; 1.6 is HaloX's header default.
     pub mouse_sensitivity: f32,
@@ -86,20 +90,42 @@ pub struct ProfileSettings {
     pub zoom_look_multiplier: f32,
     pub vehicle_look_multiplier: f32,
     pub volume: f32,
+    /// Look inversion, the controller's (0x1D).
     pub look_inverted: bool,
+    /// The mouse's look inversion (0x1E). HaloX writes it and also flips
+    /// the mouse itself, and the launcher does the same
+    /// (`mouse_motion`); whether the engine flips it a second time is to
+    /// be checked on the PC.
+    pub mouse_inverted: bool,
     pub vibration: bool,
+    /// Automatic look centering.
+    pub auto_center: bool,
+    /// Fill the keyboard and mouse table (0x42C) with
+    /// `controls::keyboard_table`; false leaves it all zero, as before
+    /// (`--no-key-bindings`, for diagnosis).
+    pub key_bindings: bool,
 }
 
 impl Default for ProfileSettings {
     fn default() -> Self {
+        ProfileSettings::from_controls(&crate::controls::Controls::default())
+    }
+}
+
+impl ProfileSettings {
+    /// The profile for these controls.
+    pub fn from_controls(c: &crate::controls::Controls) -> ProfileSettings {
         ProfileSettings {
-            look_sensitivity: 3,
-            mouse_sensitivity: 1.6,
+            look_sensitivity: c.look_sensitivity,
+            mouse_sensitivity: c.mouse_sensitivity,
             zoom_look_multiplier: 1.0,
             vehicle_look_multiplier: 1.0,
             volume: 1.0,
-            look_inverted: false,
-            vibration: true,
+            look_inverted: c.look_inverted,
+            mouse_inverted: c.mouse_inverted,
+            vibration: c.vibration,
+            auto_center: c.auto_center,
+            key_bindings: true,
         }
     }
 }
@@ -110,7 +136,9 @@ pub fn build_profile(s: &ProfileSettings) -> Vec<u8> {
     let f32_at =
         |p: &mut Vec<u8>, at: usize, v: f32| p[at..at + 4].copy_from_slice(&v.to_le_bytes());
     p[prof::LOOK_INVERTED] = s.look_inverted as u8;
+    p[prof::MOUSE_LOOK_INVERTED] = s.mouse_inverted as u8;
     p[prof::VIBRATION_DISABLED] = (!s.vibration) as u8;
+    p[prof::AUTO_CENTER] = s.auto_center as u8;
     p[prof::VERTICAL_LOOK_SENSITIVITY] = s.look_sensitivity;
     p[prof::HORIZONTAL_LOOK_SENSITIVITY] = s.look_sensitivity;
     f32_at(&mut p, prof::ZOOM_LOOK_MULTIPLIER, s.zoom_look_multiplier);
@@ -120,6 +148,11 @@ pub fn build_profile(s: &ProfileSettings) -> Vec<u8> {
         s.vehicle_look_multiplier,
     );
     f32_at(&mut p, prof::MOUSE_SENSITIVITY, s.mouse_sensitivity);
+    if s.key_bindings {
+        let t = crate::controls::encode_keyboard_table(&crate::controls::keyboard_table());
+        let at = prof::KEYBOARD_MOUSE_MAPPING;
+        p[at..at + t.len()].copy_from_slice(&t);
+    }
     f32_at(&mut p, prof::MASTER_VOLUME, s.volume);
     f32_at(&mut p, prof::MUSIC_VOLUME, s.volume);
     f32_at(&mut p, prof::SFX_VOLUME, s.volume);
@@ -292,75 +325,24 @@ pub fn mouse_to_stick(dx: f32, dy: f32) -> (i16, i16) {
     (c(dx), c(-dy))
 }
 
-/// Raw mouse counts to the input state's units: counts x sensitivity x
-/// 0.10, HaloX's scale with its default sensitivity 0.10 (an estimate for
-/// halo2; tune it on the PC).
+/// Raw mouse counts to the input state's units at MCC's default mouse
+/// sensitivity (1.6): counts x sensitivity x 0.10, HaloX's scale with its
+/// default sensitivity 0.10 (an estimate for halo2; tune it on the PC).
 pub const MOUSE_SCALE: f32 = 0.01;
 
-/// Which gamepad mapping slot 116 hands out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PadMap {
-    /// All zero, what HaloX returns (it never fills its mapping).
-    Zero,
-    /// Halo 2's DEFAULT layout (our controller notes), an estimate of
-    /// what the engine expects here.
-    Halo2,
-}
+/// The MCC mouse sensitivity at which `MOUSE_SCALE` applies.
+pub const MOUSE_SCALE_AT: f32 = 1.6;
 
-/// The game actions' indices (host-interface.md 8.5) we map.
-pub mod action {
-    pub const JUMP: usize = 0;
-    pub const SWITCH_GRENADE: usize = 1;
-    pub const ACTION: usize = 2;
-    pub const RELOAD: usize = 3;
-    pub const SWITCH_WEAPON: usize = 4;
-    pub const MELEE: usize = 5;
-    pub const FLASHLIGHT: usize = 6;
-    pub const THROW_GRENADE: usize = 7;
-    pub const FIRE: usize = 8;
-    pub const CROUCH: usize = 9;
-    pub const ZOOM: usize = 10;
-    pub const SHOW_SCORES: usize = 20;
-    pub const SECONDARY_FIRE: usize = 24;
-}
-
-/// The physical buttons of the mapping (0xFF = none).
-pub mod button {
-    pub const LT: u8 = 0;
-    pub const RT: u8 = 1;
-    pub const BACK: u8 = 7;
-    pub const LS: u8 = 8;
-    pub const RS: u8 = 9;
-    pub const LB: u8 = 10;
-    pub const RB: u8 = 11;
-    pub const A: u8 = 12;
-    pub const B: u8 = 13;
-    pub const X: u8 = 14;
-    pub const Y: u8 = 15;
-    pub const NONE: u8 = 0xFF;
-}
-
-pub fn gamepad_mapping(kind: PadMap) -> [u8; GAMEPAD_MAPPING_SIZE] {
-    match kind {
-        PadMap::Zero => [0; GAMEPAD_MAPPING_SIZE],
-        PadMap::Halo2 => {
-            let mut m = [button::NONE; GAMEPAD_MAPPING_SIZE];
-            m[action::JUMP] = button::A;
-            m[action::SWITCH_GRENADE] = button::RB;
-            m[action::ACTION] = button::X;
-            m[action::RELOAD] = button::X;
-            m[action::SWITCH_WEAPON] = button::Y;
-            m[action::MELEE] = button::B;
-            m[action::FLASHLIGHT] = button::LB;
-            m[action::THROW_GRENADE] = button::LT;
-            m[action::FIRE] = button::RT;
-            m[action::CROUCH] = button::LS;
-            m[action::ZOOM] = button::RS;
-            m[action::SHOW_SCORES] = button::BACK;
-            m[action::SECONDARY_FIRE] = button::LT;
-            m
-        }
-    }
+/// Raw mouse counts (`dx`, `dy`, +Y down) to the input state's units for
+/// an MCC mouse sensitivity and the mouse's look inversion, as HaloX does
+/// it: counts x sensitivity x 0.0625 x 0.10 (so `MOUSE_SCALE` at 1.6),
+/// and Y flipped when inverted. The engine may scale on-foot aim by
+/// nothing else: HaloX writes the profile's mouse sensitivity (0x410)
+/// only because "vehicle code also reads" it.
+pub fn mouse_motion(dx: f32, dy: f32, sensitivity: f32, inverted: bool) -> (f32, f32) {
+    let k = MOUSE_SCALE * sensitivity / MOUSE_SCALE_AT;
+    let y = if inverted { -dy } else { dy };
+    (dx * k, y * k)
 }
 
 /// `s_language_settings` with one tag (e.g. "en-US") in all three fields
@@ -441,6 +423,70 @@ mod tests {
         assert_eq!(p[prof::HORIZONTAL_LOOK_SENSITIVITY], 3);
         assert_eq!(p[prof::VIBRATION_DISABLED], 0);
         assert_eq!(p[prof::LOOK_INVERTED], 0);
+        assert_eq!(p[prof::AUTO_CENTER], 0);
+        // No preset or swap of the engine's own over ours.
+        for at in [prof::BUTTON_PRESET, prof::STICK_PRESET, 0x1CA, 0x1D7] {
+            assert_eq!(p[at], 0, "{at:#x}");
+        }
+        assert_eq!(i(prof::KEYBOARD_MOUSE_PRESET), 0);
+        // The keyboard table: entry i is action i, W moves forward.
+        let entry = |n: usize| prof::KEYBOARD_MOUSE_MAPPING + n * 0x18;
+        assert_eq!(i(entry(0)), 0);
+        assert_eq!(i(entry(0) + 4), 0x20);
+        assert_eq!(i(entry(16)), 16);
+        assert_eq!(i(entry(16) + 4), 'W' as i32);
+        assert_eq!(i(entry(65)), 65);
+        assert_eq!(&p[entry(66)..entry(66) + 4], &1.0f32.to_le_bytes());
+    }
+
+    #[test]
+    fn controls_reach_the_profile() {
+        let c = crate::controls::Controls {
+            look_sensitivity: 10,
+            look_inverted: true,
+            auto_center: true,
+            vibration: false,
+            mouse_sensitivity: 2.5,
+            ..Default::default()
+        };
+        let mut ps = ProfileSettings::from_controls(&c);
+        let p = build_profile(&ps);
+        let f = |at: usize| f32::from_le_bytes(p[at..at + 4].try_into().unwrap());
+        assert_eq!(p[prof::VERTICAL_LOOK_SENSITIVITY], 10);
+        assert_eq!(p[prof::HORIZONTAL_LOOK_SENSITIVITY], 10);
+        assert_eq!(p[prof::LOOK_INVERTED], 1);
+        // The controller's inversion leaves the mouse's alone.
+        assert_eq!(p[prof::MOUSE_LOOK_INVERTED], 0);
+        assert_eq!(p[prof::AUTO_CENTER], 1);
+        assert_eq!(p[prof::VIBRATION_DISABLED], 1);
+        assert_eq!(f(prof::MOUSE_SENSITIVITY), 2.5);
+        let mouse = ProfileSettings::from_controls(&crate::controls::Controls {
+            mouse_inverted: true,
+            ..Default::default()
+        });
+        let m = build_profile(&mouse);
+        assert_eq!(
+            (m[prof::LOOK_INVERTED], m[prof::MOUSE_LOOK_INVERTED]),
+            (0, 1)
+        );
+        ps.key_bindings = false;
+        let p = build_profile(&ps);
+        let table = prof::KEYBOARD_MOUSE_MAPPING..prof::MASTER_VOLUME;
+        assert!(p[table].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn mouse_motion_follows_sensitivity_and_inversion() {
+        let near = |(x, y): (f32, f32), (wx, wy): (f32, f32)| {
+            assert!((x - wx).abs() < 1e-5 && (y - wy).abs() < 1e-5, "({x}, {y})");
+        };
+        // MCC's default: HaloX's 0.01 a count.
+        near(mouse_motion(100.0, -50.0, 1.6, false), (1.0, -0.5));
+        // Twice the sensitivity, twice the motion.
+        near(mouse_motion(100.0, -50.0, 3.2, false), (2.0, -1.0));
+        // Inverted: Y flips, X doesn't.
+        near(mouse_motion(100.0, -50.0, 1.6, true), (1.0, 0.5));
+        assert_eq!(mouse_motion(0.0, 0.0, 9.0, true), (0.0, 0.0));
     }
 
     #[test]
@@ -483,16 +529,6 @@ mod tests {
         assert_eq!(mouse_to_stick(0.0, 0.0), (0, 0));
         assert_eq!(mouse_to_stick(1.0, 1.0), (2000, -2000));
         assert_eq!(mouse_to_stick(100.0, -100.0), (32767, 32767));
-    }
-
-    #[test]
-    fn mappings() {
-        assert!(gamepad_mapping(PadMap::Zero).iter().all(|&b| b == 0));
-        let m = gamepad_mapping(PadMap::Halo2);
-        assert_eq!(m[action::JUMP], button::A);
-        assert_eq!(m[action::FIRE], button::RT);
-        assert_eq!(m[action::MELEE], button::B);
-        assert_eq!(m[30], button::NONE);
     }
 
     #[test]

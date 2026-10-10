@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 20:30 UTC. Any assistant that works on the project
+Last updated 2026-10-10 23:30 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -179,6 +179,22 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   owner's PC with the real engine (2026-10-10 20:00 local server, 20:30
   through Proxmox). Next: a real game with kills (to set `COUNTS_SEEN`),
   a play session by the owner, two PCs, then clans.
+- `launcher-controls` (on `launcher-friends` 2427b8a, reviewed twice,
+  gate passing) answers the owner's 21:45 report that no controller or
+  keyboard input worked in game, and his ask for layouts like Bumper
+  Jumper. The gamepad mapping (host slot 116) was all zero, every action
+  on LT; it is now the button layout picked in the lobby's new Settings
+  screen (CONTROLLER: Halo 2's Default, Southpaw, Boxer, Green Thumb,
+  plus Bumper Jumper and Recon; thumbstick layouts Default, Southpaw,
+  Legacy, Legacy Southpaw done by the launcher; look sensitivity,
+  inversion, auto centering, vibration, mouse sensitivity and inversion),
+  saved in `lobby.txt` and passed to every engine as flags (`--layout`
+  and the rest; `crates/h2launch/src/controls.rs`). The profile's
+  keyboard table (0x42C) is filled with halo2.dll's own keys (as HaloX
+  read them) plus MCC's; whether the engine reads it, and whether keys
+  reach it at all (focus, AttachThreadInput), is the next PC check. The
+  checklist is "Controls" in `docs/notes/launcher/README.md`. Next: the
+  owner tries each layout in an offline match.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.

@@ -14,12 +14,14 @@
 //! estimate.
 
 pub mod cli;
+pub mod controls;
 pub mod live;
 pub mod lobby;
 pub mod maps;
 pub mod mccroot;
 pub mod net;
 pub mod options;
+pub mod padpick;
 pub mod paths;
 pub mod pe;
 pub mod profile;

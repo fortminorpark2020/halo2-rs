@@ -1,21 +1,33 @@
 //! What the lobby keeps between runs (`lobby.txt` in the launcher's
-//! folder): the server's address and the gamertag.
+//! folder): the server's address, the gamertag and the controls (the
+//! Settings screen's; see `crate::controls`). A file from before the
+//! controls were added reads with Halo 2's default controls.
 //!
 //! ```text
 //! server = 192.168.8.102
 //! gamertag = JOHN
+//! button_layout = bumper_jumper
+//! thumbstick_layout = default
+//! look_sensitivity = 3
+//! look_inversion = off
+//! auto_look_centering = off
+//! vibration = on
+//! mouse_sensitivity = 1.6
+//! mouse_inversion = off
 //! ```
 
+use crate::controls::Controls;
 use std::path::{Path, PathBuf};
 
 /// The owner's matchmaking server on his home network, used until another
 /// is typed in.
 pub const DEFAULT_SERVER: &str = "192.168.8.102";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub server: String,
     pub gamertag: String,
+    pub controls: Controls,
 }
 
 impl Default for Settings {
@@ -23,13 +35,15 @@ impl Default for Settings {
         Settings {
             server: DEFAULT_SERVER.into(),
             gamertag: String::new(),
+            controls: Controls::default(),
         }
     }
 }
 
 impl Settings {
-    /// Reads the file's text; unknown lines are skipped, so a newer
-    /// launcher's file still works.
+    /// Reads the file's text; unknown lines (and controls with a bad
+    /// value, which keep their default) are skipped, so a newer launcher's
+    /// file still works.
     pub fn parse(text: &str) -> Settings {
         let mut s = Settings::default();
         for line in text.lines() {
@@ -40,14 +54,21 @@ impl Settings {
             match k.trim().to_ascii_lowercase().as_str() {
                 "server" if !v.is_empty() => s.server = v.to_string(),
                 "gamertag" => s.gamertag = clean_gamertag(v),
-                _ => {}
+                k => {
+                    let _ = s.controls.set(k, v);
+                }
             }
         }
         s
     }
 
     pub fn to_text(&self) -> String {
-        format!("server = {}\ngamertag = {}\n", self.server, self.gamertag)
+        format!(
+            "server = {}\ngamertag = {}\n{}",
+            self.server,
+            self.gamertag,
+            self.controls.lines()
+        )
     }
 
     pub fn load(path: &Path) -> Settings {
@@ -106,12 +127,38 @@ mod tests {
         let s = Settings {
             server: "example.org:9000".into(),
             gamertag: "MASTER CHIEF".into(),
+            controls: Controls {
+                buttons: crate::controls::ButtonLayout::BumperJumper,
+                sticks: crate::controls::StickLayout::Legacy,
+                look_sensitivity: 5,
+                look_inverted: true,
+                auto_center: true,
+                vibration: false,
+                mouse_sensitivity: 3.1,
+                mouse_inverted: true,
+            },
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
         assert_eq!(Settings::parse(""), Settings::default());
-        let odd = Settings::parse("# hi\nserver =\ncolour = red\ngamertag = j0hn!!\n");
+        let odd = Settings::parse(
+            "# hi\nserver =\ncolour = red\ngamertag = j0hn!!\nlook_sensitivity = 99\nbutton_layout = recon\n",
+        );
         assert_eq!(odd.server, DEFAULT_SERVER);
         assert_eq!(odd.gamertag, "J0HN");
+        // A bad value keeps the default; a good one is read.
+        assert_eq!(odd.controls.look_sensitivity, 3);
+        assert_eq!(odd.controls.buttons, crate::controls::ButtonLayout::Recon);
+    }
+
+    #[test]
+    fn a_file_from_before_the_controls_reads_with_the_defaults() {
+        let old = Settings::parse("server = 192.168.8.102\ngamertag = JOHN\n");
+        assert_eq!(old.gamertag, "JOHN");
+        assert_eq!(old.controls, Controls::default());
+        // And writing it back keeps the server and the gamertag first.
+        assert!(old
+            .to_text()
+            .starts_with("server = 192.168.8.102\ngamertag = JOHN\n"));
     }
 
     #[test]

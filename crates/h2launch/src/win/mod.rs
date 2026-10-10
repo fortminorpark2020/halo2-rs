@@ -99,6 +99,8 @@ pub(crate) struct Setup {
     pub map: &'static MapEntry,
     /// The networked match (`--session`) and which machine we are.
     pub session: Option<(crate::session::Session, usize)>,
+    /// The player's controls: the flags over what the lobby saved.
+    pub controls: crate::controls::Controls,
 }
 
 /// `--instance`: set before the log opens.
@@ -629,6 +631,27 @@ fn launch(mut args: Args) -> i32 {
         },
         None => None,
     };
+    // The controls: the lobby's Settings (lobby.txt), with any flag over
+    // them. The lobby passes all of them to the engines it starts; an
+    // --offline or --live run takes the saved ones.
+    let saved = crate::lobby::settings::folder(instance()).join("lobby.txt");
+    let controls = args
+        .controls
+        .over(crate::lobby::settings::Settings::load(&saved).controls);
+    log!(
+        "controls: {} ({}{})",
+        controls.describe(),
+        if saved.exists() {
+            format!("saved in {}", saved.display())
+        } else {
+            "Halo 2's defaults".into()
+        },
+        if args.controls.any() {
+            ", with the flags over them"
+        } else {
+            ""
+        }
+    );
     let name: Vec<u16> = args.name.encode_utf16().collect();
     let _ = SETUP.set(Setup {
         args,
@@ -640,6 +663,7 @@ fn launch(mut args: Args) -> i32 {
         script,
         map,
         session,
+        controls,
     });
     let s = setup().expect("just set");
     if let Err(e) = std::thread::Builder::new()
@@ -850,6 +874,7 @@ fn main_loop() -> i32 {
         }
 
         gfx::resize_if_settled();
+        gfx::come_to_front(t);
         input::update_cursor_clip(game.is_some() && quit_started.is_none());
         if s.args.attach_input {
             if let Some(h) = game {
