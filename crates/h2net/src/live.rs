@@ -10,6 +10,21 @@
 //! Each message is a kind and a body, as in LAN games. Reading one checks
 //! every count and length, so bytes from a broken or hostile peer are an
 //! error, never a crash.
+//!
+//! Two programs sign in: the game (h2viewer), whose players play each
+//! other on its own engine, and the launcher (h2launch), whose players
+//! play on MCC's Halo 2 engine with the game traffic going through the
+//! UDP relay (`h2relay`). The game signs in as it always has: LOGIN starts
+//! with `MAGIC` and the game's `PROTOCOL`, and the server takes it only at
+//! its own `PROTOCOL` (games on other versions can't play each other).
+//! The launcher's LOGIN starts with `MAGIC_V2` and `LIVE_PROTOCOL`, this
+//! service's own version, then says which program it is
+//! (`LoginClient`); the server takes it whatever the game's `PROTOCOL`
+//! is, so a new game version never locks launchers out. The messages the
+//! game sends and is sent are the same as ever (so `PROTOCOL` stays as it
+//! was); the launcher's own ones (LAUNCHER_MATCH, JOINED and
+//! LAUNCHER_RESULT) are versioned by `LIVE_PROTOCOL` and only ever go to
+//! and from launchers.
 
 use crate::conn::Connection;
 use crate::PROTOCOL;
@@ -18,8 +33,21 @@ use h2sim::GameType;
 use std::io::Read;
 use std::path::Path;
 
-/// LOGIN starts with this.
+/// The game's LOGIN starts with this, then its `PROTOCOL`.
 pub const MAGIC: u32 = u32::from_le_bytes(*b"H2LV");
+/// A versioned LOGIN (the launcher's) starts with this, then
+/// `LIVE_PROTOCOL` and the kind of program (see `login_header`).
+pub const MAGIC_V2: u32 = u32::from_le_bytes(*b"H2L2");
+/// The online service's own version, separate from the game's `PROTOCOL`:
+/// bump it whenever a versioned LOGIN or a launcher's messages change. The
+/// server takes launchers at this version only, whatever the game's
+/// `PROTOCOL`.
+pub const LIVE_PROTOCOL: u32 = 1;
+/// The kinds of program a versioned LOGIN can say it is, as a byte.
+pub const CLIENT_VIEWER: u8 = 0;
+pub const CLIENT_LAUNCHER: u8 = 1;
+/// The length of a relay member key (h2relay's `MemberKey`).
+pub const MEMBER_KEY_LEN: usize = 16;
 /// Control messages are at most this big (kind and body); a PC that sends a
 /// bigger one is dropped.
 pub const MAX_MESSAGE: usize = 64 << 10;
@@ -37,6 +65,8 @@ pub const QUICKMATCH: u8 = 255;
 
 /// Why the server turned a PC away (REFUSED), as the PC shows it.
 pub const UPDATE_YOUR_GAME: &str = "UPDATE YOUR GAME";
+/// A launcher written for another `LIVE_PROTOCOL` than the server's.
+pub const UPDATE_YOUR_LAUNCHER: &str = "UPDATE YOUR LAUNCHER";
 /// Someone else has the gamertag: the PC asks its player for another.
 pub const GAMERTAG_TAKEN: &str = "GAMERTAG TAKEN";
 pub const BAD_SIGNATURE: &str = "BAD SIGNATURE";
@@ -58,6 +88,8 @@ pub const MAX_MAPS: usize = 1024;
 pub const MAX_PLAYLIST_MAPS: usize = 64;
 /// Most players in a match or its results.
 const MAX_PLAYERS: usize = 16;
+/// Most teams a launcher's result scores (Halo 2 has eight team colours).
+pub const MAX_TEAMS: usize = 8;
 /// Most PCs a FANOUT names (far more than ever join one host), and what it
 /// says instead to mean the same PCs as the last.
 const MAX_FANOUT: usize = 254;
@@ -93,6 +125,10 @@ pub mod kind {
     pub const RESULT: u8 = 31;
     pub const LEFT_MATCH: u8 = 32;
     pub const BACK: u8 = 33;
+    /// A launcher's: its game joined the match's host, through the relay.
+    pub const JOINED: u8 = 34;
+    /// A launcher's: how the match ended, from the engine's results.
+    pub const LAUNCHER_RESULT: u8 = 35;
     // PC to server, first on a relay leg.
     pub const LINK_HELLO: u8 = 40;
     // Host to server, on its fan-out leg once linked.
@@ -113,6 +149,8 @@ pub mod kind {
     pub const MATCH_OVER: u8 = 113;
     pub const NOTICE: u8 = 114;
     pub const CUSTOM_OPEN: u8 = 115;
+    /// To a launcher: a match is ready, and how to reach it on the relay.
+    pub const LAUNCHER_MATCH: u8 = 116;
     // Server to PC, on a relay leg once its other end is there.
     pub const LINKED: u8 = 41;
 }
@@ -169,6 +207,13 @@ pub enum ToServer {
     },
     /// Back in the party lobby after a game.
     Back,
+    /// A launcher joining a match: its game joined the host's game, through
+    /// the relay. (The game's joining PCs are seen joining by their relay
+    /// legs.)
+    Joined(u64),
+    /// A launcher: how a match ended, as its engine's results say. The
+    /// host's counts; the others' confirm it, as with RESULT.
+    LauncherResult(LauncherResult),
     /// First on a relay leg: which leg this is.
     LinkHello {
         token: [u8; 16],
@@ -225,6 +270,9 @@ pub enum ToPc {
         leader: u64,
         map: String,
     },
+    /// To a launcher: a match is ready (in place of MATCH). It comes again,
+    /// with another host, if the one asked didn't start hosting.
+    LauncherMatch(LauncherMatch),
     Ping(u32),
     Pong(u32),
     /// On a relay leg: the other end is there, and what follows is theirs.
@@ -234,6 +282,10 @@ pub enum ToPc {
 /// Signing in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Login {
+    /// Which program signs in, at what version. The game's LOGIN is
+    /// written as it always was (`MAGIC`, then its `PROTOCOL`); a
+    /// launcher's is versioned (`MAGIC_V2`, then `LIVE_PROTOCOL`).
+    pub client: LoginClient,
     /// The PC's Ed25519 public key; its account is named by the key.
     pub key: [u8; 32],
     pub gamertag: String,
@@ -244,6 +296,56 @@ pub struct Login {
     pub maps: Vec<(String, u64)>,
     /// Splitscreen guests playing on the PC.
     pub guests: u8,
+}
+
+/// The program signing in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginClient {
+    /// The game (h2viewer), at its `PROTOCOL`: it plays only others at the
+    /// same one.
+    Viewer { protocol: u32 },
+    /// The launcher (h2launch), with its own version (for the server's
+    /// log): it plays on MCC's engine, so the game's `PROTOCOL` is no
+    /// matter to it.
+    Launcher { version: String },
+}
+
+impl LoginClient {
+    /// The game, at this build's `PROTOCOL`.
+    pub fn viewer() -> LoginClient {
+        LoginClient::Viewer { protocol: PROTOCOL }
+    }
+
+    pub fn kind(&self) -> ClientKind {
+        match self {
+            LoginClient::Viewer { .. } => ClientKind::Viewer,
+            LoginClient::Launcher { .. } => ClientKind::Launcher,
+        }
+    }
+}
+
+/// Which program a PC runs, and so which playlists, parties and players it
+/// can play with: the game's players never play the launcher's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ClientKind {
+    /// The game (h2viewer).
+    #[default]
+    Viewer,
+    /// The launcher (h2launch), on MCC's engine.
+    Launcher,
+}
+
+/// What a LOGIN says first, read before the rest (which other versions may
+/// write differently), so the server can say why it turns a PC away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginHeader {
+    /// The game's LOGIN: `MAGIC`, then its `PROTOCOL`.
+    Game { protocol: u32 },
+    /// A versioned LOGIN: `MAGIC_V2`, then the `LIVE_PROTOCOL` it was
+    /// written for, then the kind of program (`CLIENT_VIEWER`,
+    /// `CLIENT_LAUNCHER`, or one this version doesn't know). Those three
+    /// stay where they are in every version.
+    Versioned { live: u32, client: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -463,20 +565,105 @@ pub struct PlayerResult {
     pub left: bool,
 }
 
+/// A match ready for launchers to play on MCC's engine: everything a
+/// launcher needs to start halo2.dll's online game through the relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LauncherMatch {
+    /// The match, as HOST_MATCH, GO, JOINED, LEFT_MATCH, LAUNCHER_RESULT
+    /// and MATCH_OVER name it.
+    pub id: u64,
+    pub playlist: u8,
+    pub ranked: bool,
+    /// Teams; otherwise everyone for themselves.
+    pub teams: bool,
+    /// The MCC map's name (like `lockout`) and game variant's (like
+    /// `01_slayer`), as the playlist names them.
+    pub map: String,
+    pub variant: String,
+    /// This PC's way into the match's room on the relay.
+    pub relay: RelaySeat,
+    /// The relay id of the PC asked to host.
+    pub host: u64,
+    /// Seconds from the host starting to host to the game's start, at the
+    /// latest: a PC that hasn't joined by then is left out.
+    pub countdown: u8,
+    /// Everyone in the match, this PC too.
+    pub players: Vec<LauncherPlayer>,
+}
+
+/// A launcher's way into its match's room on the relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelaySeat {
+    /// The relay's UDP port, at the address the PC dialled the server at.
+    pub port: u16,
+    /// The match's room on the relay.
+    pub room: u64,
+    /// This PC's id in it (and its player's XUID in the engine): the same
+    /// for an account in every match.
+    pub id: u64,
+    /// The key that proves the id is this PC's (h2relay's `MemberKey`),
+    /// given to this PC only.
+    pub key: [u8; MEMBER_KEY_LEN],
+}
+
+/// A player in a launcher's match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LauncherPlayer {
+    /// Their id on the relay and in the engine.
+    pub relay_id: u64,
+    pub account: u64,
+    pub gamertag: String,
+    pub team: u8,
+    /// Their level in the playlist (their best, if it isn't ranked).
+    pub level: u8,
+    pub party: u64,
+}
+
+/// How a launcher's match ended, filled in from the engine's results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LauncherResult {
+    pub id: u64,
+    /// The game ended as its variant says (score or time reached), rather
+    /// than being cut short: only then can it count.
+    pub finished: bool,
+    /// Each team's score, by team number (none in free-for-all games).
+    pub team_scores: Vec<i32>,
+    pub players: Vec<LauncherPlayerResult>,
+}
+
+/// How one player finished a launcher's match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LauncherPlayerResult {
+    pub relay_id: u64,
+    pub team: u8,
+    /// Their standing, 0 for first (in team games, their team's).
+    pub place: u8,
+    pub score: i32,
+    pub kills: u16,
+    pub deaths: u16,
+    /// Quit before the end.
+    pub left: bool,
+}
+
 /// What a PC signs to prove it holds `key`: a fixed text, the server's
 /// challenge and the key.
 pub fn proof(nonce: &[u8; 32], key: &[u8; 32]) -> Vec<u8> {
     [&b"h2live-login"[..], nonce, key].concat()
 }
 
-/// The protocol a LOGIN was written for, if it's a LOGIN at all, read
-/// before the rest (which other versions may write differently).
-pub fn login_protocol(body: &[u8]) -> Option<u32> {
+/// What a LOGIN says first, if it's a LOGIN at all.
+pub fn login_header(body: &[u8]) -> Option<LoginHeader> {
     let mut r = Reader::new(body);
-    if r.u32().ok()? != MAGIC {
-        return None;
+    match r.u32().ok()? {
+        MAGIC => Some(LoginHeader::Game {
+            protocol: r.u32().ok()?,
+        }),
+        MAGIC_V2 => Some(LoginHeader::Versioned {
+            live: r.u32().ok()?,
+            client: r.u8().ok()?,
+        }),
+        _ => None,
     }
-    r.u32().ok()
 }
 
 /// What tells copies of a map apart: FNV-1a (64-bit) over its first 2 KiB
@@ -586,8 +773,20 @@ impl Stage {
 
 impl Login {
     fn write(&self, w: &mut Writer) {
-        w.u32(MAGIC);
-        w.u32(PROTOCOL);
+        match &self.client {
+            // As the game always has, so it signs in to servers from before
+            // there were versioned LOGINs too.
+            LoginClient::Viewer { protocol } => {
+                w.u32(MAGIC);
+                w.u32(*protocol);
+            }
+            LoginClient::Launcher { version } => {
+                w.u32(MAGIC_V2);
+                w.u32(LIVE_PROTOCOL);
+                w.u8(CLIENT_LAUNCHER);
+                w.str(version);
+            }
+        }
         bytes(w, &self.key);
         w.str(&self.gamertag);
         self.look.write(w);
@@ -601,10 +800,21 @@ impl Login {
         w.u8(self.guests);
     }
 
+    /// A LOGIN: the game's at this build's `PROTOCOL`, or a versioned one
+    /// at this build's `LIVE_PROTOCOL` (the version of the program in it is
+    /// the server's to judge).
     fn read(r: &mut Reader) -> Result<Login, Malformed> {
-        if r.u32()? != MAGIC || r.u32()? != PROTOCOL {
-            return Err(Malformed);
-        }
+        let client = match (r.u32()?, r.u32()?) {
+            (MAGIC, PROTOCOL) => LoginClient::Viewer { protocol: PROTOCOL },
+            (MAGIC_V2, LIVE_PROTOCOL) => match r.u8()? {
+                CLIENT_VIEWER => LoginClient::Viewer { protocol: r.u32()? },
+                CLIENT_LAUNCHER => LoginClient::Launcher {
+                    version: read_str(r, MAX_NAME)?,
+                },
+                _ => return Err(Malformed),
+            },
+            _ => return Err(Malformed),
+        };
         let key = read_bytes(r)?;
         let gamertag = read_str(r, MAX_NAME)?;
         let look = Look::read(r)?;
@@ -614,6 +824,7 @@ impl Login {
             .map(|_| Ok((read_str(r, MAX_NAME)?, r.u64()?)))
             .collect::<Result<_, _>>()?;
         Ok(Login {
+            client,
             key,
             gamertag,
             look,
@@ -954,6 +1165,121 @@ impl MatchOver {
     }
 }
 
+impl LauncherMatch {
+    fn write(&self, w: &mut Writer) {
+        w.u64(self.id);
+        w.u8(self.playlist);
+        w.bool(self.ranked);
+        w.bool(self.teams);
+        w.str(&self.map);
+        w.str(&self.variant);
+        w.u16(self.relay.port);
+        w.u64(self.relay.room);
+        w.u64(self.relay.id);
+        bytes(w, &self.relay.key);
+        w.u64(self.host);
+        w.u8(self.countdown);
+        let players = &self.players[..self.players.len().min(MAX_PLAYERS)];
+        count(w, players.len());
+        for p in players {
+            w.u64(p.relay_id);
+            w.u64(p.account);
+            w.str(&p.gamertag);
+            w.u8(p.team);
+            w.u8(p.level);
+            w.u64(p.party);
+        }
+    }
+
+    fn read(r: &mut Reader) -> Result<LauncherMatch, Malformed> {
+        let (id, playlist, ranked, teams) = (r.u64()?, r.u8()?, read_bool(r)?, read_bool(r)?);
+        let (map, variant) = (read_str(r, MAX_NAME)?, read_str(r, MAX_NAME)?);
+        let relay = RelaySeat {
+            port: r.u16()?,
+            room: r.u64()?,
+            id: r.u64()?,
+            key: read_bytes(r)?,
+        };
+        let (host, countdown) = (r.u64()?, r.u8()?);
+        let n = read_count(r, MAX_PLAYERS)?;
+        let players = (0..n)
+            .map(|_| {
+                Ok(LauncherPlayer {
+                    relay_id: r.u64()?,
+                    account: r.u64()?,
+                    gamertag: read_str(r, MAX_NAME)?,
+                    team: r.u8()?,
+                    level: r.u8()?,
+                    party: r.u64()?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(LauncherMatch {
+            id,
+            playlist,
+            ranked,
+            teams,
+            map,
+            variant,
+            relay,
+            host,
+            countdown,
+            players,
+        })
+    }
+}
+
+impl LauncherResult {
+    fn write(&self, w: &mut Writer) {
+        w.u64(self.id);
+        w.bool(self.finished);
+        let scores = &self.team_scores[..self.team_scores.len().min(MAX_TEAMS)];
+        count(w, scores.len());
+        for &score in scores {
+            w.u32(score as u32);
+        }
+        let players = &self.players[..self.players.len().min(MAX_PLAYERS)];
+        count(w, players.len());
+        for p in players {
+            w.u64(p.relay_id);
+            w.u8(p.team);
+            w.u8(p.place);
+            w.u32(p.score as u32);
+            w.u16(p.kills);
+            w.u16(p.deaths);
+            w.bool(p.left);
+        }
+    }
+
+    fn read(r: &mut Reader) -> Result<LauncherResult, Malformed> {
+        let (id, finished) = (r.u64()?, read_bool(r)?);
+        let n = read_count(r, MAX_TEAMS)?;
+        let team_scores = (0..n)
+            .map(|_| Ok(r.u32()? as i32))
+            .collect::<Result<_, _>>()?;
+        let n = read_count(r, MAX_PLAYERS)?;
+        let players = (0..n)
+            .map(|_| {
+                Ok(LauncherPlayerResult {
+                    relay_id: r.u64()?,
+                    team: r.u8()?,
+                    place: r.u8()?,
+                    score: r.u32()? as i32,
+                    kills: r.u16()?,
+                    deaths: r.u16()?,
+                    left: read_bool(r)?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(LauncherResult {
+            id,
+            finished,
+            team_scores,
+            players,
+        })
+    }
+}
+
 impl PlayerResult {
     fn write(&self, w: &mut Writer) {
         w.u64(self.account);
@@ -1066,6 +1392,14 @@ impl ToServer {
                 kind::LEFT_MATCH
             }
             ToServer::Back => kind::BACK,
+            ToServer::Joined(id) => {
+                w.u64(*id);
+                kind::JOINED
+            }
+            ToServer::LauncherResult(result) => {
+                result.write(&mut w);
+                kind::LAUNCHER_RESULT
+            }
             ToServer::LinkHello { token, account } => {
                 bytes(&mut w, token);
                 w.u64(*account);
@@ -1129,6 +1463,8 @@ impl ToServer {
                 host_lost: read_bool(r)?,
             },
             kind::BACK => ToServer::Back,
+            kind::JOINED => ToServer::Joined(r.u64()?),
+            kind::LAUNCHER_RESULT => ToServer::LauncherResult(LauncherResult::read(r)?),
             kind::LINK_HELLO => ToServer::LinkHello {
                 token: read_bytes(r)?,
                 account: r.u64()?,
@@ -1235,6 +1571,10 @@ impl ToPc {
                 w.str(map);
                 kind::CUSTOM_OPEN
             }
+            ToPc::LauncherMatch(m) => {
+                m.write(&mut w);
+                kind::LAUNCHER_MATCH
+            }
             ToPc::Ping(n) => {
                 w.u32(*n);
                 kind::PING
@@ -1289,6 +1629,7 @@ impl ToPc {
                 leader: r.u64()?,
                 map: read_str(r, MAX_NAME)?,
             },
+            kind::LAUNCHER_MATCH => ToPc::LauncherMatch(LauncherMatch::read(r)?),
             kind::PING => ToPc::Ping(r.u32()?),
             kind::PONG => ToPc::Pong(r.u32()?),
             kind::LINKED => ToPc::Linked,
@@ -1317,6 +1658,7 @@ mod tests {
 
     fn login() -> Login {
         Login {
+            client: LoginClient::viewer(),
             key: [7; 32],
             gamertag: "NOBLE SIX".into(),
             look: look(3),
@@ -1326,6 +1668,81 @@ mod tests {
                 ("midship".into(), 9),
             ],
             guests: 2,
+        }
+    }
+
+    fn launcher_login() -> Login {
+        Login {
+            client: LoginClient::Launcher {
+                version: "h2launch 0.1.0".into(),
+            },
+            look: Look::default(),
+            guests: 0,
+            ..login()
+        }
+    }
+
+    fn launcher_result() -> LauncherResult {
+        let player = LauncherPlayerResult {
+            relay_id: 0xfeed_0000_0000_0001,
+            team: 1,
+            place: 0,
+            score: 50,
+            kills: 50,
+            deaths: 12,
+            left: false,
+        };
+        LauncherResult {
+            id: 23,
+            finished: true,
+            team_scores: vec![-1, 50],
+            players: vec![
+                player,
+                LauncherPlayerResult {
+                    relay_id: 2,
+                    team: 0,
+                    place: 1,
+                    score: -1,
+                    left: true,
+                    ..player
+                },
+            ],
+        }
+    }
+
+    fn launcher_match() -> LauncherMatch {
+        let player = LauncherPlayer {
+            relay_id: 0xfeed_0000_0000_0001,
+            account: 0xfeed_0000_0000_0001,
+            gamertag: "JORGE".into(),
+            team: 1,
+            level: 7,
+            party: 3,
+        };
+        LauncherMatch {
+            id: 24,
+            playlist: 11,
+            ranked: true,
+            teams: true,
+            map: "lockout".into(),
+            variant: "01_slayer".into(),
+            relay: RelaySeat {
+                port: 47050,
+                room: 24,
+                id: 0xfeed_0000_0000_0001,
+                key: [5; MEMBER_KEY_LEN],
+            },
+            host: 2,
+            countdown: 20,
+            players: vec![
+                player.clone(),
+                LauncherPlayer {
+                    relay_id: 2,
+                    account: 2,
+                    team: 0,
+                    ..player
+                },
+            ],
         }
     }
 
@@ -1377,6 +1794,9 @@ mod tests {
                 host_lost: true,
             },
             ToServer::Back,
+            ToServer::Login(launcher_login()),
+            ToServer::Joined(21),
+            ToServer::LauncherResult(launcher_result()),
             ToServer::LinkHello {
                 token: [3; 16],
                 account: 20,
@@ -1514,6 +1934,7 @@ mod tests {
                 leader: 14,
                 map: "beavercreek".into(),
             },
+            ToPc::LauncherMatch(launcher_match()),
             ToPc::Ping(15),
             ToPc::Pong(16),
             ToPc::Linked,
@@ -1535,11 +1956,12 @@ mod tests {
             assert_eq!(ToPc::read(kind, &body).as_ref(), Ok(m), "{m:?}");
             kinds.push(kind);
         }
-        // Every kind once (pings and pongs once each way).
-        assert_eq!(kinds.len(), 24 + 18);
+        // Every kind once: pings and pongs once each way, and LOGIN twice
+        // (the game's and a launcher's).
+        assert_eq!(kinds.len(), 27 + 19);
         kinds.sort_unstable();
         kinds.dedup();
-        assert_eq!(kinds.len(), 24 + 18 - 2);
+        assert_eq!(kinds.len(), 27 + 19 - 2 - 1);
     }
 
     #[test]
@@ -1681,16 +2103,146 @@ mod tests {
     fn a_login_says_its_protocol_first() {
         let (kind, body) = ToServer::Login(login()).write();
         assert_eq!(kind, kind::LOGIN);
-        assert_eq!(login_protocol(&body), Some(PROTOCOL));
+        assert_eq!(
+            login_header(&body),
+            Some(LoginHeader::Game { protocol: PROTOCOL })
+        );
         // An older game's LOGIN is told apart before the rest is read.
         let mut w = Writer::default();
         w.u32(MAGIC);
         w.u32(PROTOCOL - 1);
         w.str("anything at all");
-        assert_eq!(login_protocol(&w.0), Some(PROTOCOL - 1));
+        let older = LoginHeader::Game {
+            protocol: PROTOCOL - 1,
+        };
+        assert_eq!(login_header(&w.0), Some(older));
         assert!(ToServer::read(kind::LOGIN, &w.0).is_err());
-        assert_eq!(login_protocol(b"GET / HTTP/1.1"), None);
-        assert_eq!(login_protocol(&[]), None);
+        assert_eq!(login_header(b"GET / HTTP/1.1"), None);
+        assert_eq!(login_header(&[]), None);
+        // A launcher's says the service's version and that it's a
+        // launcher, whatever comes after.
+        let (_, body) = ToServer::Login(launcher_login()).write();
+        let launcher = LoginHeader::Versioned {
+            live: LIVE_PROTOCOL,
+            client: CLIENT_LAUNCHER,
+        };
+        assert_eq!(login_header(&body), Some(launcher));
+        let mut w = Writer::default();
+        w.u32(MAGIC_V2);
+        w.u32(LIVE_PROTOCOL + 1);
+        w.u8(CLIENT_LAUNCHER);
+        w.str("from the future, written some other way");
+        let newer = LoginHeader::Versioned {
+            live: LIVE_PROTOCOL + 1,
+            client: CLIENT_LAUNCHER,
+        };
+        assert_eq!(login_header(&w.0), Some(newer));
+        assert!(ToServer::read(kind::LOGIN, &w.0).is_err());
+        assert_eq!(login_header(&w.0[..8]), None);
+    }
+
+    #[test]
+    fn the_games_login_is_written_as_it_always_was() {
+        // Byte for byte as games at PROTOCOL 26 (and before) write it, so
+        // they still sign in, and a new game signs in to an old server.
+        let l = login();
+        let mut w = Writer::default();
+        w.u32(MAGIC);
+        w.u32(PROTOCOL);
+        w.0.extend_from_slice(&l.key);
+        w.str(&l.gamertag);
+        l.look.write(&mut w);
+        w.str(&l.card);
+        w.u16(l.maps.len() as u16);
+        for (name, hash) in &l.maps {
+            w.str(name);
+            w.u64(*hash);
+        }
+        w.u8(l.guests);
+        let (kind, body) = ToServer::Login(l.clone()).write();
+        assert_eq!((kind, &body), (kind::LOGIN, &w.0));
+        assert_eq!(&body[..4], b"H2LV");
+        assert_eq!(ToServer::read(kind, &body), Ok(ToServer::Login(l)));
+    }
+
+    #[test]
+    fn launchers_sign_in_with_the_services_version() {
+        let l = launcher_login();
+        let (kind, body) = ToServer::Login(l.clone()).write();
+        assert_eq!(&body[..4], b"H2L2");
+        assert_eq!(&body[4..8], &LIVE_PROTOCOL.to_le_bytes());
+        assert_eq!(body[8], CLIENT_LAUNCHER);
+        assert_eq!(ToServer::read(kind, &body), Ok(ToServer::Login(l.clone())));
+        // Nothing in it is the game's PROTOCOL: after the version, the rest
+        // is as the game writes it.
+        let as_game = Login {
+            client: LoginClient::viewer(),
+            ..l.clone()
+        };
+        let (_, game) = ToServer::Login(as_game).write();
+        let version = 2 + "h2launch 0.1.0".len();
+        assert_eq!(body[9 + version..], game[8..]);
+        // A versioned LOGIN can say it's the game, at any PROTOCOL (the
+        // server judges that).
+        let mut w = Writer::default();
+        w.u32(MAGIC_V2);
+        w.u32(LIVE_PROTOCOL);
+        w.u8(CLIENT_VIEWER);
+        w.u32(PROTOCOL + 7);
+        w.0.extend_from_slice(&body[9 + version..]);
+        let Ok(ToServer::Login(viewer)) = ToServer::read(kind, &w.0) else {
+            panic!("not read");
+        };
+        let protocol = PROTOCOL + 7;
+        assert_eq!(viewer.client, LoginClient::Viewer { protocol });
+        assert_eq!(viewer.client.kind(), ClientKind::Viewer);
+        assert_eq!((viewer.key, viewer.gamertag), (l.key, l.gamertag.clone()));
+        // A kind of program this version doesn't know, and a version
+        // longer than any name, are errors.
+        w.0[8] = 2;
+        assert!(ToServer::read(kind, &w.0).is_err());
+        let long = Login {
+            client: LoginClient::Launcher {
+                version: "v".repeat(MAX_NAME + 1),
+            },
+            ..l
+        };
+        let (kind, body) = ToServer::Login(long).write();
+        assert!(ToServer::read(kind, &body).is_err());
+    }
+
+    #[test]
+    fn launcher_results_and_matches_have_their_limits() {
+        let mut too_many = launcher_result();
+        too_many.team_scores = vec![0; MAX_TEAMS];
+        let (kind, mut body) = ToServer::LauncherResult(too_many).write();
+        assert!(ToServer::read(kind, &body).is_ok());
+        // id, finished, then how many team scores.
+        body[9] += 1;
+        body.splice(10..10, [0; 4]);
+        assert!(ToServer::read(kind, &body).is_err());
+        let mut w = Writer::default();
+        w.u64(1);
+        w.bool(true);
+        w.u8(0);
+        w.u8(17);
+        assert!(ToServer::read(kind::LAUNCHER_RESULT, &w.0).is_err());
+        // Finished is a 0 or a 1.
+        let (_, mut body) = ToServer::LauncherResult(launcher_result()).write();
+        body[8] = 2;
+        assert!(ToServer::read(kind::LAUNCHER_RESULT, &body).is_err());
+        // A match for 17 players.
+        let mut m = launcher_match();
+        m.players = vec![m.players[0].clone(); 16];
+        let (kind, body) = ToPc::LauncherMatch(m.clone()).write();
+        assert!(ToPc::read(kind, &body).is_ok());
+        m.players.push(m.players[0].clone());
+        let (kind, body) = ToPc::LauncherMatch(m).write();
+        // Written with its first 16, so it reads back short.
+        let Ok(ToPc::LauncherMatch(read)) = ToPc::read(kind, &body) else {
+            panic!("not read");
+        };
+        assert_eq!(read.players.len(), 16);
     }
 
     #[test]

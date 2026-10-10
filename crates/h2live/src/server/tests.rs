@@ -243,6 +243,7 @@ fn heard(conn: &mut Connection) -> Vec<ToPc> {
 fn log_in_by_hand(w: &mut World, n: u8, gamertag: &str) -> (Connection, [u8; 32]) {
     let mut conn = w.raw(n);
     let login = Login {
+        client: LoginClient::viewer(),
         key: key(n).verifying_key().to_bytes(),
         gamertag: gamertag.into(),
         look: Look::default(),
@@ -285,9 +286,11 @@ fn a_pc_signs_in_with_its_key() {
     assert_eq!(welcome.gamertag, "NOBLE SIX");
     assert_eq!((welcome.best, welcome.levels.len()), (1, 0));
     assert_eq!(w.pcs[a].view.motd, "Have fun");
-    // Every playlist, with a level in the ranked ones, and its maps.
+    // Every playlist of the game's (not the launcher's), with a level in
+    // the ranked ones, and its maps.
     let playlists = &w.pcs[a].view.playlists;
-    let built_in = crate::playlists::built_in();
+    let mut built_in = crate::playlists::built_in();
+    built_in.retain(|p| p.client == ClientKind::Viewer);
     assert_eq!(playlists.len(), built_in.len());
     assert!(playlists.iter().all(|p| p.level == p.ranked as u8));
     assert!(playlists
