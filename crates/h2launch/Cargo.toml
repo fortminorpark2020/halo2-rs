@@ -24,6 +24,10 @@ softbuffer = "0.4"
 ab_glyph = "0.2"
 gilrs = { version = "0.11.2", default-features = false, features = ["xinput"] }
 
+[dev-dependencies]
+# Made-up format-13 maps for the rank icons' tests.
+blam-cache = { path = "../blam-cache", features = ["synthetic"] }
+
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [

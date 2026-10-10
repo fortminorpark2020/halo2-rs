@@ -674,6 +674,13 @@ fn game_result(block: usize) {
     for line in crate::results::describe(bytes) {
         log!("result: {line}");
     }
+    // In Slayer, each player's kills are their score plus their suicides:
+    // say whether the inferred offsets bear that out.
+    let slayer = super::variant().is_some_and(crate::lobby::names::slayer);
+    if slayer {
+        let line = crate::results::check_kills(&crate::results::players(bytes));
+        log!("result: {line}");
+    }
     // H2LAUNCH_RESULT_DUMP=<folder>: keep a copy of the block on this PC,
     // for working out more of its layout. It is the engine's data: never
     // commit or upload it.
@@ -696,8 +703,14 @@ fn game_result(block: usize) {
         super::QUIT_USER | super::QUIT_CONSOLE
     );
     if !quitting {
+        // Kills reach the server only when this game bore them out (see
+        // `results::COUNTS_SEEN`).
         let players = crate::results::players(bytes);
-        let players = players.iter().map(|p| p.for_server()).collect();
+        let kills = crate::results::kills_hold(&players, slayer);
+        if !kills && !crate::results::COUNTS_SEEN {
+            log!("result: kills not sent (not borne out by this game)");
+        }
+        let players = players.iter().map(|p| p.for_server(kills)).collect();
         crate::live::tell(crate::live::Engine::Ended(players));
     }
 }

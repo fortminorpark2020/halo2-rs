@@ -53,7 +53,7 @@ pub fn verify(card: &str, key: &VerifyingKey) -> Option<Account> {
 mod tests {
     use super::*;
     use crate::levels::Rank;
-    use crate::store::Stats;
+    use crate::store::{Stats, Tally};
 
     fn account() -> Account {
         let mut a = Account::new([5; 32], 1_700_000_000);
@@ -67,6 +67,7 @@ mod tests {
             },
             games: 60,
             wins: 31,
+            tally: Default::default(),
         });
         a
     }
@@ -80,6 +81,53 @@ mod tests {
         // Another server's key doesn't vouch for it.
         let other = SigningKey::from_bytes(&[2; 32]);
         assert_eq!(verify(&card, &other.verifying_key()), None);
+    }
+
+    #[test]
+    fn cards_carry_tallies_and_stay_small() {
+        let key = SigningKey::from_bytes(&[1; 32]);
+        // A card from before tallies (every playlist's line is six words)
+        // still verifies and reads.
+        let old = sign(&account(), &key);
+        assert!(old.contains(" 2100 17 60 31\n"));
+        assert_eq!(verify(&old, &key.verifying_key()), Some(account()));
+        // One with a tally holds it.
+        let mut a = account();
+        a.stats[0].tally = Tally {
+            kills: 900,
+            assists: 80,
+            deaths: 700,
+            betrayals: 3,
+            suicides: 12,
+        };
+        let card = sign(&a, &key);
+        assert!(card.contains(" 2100 17 60 31 900 80 700 3 12\n"));
+        assert_eq!(verify(&card, &key.verifying_key()), Some(a.clone()));
+        // Twenty playlists, every number at its largest, the longest
+        // gamertag and keys: far under what games read cards against.
+        a.gamertag = "W".repeat(h2sim::game::MAX_NAME);
+        let most = Tally {
+            kills: u32::MAX,
+            assists: u32::MAX,
+            deaths: u32::MAX,
+            betrayals: u32::MAX,
+            suicides: u32::MAX,
+        };
+        a.stats = (0..20)
+            .map(|i| Stats {
+                playlist: format!("mcc_long_playlist_key_{i:02}"),
+                rank: Rank {
+                    xp: crate::levels::MAX_XP,
+                    level: crate::levels::MAX_LEVEL,
+                },
+                games: u32::MAX,
+                wins: u32::MAX,
+                tally: most,
+            })
+            .collect();
+        let card = sign(&a, &key);
+        assert!(card.len() < h2net::live::MAX_CARD / 2, "{}", card.len());
+        assert_eq!(verify(&card, &key.verifying_key()), Some(a));
     }
 
     #[test]

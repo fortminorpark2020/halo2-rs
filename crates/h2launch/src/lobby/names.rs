@@ -71,6 +71,41 @@ pub const CUSTOM_GAMES: [(&str, bool); 17] = [
     ("H2_3_Plots", true),
 ];
 
+/// The variants whose game type in `crates/h2live/src/playlists.txt` is
+/// `slayer` or `team_slayer`: the games where a player's kills are their
+/// score plus their suicides, which the engine's results are checked
+/// against (`crate::results::check_kills`).
+const SLAYER: [&str; 15] = [
+    "h2_ffa_slayer_smgPrimary_magSecondary_25kills",
+    "H2_FFA_Rockets_b",
+    "H2_FFA_Shotguns_b",
+    "H2_FFA_HeadtoHead_b",
+    "h2_ffa_slayerSwords_25kills",
+    "H2_Team_Slayer_2v2_a",
+    "h2_2v2_team_slayer_25kills_brPrimary_magSecondary",
+    "H2_Team_Rockets_b",
+    "H2_Team_Slayer",
+    "H2_Team_BRs",
+    "H2_Team_SWAT",
+    "H2_BTB_Slayer",
+    "H2_Team_Snipers",
+    "h2_arena_snipers_09_2018",
+    "H2_Hardcore_Team_Slayer",
+];
+
+/// `variant` (a bare name or a path, with or without `.bin`, any case) is
+/// one of the Slayer variants above.
+pub fn slayer(variant: &str) -> bool {
+    let file = variant.rsplit(['/', '\\']).next().unwrap_or(variant);
+    let stem = match file.len().checked_sub(4) {
+        Some(at) if file.is_char_boundary(at) && file[at..].eq_ignore_ascii_case(".bin") => {
+            &file[..at]
+        }
+        _ => file,
+    };
+    SLAYER.iter().any(|f| f.eq_ignore_ascii_case(stem))
+}
+
 /// A variant's name on screen: from the table, or made from its file name
 /// (`H2_Team_Slayer` becomes "Team Slayer").
 pub fn variant(file: &str) -> String {
@@ -181,6 +216,51 @@ mod tests {
         let names: std::collections::HashSet<String> =
             CUSTOM_GAMES.iter().map(|(f, _)| variant(f)).collect();
         assert_eq!(names.len(), CUSTOM_GAMES.len(), "two have the same name");
+    }
+
+    #[test]
+    fn slayer_variants_are_the_playlists_slayer_ones() {
+        let playlists = include_str!("../../../h2live/src/playlists.txt");
+        let mut seen = std::collections::HashSet::new();
+        for line in playlists.lines() {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            if let ["mcc_variant", kind, file, ..] = words[..] {
+                let want = kind == "slayer" || kind == "team_slayer";
+                assert_eq!(slayer(file), want, "{file} ({kind})");
+                if want {
+                    seen.insert(file.to_ascii_lowercase());
+                }
+            }
+        }
+        // And every one in the table is a playlist's.
+        for f in SLAYER {
+            assert!(seen.contains(&f.to_ascii_lowercase()), "{f} isn't played");
+        }
+        assert_eq!(seen.len(), SLAYER.len());
+    }
+
+    #[test]
+    fn slayer_takes_a_name_a_path_or_a_bin() {
+        for v in [
+            "H2_Team_Slayer",
+            "h2_team_slayer",
+            "H2_Team_Slayer.bin",
+            "H2_TEAM_SLAYER.BIN",
+            r"C:\MCC\halo2\hopper_game_variants\H2_Team_Slayer.bin",
+            "/tmp/variants/h2_team_slayer.bin",
+        ] {
+            assert!(slayer(v), "{v}");
+        }
+        for v in [
+            "H2_Team_Ball",
+            "H2_Team_Ball.bin",
+            "Slayer",
+            "",
+            ".bin",
+            "H2_Team_Slayer.bin.txt",
+        ] {
+            assert!(!slayer(v), "{v}");
+        }
     }
 
     #[test]

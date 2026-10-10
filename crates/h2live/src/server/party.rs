@@ -153,35 +153,54 @@ impl Server {
             return;
         }
         party.invited.retain(|&(to, _)| to != who);
-        if party.invited.len() == INVITES {
-            party.invited.remove(0);
-        }
+        let dropped = (party.invited.len() == INVITES).then(|| party.invited.remove(0).0);
         party.invited.push((who, me));
         self.tell(who, &ToPc::Invited { party: id, from });
+        // An invite-only party may be one they can join now (and, for the
+        // oldest invite dropped to make room, one they no longer can).
+        self.friends_changed(who);
+        if let Some(dropped) = dropped {
+            self.friends_changed(dropped);
+        }
     }
 
-    /// `me` joins party `id`, leaving their own: by invite, or because it's
-    /// open (and they weren't removed from it). In a custom game, they're
-    /// linked to its host.
-    pub(super) fn join_party(&mut self, me: u64, id: u64) {
+    /// Whether `me` could join party `id` now, and if not what they're told
+    /// (nothing, if it's their own party already): the party is there, isn't
+    /// playing a match, is on their program, is open and hasn't removed them
+    /// or else has invited them, and has room for them and their guests.
+    /// JOIN_PARTY goes by this, and so does the `joinable` flag of a
+    /// FRIENDS entry, so the two never differ.
+    pub(super) fn can_join(&self, me: u64, id: u64) -> Result<(), &'static str> {
         let Some(party) = self.parties.get(&id) else {
-            return self.notice(me, PARTY_GONE);
+            return Err(PARTY_GONE);
         };
         if party.members.contains(&me) {
-            return;
+            return Err("");
         }
         if party.activity == Activity::Playing {
-            return self.notice(me, IN_A_MATCH);
+            return Err(IN_A_MATCH);
         }
         if self.client_of(party.leader) != self.client_of(me) {
-            return self.notice(me, OTHER_PROGRAM);
+            return Err(OTHER_PROGRAM);
         }
         let closed = party.privacy == Privacy::InviteOnly || party.booted.contains(&me);
         if closed && !party.has_invited(me) {
-            return self.notice(me, INVITE_ONLY);
+            return Err(INVITE_ONLY);
         }
         if self.size(party) + 1 + self.guests(me) > MAX_PARTY {
-            return self.notice(me, PARTY_FULL);
+            return Err(PARTY_FULL);
+        }
+        Ok(())
+    }
+
+    /// `me` joins party `id`, leaving their own, if they can (`can_join`):
+    /// by invite, or because it's open. In a custom game, they're linked to
+    /// its host.
+    pub(super) fn join_party(&mut self, me: u64, id: u64) {
+        match self.can_join(me, id) {
+            Ok(()) => {}
+            Err("") => return,
+            Err(why) => return self.notice(me, why),
         }
         let Some(k) = self.pc_of(me) else {
             return;
@@ -211,6 +230,8 @@ impl Server {
             return;
         };
         let (_, from) = party.invited.remove(i);
+        // Without the invite, an invite-only party can't be joined.
+        self.friends_changed(me);
         let Some(name) = self.accounts.get(&me).map(|a| a.gamertag.clone()) else {
             return;
         };
@@ -237,10 +258,12 @@ impl Server {
         if who == me || !party.members.contains(&who) {
             return;
         }
-        if party.booted.len() == BOOTED {
-            party.booted.remove(0);
-        }
+        let forgotten = (party.booted.len() == BOOTED).then(|| party.booted.remove(0));
         party.booted.push(who);
+        // The oldest removed player dropped to make room may join it again.
+        if let Some(forgotten) = forgotten {
+            self.friends_changed(forgotten);
+        }
         self.remove_member(id, who);
         self.new_party(who);
         self.notice(who, REMOVED);
@@ -302,19 +325,23 @@ impl Server {
 
     fn party_info(&self, id: u64, party: &Party) -> PartyInfo {
         let playlist = self.playlists.iter().find(|p| p.id == party.playlist);
+        // Parties never mix programs: its members see levels as the
+        // leader's program does.
+        let client = self.client_of(party.leader);
         let members = party.members.iter().filter_map(|&a| {
             let account = self.accounts.get(&a)?;
+            let best = self.best_for(account, client);
             // Their level in the ranked playlist the party searches, plays
             // or just played, if it does; otherwise their best.
             let level = match playlist.filter(|p| p.ranked) {
                 Some(p) => account.stats(&p.key).map_or(1, |s| s.rank.level),
-                None => account.best_level(),
+                None => best,
             };
             Some(PartyMember {
                 account: a,
                 gamertag: account.gamertag.clone(),
                 look: account.look,
-                best: account.best_level(),
+                best,
                 level,
                 guests: self.guests(a) as u8,
             })
@@ -393,7 +420,7 @@ impl Server {
                 account: account.id,
                 gamertag: account.gamertag.clone(),
                 look: account.look,
-                best: account.best_level(),
+                best: self.best_for(account, client),
                 activity: party.activity,
                 party: pc.party,
                 open,

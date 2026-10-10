@@ -1,25 +1,28 @@
 //! The lobby's screens and what happens on them: signing in, the party and
 //! the playlists, searching, custom games, the pregame lobby, the match
-//! (its engine runs in a second copy of the launcher, see `child`) and the
-//! carnage report.
+//! (its engine runs in a second copy of the launcher, see `child`), the
+//! carnage report, the friends list and players' service records.
 //! Nothing here opens a window: `window`, or the headless loop in
 //! `mod.rs`, gives it input and time and shows what it draws.
 
 use super::canvas::{Align, Canvas, Color, Style, Text};
 use super::child::{Kind, Match, Running, Said};
 use super::names;
+use super::ranks::{RankIcons, Size};
 use super::settings::{self, Settings, GAMERTAG_LEN};
 use crate::live::{self, Engine, Log, Told};
 use crate::session::Session;
 use h2live::client::{LiveClient, LiveEvent, Profile, View};
 use h2net::live::{
-    Activity, LauncherMatch, LauncherPlayerResult, MatchOver, OnlinePlayer, PartyInfo, PartyMember,
-    Privacy, Stage, ToServer, CUSTOM_GAME, GAMERTAG_TAKEN,
+    Activity, Friend, LauncherMatch, LauncherPlayerResult, MatchOver, Online, OnlinePlayer,
+    PartyInfo, PartyMember, PlaylistInfo, Privacy, Relation, ServiceRecord, Stage, ToServer,
+    CUSTOM_GAME, GAMERTAG_TAKEN, MAX_FRIENDS, QUICKMATCH,
 };
 use h2net::Connection;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How long the pregame lobby shows the match before the engine starts.
@@ -41,6 +44,16 @@ const SERVER_LEN: usize = 100;
 const CUSTOM_WAIT: Duration = Duration::from_secs(10);
 /// The custom game screen's rows: the game, the map, and the start.
 const CUSTOM_ROWS: usize = 3;
+/// How many service records the lobby keeps.
+const RECORDS_KEPT: usize = 32;
+/// A service record younger than this is shown without asking again.
+const RECORD_FRESH: Duration = Duration::from_secs(60);
+/// How long the lobby waits for a service record before saying the server
+/// didn't answer.
+const RECORD_WAIT: Duration = Duration::from_secs(5);
+/// Rows a list shows at once on the friends, players, party and service
+/// record screens.
+const LIST_ROWS: usize = 9;
 
 /// What the lobby starts with.
 pub struct Config {
@@ -57,6 +70,9 @@ pub struct Config {
     /// `--instance`, passed on to the engine.
     pub instance: Option<String>,
     pub log: Log,
+    /// Halo 2's level icons, if a Halo 2 Vista mainmenu.map was found
+    /// (`ranks::load`); without them levels are drawn as numbers.
+    pub ranks: Option<Arc<RankIcons>>,
 }
 
 /// A key, button or typed character.
@@ -72,6 +88,10 @@ pub enum Input {
     B,
     X,
     Y,
+    /// The bumpers (Page Up and Page Down, or Q and E where letters are
+    /// buttons): LB is always a service record, RB the friends list.
+    Lb,
+    Rb,
     Tab,
     Backspace,
     Char(char),
@@ -93,6 +113,10 @@ enum Screen {
     InGame,
     Carnage,
     Failed,
+    /// A player's service record (`App::record_of`).
+    Record,
+    /// The friends list and friend requests.
+    Friends,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +125,39 @@ enum Popup {
     LeaveGame,
     /// The leader asked to remove this member from the party.
     Kick(u64),
+    /// Typing a gamertag to send a friend request to.
+    AddFriend,
+    /// What to do with this friend (`App::osel` is the option picked).
+    FriendOptions(u64),
+    /// Asking before removing this friend.
+    Unfriend(u64),
+}
+
+/// What the options popup offers for a friend, in the order shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FriendOption {
+    Invite,
+    Join,
+    Record,
+    Remove,
+}
+
+impl FriendOption {
+    fn label(self) -> &'static str {
+        match self {
+            FriendOption::Invite => "Invite to party",
+            FriendOption::Join => "Join party",
+            FriendOption::Record => "Service record",
+            FriendOption::Remove => "Remove friend",
+        }
+    }
+}
+
+/// A service record shown, or why there isn't one.
+enum RecordView<'a> {
+    Shown(&'a ServiceRecord),
+    Loading,
+    NoAnswer,
 }
 
 /// What a click on part of the screen does.
@@ -167,12 +224,37 @@ pub struct App {
     /// The client's clock starts here.
     clock: Instant,
     now: Instant,
-    /// The selected playlist (or the custom game row after them) and
-    /// player.
+    /// The selected playlist (or the custom game row after them).
     sel: usize,
+    /// The selected player online, and their account: the selection
+    /// follows the player when a new ONLINE list reorders the rows.
     psel: usize,
+    paccount: Option<u64>,
     /// The selected party member.
     msel: usize,
+    /// The friends screen's selected row and its account, which the
+    /// selection follows as `paccount` does; and the options popup's
+    /// selected row and its option, which the selection follows when a
+    /// new list adds or drops Invite or Join.
+    fsel: usize,
+    faccount: Option<u64>,
+    osel: usize,
+    opick: Option<FriendOption>,
+    /// The gamertag typed in the add friend popup.
+    friend_tag: String,
+    /// The carnage report's selected row (in the order shown).
+    csel: usize,
+    /// The service record screen: whose, the screen it was opened from,
+    /// and its first row shown.
+    record_of: u64,
+    record_back: Screen,
+    record_first: usize,
+    /// The service records that came, the newest last, with when.
+    records: VecDeque<(ServiceRecord, Instant)>,
+    /// The records asked for and not come yet, with when.
+    record_asks: Vec<(u64, Instant)>,
+    /// What was drawn in the last frame, for the headless script's `see`.
+    drawn: Vec<String>,
     /// The custom game screen's selected row, the game picked (in
     /// `names::CUSTOM_GAMES`) and the map (in `Config::maps`), and when
     /// the server was asked for it.
@@ -213,7 +295,20 @@ impl App {
             now,
             sel: 0,
             psel: 0,
+            paccount: None,
             msel: 0,
+            fsel: 0,
+            faccount: None,
+            osel: 0,
+            opick: None,
+            friend_tag: String::new(),
+            csel: 0,
+            record_of: 0,
+            record_back: Screen::Live,
+            record_first: 0,
+            records: VecDeque::new(),
+            record_asks: Vec::new(),
+            drawn: Vec::new(),
             crow: 0,
             cgame: 0,
             cmap: 0,
@@ -254,6 +349,9 @@ impl App {
                 Popup::Quit => "quit",
                 Popup::LeaveGame => "leave",
                 Popup::Kick(_) => "remove",
+                Popup::AddFriend => "addfriend",
+                Popup::FriendOptions(_) => "friend",
+                Popup::Unfriend(_) => "unfriend",
             }
             .into();
         }
@@ -274,8 +372,15 @@ impl App {
             Screen::Carnage if waiting => "carnage-waiting",
             Screen::Carnage => "carnage",
             Screen::Failed => "failed",
+            Screen::Record => "record",
+            Screen::Friends => "friends",
         }
         .into()
+    }
+
+    /// The text drawn in the last frame, each string as it was drawn.
+    pub fn drawn(&self) -> &[String] {
+        &self.drawn
     }
 
     // ------------------------------------------------------------ server
@@ -304,6 +409,10 @@ impl App {
             self.settings.gamertag
         ));
         self.client = None;
+        // Another server, maybe, with the same account numbers: nothing
+        // kept from the last one counts.
+        self.records.clear();
+        self.record_asks.clear();
         self.dialing = Some((h2net::dial(&url, SIGN_IN_WAIT), Instant::now()));
         self.signing_in = Some(Instant::now());
         self.screen = Screen::Connecting;
@@ -398,11 +507,18 @@ impl App {
                 self.fail(format!("Lost the server: {why}"));
             }
             LiveEvent::Notice(text) => {
-                self.asked = None;
+                // A friend notice isn't the answer to the custom game asked
+                // for.
+                if !h2net::live::is_friend_notice(&text) {
+                    self.asked = None;
+                }
                 self.toast(text);
             }
             LiveEvent::LauncherMatch(m) => self.on_match(m),
             LiveEvent::MatchOver(over) => self.on_match_over(over),
+            LiveEvent::ServiceRecord(r) => self.keep_record(r),
+            // Selections find their player again at the end of the tick.
+            LiveEvent::Friends => {}
             _ => {}
         }
     }
@@ -466,9 +582,14 @@ impl App {
 
     /// The invitation to show: the latest, on the party screens.
     fn invite(&self) -> Option<(u64, String)> {
-        if !matches!(self.screen, Screen::Live | Screen::Players | Screen::Party)
-            || self.popup.is_some()
-        {
+        let party_screens = [
+            Screen::Live,
+            Screen::Players,
+            Screen::Party,
+            Screen::Friends,
+            Screen::Record,
+        ];
+        if !party_screens.contains(&self.screen) || self.popup.is_some() {
             return None;
         }
         self.view()?.invites.last().cloned()
@@ -483,6 +604,76 @@ impl App {
         }
     }
 
+    /// The friends list in the order the lobby shows it: requests to us,
+    /// friends on the launcher, friends on the game, friends offline, then
+    /// requests we sent; by gamertag (ignoring case) within each.
+    fn friend_rows(&self) -> Vec<&Friend> {
+        let Some(v) = self.view() else {
+            return Vec::new();
+        };
+        let group = |f: &Friend| match (f.relation, f.online) {
+            (Relation::AskedUs, _) => 0,
+            (Relation::Friend, Online::Launcher) => 1,
+            (Relation::Friend, Online::Game) => 2,
+            (Relation::Friend, Online::Offline) => 3,
+            (Relation::WeAsked, _) => 4,
+        };
+        let mut rows: Vec<&Friend> = v.friends.iter().collect();
+        rows.sort_by_cached_key(|f| (group(f), f.gamertag.to_ascii_lowercase(), f.account));
+        rows
+    }
+
+    /// `account`'s entry on our friends list (a friend, or a request
+    /// either way).
+    fn friend(&self, account: u64) -> Option<&Friend> {
+        self.view()?.friends.iter().find(|f| f.account == account)
+    }
+
+    /// A friend request to `account` makes sense: it isn't us, and they
+    /// aren't on our list already (as a friend, or a request either way).
+    fn can_ask(&self, account: u64) -> bool {
+        Some(account) != self.account() && self.friend(account).is_none()
+    }
+
+    /// What X (join) on friend `f`, whose party can't be joined, says, in
+    /// the server's notices' style. The server's reasons (`can_join`)
+    /// aren't all sent: the ONLINE list says whether the party is open and
+    /// how much room it has, and anything else (removed from it, say, or
+    /// no room for our guests) is "can't be joined".
+    fn cannot_join(&self, f: &Friend) -> String {
+        let tag = f.gamertag.to_uppercase();
+        let theirs = self
+            .view()
+            .and_then(|v| v.online.iter().find(|o| o.account == f.account));
+        match f.online {
+            Online::Offline => return format!("{tag} IS OFFLINE"),
+            Online::Game => return format!("{tag} IS ON ANOTHER VERSION OF THE GAME"),
+            Online::Launcher => {}
+        }
+        if self.party().is_some_and(|pt| pt.id == f.party) {
+            format!("{tag} IS ALREADY IN YOUR PARTY")
+        } else if f.activity == Activity::Playing {
+            format!("{tag}'S PARTY IS IN A MATCH")
+        } else if theirs.is_some_and(|o| !o.open) {
+            format!("{tag}'S PARTY IS INVITE ONLY")
+        } else if theirs.is_some_and(|o| o.openings == 0) {
+            format!("{tag}'S PARTY IS FULL")
+        } else {
+            format!("{tag}'S PARTY CAN'T BE JOINED")
+        }
+    }
+
+    /// Send a friend request to `gamertag` (it's cleaned first; nothing
+    /// goes for an empty one).
+    fn ask_friend(&mut self, gamertag: &str) {
+        let tag = settings::clean_gamertag(gamertag);
+        if tag.is_empty() {
+            return;
+        }
+        self.log(&format!("lobby: sending {tag} a friend request"));
+        self.send(ToServer::FriendRequest(tag));
+    }
+
     fn playlist_name(&self, id: u8) -> String {
         if id == CUSTOM_GAME {
             return "Custom Game".into();
@@ -491,6 +682,130 @@ impl App {
             .and_then(|v| v.playlists.iter().find(|p| p.id == id))
             .map(|p| p.name.clone())
             .unwrap_or_default()
+    }
+
+    // --------------------------------------------------- service records
+
+    /// A service record that came: kept (the newest `RECORDS_KEPT`), and
+    /// no longer waited for.
+    fn keep_record(&mut self, r: ServiceRecord) {
+        self.record_asks.retain(|(a, _)| *a != r.account);
+        self.records.retain(|(old, _)| old.account != r.account);
+        if self.records.len() == RECORDS_KEPT {
+            self.records.pop_front();
+        }
+        self.records.push_back((r, self.now));
+    }
+
+    /// The record kept for `account`, and when it came.
+    fn cached_record(&self, account: u64) -> Option<&(ServiceRecord, Instant)> {
+        self.records.iter().find(|(r, _)| r.account == account)
+    }
+
+    /// Show `account`'s service record: the one kept if it's fresh;
+    /// otherwise ask the server (once while waiting), showing the one kept
+    /// meanwhile.
+    fn open_record(&mut self, account: u64) {
+        if self.screen != Screen::Record {
+            self.record_back = self.screen;
+        }
+        self.record_of = account;
+        self.record_first = 0;
+        self.screen = Screen::Record;
+        self.ask_record(account);
+    }
+
+    fn ask_record(&mut self, account: u64) {
+        let now = self.now;
+        let fresh = self
+            .cached_record(account)
+            .is_some_and(|(_, at)| now.saturating_duration_since(*at) < RECORD_FRESH);
+        let waiting = self
+            .record_asks
+            .iter()
+            .any(|(a, at)| *a == account && now.saturating_duration_since(*at) < RECORD_WAIT);
+        if fresh || waiting {
+            return;
+        }
+        self.record_asks.retain(|(a, _)| *a != account);
+        self.record_asks.push((account, now));
+        self.send(ToServer::Record(account));
+    }
+
+    /// What the service record screen shows.
+    fn record_view(&self) -> RecordView<'_> {
+        if let Some((r, _)) = self.cached_record(self.record_of) {
+            return RecordView::Shown(r);
+        }
+        if self.record_asks.iter().any(|(a, at)| {
+            *a == self.record_of && self.now.saturating_duration_since(*at) < RECORD_WAIT
+        }) {
+            RecordView::Loading
+        } else {
+            RecordView::NoAnswer
+        }
+    }
+
+    /// The playlist the party panel and the party screen show levels for:
+    /// the one the party searches while it searches, else the one selected
+    /// on the playlists screen (None on the custom game row, and on the
+    /// custom game screen, whatever row was selected before it).
+    fn panel_playlist(&self) -> Option<&PlaylistInfo> {
+        if self.screen == Screen::Custom {
+            return None;
+        }
+        let v = self.view()?;
+        if self.searching() {
+            let id = v.party.as_ref()?.playlist;
+            return v.playlists.iter().find(|p| p.id == id);
+        }
+        v.playlists.get(self.sel)
+    }
+
+    /// The level the party panel shows beside member `m` of party `pt`:
+    /// their level in the panel's playlist when it's ranked, else their
+    /// highest. Ours is in the playlists list. PARTY gives the others'
+    /// only in the playlist the party last searched or played, so for
+    /// another a service record kept (`ask_member_records`) gives it; with
+    /// neither, 0 (drawn "-") until the record comes.
+    fn member_level(&self, pt: &PartyInfo, m: &PartyMember) -> u8 {
+        let Some(pl) = self.panel_playlist().filter(|p| p.ranked) else {
+            return m.best.max(1);
+        };
+        if Some(m.account) == self.account() {
+            return pl.level.max(1);
+        }
+        if pt.playlist == pl.id && m.level > 0 {
+            return m.level;
+        }
+        match self.cached_record(m.account) {
+            Some((r, _)) => r.found.as_ref().map_or(1, |f| {
+                let played = f.playlists.iter().find(|p| p.playlist == pl.id);
+                played.map_or(1, |p| p.level.max(1))
+            }),
+            None => 0,
+        }
+    }
+
+    /// Ask for the service records the party panel needs for the levels
+    /// PARTY doesn't give (`member_level`), on the playlists and party
+    /// screens.
+    fn ask_member_records(&mut self) {
+        if !matches!(self.screen, Screen::Live | Screen::Party) || self.popup.is_some() {
+            return;
+        }
+        let Some(id) = self.panel_playlist().filter(|p| p.ranked).map(|p| p.id) else {
+            return;
+        };
+        let me = self.account();
+        let wanted: Vec<u64> = self.party().map_or(Vec::new(), |pt| {
+            let others = pt.members.iter().filter(|m| Some(m.account) != me);
+            let unknown = others.filter(|m| pt.playlist != id || m.level == 0);
+            unknown.map(|m| m.account).collect()
+        });
+        for account in wanted {
+            self.ask_record(account);
+        }
     }
 
     // ------------------------------------------------------------- match
@@ -550,6 +865,17 @@ impl App {
     }
 
     fn on_match_over(&mut self, over: MatchOver) {
+        // The next look at anyone in the match shows the new numbers.
+        let mut played: Vec<u64> = over.players.iter().map(|&(a, _)| a).collect();
+        if let Some(g) = self.game.as_ref().filter(|g| g.m.id == over.id) {
+            played.extend(g.m.players.iter().map(|p| p.account));
+        }
+        self.records.retain(|(r, _)| !played.contains(&r.account));
+        // A record on screen that was dropped is asked for again, rather
+        // than saying the server didn't answer.
+        if self.screen == Screen::Record && played.contains(&self.record_of) {
+            self.ask_record(self.record_of);
+        }
         let Some(g) = self.game.as_mut().filter(|g| g.m.id == over.id) else {
             return;
         };
@@ -659,6 +985,12 @@ impl App {
             if g.results.is_some() {
                 self.screen = Screen::Carnage;
                 self.focus = true;
+                // Start on this PC's player.
+                let me = g.m.relay.id;
+                self.csel = carnage_rows(g)
+                    .iter()
+                    .position(|r| r.relay_id == me)
+                    .unwrap_or(0);
             } else {
                 let why = g.over.as_ref().map(|o| o.reason.clone());
                 toast = Some(match why {
@@ -726,8 +1058,47 @@ impl App {
         {
             self.asked = None;
         }
-        let n = self.others().len();
-        self.psel = self.psel.min(n.saturating_sub(1));
+        self.follow();
+        self.record_asks
+            .retain(|(_, at)| now.saturating_duration_since(*at) < RECORD_WAIT);
+        self.ask_member_records();
+    }
+
+    /// Keep the selections on the friends and players screens on the
+    /// player picked, when a new list moves them to another row (the same
+    /// row number, clamped, if they've gone), and close a popup naming a
+    /// friend who has left the list.
+    fn follow(&mut self) {
+        let rows: Vec<u64> = self.friend_rows().iter().map(|f| f.account).collect();
+        self.fsel = follow(&rows, self.faccount, self.fsel);
+        self.faccount = rows.get(self.fsel).copied();
+        let rows: Vec<u64> = self.others().iter().map(|o| o.account).collect();
+        self.psel = follow(&rows, self.paccount, self.psel);
+        self.paccount = rows.get(self.psel).copied();
+        if let Some(Popup::FriendOptions(a) | Popup::Unfriend(a)) = self.popup {
+            if self
+                .friend(a)
+                .is_none_or(|f| f.relation != Relation::Friend)
+            {
+                self.popup = None;
+            }
+        }
+        // The option picked, where it is now (the same row, clamped, if
+        // it's gone).
+        if let Some(Popup::FriendOptions(a)) = self.popup {
+            let options = self.friend_options(a);
+            let at = self
+                .opick
+                .and_then(|o| options.iter().position(|&p| p == o));
+            self.pick_option(a, at.unwrap_or(self.osel));
+        }
+    }
+
+    /// Select row `i` of friend `who`'s options popup (clamped).
+    fn pick_option(&mut self, who: u64, i: usize) {
+        let options = self.friend_options(who);
+        self.osel = i.min(options.len().saturating_sub(1));
+        self.opick = options.get(self.osel).copied();
     }
 
     /// The lobby is closing: close the engine of a match being played
@@ -759,13 +1130,16 @@ impl App {
 
     pub fn input(&mut self, i: Input) {
         // Letters are buttons, except where a name is typed.
-        let typing = self.screen == Screen::SignIn && self.popup.is_none();
+        let typing = (self.screen == Screen::SignIn && self.popup.is_none())
+            || self.popup == Some(Popup::AddFriend);
         let i = match i {
             Input::Char(c) if !typing => match c.to_ascii_lowercase() {
                 'a' | ' ' => Input::A,
                 'b' => Input::B,
                 'x' => Input::X,
                 'y' => Input::Y,
+                'q' => Input::Lb,
+                'e' => Input::Rb,
                 _ => return,
             },
             other => other,
@@ -805,21 +1179,9 @@ impl App {
                     self.popup = Some(Popup::LeaveGame);
                 }
             }
-            Screen::Carnage => {
-                if matches!(i, Input::A | Input::B) {
-                    // The leader of a custom game picks the next.
-                    let custom = self
-                        .game
-                        .as_ref()
-                        .is_some_and(|g| g.m.playlist == CUSTOM_GAME);
-                    self.game = None;
-                    self.screen = if custom && self.leader() {
-                        Screen::Custom
-                    } else {
-                        Screen::Live
-                    };
-                }
-            }
+            Screen::Carnage => self.carnage_input(i),
+            Screen::Record => self.record_input(i),
+            Screen::Friends => self.friends_input(i),
             Screen::Failed => match i {
                 Input::A => self.connect(),
                 Input::Y => {
@@ -853,7 +1215,201 @@ impl App {
                 }
                 self.log("lobby: leaving the game");
             }
+            (Popup::AddFriend, Input::A) => {
+                self.popup = None;
+                let tag = std::mem::take(&mut self.friend_tag);
+                self.ask_friend(&tag);
+            }
+            (Popup::AddFriend, Input::Backspace) => {
+                self.friend_tag.pop();
+            }
+            (Popup::AddFriend, Input::Char(c)) => {
+                let full = self.friend_tag.chars().count() >= GAMERTAG_LEN;
+                if (c.is_ascii_alphanumeric() || c == ' ') && !full {
+                    self.friend_tag.push(c.to_ascii_uppercase());
+                }
+            }
+            (Popup::FriendOptions(who), _) => self.options_input(who, i),
+            (Popup::Unfriend(who), Input::A) => {
+                self.popup = None;
+                self.log(&format!("lobby: removing {who:#x} from the friends list"));
+                self.send(ToServer::FriendRemove(who));
+            }
             (_, Input::B) => self.popup = None,
+            _ => {}
+        }
+    }
+
+    /// What the options popup offers for friend `who`, in order: only
+    /// what applies, with Remove friend always last.
+    fn friend_options(&self, who: u64) -> Vec<FriendOption> {
+        let Some(f) = self.friend(who) else {
+            return Vec::new();
+        };
+        let ours = self.party().map(|p| p.id);
+        let mut out = Vec::new();
+        if f.online == Online::Launcher && ours != Some(f.party) {
+            out.push(FriendOption::Invite);
+        }
+        if f.joinable {
+            out.push(FriendOption::Join);
+        }
+        out.push(FriendOption::Record);
+        out.push(FriendOption::Remove);
+        out
+    }
+
+    fn options_input(&mut self, who: u64, i: Input) {
+        let options = self.friend_options(who);
+        let n = options.len().max(1);
+        match i {
+            // Up from the first goes to the last, and down from the last
+            // to the first.
+            Input::Up => self.pick_option(who, (self.osel + n - 1) % n),
+            Input::Down => self.pick_option(who, (self.osel + 1) % n),
+            Input::B => self.popup = None,
+            Input::A => {
+                let Some(&pick) = options.get(self.osel) else {
+                    return;
+                };
+                let Some(f) = self.friend(who).cloned() else {
+                    self.popup = None;
+                    return;
+                };
+                self.popup = None;
+                match pick {
+                    FriendOption::Invite => {
+                        self.send(ToServer::Invite(who));
+                        self.toast(format!("Invited {} to your party.", f.gamertag));
+                    }
+                    FriendOption::Join => {
+                        self.log(&format!("lobby: joining {}'s party", f.gamertag));
+                        self.send(ToServer::JoinParty(f.party));
+                        self.screen = Screen::Live;
+                    }
+                    FriendOption::Record => self.open_record(who),
+                    FriendOption::Remove => self.popup = Some(Popup::Unfriend(who)),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn carnage_input(&mut self, i: Input) {
+        let rows: Vec<LauncherPlayerResult> = self
+            .game
+            .as_ref()
+            .map(|g| carnage_rows(g).into_iter().copied().collect())
+            .unwrap_or_default();
+        let picked = rows.get(self.csel).and_then(|r| {
+            let g = self.game.as_ref()?;
+            g.m.players
+                .iter()
+                .find(|p| p.relay_id == r.relay_id)
+                .cloned()
+        });
+        match i {
+            Input::Up => self.csel = self.csel.saturating_sub(1),
+            Input::Down => self.csel = (self.csel + 1).min(rows.len().saturating_sub(1)),
+            Input::Lb => {
+                if let Some(p) = picked {
+                    self.open_record(p.account);
+                }
+            }
+            Input::Y => {
+                if let Some(p) = picked.filter(|p| self.can_ask(p.account)) {
+                    self.ask_friend(&p.gamertag);
+                }
+            }
+            Input::A | Input::B => {
+                // The leader of a custom game picks the next.
+                let custom = self
+                    .game
+                    .as_ref()
+                    .is_some_and(|g| g.m.playlist == CUSTOM_GAME);
+                self.game = None;
+                self.screen = if custom && self.leader() {
+                    Screen::Custom
+                } else {
+                    Screen::Live
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn record_input(&mut self, i: Input) {
+        let rows = match self.record_view() {
+            RecordView::Shown(r) => r.found.as_ref().map_or(0, |f| f.playlists.len()),
+            _ => 0,
+        };
+        let most = rows.saturating_sub(LIST_ROWS);
+        match i {
+            Input::Up => self.record_first = self.record_first.saturating_sub(1),
+            Input::Down => self.record_first = (self.record_first + 1).min(most),
+            Input::A if matches!(self.record_view(), RecordView::NoAnswer) => {
+                let who = self.record_of;
+                self.ask_record(who);
+            }
+            Input::B => {
+                self.screen = match self.record_back {
+                    // The game it was opened from may be over.
+                    Screen::Carnage if self.game.is_none() => Screen::Live,
+                    back => back,
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Select row `k` of the friends screen.
+    fn select_friend(&mut self, k: usize) {
+        let rows: Vec<u64> = self.friend_rows().iter().map(|f| f.account).collect();
+        self.fsel = k.min(rows.len().saturating_sub(1));
+        self.faccount = rows.get(self.fsel).copied();
+    }
+
+    fn friends_input(&mut self, i: Input) {
+        let picked = self.friend_rows().get(self.fsel).map(|f| (*f).clone());
+        let n = self.friend_rows().len();
+        match (i, picked) {
+            (Input::Up, _) => self.select_friend(self.fsel.saturating_sub(1)),
+            (Input::Down, _) => self.select_friend((self.fsel + 1).min(n.saturating_sub(1))),
+            (Input::Y, _) => {
+                self.friend_tag.clear();
+                self.popup = Some(Popup::AddFriend);
+            }
+            (Input::B, _) => self.screen = Screen::Live,
+            (Input::Lb, Some(f)) => self.open_record(f.account),
+            (Input::A, Some(f)) if f.relation == Relation::AskedUs => {
+                self.log(&format!("lobby: accepting {}'s friend request", f.gamertag));
+                self.send(ToServer::FriendAccept(f.account));
+            }
+            (Input::X, Some(f)) if f.relation == Relation::AskedUs => {
+                self.log(&format!("lobby: declining {}'s friend request", f.gamertag));
+                self.send(ToServer::FriendDecline(f.account));
+            }
+            (Input::A, Some(f)) if f.relation == Relation::Friend => {
+                let who = f.account;
+                self.pick_option(who, 0);
+                self.popup = Some(Popup::FriendOptions(who));
+            }
+            (Input::X, Some(f)) if f.relation == Relation::Friend && f.joinable => {
+                self.log(&format!("lobby: joining {}'s party", f.gamertag));
+                self.send(ToServer::JoinParty(f.party));
+                self.screen = Screen::Live;
+            }
+            (Input::X, Some(f)) if f.relation == Relation::Friend => {
+                let why = self.cannot_join(&f);
+                self.toast(why);
+            }
+            (Input::X, Some(f)) if f.relation == Relation::WeAsked => {
+                self.log(&format!(
+                    "lobby: taking back the friend request to {}",
+                    f.gamertag
+                ));
+                self.send(ToServer::FriendRemove(f.account));
+            }
             _ => {}
         }
     }
@@ -882,6 +1438,21 @@ impl App {
     }
 
     fn live_input(&mut self, i: Input) {
+        // The service record and the friends list, searching or not (the
+        // search goes on).
+        match i {
+            Input::Lb => {
+                if let Some(me) = self.account() {
+                    self.open_record(me);
+                }
+                return;
+            }
+            Input::Rb => {
+                self.screen = Screen::Friends;
+                return;
+            }
+            _ => {}
+        }
         if self.searching() {
             if i == Input::B {
                 if self.leader() {
@@ -920,7 +1491,7 @@ impl App {
                 self.send(ToServer::Search(id));
             }
             Input::X => {
-                self.psel = 0;
+                self.select_player(0);
                 self.screen = Screen::Players;
             }
             Input::Y if self.party().is_some() => {
@@ -964,6 +1535,7 @@ impl App {
                 self.send(ToServer::Promote(who));
             }
             (Input::X, Some((who, false))) if leader => self.popup = Some(Popup::Kick(who)),
+            (Input::Lb, Some((who, _))) => self.open_record(who),
             (Input::Y, _) if leader => {
                 let privacy = match self.party().map(|p| p.privacy) {
                     Some(Privacy::Open) => Privacy::InviteOnly,
@@ -1032,12 +1604,30 @@ impl App {
         });
     }
 
+    /// Select row `k` of the players screen.
+    fn select_player(&mut self, k: usize) {
+        let rows: Vec<u64> = self.others().iter().map(|o| o.account).collect();
+        self.psel = k.min(rows.len().saturating_sub(1));
+        self.paccount = rows.get(self.psel).copied();
+    }
+
     fn players_input(&mut self, i: Input) {
         let others: Vec<OnlinePlayer> = self.others().into_iter().cloned().collect();
         let picked = others.get(self.psel);
         match i {
-            Input::Up => self.psel = self.psel.saturating_sub(1),
-            Input::Down => self.psel = (self.psel + 1).min(others.len().saturating_sub(1)),
+            Input::Up => self.select_player(self.psel.saturating_sub(1)),
+            Input::Down => self.select_player((self.psel + 1).min(others.len().saturating_sub(1))),
+            Input::Y => {
+                if let Some(p) = picked.filter(|p| self.can_ask(p.account)) {
+                    self.ask_friend(&p.gamertag);
+                }
+            }
+            Input::Lb => {
+                if let Some(p) = picked {
+                    self.open_record(p.account);
+                }
+            }
+            Input::Rb => self.screen = Screen::Friends,
             Input::A => {
                 if let Some(p) = picked {
                     self.send(ToServer::Invite(p.account));
@@ -1080,6 +1670,29 @@ impl App {
                 self.crow = r;
                 self.input(if on { Input::Right } else { Input::Left });
             }
+            Some(Hit::Row(r)) if matches!(self.popup, Some(Popup::FriendOptions(_))) => {
+                if self.osel == r {
+                    self.input(Input::A);
+                } else if let Some(Popup::FriendOptions(who)) = self.popup {
+                    self.pick_option(who, r);
+                }
+            }
+            Some(Hit::Row(r)) if self.screen == Screen::Friends => {
+                if self.fsel == r {
+                    self.input(Input::A);
+                } else {
+                    self.select_friend(r);
+                }
+            }
+            Some(Hit::Row(r)) if self.screen == Screen::Players => {
+                if self.psel == r {
+                    self.input(Input::A);
+                } else {
+                    self.select_player(r);
+                }
+            }
+            // A row of the carnage report is only selected: A continues.
+            Some(Hit::Row(r)) if self.screen == Screen::Carnage => self.csel = r,
             Some(Hit::Row(r)) if self.screen == Screen::Custom => {
                 if self.crow == r && r == CUSTOM_ROWS - 1 {
                     self.input(Input::A);
@@ -1089,7 +1702,6 @@ impl App {
             }
             Some(Hit::Row(r)) => {
                 let sel = match self.screen {
-                    Screen::Players => &mut self.psel,
                     Screen::Party => &mut self.msel,
                     _ => &mut self.sel,
                 };
@@ -1100,6 +1712,40 @@ impl App {
                 }
             }
             None => {}
+        }
+    }
+
+    /// Select `gamertag`'s row (ignoring case) on the players, friends,
+    /// party or carnage screen, for the headless script's `pick`; false if
+    /// there is none.
+    pub fn pick(&mut self, gamertag: &str) -> bool {
+        let is = |t: &str| t.eq_ignore_ascii_case(gamertag.trim());
+        match self.screen {
+            Screen::Players => {
+                let at = self.others().iter().position(|o| is(&o.gamertag));
+                at.map(|k| self.select_player(k)).is_some()
+            }
+            Screen::Friends => {
+                let at = self.friend_rows().iter().position(|f| is(&f.gamertag));
+                at.map(|k| self.select_friend(k)).is_some()
+            }
+            Screen::Party => {
+                let at = self
+                    .party()
+                    .and_then(|p| p.members.iter().position(|m| is(&m.gamertag)));
+                at.map(|k| self.msel = k).is_some()
+            }
+            Screen::Carnage => {
+                let at = self.game.as_ref().and_then(|g| {
+                    carnage_rows(g).iter().position(|r| {
+                        g.m.players
+                            .iter()
+                            .any(|p| p.relay_id == r.relay_id && is(&p.gamertag))
+                    })
+                });
+                at.map(|k| self.csel = k).is_some()
+            }
+            _ => false,
         }
     }
 
@@ -1114,6 +1760,8 @@ impl App {
         c.fill(0.0, 0.0, w, oy + 88.0 * s, Color::rgb(0).alpha(90));
         c.fill(0.0, oy + 88.0 * s, w, (2.0 * s).max(1.0), EDGE.alpha(120));
         let mut areas = Vec::new();
+        let mut drawn = Vec::new();
+        let ranks = self.cfg.ranks.clone();
         let mut p = Pen {
             c,
             t,
@@ -1122,9 +1770,12 @@ impl App {
             oy,
             areas: &mut areas,
             top: false,
+            ranks: ranks.as_deref(),
+            drawn: &mut drawn,
         };
         self.draw_screen(&mut p);
         self.areas = areas;
+        self.drawn = drawn;
         self.view = (s, ox, oy);
     }
 
@@ -1141,6 +1792,8 @@ impl App {
             Screen::InGame => "IN GAME",
             Screen::Carnage => "CARNAGE REPORT",
             Screen::Failed => "OFFLINE",
+            Screen::Record => "SERVICE RECORD",
+            Screen::Friends => "FRIENDS",
         };
         p.text(60.0, 58.0, 36.0, WHITE, Align::Left, title);
         self.draw_header(p);
@@ -1155,6 +1808,8 @@ impl App {
             Screen::InGame => self.draw_in_game(p),
             Screen::Carnage => self.draw_carnage(p),
             Screen::Failed => self.draw_failed(p),
+            Screen::Record => self.draw_record(p),
+            Screen::Friends => self.draw_friends(p),
         }
         p.text(
             1220.0,
@@ -1162,9 +1817,8 @@ impl App {
             14.5,
             DIM,
             Align::Right,
-            "Keyboard: Enter = A, Esc = B, X, Y, arrows",
+            "Keyboard: Enter = A, Esc = B, X, Y, Q = LB, E = RB, arrows",
         );
-        self.draw_toasts(p);
         if let Some(popup) = self.popup {
             match popup {
                 Popup::Quit => {
@@ -1192,6 +1846,18 @@ impl App {
                         &[(Input::A, "Remove"), (Input::B, "Cancel")],
                     );
                 }
+                Popup::AddFriend => self.draw_add_friend(p),
+                Popup::FriendOptions(who) => self.draw_friend_options(p, who),
+                Popup::Unfriend(who) => {
+                    let name = self
+                        .friend(who)
+                        .map_or("this player".into(), |f| f.gamertag.clone());
+                    p.popup(
+                        "REMOVE FRIEND",
+                        &format!("Remove {name} from your friends? They won't be told."),
+                        &[(Input::A, "Remove"), (Input::B, "Cancel")],
+                    );
+                }
             }
         } else if let Some((_, from)) = self.invite() {
             p.popup(
@@ -1200,6 +1866,8 @@ impl App {
                 &[(Input::A, "Accept"), (Input::B, "Decline")],
             );
         }
+        // Last, so a popup's shade doesn't dim them.
+        self.draw_toasts(p);
     }
 
     fn draw_header(&self, p: &mut Pen) {
@@ -1209,7 +1877,21 @@ impl App {
         let Some(w) = &c.view.welcome else {
             return;
         };
-        p.text(1220.0, 44.0, 24.0, WHITE, Align::Right, &w.gamertag);
+        let wd = p.text(1220.0, 44.0, 24.0, WHITE, Align::Right, &w.gamertag);
+        // The highest level's icon left of the gamertag (the line below
+        // has the number).
+        if p.has_icons() {
+            let x = 1220.0 - wd - 10.0;
+            p.level(
+                x,
+                44.0,
+                24.0,
+                WHITE,
+                Align::Right,
+                w.best.max(1),
+                Size::Small,
+            );
+        }
         let mut line = format!("Level {}  ·  {} online", w.best.max(1), c.view.online.len());
         if let Some(ms) = c.view.round_trip {
             line += &format!("  ·  {ms} ms");
@@ -1299,11 +1981,26 @@ impl App {
         let Some(v) = self.view() else {
             return;
         };
+        // The RB hint counts the friend requests waiting for an answer.
+        let asking = v
+            .friends
+            .iter()
+            .filter(|f| f.relation == Relation::AskedUs)
+            .count();
+        let friends = if asking > 0 {
+            format!("Friends ({asking})")
+        } else {
+            "Friends".into()
+        };
         if self.searching() {
             self.draw_search(p, v);
+            let mut hints = Vec::new();
             if self.leader() {
-                p.hints(&[(Input::B, "Stop searching")]);
+                hints.push((Input::B, "Stop searching"));
             }
+            hints.push((Input::Rb, friends.as_str()));
+            hints.push((Input::Lb, "Service record"));
+            p.hints(&hints);
         } else {
             self.draw_playlists(p, v);
             let mut hints = Vec::new();
@@ -1315,6 +2012,8 @@ impl App {
             if v.party.is_some() {
                 hints.push((Input::Y, "Party"));
             }
+            hints.push((Input::Rb, friends.as_str()));
+            hints.push((Input::Lb, "Service record"));
             hints.push((Input::B, "Quit"));
             p.hints(&hints);
         }
@@ -1343,12 +2042,17 @@ impl App {
             };
             let name = p.fit(24.0, 420.0, &pl.name);
             p.text(90.0, y + 32.0, 24.0, col, Align::Left, &name);
-            let level = if pl.ranked {
-                pl.level.max(1).to_string()
-            } else {
-                "-".into()
-            };
-            p.text(560.0, y + 32.0, 22.0, col, Align::Center, &level);
+            // Level 0 draws "-": unranked.
+            let level = if pl.ranked { pl.level.max(1) } else { 0 };
+            p.level(
+                560.0,
+                y + 32.0,
+                22.0,
+                col,
+                Align::Center,
+                level,
+                Size::Small,
+            );
             let searching = pl.searching.to_string();
             p.text(650.0, y + 32.0, 20.0, DIM, Align::Center, &searching);
             p.text(
@@ -1464,14 +2168,15 @@ impl App {
             }
             let name = p.fit(24.0, 260.0, &m.gamertag);
             p.text(860.0, y + 32.0, 24.0, TEXT, Align::Left, &name);
-            let level = if m.level > 0 { m.level } else { m.best.max(1) };
-            p.text(
+            let level = self.member_level(pt, m);
+            p.level(
                 1196.0,
                 y + 32.0,
                 22.0,
                 TEXT,
                 Align::Right,
-                &level.to_string(),
+                level,
+                Size::Small,
             );
         }
         if pt.members.len() == 1 {
@@ -1513,14 +2218,16 @@ impl App {
             }
             let name = p.fit(24.0, 400.0, &m.gamertag);
             p.text(108.0, y + 32.0, 24.0, col, Align::Left, &name);
-            let level = if m.level > 0 { m.level } else { m.best.max(1) };
-            p.text(
+            // As the party panel shows it, so the two agree.
+            let level = self.member_level(pt, m);
+            p.level(
                 560.0,
                 y + 32.0,
                 22.0,
                 col,
                 Align::Center,
-                &level.to_string(),
+                level,
+                Size::Small,
             );
             let mut role = if m.account == pt.leader {
                 "Party leader".to_string()
@@ -1556,6 +2263,9 @@ impl App {
                 hints.push((Input::X, "Remove"));
             }
             _ => {}
+        }
+        if self.picked_member().is_some() {
+            hints.push((Input::Lb, "Service record"));
         }
         if self.leader() {
             hints.push((
@@ -1654,13 +2364,15 @@ impl App {
             let col = if on { WHITE } else { TEXT };
             let name = p.fit(24.0, 420.0, &o.gamertag);
             p.text(90.0, y + 32.0, 24.0, col, Align::Left, &name);
-            p.text(
+            let level = o.best.max(1);
+            p.level(
                 560.0,
                 y + 32.0,
                 22.0,
                 col,
                 Align::Center,
-                &o.best.max(1).to_string(),
+                level,
+                Size::Small,
             );
             let doing = match o.activity {
                 Activity::Lobby => "In a lobby",
@@ -1698,7 +2410,12 @@ impl App {
             if self.can_join(o) {
                 hints.push((Input::X, "Join their party"));
             }
+            if self.can_ask(o.account) {
+                hints.push((Input::Y, "Add friend"));
+            }
+            hints.push((Input::Lb, "Service record"));
         }
+        hints.push((Input::Rb, "Friends"));
         hints.push((Input::B, "Back"));
         p.hints(&hints);
     }
@@ -1758,13 +2475,15 @@ impl App {
             if pl.relay_id == g.m.host {
                 p.text(x + w - 70.0, base, size * 0.7, GOLD, Align::Right, "HOST");
             }
-            p.text(
+            let level = pl.level.max(1);
+            p.level(
                 x + w - 16.0,
                 base,
                 size,
                 TEXT,
                 Align::Right,
-                &pl.level.max(1).to_string(),
+                level,
+                Size::Big,
             );
         }
     }
@@ -1825,29 +2544,44 @@ impl App {
         };
         p.text(60.0, 176.0, 20.0, col, Align::Left, &verdict);
         p.panel(60.0, 196.0, 1160.0, 444.0);
-        let results = g.results.clone().unwrap_or_default();
-        let kills = results.iter().any(|r| r.kills > 0);
+        // Halo 2 Xbox's columns.
         let heads = [
             (100.0, Align::Left, "PLACE"),
             (200.0, Align::Left, "PLAYER"),
-            (760.0, Align::Center, "SCORE"),
-            (860.0, Align::Center, "KILLS"),
-            (960.0, Align::Center, "DEATHS"),
-            (1080.0, Align::Center, "LEVEL"),
+            (700.0, Align::Center, "SCORE"),
+            (790.0, Align::Center, "KILLS"),
+            (880.0, Align::Center, "ASSISTS"),
+            (970.0, Align::Center, "DEATHS"),
+            (1090.0, Align::Center, "LEVEL"),
         ];
         for (x, a, h) in heads {
             p.text(x, 228.0, 16.0, HEAD, a, h);
         }
-        let mut rows: Vec<&LauncherPlayerResult> = results.iter().collect();
-        rows.sort_by_key(|r| (r.place, -r.score));
+        let rows = carnage_rows(g);
+        // Until the engine's kills and assists are seen right
+        // (`results::COUNTS_SEEN`), a column that is 0 for everyone may
+        // only mean they weren't sent, so it says "-" rather than 0.
+        let unsent = |count: fn(&LauncherPlayerResult) -> u16| {
+            !crate::results::COUNTS_SEEN && rows.iter().all(|r| count(r) == 0)
+        };
+        let (no_kills, no_assists) = (unsent(|r| r.kills), unsent(|r| r.assists));
+        let shown = |unsent: bool, n: u16| {
+            if unsent {
+                "-".to_string()
+            } else {
+                n.to_string()
+            }
+        };
         let h = (380.0 / rows.len().max(1) as f32).min(44.0);
         for (k, r) in rows.iter().enumerate() {
             let y = 242.0 + k as f32 * h;
             let pl = g.m.players.iter().find(|pl| pl.relay_id == r.relay_id);
             let me = r.relay_id == g.m.relay.id;
-            if me {
+            let on = k == self.csel;
+            if me && !on {
                 p.fill(72.0, y, 1136.0, h - 4.0, SEL.alpha(110));
             }
+            p.row(72.0, y, 1136.0, h - 4.0, on, Hit::Row(k));
             let team = g
                 .session
                 .players
@@ -1859,28 +2593,29 @@ impl App {
             let base = y + h * 0.5 + size * 0.35;
             p.text(100.0, base, size, TEXT, Align::Left, &names::place(r.place));
             let name = pl.map_or("?", |pl| pl.gamertag.as_str());
-            let mut name = p.fit(size, 520.0, name);
+            let mut name = p.fit(size, 440.0, name);
             if r.left {
                 name += "  (quit)";
             }
-            let col = if me { WHITE } else { TEXT };
+            let col = if me || on { WHITE } else { TEXT };
             p.text(200.0, base, size, col, Align::Left, &name);
-            p.text(760.0, base, size, col, Align::Center, &r.score.to_string());
-            let k = if kills {
-                r.kills.to_string()
-            } else {
-                "-".into()
-            };
-            p.text(860.0, base, size, col, Align::Center, &k);
-            p.text(960.0, base, size, col, Align::Center, &r.deaths.to_string());
+            for (x, n) in [
+                (700.0, r.score.to_string()),
+                (790.0, shown(no_kills, r.kills)),
+                (880.0, shown(no_assists, r.assists)),
+                (970.0, r.deaths.to_string()),
+            ] {
+                p.text(x, base, size, col, Align::Center, &n);
+            }
             let level = pl.map(|pl| {
                 g.over
                     .as_ref()
                     .and_then(|o| o.players.iter().find(|(a, _)| *a == pl.account))
                     .map_or(pl.level, |&(_, l)| l)
             });
-            let level = level.map_or("-".into(), |l| l.max(1).to_string());
-            p.text(1080.0, base, size, col, Align::Center, &level);
+            // An unknown player's level is 0, which draws "-".
+            let level = level.map_or(0, |l| l.max(1));
+            p.level(1090.0, base, size, col, Align::Center, level, Size::Big);
         }
         if rows.is_empty() {
             p.text(
@@ -1892,24 +2627,378 @@ impl App {
                 "The engine's results couldn't be read.",
             );
         }
-        p.hints(&[(Input::A, "Continue")]);
+        let mut hints = vec![(Input::A, "Continue")];
+        let picked = rows
+            .get(self.csel)
+            .and_then(|r| g.m.players.iter().find(|p| p.relay_id == r.relay_id));
+        if let Some(pl) = picked {
+            if self.can_ask(pl.account) {
+                hints.push((Input::Y, "Add friend"));
+            }
+            hints.push((Input::Lb, "Service record"));
+        }
+        p.hints(&hints);
     }
 
+    /// The service record screen: the player's totals on the left, and
+    /// each ranked playlist they've played on the right.
+    fn draw_record(&self, p: &mut Pen) {
+        p.panel(60.0, 110.0, 380.0, 530.0);
+        p.panel(460.0, 110.0, 760.0, 530.0);
+        let found = match self.record_view() {
+            RecordView::Shown(r) => match &r.found {
+                Some(f) => f,
+                None => {
+                    p.text(840.0, 330.0, 22.0, TEXT, Align::Center, "No such player.");
+                    p.hints(&[(Input::B, "Back")]);
+                    return;
+                }
+            },
+            RecordView::Loading => {
+                let line = "Loading the service record.";
+                p.text(840.0, 330.0, 22.0, TEXT, Align::Center, line);
+                p.spinner(840.0, 420.0, self.clock.elapsed().as_secs_f32());
+                p.hints(&[(Input::B, "Back")]);
+                return;
+            }
+            RecordView::NoAnswer => {
+                let line = "The server didn't answer.";
+                p.text(840.0, 330.0, 22.0, TEXT, Align::Center, line);
+                p.hints(&[(Input::A, "Try again"), (Input::B, "Back")]);
+                return;
+            }
+        };
+        let name = p.fit(32.0, 340.0, &found.gamertag);
+        p.text(84.0, 170.0, 32.0, WHITE, Align::Left, &name);
+        // The highest level's icon at three times its size, if there are
+        // icons; without them the number alone sits there.
+        let best = found.best.max(1);
+        let x = if p.icon(84.0, 196.0, 84.0, 78.0, best, Size::Big) {
+            184.0
+        } else {
+            84.0
+        };
+        p.text(x, 222.0, 16.0, HEAD, Align::Left, "HIGHEST LEVEL");
+        p.text(x, 262.0, 36.0, WHITE, Align::Left, &best.to_string());
+        let mut total = h2net::live::Tally::default();
+        let (mut games, mut wins) = (0u64, 0u64);
+        for pr in &found.playlists {
+            games += u64::from(pr.games);
+            wins += u64::from(pr.wins);
+            let t = &mut total;
+            t.kills = t.kills.saturating_add(pr.tally.kills);
+            t.deaths = t.deaths.saturating_add(pr.tally.deaths);
+            t.assists = t.assists.saturating_add(pr.tally.assists);
+        }
+        let totals = [
+            ("Ranked games", games.to_string()),
+            ("Wins", wins.to_string()),
+            ("Kills", total.kills.to_string()),
+            ("Deaths", total.deaths.to_string()),
+            ("Assists", total.assists.to_string()),
+            ("K/D", kd(total.kills, total.deaths)),
+        ];
+        for (k, (label, value)) in totals.iter().enumerate() {
+            let y = 330.0 + k as f32 * 36.0;
+            p.text(84.0, y, 20.0, DIM, Align::Left, label);
+            p.text(416.0, y, 20.0, TEXT, Align::Right, value);
+        }
+        let since = format!("Member since {}", utc_date(found.created));
+        p.text(84.0, 610.0, 16.0, DIM, Align::Left, &since);
+        p.text(484.0, 142.0, 16.0, HEAD, Align::Left, "PLAYLIST");
+        for (x, h) in [
+            (740.0, "LEVEL"),
+            (815.0, "GAMES"),
+            (880.0, "WINS"),
+            (945.0, "KILLS"),
+            (1015.0, "DEATHS"),
+            (1085.0, "ASSISTS"),
+            (1160.0, "K/D"),
+        ] {
+            p.text(x, 142.0, 16.0, HEAD, Align::Center, h);
+        }
+        let first = self
+            .record_first
+            .min(found.playlists.len().saturating_sub(LIST_ROWS));
+        for (k, pr) in found
+            .playlists
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(LIST_ROWS)
+        {
+            let y = 156.0 + (k - first) as f32 * 50.0;
+            if (k - first) % 2 == 1 {
+                p.fill(472.0, y, 736.0, 46.0, Color::rgb(0x06_1430).alpha(90));
+            }
+            let base = y + 32.0;
+            let name = match self.playlist_name(pr.playlist) {
+                n if n.is_empty() => format!("Playlist {}", pr.playlist),
+                n => n,
+            };
+            let name = p.fit(22.0, 220.0, &name);
+            p.text(484.0, base, 22.0, TEXT, Align::Left, &name);
+            let level = pr.level.max(1);
+            p.level(740.0, base, 20.0, TEXT, Align::Center, level, Size::Small);
+            let t = &pr.tally;
+            for (x, n) in [
+                (815.0, pr.games.to_string()),
+                (880.0, pr.wins.to_string()),
+                (945.0, t.kills.to_string()),
+                (1015.0, t.deaths.to_string()),
+                (1085.0, t.assists.to_string()),
+                (1160.0, kd(t.kills, t.deaths)),
+            ] {
+                p.text(x, base, 20.0, TEXT, Align::Center, &n);
+            }
+        }
+        if found.playlists.is_empty() {
+            p.text(
+                840.0,
+                330.0,
+                22.0,
+                DIM,
+                Align::Center,
+                "No ranked games yet.",
+            );
+        }
+        p.hints(&[(Input::B, "Back")]);
+    }
+
+    /// A friend's status on the friends screen, and its colour.
+    fn friend_status(&self, f: &Friend) -> (String, Color) {
+        let status = match (f.relation, f.online) {
+            (Relation::AskedUs, _) => return ("Wants to be your friend".into(), GOLD),
+            (Relation::WeAsked, _) => "Friend request sent".into(),
+            (Relation::Friend, Online::Offline) => "Offline".into(),
+            (Relation::Friend, Online::Game) => "Online (h2viewer)".into(),
+            (Relation::Friend, Online::Launcher) => {
+                // A friend who left a match their party still plays has
+                // no map or game type: then the playlist alone.
+                let known = !f.map.is_empty() && !f.variant.is_empty();
+                let game = |what: String, alone: String| match known {
+                    true => format!(
+                        "{what}: {} on {}",
+                        names::variant(&f.variant),
+                        names::map(&f.map)
+                    ),
+                    false => alone,
+                };
+                match f.activity {
+                    Activity::Lobby => "In a lobby".into(),
+                    Activity::Searching if f.playlist == QUICKMATCH => {
+                        "Searching (quickmatch)".into()
+                    }
+                    Activity::Searching => format!("Searching {}", self.playlist_name(f.playlist)),
+                    // A launcher's custom game is a match on playlist 255.
+                    Activity::Playing | Activity::Custom if f.playlist == CUSTOM_GAME => {
+                        game("Custom game".into(), "In a custom game".into())
+                    }
+                    Activity::Playing | Activity::Custom => {
+                        let name = self.playlist_name(f.playlist);
+                        game(name.clone(), format!("Playing {name}"))
+                    }
+                }
+            }
+        };
+        (status, DIM)
+    }
+
+    fn draw_friends(&self, p: &mut Pen) {
+        p.panel(60.0, 110.0, 1160.0, 530.0);
+        p.text(84.0, 142.0, 16.0, HEAD, Align::Left, "GAMERTAG");
+        p.text(560.0, 142.0, 16.0, HEAD, Align::Center, "LEVEL");
+        p.text(660.0, 142.0, 16.0, HEAD, Align::Left, "STATUS");
+        let rows = self.friend_rows();
+        // Friends and the requests we sent count towards the most.
+        let count = rows
+            .iter()
+            .filter(|f| f.relation != Relation::AskedUs)
+            .count();
+        let of = format!("{count} of {MAX_FRIENDS}");
+        p.text(1196.0, 142.0, 16.0, DIM, Align::Right, &of);
+        let ours = self.party().map(|pt| pt.id);
+        let first = first_row(self.fsel, rows.len(), LIST_ROWS);
+        for (k, f) in rows.iter().enumerate().skip(first).take(LIST_ROWS) {
+            let y = 156.0 + (k - first) as f32 * 50.0;
+            let on = k == self.fsel;
+            p.row(72.0, y, 1136.0, 46.0, on, Hit::Row(k));
+            let col = if on { WHITE } else { TEXT };
+            if f.relation == Relation::Friend {
+                match f.online {
+                    Online::Launcher => p.circle(90.0, y + 23.0, 6.0, GOOD),
+                    Online::Game => p.circle(90.0, y + 23.0, 6.0, DIM),
+                    Online::Offline => {}
+                }
+            }
+            let name = p.fit(24.0, 400.0, &f.gamertag);
+            p.text(108.0, y + 32.0, 24.0, col, Align::Left, &name);
+            let level = f.best.max(1);
+            p.level(
+                560.0,
+                y + 32.0,
+                22.0,
+                col,
+                Align::Center,
+                level,
+                Size::Small,
+            );
+            let (status, scol) = self.friend_status(f);
+            let status = p.fit(20.0, 380.0, &status);
+            p.text(660.0, y + 32.0, 20.0, scol, Align::Left, &status);
+            let open = self
+                .view()
+                .and_then(|v| v.online.iter().find(|o| o.account == f.account))
+                .map(|o| o.open);
+            let party = if f.relation != Relation::Friend || f.online != Online::Launcher {
+                ""
+            } else if ours == Some(f.party) {
+                "Your party"
+            } else if f.joinable {
+                "Open party"
+            } else if open == Some(false) {
+                "Invite only"
+            } else {
+                ""
+            };
+            p.text(1196.0, y + 32.0, 20.0, DIM, Align::Right, party);
+        }
+        if rows.is_empty() {
+            let line = "No friends yet. Press Y to send a friend request.";
+            p.text(640.0, 320.0, 22.0, DIM, Align::Center, line);
+        }
+        let mut hints = Vec::new();
+        match rows.get(self.fsel) {
+            Some(f) if f.relation == Relation::AskedUs => {
+                hints.push((Input::A, "Accept"));
+                hints.push((Input::X, "Decline"));
+            }
+            Some(f) if f.relation == Relation::Friend => {
+                hints.push((Input::A, "Options"));
+                if f.joinable {
+                    hints.push((Input::X, "Join party"));
+                }
+            }
+            Some(_) => hints.push((Input::X, "Cancel request")),
+            None => {}
+        }
+        if !rows.is_empty() {
+            hints.push((Input::Lb, "Service record"));
+        }
+        hints.push((Input::Y, "Add friend"));
+        hints.push((Input::B, "Back"));
+        p.hints(&hints);
+    }
+
+    fn draw_add_friend(&self, p: &mut Pen) {
+        p.popup_box(320.0, 230.0, 640.0, 260.0);
+        p.text(
+            640.0,
+            278.0,
+            30.0,
+            WHITE,
+            Align::Center,
+            "SEND FRIEND REQUEST",
+        );
+        let line = "Type their gamertag on the keyboard.";
+        p.text(640.0, 314.0, 20.0, TEXT, Align::Center, line);
+        // Drawn like the sign-in screen's gamertag field.
+        p.fill(380.0, 330.0, 520.0, 52.0, Color::rgb(0x06_1430).alpha(220));
+        p.outline(380.0, 330.0, 520.0, 52.0, 2.0, SEL_EDGE);
+        let shown = p.fit(26.0, 480.0, &self.friend_tag);
+        let wd = p.text(396.0, 366.0, 26.0, WHITE, Align::Left, &shown);
+        p.fill(398.0 + wd, 342.0, 2.0, 30.0, SEL_EDGE);
+        let hints = [(Input::A, "Send"), (Input::B, "Cancel")];
+        let width = p.hints_width(&hints);
+        p.hint_row(&hints, 640.0 - width / 2.0, 462.0);
+    }
+
+    fn draw_friend_options(&self, p: &mut Pen, who: u64) {
+        p.popup_box(320.0, 200.0, 640.0, 320.0);
+        let name = self.friend(who).map_or("", |f| f.gamertag.as_str());
+        p.text(640.0, 250.0, 30.0, WHITE, Align::Center, name);
+        for (k, o) in self.friend_options(who).iter().enumerate() {
+            let y = 280.0 + k as f32 * 44.0;
+            let on = k == self.osel;
+            p.row(360.0, y, 560.0, 40.0, on, Hit::Row(k));
+            let col = if on { WHITE } else { TEXT };
+            p.text(640.0, y + 28.0, 22.0, col, Align::Center, o.label());
+        }
+        let hints = [(Input::A, "Select"), (Input::B, "Back")];
+        let width = p.hints_width(&hints);
+        p.hint_row(&hints, 640.0 - width / 2.0, 492.0);
+    }
+
+    /// The notices, newest at the bottom, stacked up from just above the
+    /// button hints and clear of every popup's box (the lowest ends at
+    /// y 520), so none is hidden behind one.
     fn draw_toasts(&self, p: &mut Pen) {
         for (k, (text, _)) in self.toasts.iter().rev().enumerate() {
-            let y = 600.0 - k as f32 * 46.0;
+            let top = toast_top(k);
             let w = p.measure(20.0, text) + 48.0;
             p.fill(
                 640.0 - w / 2.0,
-                y - 30.0,
+                top,
                 w,
-                40.0,
+                TOAST_H,
                 Color::rgb(0x0A_1830).alpha(235),
             );
-            p.outline(640.0 - w / 2.0, y - 30.0, w, 40.0, 2.0, SEL_EDGE);
-            p.text(640.0, y - 3.0, 20.0, WHITE, Align::Center, text);
+            p.outline(640.0 - w / 2.0, top, w, TOAST_H, 2.0, SEL_EDGE);
+            p.text(640.0, top + 27.0, 20.0, WHITE, Align::Center, text);
         }
     }
+}
+
+/// A notice's height, in layout units.
+const TOAST_H: f32 = 40.0;
+
+/// The top of the `k`th notice up from the newest (layout units): the
+/// newest ends at y 652, above the button hints (from about 656), and the
+/// third starts at y 524, below the lowest popup's box (the friend options
+/// popup ends at 520).
+fn toast_top(k: usize) -> f32 {
+    612.0 - k as f32 * 44.0
+}
+
+/// The carnage report's rows: the game's results by place, then team
+/// (so a team game lists each team together in its finishing order), then
+/// score, highest first.
+fn carnage_rows(g: &Game) -> Vec<&LauncherPlayerResult> {
+    let mut rows: Vec<&LauncherPlayerResult> = g.results.iter().flatten().collect();
+    rows.sort_by_key(|r| (r.place, r.team, -r.score));
+    rows
+}
+
+/// The row to select in a list of accounts `rows` that just came: the one
+/// with `picked`'s account if it's still there, else `sel` kept in range.
+fn follow(rows: &[u64], picked: Option<u64>, sel: usize) -> usize {
+    picked
+        .and_then(|a| rows.iter().position(|&r| r == a))
+        .unwrap_or(sel)
+        .min(rows.len().saturating_sub(1))
+}
+
+/// Kills per death with two decimals ("-" with neither).
+fn kd(kills: u32, deaths: u32) -> String {
+    if kills == 0 && deaths == 0 {
+        return "-".into();
+    }
+    format!("{:.2}", f64::from(kills) / f64::from(deaths.max(1)))
+}
+
+/// The UTC date of Unix time `unix`, as 2026-10-10.
+fn utc_date(unix: u64) -> String {
+    // Days to a civil date (Howard Hinnant's method).
+    let z = (unix / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 /// The first row to show so that row `sel` of `len` is in view, `rows` at a
@@ -1937,6 +3026,15 @@ const GOOD: Color = Color::rgb(0x7B_E07B);
 const WARN: Color = Color::rgb(0xFF_C04A);
 const ERROR: Color = Color::rgb(0xFF_6B5B);
 
+/// How wide a button's face is in a hint: 28 for the round ones, 34 for
+/// the bumpers.
+fn face_width(i: Input) -> f32 {
+    match i {
+        Input::Lb | Input::Rb => 34.0,
+        _ => 28.0,
+    }
+}
+
 /// Draws in layout units (a 1280 by 720 screen, scaled to the window and
 /// centred in it) and keeps where clicks go.
 struct Pen<'a> {
@@ -1947,6 +3045,10 @@ struct Pen<'a> {
     oy: f32,
     areas: &'a mut Vec<Area>,
     top: bool,
+    /// Halo 2's level icons, if they were found.
+    ranks: Option<&'a RankIcons>,
+    /// Every string drawn, for `App::drawn`.
+    drawn: &'a mut Vec<String>,
 }
 
 impl Pen<'_> {
@@ -1970,6 +3072,9 @@ impl Pen<'_> {
 
     /// Text with its baseline at `y`; returns its width.
     fn text(&mut self, x: f32, y: f32, size: f32, col: Color, align: Align, s: &str) -> f32 {
+        if !s.is_empty() {
+            self.drawn.push(s.to_string());
+        }
         let k = self.s;
         let w = self.c.text(
             self.t,
@@ -2015,6 +3120,68 @@ impl Pen<'_> {
         lines
     }
 
+    /// There are level icons to draw.
+    fn has_icons(&self) -> bool {
+        self.ranks.is_some()
+    }
+
+    /// `level`'s icon scaled into the rectangle at (`x`, `y`), `w` by `h`;
+    /// false (nothing drawn) without icons or for a level outside 1 to 50.
+    fn icon(&mut self, x: f32, y: f32, w: f32, h: f32, level: u8, size: Size) -> bool {
+        let Some(icon) = self.ranks.and_then(|r| r.icon(level, size)) else {
+            return false;
+        };
+        let s = self.s;
+        self.c.image(
+            self.ox + x * s,
+            self.oy + y * s,
+            w * s,
+            h * s,
+            icon.width,
+            icon.height,
+            &icon.rgba,
+        );
+        true
+    }
+
+    /// A level where its number would be drawn (the same arguments as
+    /// `text`, baseline `base`): Halo 2's icon for it when there are icons
+    /// (`size * 1.25` high and square for Small, `size * 1.45` high and
+    /// 28:26 wide for Big), centred on the middle of the capitals with `x`
+    /// its left edge, centre or right edge by `align`; otherwise the
+    /// number, and "-" for level 0.
+    #[allow(clippy::too_many_arguments)]
+    fn level(
+        &mut self,
+        x: f32,
+        base: f32,
+        size: f32,
+        col: Color,
+        align: Align,
+        level: u8,
+        kind: Size,
+    ) {
+        let (w, h) = match kind {
+            Size::Small => (size * 1.25, size * 1.25),
+            Size::Big => (size * 1.45 * 28.0 / 26.0, size * 1.45),
+        };
+        let left = match align {
+            Align::Left => x,
+            Align::Center => x - w / 2.0,
+            Align::Right => x - w,
+        };
+        let middle = base - size * 0.35;
+        if level > 0 && self.icon(left, middle - h / 2.0, w, h, level, kind) {
+            return;
+        }
+        let n = if level == 0 {
+            "-".to_string()
+        } else {
+            level.to_string()
+        };
+        self.text(x, base, size, col, align, &n);
+    }
+
     fn area(&mut self, x: f32, y: f32, w: f32, h: f32, hit: Hit) {
         self.areas.push(Area {
             x,
@@ -2055,8 +3222,18 @@ impl Pen<'_> {
         }
     }
 
-    /// A button's round face with its letter.
+    /// A button's face with its letter: round, or for the bumpers rounded
+    /// and 34 by 22.
     fn button(&mut self, x: f32, y: f32, i: Input) {
+        if let Input::Lb | Input::Rb = i {
+            let col = Color::rgb(0x4A_5568);
+            self.fill(x - 6.0, y - 11.0, 12.0, 22.0, col);
+            self.circle(x - 6.0, y, 11.0, col);
+            self.circle(x + 6.0, y, 11.0, col);
+            let label = if i == Input::Lb { "LB" } else { "RB" };
+            self.text(x, y + 4.5, 13.0, WHITE, Align::Center, label);
+            return;
+        }
         let (letter, col) = match i {
             Input::A => ("A", 0x5D_BB3A),
             Input::B => ("B", 0xD8_412F),
@@ -2075,28 +3252,34 @@ impl Pen<'_> {
 
     fn hint_row(&mut self, hints: &[(Input, &str)], mut x: f32, y: f32) {
         for &(i, label) in hints {
-            self.button(x + 14.0, y - 7.0, i);
-            let w = self.text(x + 36.0, y, 20.0, TEXT, Align::Left, label);
-            self.area(x, y - 24.0, w + 40.0, 34.0, Hit::Press(i));
-            x += w + 70.0;
+            let face = face_width(i);
+            self.button(x + face / 2.0, y - 7.0, i);
+            let w = self.text(x + face + 8.0, y, 20.0, TEXT, Align::Left, label);
+            self.area(x, y - 24.0, w + face + 12.0, 34.0, Hit::Press(i));
+            x += w + face + 42.0;
         }
     }
 
     fn hints_width(&mut self, hints: &[(Input, &str)]) -> f32 {
         let w: f32 = hints
             .iter()
-            .map(|&(_, label)| self.measure(20.0, label) + 70.0)
+            .map(|&(i, label)| self.measure(20.0, label) + face_width(i) + 42.0)
             .sum();
         w - 30.0
     }
 
+    /// A popup's box, which alone takes clicks while it is up.
+    fn popup_box(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.top = true;
+        let (cw, ch) = (self.c.w as f32, self.c.h as f32);
+        self.c.fill(0.0, 0.0, cw, ch, Color::rgb(0).alpha(150));
+        self.fill(x, y, w, h, Color::rgb(0x08_1A3C));
+        self.outline(x, y, w, h, 2.0, EDGE);
+    }
+
     /// A box over the screen, which alone takes clicks while it is up.
     fn popup(&mut self, title: &str, body: &str, hints: &[(Input, &str)]) {
-        self.top = true;
-        let (w, h) = (self.c.w as f32, self.c.h as f32);
-        self.c.fill(0.0, 0.0, w, h, Color::rgb(0).alpha(150));
-        self.fill(320.0, 230.0, 640.0, 260.0, Color::rgb(0x08_1A3C));
-        self.outline(320.0, 230.0, 640.0, 260.0, 2.0, EDGE);
+        self.popup_box(320.0, 230.0, 640.0, 260.0);
         self.text(640.0, 290.0, 30.0, WHITE, Align::Center, title);
         let lines = self.wrap(22.0, 560.0, body);
         for (k, l) in lines.iter().enumerate() {
@@ -2110,7 +3293,6 @@ impl Pen<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     fn app(folder: &std::path::Path) -> App {
         App::new(Config {
@@ -2121,6 +3303,7 @@ mod tests {
             server: None,
             instance: None,
             log: Arc::new(|_: &str| {}),
+            ranks: None,
         })
     }
 
@@ -2273,6 +3456,851 @@ mod tests {
         let back = arrow(&a, 0, false);
         a.click(ox + (back.x + 5.0) * s, oy + (back.y + 5.0) * s);
         assert_eq!((a.crow, a.cgame), (0, names::CUSTOM_GAMES.len() - 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lobby signed in as ALPHA (account 1) over one end of a pair, on
+    /// the playlists, and the server's end, to read what the lobby sends.
+    fn live_app(dir: &std::path::Path) -> (App, Connection) {
+        let mut a = app(dir);
+        let (ours, mut theirs) = Connection::pair();
+        let key = h2live::client::identity(&dir.join("key.bin")).unwrap();
+        let profile = Profile {
+            gamertag: "ALPHA".into(),
+            look: Default::default(),
+            maps: Vec::new(),
+            guests: 0,
+        };
+        let card = dir.join("card.txt");
+        let mut c = LiveClient::launcher(ours, key, &profile, "test", &card, 0.0);
+        c.view.welcome = Some(h2net::live::Welcome {
+            account: 1,
+            gamertag: "ALPHA".into(),
+            card: String::new(),
+            best: 3,
+            levels: Vec::new(),
+        });
+        a.client = Some(c);
+        a.screen = Screen::Live;
+        // The LOGIN.
+        sent(&mut theirs);
+        (a, theirs)
+    }
+
+    /// What the lobby sent since the last look (pings left out).
+    fn sent(conn: &mut Connection) -> Vec<ToServer> {
+        conn.receive()
+            .unwrap()
+            .into_iter()
+            .map(|(k, b)| ToServer::read(k, &b).unwrap())
+            .filter(|m| !matches!(m, ToServer::Ping(_) | ToServer::Pong(_)))
+            .collect()
+    }
+
+    fn view(a: &mut App) -> &mut View {
+        &mut a.client.as_mut().unwrap().view
+    }
+
+    fn friend(account: u64, tag: &str, relation: Relation, online: Online) -> Friend {
+        Friend {
+            account,
+            gamertag: tag.into(),
+            relation,
+            best: 2,
+            online,
+            activity: Activity::Lobby,
+            playlist: 0,
+            map: String::new(),
+            variant: String::new(),
+            party: account + 100,
+            joinable: false,
+        }
+    }
+
+    fn party(id: u64, activity: Activity) -> PartyInfo {
+        PartyInfo {
+            id,
+            leader: 1,
+            privacy: Privacy::Open,
+            activity,
+            playlist: 11,
+            members: vec![PartyMember {
+                account: 1,
+                gamertag: "ALPHA".into(),
+                look: Default::default(),
+                best: 3,
+                level: 3,
+                guests: 0,
+            }],
+            maps: Vec::new(),
+        }
+    }
+
+    fn tags(a: &App) -> Vec<String> {
+        a.friend_rows().iter().map(|f| f.gamertag.clone()).collect()
+    }
+
+    #[test]
+    fn the_friends_screen_orders_rows_and_answers_requests() {
+        let dir = scratch("friends");
+        let (mut a, mut server) = live_app(&dir);
+        view(&mut a).friends = vec![
+            friend(10, "ZED", Relation::WeAsked, Online::Offline),
+            friend(11, "bob", Relation::Friend, Online::Offline),
+            friend(12, "YAN", Relation::AskedUs, Online::Offline),
+            friend(13, "CAT", Relation::Friend, Online::Game),
+            friend(14, "DAN", Relation::Friend, Online::Launcher),
+            friend(15, "AMY", Relation::AskedUs, Online::Offline),
+            friend(16, "ABE", Relation::Friend, Online::Launcher),
+        ];
+        a.input(Input::Rb);
+        assert_eq!(a.label(), "friends");
+        a.tick(Instant::now());
+        assert_eq!(tags(&a), ["AMY", "YAN", "ABE", "DAN", "CAT", "bob", "ZED"]);
+        // A accepts the request selected, X declines it.
+        a.input(Input::A);
+        assert_eq!(sent(&mut server), [ToServer::FriendAccept(15)]);
+        a.input(Input::Down);
+        a.input(Input::X);
+        assert_eq!(sent(&mut server), [ToServer::FriendDecline(12)]);
+        // A request we sent: X takes it back, A does nothing.
+        assert!(a.pick("zed"));
+        a.input(Input::A);
+        a.input(Input::X);
+        assert_eq!(sent(&mut server), [ToServer::FriendRemove(10)]);
+        // An offline friend can't be joined.
+        assert!(a.pick("BOB"));
+        a.input(Input::X);
+        assert!(sent(&mut server).is_empty());
+        assert!(!a.pick("NOBODY"));
+        a.input(Input::B);
+        assert_eq!(a.label(), "live");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn selections_follow_the_player_when_a_list_moves_them() {
+        let dir = scratch("follow");
+        let (mut a, mut server) = live_app(&dir);
+        view(&mut a).friends = vec![
+            friend(12, "YAN", Relation::AskedUs, Online::Offline),
+            friend(15, "AMY", Relation::AskedUs, Online::Offline),
+            friend(14, "DAN", Relation::Friend, Online::Launcher),
+        ];
+        a.input(Input::Rb);
+        a.tick(Instant::now());
+        a.input(Input::Down);
+        assert_eq!(a.faccount, Some(12));
+        // A new request sorts first: YAN moves down a row and stays picked,
+        // so X declines YAN, not the one now on YAN's old row.
+        view(&mut a)
+            .friends
+            .push(friend(17, "ABE", Relation::AskedUs, Online::Offline));
+        a.tick(Instant::now());
+        assert_eq!(a.fsel, 2);
+        a.input(Input::X);
+        assert_eq!(sent(&mut server), [ToServer::FriendDecline(12)]);
+        // YAN goes: the same row number, now DAN's.
+        view(&mut a).friends.retain(|f| f.account != 12);
+        a.tick(Instant::now());
+        assert_eq!((a.fsel, a.faccount), (2, Some(14)));
+        // A popup naming DAN closes when DAN leaves the list.
+        a.input(Input::A);
+        assert_eq!(a.label(), "friend");
+        a.input(Input::Up);
+        a.input(Input::A);
+        assert_eq!(a.label(), "unfriend");
+        view(&mut a).friends.retain(|f| f.account != 14);
+        a.tick(Instant::now());
+        assert_eq!(a.label(), "friends");
+        assert!(sent(&mut server).is_empty());
+        // The players screen's selection follows ONLINE lists the same way.
+        let player = |account: u64, tag: &str| OnlinePlayer {
+            account,
+            gamertag: tag.into(),
+            look: Default::default(),
+            best: 1,
+            activity: Activity::Lobby,
+            party: account,
+            open: true,
+            size: 1,
+            openings: 3,
+        };
+        view(&mut a).online = vec![
+            player(1, "ALPHA"),
+            player(20, "BRAVO"),
+            player(21, "CHARLIE"),
+        ];
+        a.screen = Screen::Players;
+        a.tick(Instant::now());
+        assert!(a.pick("charlie"));
+        view(&mut a).online.insert(1, player(22, "ABLE"));
+        a.tick(Instant::now());
+        a.input(Input::A);
+        assert_eq!(sent(&mut server), [ToServer::Invite(21)]);
+        // Y asks the player picked to be friends, by gamertag.
+        a.input(Input::Y);
+        assert_eq!(
+            sent(&mut server),
+            [ToServer::FriendRequest("CHARLIE".into())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bumpers_work_while_searching_and_friend_notices_leave_asked() {
+        let dir = scratch("search");
+        let (mut a, mut server) = live_app(&dir);
+        view(&mut a).party = Some(party(500, Activity::Searching));
+        assert_eq!(a.label(), "searching");
+        a.input(Input::Rb);
+        assert_eq!(a.label(), "friends");
+        a.input(Input::B);
+        assert_eq!(a.label(), "searching");
+        // Q is LB where letters are buttons: our own service record.
+        a.input(Input::Char('q'));
+        assert_eq!(a.label(), "record");
+        assert_eq!(sent(&mut server), [ToServer::Record(1)]);
+        a.input(Input::B);
+        assert_eq!(a.label(), "searching");
+        a.input(Input::Char('e'));
+        assert_eq!(a.label(), "friends");
+        // The custom game asked for is still waited for after a friend
+        // notice, but not after another notice.
+        a.asked = Some(a.now);
+        let notice = h2net::live::friend_notice(h2net::live::ASKED_YOU, "BRAVO");
+        a.on_event(LiveEvent::Notice(notice));
+        assert!(a.asked.is_some());
+        a.on_event(LiveEvent::Notice(h2net::live::SLOW_DOWN.into()));
+        assert!(a.asked.is_some());
+        a.on_event(LiveEvent::Notice("THAT MAP ISN'T IN A PLAYLIST".into()));
+        assert!(a.asked.is_none());
+        assert_eq!(a.toasts.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_add_friend_popup_takes_typed_letters() {
+        let dir = scratch("addfriend");
+        let (mut a, mut server) = live_app(&dir);
+        a.input(Input::Rb);
+        a.input(Input::Y);
+        assert_eq!(a.label(), "addfriend");
+        // Letters are typed, not buttons (B would close it, X and Y...).
+        for c in "bravo xy!".chars() {
+            a.input(Input::Char(c));
+        }
+        assert_eq!(a.label(), "addfriend");
+        assert_eq!(a.friend_tag, "BRAVO XY");
+        a.input(Input::Backspace);
+        a.input(Input::Backspace);
+        a.input(Input::Backspace);
+        a.input(Input::A);
+        assert_eq!(a.label(), "friends");
+        assert_eq!(sent(&mut server), [ToServer::FriendRequest("BRAVO".into())]);
+        // Once: and an empty one sends nothing.
+        a.input(Input::Y);
+        assert!(a.friend_tag.is_empty());
+        a.input(Input::A);
+        a.input(Input::Y);
+        a.input(Input::Char('z'));
+        a.input(Input::B);
+        assert_eq!(a.label(), "friends");
+        assert!(sent(&mut server).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_options_popup_lists_only_what_applies() {
+        let dir = scratch("options");
+        let (mut a, mut server) = live_app(&dir);
+        view(&mut a).party = Some(party(500, Activity::Lobby));
+        let mut dan = friend(14, "DAN", Relation::Friend, Online::Launcher);
+        dan.joinable = true;
+        let mut eve = friend(18, "EVE", Relation::Friend, Online::Launcher);
+        eve.party = 500;
+        view(&mut a).friends = vec![
+            dan,
+            eve,
+            friend(11, "BOB", Relation::Friend, Online::Offline),
+        ];
+        use FriendOption::*;
+        assert_eq!(a.friend_options(14), [Invite, Join, Record, Remove]);
+        // Already in our party: no invite.
+        assert_eq!(a.friend_options(18), [Record, Remove]);
+        assert_eq!(a.friend_options(11), [Record, Remove]);
+        a.input(Input::Rb);
+        a.tick(Instant::now());
+        assert!(a.pick("dan"));
+        a.input(Input::A);
+        assert_eq!(a.label(), "friend");
+        // Up from the top is Remove friend, the last.
+        a.input(Input::Up);
+        assert_eq!(a.osel, 3);
+        a.input(Input::Down);
+        assert_eq!(a.osel, 0);
+        a.input(Input::A);
+        assert_eq!(sent(&mut server), [ToServer::Invite(14)]);
+        assert_eq!(a.label(), "friends");
+        a.input(Input::A);
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(sent(&mut server), [ToServer::JoinParty(114)]);
+        assert_eq!(a.label(), "live");
+        a.input(Input::Rb);
+        assert!(a.pick("bob"));
+        a.input(Input::A);
+        a.input(Input::Up);
+        a.input(Input::A);
+        assert_eq!(a.label(), "unfriend");
+        a.input(Input::A);
+        assert_eq!(sent(&mut server), [ToServer::FriendRemove(11)]);
+
+        // A new list that drops Join keeps Remove friend picked...
+        a.screen = Screen::Friends;
+        assert!(a.pick("dan"));
+        a.input(Input::A);
+        a.input(Input::Up);
+        assert_eq!(a.opick, Some(Remove));
+        view(&mut a).friends[0].joinable = false;
+        a.tick(a.now);
+        assert_eq!((a.osel, a.opick), (2, Some(Remove)));
+        // ... and one that drops Invite keeps Service record picked.
+        a.input(Input::Up);
+        assert_eq!(a.opick, Some(Record));
+        view(&mut a).friends[0].party = 500;
+        a.tick(a.now);
+        assert_eq!((a.osel, a.opick), (0, Some(Record)));
+        // Join back: the same option still, on its new row.
+        view(&mut a).friends[0].joinable = true;
+        a.tick(a.now);
+        assert_eq!((a.osel, a.opick), (1, Some(Record)));
+        a.input(Input::A);
+        assert_eq!(a.label(), "record");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_friend_who_left_their_partys_match_shows_its_playlist_alone() {
+        let dir = scratch("left-match");
+        let (a, _server) = live_app(&dir);
+        let mut dan = friend(14, "DAN", Relation::Friend, Online::Launcher);
+        dan.activity = Activity::Playing;
+        dan.playlist = CUSTOM_GAME;
+        assert_eq!(a.friend_status(&dan).0, "In a custom game");
+        dan.map = "lockout".into();
+        dan.variant = "H2_Team_Slayer".into();
+        let status = a.friend_status(&dan).0;
+        assert!(status.starts_with("Custom game: ") && status.ends_with(" on Lockout"));
+        dan.playlist = 11;
+        dan.map.clear();
+        assert!(a.friend_status(&dan).0.starts_with("Playing "));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn signing_in_again_forgets_the_records_kept() {
+        let dir = scratch("records-forgotten");
+        let (mut a, _server) = live_app(&dir);
+        a.keep_record(ServiceRecord {
+            account: 2,
+            found: None,
+        });
+        a.record_asks.push((3, a.now));
+        a.fields[0] = "ALPHA".into();
+        a.fields[1] = "127.0.0.1:1".into();
+        a.connect();
+        assert!(a.cached_record(2).is_none() && a.record_asks.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A game of ALPHA (this PC) against BRAVO, over, on the carnage
+    /// report.
+    fn carnage(a: &mut App) {
+        let player = |relay_id: u64, account: u64, tag: &str| h2net::live::LauncherPlayer {
+            relay_id,
+            account,
+            gamertag: tag.into(),
+            team: 0,
+            level: 4,
+            party: account,
+        };
+        let m = LauncherMatch {
+            id: 0x77,
+            playlist: 11,
+            ranked: true,
+            teams: false,
+            map: "lockout".into(),
+            variant: "H2_FFA_HeadtoHead_b".into(),
+            relay: h2net::live::RelaySeat {
+                port: 47050,
+                room: 0x77,
+                id: 0x11,
+                key: [0; 16],
+            },
+            host: 0x11,
+            countdown: 20,
+            players: vec![player(0x11, 1, "ALPHA"), player(0x22, 2, "BRAVO")],
+        };
+        let ip = "127.0.0.1".parse().unwrap();
+        let (session, me) = live::session_from(&m, ip).unwrap();
+        let result = |relay_id, place, score| LauncherPlayerResult {
+            relay_id,
+            team: place,
+            place,
+            score,
+            kills: 5,
+            assists: 2,
+            deaths: 3,
+            betrayals: 0,
+            suicides: 0,
+            left: false,
+        };
+        let results = vec![result(0x11, 1, 3), result(0x22, 0, 5)];
+        a.game = Some(Game {
+            m,
+            session,
+            me,
+            told: Told::default(),
+            launch: false,
+            start_at: a.now,
+            child: None,
+            running: true,
+            loaded: true,
+            results: Some(results),
+            ended_at: Some(a.now),
+            over: None,
+        });
+        a.screen = Screen::Carnage;
+        a.csel = 1;
+    }
+
+    #[test]
+    fn kills_and_assists_no_one_has_say_dash_until_the_counts_are_seen() {
+        let dir = scratch("carnage-dash");
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        let Ok(mut text) = Text::system() else {
+            return;
+        };
+        let cells = |a: &mut App, text: &mut Text| {
+            a.draw(&mut Canvas::new(640, 360), text);
+            let d = a.drawn();
+            (
+                d.iter().filter(|t| *t == "-").count(),
+                d.iter().any(|t| t == "5"),
+            )
+        };
+        // Counts someone has show as they are.
+        let (dashes, five) = cells(&mut a, &mut text);
+        assert!(five);
+        // Kills and assists 0 for everyone may not have been sent.
+        for r in a.game.as_mut().unwrap().results.iter_mut().flatten() {
+            r.kills = 0;
+            r.assists = 0;
+        }
+        let (more, _) = cells(&mut a, &mut text);
+        let expected = if crate::results::COUNTS_SEEN { 0 } else { 4 };
+        assert_eq!(more - dashes, expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_carnage_report_opens_service_records_and_asks_friends() {
+        let dir = scratch("carnage");
+        let (mut a, mut server) = live_app(&dir);
+        carnage(&mut a);
+        // BRAVO won: first. We're second.
+        let rows: Vec<u64> = carnage_rows(a.game.as_ref().unwrap())
+            .iter()
+            .map(|r| r.relay_id)
+            .collect();
+        assert_eq!(rows, [0x22, 0x11]);
+        // Y on ourselves does nothing; on BRAVO it's a friend request.
+        a.input(Input::Y);
+        assert!(sent(&mut server).is_empty());
+        assert!(a.pick("bravo"));
+        assert_eq!(a.csel, 0);
+        a.input(Input::Y);
+        assert_eq!(sent(&mut server), [ToServer::FriendRequest("BRAVO".into())]);
+        a.input(Input::Lb);
+        assert_eq!(a.label(), "record");
+        assert_eq!(sent(&mut server), [ToServer::Record(2)]);
+        a.on_event(LiveEvent::ServiceRecord(ServiceRecord {
+            account: 2,
+            found: None,
+        }));
+        if let Ok(mut text) = Text::system() {
+            a.draw(&mut Canvas::new(640, 360), &mut text);
+            assert!(a.drawn().iter().any(|d| d == "No such player."));
+        }
+        a.input(Input::B);
+        assert_eq!(a.label(), "carnage-waiting");
+        // Within a minute the record kept is shown, with nothing asked.
+        a.input(Input::Lb);
+        assert_eq!(a.label(), "record");
+        assert!(sent(&mut server).is_empty());
+        // MATCH_OVER drops the records of everyone in the match, and the
+        // one on screen is asked for again (it's loading, not unanswered).
+        a.on_event(LiveEvent::MatchOver(MatchOver {
+            id: 0x77,
+            counted: true,
+            reason: String::new(),
+            card: String::new(),
+            levels: Vec::new(),
+            players: vec![(1, 5), (2, 4)],
+        }));
+        assert!(a.cached_record(2).is_none());
+        assert_eq!(a.label(), "record");
+        assert!(matches!(a.record_view(), RecordView::Loading));
+        assert_eq!(sent(&mut server), [ToServer::Record(2)]);
+        // A second ask while waiting sends nothing; after RECORD_WAIT with
+        // no answer, the screen says so and A asks again.
+        a.input(Input::B);
+        a.input(Input::Lb);
+        assert!(sent(&mut server).is_empty());
+        a.tick(a.now + RECORD_WAIT);
+        assert!(matches!(a.record_view(), RecordView::NoAnswer));
+        a.input(Input::A);
+        assert_eq!(sent(&mut server), [ToServer::Record(2)]);
+        // A continues once back on the report.
+        a.input(Input::B);
+        a.input(Input::A);
+        assert_eq!(a.label(), "live");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Icons of one colour each: red for the big set, green for the small.
+    fn icons() -> RankIcons {
+        let set = |w: u32, h: u32, rgba: [u8; 4]| -> Vec<blam_cache::bitmap::Image> {
+            (0..50)
+                .map(|_| blam_cache::bitmap::Image {
+                    width: w,
+                    height: h,
+                    rgba: rgba.repeat((w * h) as usize),
+                })
+                .collect()
+        };
+        let big = set(28, 26, [255, 0, 0, 255]);
+        let small = set(17, 17, [0, 255, 0, 255]);
+        RankIcons::new(big, small, PathBuf::from("mainmenu.map")).unwrap()
+    }
+
+    #[test]
+    fn the_service_record_draws_with_and_without_icons() {
+        let Ok(mut text) = Text::system() else {
+            return;
+        };
+        let dir = scratch("record");
+        let (mut a, _server) = live_app(&dir);
+        let tally = h2net::live::Tally {
+            kills: 7,
+            assists: 2,
+            deaths: 2,
+            betrayals: 0,
+            suicides: 1,
+        };
+        let row = |playlist| h2net::live::PlaylistRecord {
+            playlist,
+            level: 8,
+            games: 3,
+            wins: 2,
+            tally,
+        };
+        a.on_event(LiveEvent::ServiceRecord(ServiceRecord {
+            account: 2,
+            found: Some(h2net::live::Record {
+                gamertag: "BRAVO".into(),
+                look: Default::default(),
+                best: 9,
+                created: 1_791_633_600,
+                playlists: vec![row(11), row(40)],
+            }),
+        }));
+        a.open_record(2);
+        let mut c = Canvas::new(1280, 720);
+        a.draw(&mut c, &mut text);
+        let drawn = a.drawn().to_vec();
+        for want in [
+            "BRAVO",
+            "HIGHEST LEVEL",
+            "9",
+            "Ranked games",
+            "6",
+            "8",
+            "14",
+            "3.50",
+            "Member since 2026-10-10",
+            "Playlist 40",
+        ] {
+            assert!(drawn.iter().any(|d| d == want), "{want} in {drawn:?}");
+        }
+        let red = |c: &Canvas| c.px.contains(&0xFF_0000);
+        let green = |c: &Canvas| c.px.contains(&0x00_FF00);
+        assert!(!red(&c) && !green(&c));
+        a.cfg.ranks = Some(Arc::new(icons()));
+        let mut c = Canvas::new(1280, 720);
+        a.draw(&mut c, &mut text);
+        // The highest level big, and each row's level small.
+        assert!(red(&c) && green(&c));
+        assert!(!a.drawn().iter().any(|d| d == "8"));
+        // The highest level's icon goes where the layout puts it.
+        assert_eq!(c.px[230 * 1280 + 126], 0xFF_0000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn levels_dates_and_kills_per_death() {
+        assert_eq!(kd(0, 0), "-");
+        assert_eq!(kd(3, 0), "3.00");
+        assert_eq!(kd(7, 2), "3.50");
+        assert_eq!(kd(0, 4), "0.00");
+        assert_eq!(utc_date(0), "1970-01-01");
+        assert_eq!(utc_date(1_791_633_600), "2026-10-10");
+        assert_eq!(utc_date(951_868_799), "2000-02-29");
+        assert_eq!(follow(&[1, 2, 3], Some(3), 0), 2);
+        assert_eq!(follow(&[1, 2], Some(9), 5), 1);
+        assert_eq!(follow(&[], Some(9), 5), 0);
+    }
+
+    #[test]
+    fn x_on_a_friend_who_cant_be_joined_says_why() {
+        let dir = scratch("cant-join");
+        let (mut a, mut server) = live_app(&dir);
+        view(&mut a).party = Some(party(500, Activity::Lobby));
+        let dan = friend(14, "Dan", Relation::Friend, Online::Launcher);
+        view(&mut a).friends = vec![
+            dan,
+            friend(11, "BOB", Relation::Friend, Online::Offline),
+            friend(13, "CAT", Relation::Friend, Online::Game),
+        ];
+        view(&mut a).online = vec![OnlinePlayer {
+            account: 14,
+            gamertag: "Dan".into(),
+            look: Default::default(),
+            best: 2,
+            activity: Activity::Lobby,
+            party: 114,
+            open: false,
+            size: 1,
+            openings: 0,
+        }];
+        a.input(Input::Rb);
+        a.tick(a.now);
+        let last = |a: &App| a.toasts.back().map(|(t, _)| t.clone());
+        assert!(a.pick("DAN"));
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS INVITE ONLY"));
+        view(&mut a).online[0].open = true;
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS FULL"));
+        view(&mut a).online[0].openings = 3;
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY CAN'T BE JOINED"));
+        view(&mut a).friends[0].activity = Activity::Playing;
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS IN A MATCH"));
+        view(&mut a).friends[0].party = 500;
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("DAN IS ALREADY IN YOUR PARTY"));
+        assert!(a.pick("BOB"));
+        a.input(Input::X);
+        assert_eq!(last(&a).as_deref(), Some("BOB IS OFFLINE"));
+        assert!(a.pick("CAT"));
+        a.input(Input::X);
+        assert_eq!(
+            last(&a).as_deref(),
+            Some("CAT IS ON ANOTHER VERSION OF THE GAME")
+        );
+        assert_eq!(a.label(), "friends");
+        assert!(sent(&mut server).is_empty());
+        // A join the server turns down (the flag was a second old) is told
+        // too: its notice is a toast like any other.
+        view(&mut a).friends[0].joinable = true;
+        assert!(a.pick("DAN"));
+        a.input(Input::X);
+        assert_eq!(sent(&mut server), [ToServer::JoinParty(500)]);
+        a.on_event(LiveEvent::Notice("THAT PARTY IS INVITE ONLY".into()));
+        assert_eq!(last(&a).as_deref(), Some("THAT PARTY IS INVITE ONLY"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_party_panel_shows_levels_in_the_playlist_selected() {
+        let dir = scratch("panel-levels");
+        let (mut a, mut server) = live_app(&dir);
+        let playlist = |id: u8, name: &str, ranked: bool, level: u8| PlaylistInfo {
+            id,
+            key: name.to_lowercase(),
+            name: name.into(),
+            ranked,
+            teams: false,
+            guests: false,
+            min: 2,
+            max: 8,
+            party_max: 8,
+            searching: 0,
+            playing: 0,
+            level,
+            maps: Vec::new(),
+        };
+        view(&mut a).playlists = vec![
+            playlist(11, "Head to Head", true, 3),
+            playlist(12, "Rumble Pit", true, 1),
+            playlist(13, "Social", false, 0),
+        ];
+        // The party last played Head to Head: PARTY gives each member's
+        // level there (BRAVO's 2).
+        let mut pt = party(500, Activity::Lobby);
+        pt.members.push(PartyMember {
+            account: 2,
+            gamertag: "BRAVO".into(),
+            look: Default::default(),
+            best: 2,
+            level: 2,
+            guests: 0,
+        });
+        view(&mut a).party = Some(pt.clone());
+        let levels = |a: &App| {
+            let pt = a.party().unwrap();
+            (
+                a.member_level(pt, &pt.members[0]),
+                a.member_level(pt, &pt.members[1]),
+            )
+        };
+        a.tick(a.now);
+        assert_eq!(levels(&a), (3, 2));
+        assert!(sent(&mut server).is_empty());
+        // Rumble Pit: ours from the playlists, BRAVO's from his service
+        // record, asked for once; "-" until it comes.
+        a.input(Input::Down);
+        a.tick(a.now);
+        assert_eq!(levels(&a), (1, 0));
+        assert_eq!(sent(&mut server), [ToServer::Record(2)]);
+        a.tick(a.now);
+        assert!(sent(&mut server).is_empty());
+        let row = h2net::live::PlaylistRecord {
+            playlist: 11,
+            level: 2,
+            games: 4,
+            wins: 3,
+            tally: Default::default(),
+        };
+        a.on_event(LiveEvent::ServiceRecord(ServiceRecord {
+            account: 2,
+            found: Some(h2net::live::Record {
+                gamertag: "BRAVO".into(),
+                look: Default::default(),
+                best: 2,
+                created: 0,
+                playlists: vec![row],
+            }),
+        }));
+        // He hasn't played Rumble Pit: level 1 there, not his 2.
+        assert_eq!(levels(&a), (1, 1));
+        // Unranked, and the custom game row: the highest levels.
+        a.input(Input::Down);
+        assert_eq!(levels(&a), (3, 2));
+        a.input(Input::Down);
+        assert_eq!(levels(&a), (3, 2));
+        a.tick(a.now);
+        assert!(sent(&mut server).is_empty());
+        // Searching, the playlist searched.
+        let mut searching = pt;
+        searching.activity = Activity::Searching;
+        searching.playlist = 12;
+        searching.members[1].level = 1;
+        view(&mut a).party = Some(searching);
+        assert_eq!(levels(&a), (1, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_party_and_custom_screens_agree_with_the_panel() {
+        let dir = scratch("panel-screens");
+        let (mut a, mut server) = live_app(&dir);
+        let rumble = PlaylistInfo {
+            id: 12,
+            key: "rumble".into(),
+            name: "Rumble Pit".into(),
+            ranked: true,
+            teams: false,
+            guests: false,
+            min: 2,
+            max: 8,
+            party_max: 8,
+            searching: 0,
+            playing: 0,
+            level: 1,
+            maps: Vec::new(),
+        };
+        let mut h2h = rumble.clone();
+        (h2h.id, h2h.key, h2h.name, h2h.level) = (11, "h2h".into(), "Head to Head".into(), 3);
+        view(&mut a).playlists = vec![h2h, rumble];
+        // The party last played Head to Head, where BRAVO is level 2.
+        let mut pt = party(500, Activity::Lobby);
+        pt.members.push(PartyMember {
+            account: 2,
+            gamertag: "BRAVO".into(),
+            look: Default::default(),
+            best: 2,
+            level: 2,
+            guests: 0,
+        });
+        view(&mut a).party = Some(pt);
+        let bravo = |a: &App| {
+            let pt = a.party().unwrap();
+            a.member_level(pt, &pt.members[1])
+        };
+        // Rumble Pit selected, then the party screen (Y): his record is
+        // asked for there too, and until it comes he shows "-" as in the
+        // panel, not PARTY's 2 from Head to Head.
+        a.input(Input::Down);
+        a.input(Input::Y);
+        assert_eq!(a.label(), "party");
+        a.tick(a.now);
+        assert_eq!(sent(&mut server), [ToServer::Record(2)]);
+        assert_eq!(bravo(&a), 0);
+        if let Ok(mut text) = Text::system() {
+            let mut c = Canvas::new(1280, 720);
+            a.draw(&mut c, &mut text);
+            assert!(a.drawn().iter().any(|d| d == "-"));
+            assert!(!a.drawn().iter().any(|d| d == "2"));
+        }
+        // The custom game screen shows the highest levels whatever row was
+        // selected before it (a member made leader after a custom game
+        // comes back to it from the carnage report), and asks nothing.
+        a.screen = Screen::Custom;
+        a.tick(a.now);
+        assert_eq!(a.label(), "custom");
+        assert_eq!(bravo(&a), 2);
+        assert!(sent(&mut server).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notices_are_drawn_above_popups() {
+        // Clear of every popup's box (the lowest ends at 520) and of the
+        // button hints along the bottom (from about 656).
+        assert!(toast_top(2) >= 520.0);
+        assert!(toast_top(0) + TOAST_H <= 656.0);
+        let Ok(mut text) = Text::system() else {
+            return;
+        };
+        let dir = scratch("toasts");
+        let mut a = app(&dir);
+        for n in ["ONE", "TWO", "THREE"] {
+            a.toast(n.into());
+        }
+        a.popup = Some(Popup::Quit);
+        let mut c = Canvas::new(1280, 720);
+        a.draw(&mut c, &mut text);
+        // Each notice's top edge is drawn at full brightness: not under
+        // the popup's shade.
+        for k in 0..3 {
+            let y = toast_top(k) as usize;
+            assert_eq!(c.px[y * 1280 + 640], 0x9F_D0FF, "notice {k}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

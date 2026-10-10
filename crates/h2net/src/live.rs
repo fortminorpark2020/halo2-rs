@@ -22,9 +22,11 @@
 //! (`LoginClient`); the server takes it whatever the game's `PROTOCOL`
 //! is, so a new game version never locks launchers out. The messages the
 //! game sends and is sent are the same as ever (so `PROTOCOL` stays as it
-//! was); the launcher's own ones (LAUNCHER_MATCH, JOINED, LAUNCHER_RESULT
-//! and LAUNCHER_CUSTOM) are versioned by `LIVE_PROTOCOL` and only ever go
-//! to and from launchers.
+//! was); the launcher's own ones (LAUNCHER_MATCH, JOINED, LAUNCHER_RESULT,
+//! LAUNCHER_CUSTOM, RECORD and SERVICE_RECORD, and the friends messages)
+//! are versioned by `LIVE_PROTOCOL` and only ever go to and from
+//! launchers. The game reads a kind it doesn't know as bad data and drops
+//! the link, so the server never sends it one of those.
 
 use crate::conn::Connection;
 use crate::PROTOCOL;
@@ -41,8 +43,10 @@ pub const MAGIC_V2: u32 = u32::from_le_bytes(*b"H2L2");
 /// The online service's own version, separate from the game's `PROTOCOL`:
 /// bump it whenever a versioned LOGIN or a launcher's messages change. The
 /// server takes launchers at this version only, whatever the game's
-/// `PROTOCOL`. (2: LAUNCHER_CUSTOM.)
-pub const LIVE_PROTOCOL: u32 = 2;
+/// `PROTOCOL`. (2: LAUNCHER_CUSTOM. 3: kills, assists, betrayals and
+/// suicides in LAUNCHER_RESULT; RECORD and SERVICE_RECORD; the friends
+/// messages.)
+pub const LIVE_PROTOCOL: u32 = 3;
 /// The kinds of program a versioned LOGIN can say it is, as a byte.
 pub const CLIENT_VIEWER: u8 = 0;
 pub const CLIENT_LAUNCHER: u8 = 1;
@@ -100,6 +104,51 @@ const SAME_PCS: u8 = 255;
 const MAX_ONLINE: usize = 2000;
 /// The bytes of a map file its hash covers.
 const HASHED: u64 = 2048;
+/// Most friends a player has, the friend requests they sent counted in
+/// (Xbox Live 1.0 kept 100).
+pub const MAX_FRIENDS: usize = 100;
+/// Most friend requests waiting for a player's answer.
+pub const MAX_FRIEND_REQUESTS: usize = 100;
+/// Most entries a FRIENDS list holds: friends and requests either way. At
+/// its largest, with every name at `MAX_NAME`, it is under 32 KB, half of
+/// `MAX_MESSAGE`.
+pub const MAX_FRIEND_ENTRIES: usize = MAX_FRIENDS + MAX_FRIEND_REQUESTS;
+/// Most playlists a SERVICE_RECORD lists.
+pub const MAX_RECORD_PLAYLISTS: usize = 64;
+
+/// What a launcher is told about friends (NOTICE). `{X}` stands for a
+/// gamertag, as the server has it: `friend_notice` puts it in, and
+/// `is_friend_notice` tells these apart from every other notice.
+pub const FRIEND_ASKED: &str = "FRIEND REQUEST SENT TO {X}";
+pub const NO_SUCH_PLAYER: &str = "NO SUCH PLAYER";
+pub const NOT_YOURSELF: &str = "YOU CAN'T ADD YOURSELF";
+pub const ALREADY_FRIENDS: &str = "{X} IS ALREADY YOUR FRIEND";
+pub const ALREADY_ASKED: &str = "YOU ALREADY SENT {X} A FRIEND REQUEST";
+/// To the one asking, or the one accepting.
+pub const LIST_FULL: &str = "YOUR FRIENDS LIST IS FULL";
+pub const TOO_MANY_REQUESTS: &str = "{X} HAS TOO MANY FRIEND REQUESTS";
+/// To the one asked, if signed in on a launcher.
+pub const ASKED_YOU: &str = "{X} SENT YOU A FRIEND REQUEST";
+/// To the one who asked, when the other accepts.
+pub const ACCEPTED: &str = "{X} ACCEPTED YOUR FRIEND REQUEST";
+/// To both, when each asked the other.
+pub const NOW_FRIENDS: &str = "YOU AND {X} ARE NOW FRIENDS";
+/// Too many friend actions in a minute.
+pub const SLOW_DOWN: &str = "SLOW DOWN. TRY AGAIN IN A MINUTE.";
+/// Every friend notice.
+pub const FRIEND_NOTICES: [&str; 11] = [
+    FRIEND_ASKED,
+    NO_SUCH_PLAYER,
+    NOT_YOURSELF,
+    ALREADY_FRIENDS,
+    ALREADY_ASKED,
+    LIST_FULL,
+    TOO_MANY_REQUESTS,
+    ASKED_YOU,
+    ACCEPTED,
+    NOW_FRIENDS,
+    SLOW_DOWN,
+];
 
 /// Message kinds.
 pub mod kind {
@@ -133,6 +182,13 @@ pub mod kind {
     pub const LAUNCHER_RESULT: u8 = 35;
     /// A launcher's party leader: play a custom game.
     pub const LAUNCHER_CUSTOM: u8 = 36;
+    /// A launcher's: send me this account's service record.
+    pub const RECORD: u8 = 37;
+    /// A launcher's friends list.
+    pub const FRIEND_REQUEST: u8 = 50;
+    pub const FRIEND_ACCEPT: u8 = 51;
+    pub const FRIEND_DECLINE: u8 = 52;
+    pub const FRIEND_REMOVE: u8 = 53;
     // PC to server, first on a relay leg.
     pub const LINK_HELLO: u8 = 40;
     // Host to server, on its fan-out leg once linked.
@@ -155,6 +211,10 @@ pub mod kind {
     pub const CUSTOM_OPEN: u8 = 115;
     /// To a launcher: a match is ready, and how to reach it on the relay.
     pub const LAUNCHER_MATCH: u8 = 116;
+    /// To a launcher: a player's service record (an answer to RECORD).
+    pub const SERVICE_RECORD: u8 = 117;
+    /// To a launcher: its whole friends list.
+    pub const FRIENDS: u8 = 118;
     // Server to PC, on a relay leg once its other end is there.
     pub const LINKED: u8 = 41;
 }
@@ -225,6 +285,18 @@ pub enum ToServer {
         map: String,
         variant: String,
     },
+    /// A launcher: send me this account's service record
+    /// (SERVICE_RECORD).
+    Record(u64),
+    /// A launcher: ask the player with this gamertag (any case) to be
+    /// friends.
+    FriendRequest(String),
+    /// A launcher: answer the friend request from this account.
+    FriendAccept(u64),
+    FriendDecline(u64),
+    /// A launcher: stop being friends with this account, or take back the
+    /// request we sent it.
+    FriendRemove(u64),
     /// First on a relay leg: which leg this is.
     LinkHello {
         token: [u8; 16],
@@ -284,6 +356,10 @@ pub enum ToPc {
     /// To a launcher: a match is ready (in place of MATCH). It comes again,
     /// with another host, if the one asked didn't start hosting.
     LauncherMatch(LauncherMatch),
+    /// To a launcher: a player's service record, as it asked (RECORD).
+    ServiceRecord(ServiceRecord),
+    /// To a launcher: its whole friends list, which replaces the last.
+    Friends(Vec<Friend>),
     Ping(u32),
     Pong(u32),
     /// On a relay leg: the other end is there, and what follows is theirs.
@@ -642,7 +718,8 @@ pub struct LauncherResult {
     pub players: Vec<LauncherPlayerResult>,
 }
 
-/// How one player finished a launcher's match.
+/// How one player finished a launcher's match. (The fields are in the
+/// wire's order.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LauncherPlayerResult {
     pub relay_id: u64,
@@ -651,9 +728,127 @@ pub struct LauncherPlayerResult {
     pub place: u8,
     pub score: i32,
     pub kills: u16,
+    pub assists: u16,
     pub deaths: u16,
+    /// Teammates they killed.
+    pub betrayals: u16,
+    pub suicides: u16,
     /// Quit before the end.
     pub left: bool,
+}
+
+/// What a player did in some games: in one, or every counted game of a
+/// playlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Tally {
+    pub kills: u32,
+    pub assists: u32,
+    pub deaths: u32,
+    pub betrayals: u32,
+    pub suicides: u32,
+}
+
+/// A player's service record (SERVICE_RECORD), or that there's no such
+/// player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceRecord {
+    /// The account asked about.
+    pub account: u64,
+    /// None if the server has no such account.
+    pub found: Option<Record>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Record {
+    pub gamertag: String,
+    pub look: Look,
+    /// Their highest level in any ranked playlist (1 if none).
+    pub best: u8,
+    /// When the account was made (Unix time).
+    pub created: u64,
+    /// The asker's program's ranked playlists they have played, in the
+    /// server's order.
+    pub playlists: Vec<PlaylistRecord>,
+}
+
+/// A player's record in one ranked playlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaylistRecord {
+    /// Its id, as PLAYLISTS names it.
+    pub playlist: u8,
+    pub level: u8,
+    pub games: u32,
+    pub wins: u32,
+    /// Over the games that counted.
+    pub tally: Tally,
+}
+
+/// How a player on a friends list stands to us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relation {
+    Friend = 0,
+    /// They sent us a friend request.
+    AskedUs = 1,
+    /// We sent them one.
+    WeAsked = 2,
+}
+
+/// Where a player on a friends list is signed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Online {
+    Offline = 0,
+    Launcher = 1,
+    /// The game (h2viewer).
+    Game = 2,
+}
+
+/// A player on a friends list (FRIENDS). Only a friend signed in on the
+/// launcher has the fields after `online` filled in; for everyone else
+/// they're 0 and empty. (A request shows only the gamertag and highest
+/// level, and a request's `online` is always `Offline`.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Friend {
+    pub account: u64,
+    pub gamertag: String,
+    pub relation: Relation,
+    /// Their highest level.
+    pub best: u8,
+    pub online: Online,
+    /// What their party is doing.
+    pub activity: Activity,
+    /// The playlist their party searches or plays (`QUICKMATCH` while
+    /// searching quickmatch; `CUSTOM_GAME`, the same number, while
+    /// `Activity::Playing` a launcher's custom game). A party back in its
+    /// lobby keeps the one it played last, so it means something only
+    /// while searching or playing.
+    pub playlist: u8,
+    /// In a match: its MCC map and game variant.
+    pub map: String,
+    pub variant: String,
+    pub party: u64,
+    /// We could join their party now (JOIN_PARTY), as of when the list was
+    /// made (a second ago at most).
+    pub joinable: bool,
+}
+
+/// A friend notice (see `FRIEND_ASKED`) with `gamertag` in it.
+pub fn friend_notice(notice: &str, gamertag: &str) -> String {
+    notice.replace("{X}", gamertag)
+}
+
+/// `text` is one of the friend notices (`FRIEND_NOTICES`), with whatever
+/// gamertag in it.
+pub fn is_friend_notice(text: &str) -> bool {
+    FRIEND_NOTICES
+        .iter()
+        .any(|notice| match notice.split_once("{X}") {
+            Some((before, after)) => {
+                text.len() > before.len() + after.len()
+                    && text.starts_with(before)
+                    && text.ends_with(after)
+            }
+            None => text == *notice,
+        })
 }
 
 /// What a PC signs to prove it holds `key`: a fixed text, the server's
@@ -1257,7 +1452,10 @@ impl LauncherResult {
             w.u8(p.place);
             w.u32(p.score as u32);
             w.u16(p.kills);
+            w.u16(p.assists);
             w.u16(p.deaths);
+            w.u16(p.betrayals);
+            w.u16(p.suicides);
             w.bool(p.left);
         }
     }
@@ -1277,7 +1475,10 @@ impl LauncherResult {
                     place: r.u8()?,
                     score: r.u32()? as i32,
                     kills: r.u16()?,
+                    assists: r.u16()?,
                     deaths: r.u16()?,
+                    betrayals: r.u16()?,
+                    suicides: r.u16()?,
                     left: read_bool(r)?,
                 })
             })
@@ -1287,6 +1488,130 @@ impl LauncherResult {
             finished,
             team_scores,
             players,
+        })
+    }
+}
+
+impl Tally {
+    fn write(&self, w: &mut Writer) {
+        w.u32(self.kills);
+        w.u32(self.assists);
+        w.u32(self.deaths);
+        w.u32(self.betrayals);
+        w.u32(self.suicides);
+    }
+
+    fn read(r: &mut Reader) -> Result<Tally, Malformed> {
+        Ok(Tally {
+            kills: r.u32()?,
+            assists: r.u32()?,
+            deaths: r.u32()?,
+            betrayals: r.u32()?,
+            suicides: r.u32()?,
+        })
+    }
+}
+
+impl ServiceRecord {
+    fn write(&self, w: &mut Writer) {
+        w.u64(self.account);
+        w.bool(self.found.is_some());
+        let Some(record) = &self.found else {
+            return;
+        };
+        w.str(&record.gamertag);
+        record.look.write(w);
+        w.u8(record.best);
+        w.u64(record.created);
+        let playlists = &record.playlists[..record.playlists.len().min(MAX_RECORD_PLAYLISTS)];
+        count(w, playlists.len());
+        for p in playlists {
+            w.u8(p.playlist);
+            w.u8(p.level);
+            w.u32(p.games);
+            w.u32(p.wins);
+            p.tally.write(w);
+        }
+    }
+
+    fn read(r: &mut Reader) -> Result<ServiceRecord, Malformed> {
+        let (account, found) = (r.u64()?, read_bool(r)?);
+        if !found {
+            return Ok(ServiceRecord {
+                account,
+                found: None,
+            });
+        }
+        let (gamertag, look) = (read_str(r, MAX_NAME)?, Look::read(r)?);
+        let (best, created) = (r.u8()?, r.u64()?);
+        let n = read_count(r, MAX_RECORD_PLAYLISTS)?;
+        let playlists = (0..n)
+            .map(|_| {
+                Ok(PlaylistRecord {
+                    playlist: r.u8()?,
+                    level: r.u8()?,
+                    games: r.u32()?,
+                    wins: r.u32()?,
+                    tally: Tally::read(r)?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let record = Record {
+            gamertag,
+            look,
+            best,
+            created,
+            playlists,
+        };
+        Ok(ServiceRecord {
+            account,
+            found: Some(record),
+        })
+    }
+}
+
+impl Friend {
+    fn write(&self, w: &mut Writer) {
+        w.u64(self.account);
+        w.str(&self.gamertag);
+        w.u8(self.relation as u8);
+        w.u8(self.best);
+        w.u8(self.online as u8);
+        w.u8(self.activity as u8);
+        w.u8(self.playlist);
+        w.str(&self.map);
+        w.str(&self.variant);
+        w.u64(self.party);
+        w.bool(self.joinable);
+    }
+
+    fn read(r: &mut Reader) -> Result<Friend, Malformed> {
+        let (account, gamertag) = (r.u64()?, read_str(r, MAX_NAME)?);
+        let relation = match r.u8()? {
+            0 => Relation::Friend,
+            1 => Relation::AskedUs,
+            2 => Relation::WeAsked,
+            _ => return Err(Malformed),
+        };
+        let best = r.u8()?;
+        let online = match r.u8()? {
+            0 => Online::Offline,
+            1 => Online::Launcher,
+            2 => Online::Game,
+            _ => return Err(Malformed),
+        };
+        Ok(Friend {
+            account,
+            gamertag,
+            relation,
+            best,
+            online,
+            activity: Activity::read(r)?,
+            playlist: r.u8()?,
+            map: read_str(r, MAX_NAME)?,
+            variant: read_str(r, MAX_NAME)?,
+            party: r.u64()?,
+            joinable: read_bool(r)?,
         })
     }
 }
@@ -1416,6 +1741,26 @@ impl ToServer {
                 w.str(variant);
                 kind::LAUNCHER_CUSTOM
             }
+            ToServer::Record(account) => {
+                w.u64(*account);
+                kind::RECORD
+            }
+            ToServer::FriendRequest(gamertag) => {
+                w.str(gamertag);
+                kind::FRIEND_REQUEST
+            }
+            ToServer::FriendAccept(account) => {
+                w.u64(*account);
+                kind::FRIEND_ACCEPT
+            }
+            ToServer::FriendDecline(account) => {
+                w.u64(*account);
+                kind::FRIEND_DECLINE
+            }
+            ToServer::FriendRemove(account) => {
+                w.u64(*account);
+                kind::FRIEND_REMOVE
+            }
             ToServer::LinkHello { token, account } => {
                 bytes(&mut w, token);
                 w.u64(*account);
@@ -1485,6 +1830,11 @@ impl ToServer {
                 map: read_str(r, MAX_NAME)?,
                 variant: read_str(r, MAX_NAME)?,
             },
+            kind::RECORD => ToServer::Record(r.u64()?),
+            kind::FRIEND_REQUEST => ToServer::FriendRequest(read_str(r, MAX_NAME)?),
+            kind::FRIEND_ACCEPT => ToServer::FriendAccept(r.u64()?),
+            kind::FRIEND_DECLINE => ToServer::FriendDecline(r.u64()?),
+            kind::FRIEND_REMOVE => ToServer::FriendRemove(r.u64()?),
             kind::LINK_HELLO => ToServer::LinkHello {
                 token: read_bytes(r)?,
                 account: r.u64()?,
@@ -1595,6 +1945,18 @@ impl ToPc {
                 m.write(&mut w);
                 kind::LAUNCHER_MATCH
             }
+            ToPc::ServiceRecord(record) => {
+                record.write(&mut w);
+                kind::SERVICE_RECORD
+            }
+            ToPc::Friends(friends) => {
+                let friends = &friends[..friends.len().min(MAX_FRIEND_ENTRIES)];
+                count(&mut w, friends.len());
+                for f in friends {
+                    f.write(&mut w);
+                }
+                kind::FRIENDS
+            }
             ToPc::Ping(n) => {
                 w.u32(*n);
                 kind::PING
@@ -1650,6 +2012,12 @@ impl ToPc {
                 map: read_str(r, MAX_NAME)?,
             },
             kind::LAUNCHER_MATCH => ToPc::LauncherMatch(LauncherMatch::read(r)?),
+            kind::SERVICE_RECORD => ToPc::ServiceRecord(ServiceRecord::read(r)?),
+            kind::FRIENDS => {
+                let n = read_count(r, MAX_FRIEND_ENTRIES)?;
+                let friends = (0..n).map(|_| Friend::read(r)).collect::<Result<_, _>>()?;
+                ToPc::Friends(friends)
+            }
             kind::PING => ToPc::Ping(r.u32()?),
             kind::PONG => ToPc::Pong(r.u32()?),
             kind::LINKED => ToPc::Linked,
@@ -1708,8 +2076,11 @@ mod tests {
             team: 1,
             place: 0,
             score: 50,
-            kills: 50,
+            kills: 52,
+            assists: 7,
             deaths: 12,
+            betrayals: 1,
+            suicides: 3,
             left: false,
         };
         LauncherResult {
@@ -1829,6 +2200,101 @@ mod tests {
                 to: Some(vec![21, 22]),
                 kind: 107,
                 body: Vec::new(),
+            },
+            ToServer::Record(22),
+            ToServer::FriendRequest("NOBLE SIX".into()),
+            ToServer::FriendAccept(23),
+            ToServer::FriendDecline(24),
+            ToServer::FriendRemove(25),
+        ]
+    }
+
+    fn service_record() -> ServiceRecord {
+        let tally = Tally {
+            kills: 1000,
+            assists: 200,
+            deaths: 900,
+            betrayals: 3,
+            suicides: 40,
+        };
+        let playlist = PlaylistRecord {
+            playlist: 11,
+            level: 17,
+            games: 60,
+            wins: 31,
+            tally,
+        };
+        ServiceRecord {
+            account: 0xfeed_0000_0000_0001,
+            found: Some(Record {
+                gamertag: "JORGE".into(),
+                look: look(4),
+                best: 17,
+                created: 1_791_000_000,
+                playlists: vec![
+                    playlist,
+                    PlaylistRecord {
+                        playlist: 12,
+                        level: 3,
+                        games: 2,
+                        wins: 0,
+                        tally: Tally::default(),
+                    },
+                ],
+            }),
+        }
+    }
+
+    /// A friends list with each relation and place to be signed in.
+    fn friends() -> Vec<Friend> {
+        let friend = Friend {
+            account: 30,
+            gamertag: "KAT".into(),
+            relation: Relation::Friend,
+            best: 12,
+            online: Online::Launcher,
+            activity: Activity::Playing,
+            playlist: 11,
+            map: "lockout".into(),
+            variant: "01_slayer".into(),
+            party: 31,
+            joinable: false,
+        };
+        let plain = Friend {
+            activity: Activity::Lobby,
+            playlist: 0,
+            map: String::new(),
+            variant: String::new(),
+            party: 0,
+            ..friend.clone()
+        };
+        vec![
+            Friend {
+                account: 32,
+                relation: Relation::AskedUs,
+                online: Online::Offline,
+                ..plain.clone()
+            },
+            friend.clone(),
+            Friend {
+                account: 33,
+                activity: Activity::Searching,
+                playlist: QUICKMATCH,
+                map: String::new(),
+                variant: String::new(),
+                joinable: true,
+                ..friend
+            },
+            Friend {
+                account: 34,
+                online: Online::Game,
+                ..plain.clone()
+            },
+            Friend {
+                account: 35,
+                relation: Relation::WeAsked,
+                online: Online::Offline,
+                ..plain
             },
         ]
     }
@@ -1962,6 +2428,12 @@ mod tests {
             ToPc::Ping(15),
             ToPc::Pong(16),
             ToPc::Linked,
+            ToPc::ServiceRecord(service_record()),
+            ToPc::ServiceRecord(ServiceRecord {
+                account: 17,
+                found: None,
+            }),
+            ToPc::Friends(friends()),
         ]
     }
 
@@ -1980,12 +2452,213 @@ mod tests {
             assert_eq!(ToPc::read(kind, &body).as_ref(), Ok(m), "{m:?}");
             kinds.push(kind);
         }
-        // Every kind once: pings and pongs once each way, and LOGIN twice
-        // (the game's and a launcher's).
-        assert_eq!(kinds.len(), 28 + 19);
+        // Every kind once: pings and pongs once each way, and LOGIN and
+        // SERVICE_RECORD twice (the game's and a launcher's; found and not).
+        assert_eq!(kinds.len(), 33 + 22);
         kinds.sort_unstable();
         kinds.dedup();
-        assert_eq!(kinds.len(), 28 + 19 - 2 - 1);
+        assert_eq!(kinds.len(), 33 + 22 - 2 - 1 - 1);
+    }
+
+    /// Every kind a PC sends the server, and every kind the server sends
+    /// a PC (PING and PONG go both ways).
+    const TO_SERVER: [u8; 32] = [
+        kind::LOGIN,
+        kind::PROVE,
+        kind::PING,
+        kind::PONG,
+        kind::PROFILE,
+        kind::INVITE,
+        kind::ACCEPT,
+        kind::DECLINE,
+        kind::JOIN_PARTY,
+        kind::LEAVE_PARTY,
+        kind::KICK,
+        kind::PROMOTE,
+        kind::PRIVACY,
+        kind::GUESTS,
+        kind::SEARCH,
+        kind::CANCEL,
+        kind::CUSTOM,
+        kind::CUSTOM_MAP,
+        kind::HOSTING,
+        kind::RESULT,
+        kind::LEFT_MATCH,
+        kind::BACK,
+        kind::JOINED,
+        kind::LAUNCHER_RESULT,
+        kind::LAUNCHER_CUSTOM,
+        kind::RECORD,
+        kind::FRIEND_REQUEST,
+        kind::FRIEND_ACCEPT,
+        kind::FRIEND_DECLINE,
+        kind::FRIEND_REMOVE,
+        kind::LINK_HELLO,
+        kind::FANOUT,
+    ];
+    const TO_PC: [u8; 21] = [
+        kind::CHALLENGE,
+        kind::WELCOME,
+        kind::REFUSED,
+        kind::PLAYLISTS,
+        kind::ONLINE,
+        kind::PARTY,
+        kind::INVITED,
+        kind::STATUS,
+        kind::MATCH,
+        kind::HOST_MATCH,
+        kind::LINK,
+        kind::GO,
+        kind::MATCH_OVER,
+        kind::NOTICE,
+        kind::CUSTOM_OPEN,
+        kind::LAUNCHER_MATCH,
+        kind::SERVICE_RECORD,
+        kind::FRIENDS,
+        kind::PING,
+        kind::PONG,
+        kind::LINKED,
+    ];
+
+    #[test]
+    fn no_two_kinds_one_way_share_a_number() {
+        assert_eq!(LIVE_PROTOCOL, 3);
+        let mut to_server = TO_SERVER.to_vec();
+        let mut to_pc = TO_PC.to_vec();
+        for kinds in [&mut to_server, &mut to_pc] {
+            let n = kinds.len();
+            kinds.sort_unstable();
+            kinds.dedup();
+            assert_eq!(kinds.len(), n, "{kinds:?}");
+        }
+        // And each message is written with a kind of its own way.
+        for m in every_message_to_the_server() {
+            assert!(to_server.contains(&m.write().0), "{m:?}");
+        }
+        for m in every_message_to_a_pc() {
+            assert!(to_pc.contains(&m.write().0), "{m:?}");
+        }
+        // Every kind is one some message has.
+        let written: Vec<u8> = every_message_to_the_server()
+            .iter()
+            .map(|m| m.write().0)
+            .collect();
+        assert!(to_server.iter().all(|k| written.contains(k)));
+        let written: Vec<u8> = every_message_to_a_pc()
+            .iter()
+            .map(|m| m.write().0)
+            .collect();
+        assert!(to_pc.iter().all(|k| written.contains(k)));
+    }
+
+    #[test]
+    fn friend_notices_are_told_apart() {
+        let asked = friend_notice(ASKED_YOU, "NOBLE SIX");
+        assert_eq!(asked, "NOBLE SIX SENT YOU A FRIEND REQUEST");
+        assert_eq!(
+            friend_notice(NOW_FRIENDS, "KAT"),
+            "YOU AND KAT ARE NOW FRIENDS"
+        );
+        for notice in FRIEND_NOTICES {
+            assert!(is_friend_notice(&friend_notice(notice, "JUN")), "{notice}");
+        }
+        assert!(is_friend_notice(&asked));
+        assert!(is_friend_notice(SLOW_DOWN));
+        for other in [
+            "THE PARTY IS FULL",
+            "CHARLIE DECLINED YOUR INVITE",
+            " SENT YOU A FRIEND REQUEST",
+            "FRIEND REQUEST SENT TO ",
+            "",
+        ] {
+            assert!(!is_friend_notice(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn friends_lists_and_service_records_have_their_limits() {
+        // 200 entries at most.
+        let most = vec![friends()[1].clone(); MAX_FRIEND_ENTRIES];
+        let (kind, mut body) = ToPc::Friends(most).write();
+        assert!(ToPc::read(kind, &body).is_ok());
+        let mut one = Writer::default();
+        friends()[1].write(&mut one);
+        body[0] += 1;
+        body.extend(&one.0);
+        assert!(ToPc::read(kind, &body).is_err());
+        // Written with its first 200, so a longer list reads back short.
+        let more = vec![friends()[1].clone(); MAX_FRIEND_ENTRIES + 1];
+        let (kind, body) = ToPc::Friends(more).write();
+        let Ok(ToPc::Friends(read)) = ToPc::read(kind, &body) else {
+            panic!("not read");
+        };
+        assert_eq!(read.len(), MAX_FRIEND_ENTRIES);
+        // The longest list the server sends: 100 friends and requests sent,
+        // and 100 requests waiting, every name as long as it can be.
+        let name = "N".repeat(MAX_NAME);
+        let full = Friend {
+            gamertag: name.clone(),
+            map: name.clone(),
+            variant: name.clone(),
+            ..friends()[1].clone()
+        };
+        let request = Friend {
+            gamertag: name,
+            ..friends()[0].clone()
+        };
+        let mut longest = vec![full; MAX_FRIENDS];
+        longest.extend(vec![request; MAX_FRIEND_REQUESTS]);
+        let (_, body) = ToPc::Friends(longest).write();
+        assert!(
+            body.len() < 32 << 10 && body.len() < MAX_MESSAGE / 2,
+            "{}",
+            body.len()
+        );
+        // Relation, online and activity past their last.
+        let entry = |f: &Friend| {
+            let mut w = Writer::default();
+            w.u8(1);
+            f.write(&mut w);
+            w.0
+        };
+        let f = &friends()[1];
+        // account, gamertag: then relation, best, online, activity.
+        let at = 1 + 8 + 2 + f.gamertag.len();
+        for (offset, value) in [(0, 3), (2, 3), (3, 4)] {
+            let mut body = entry(f);
+            assert!(ToPc::read(kind::FRIENDS, &body).is_ok());
+            body[at + offset] = value;
+            assert!(ToPc::read(kind::FRIENDS, &body).is_err(), "{offset}");
+        }
+        // A record of 65 playlists.
+        let mut record = service_record();
+        let mut found = record.found.take().unwrap();
+        found.playlists = vec![found.playlists[0]; MAX_RECORD_PLAYLISTS];
+        record.found = Some(found);
+        let (kind, mut body) = ToPc::ServiceRecord(record.clone()).write();
+        assert!(ToPc::read(kind, &body).is_ok());
+        // Each playlist is 30 bytes; its count comes before them.
+        let at = body.len() - 30 * MAX_RECORD_PLAYLISTS - 1;
+        body[at] += 1;
+        let first = body[at + 1..at + 31].to_vec();
+        body.extend(first);
+        assert!(ToPc::read(kind, &body).is_err());
+        // Not found, with something after it.
+        let (kind, mut body) = ToPc::ServiceRecord(ServiceRecord {
+            account: 1,
+            found: None,
+        })
+        .write();
+        assert_eq!(body.len(), 9);
+        body.push(0);
+        assert!(ToPc::read(kind, &body).is_err());
+        // Found is a 0 or a 1.
+        let (kind, mut body) = ToPc::ServiceRecord(record).write();
+        body[8] = 2;
+        assert!(ToPc::read(kind, &body).is_err());
+        // A gamertag asked for that's longer than any name.
+        let (kind, body) = ToServer::FriendRequest("X".repeat(MAX_NAME + 1)).write();
+        assert!(ToServer::read(kind, &body).is_err());
     }
 
     #[test]
@@ -2163,6 +2836,17 @@ mod tests {
         assert_eq!(login_header(&w.0), Some(newer));
         assert!(ToServer::read(kind::LOGIN, &w.0).is_err());
         assert_eq!(login_header(&w.0[..8]), None);
+        // A launcher at version 2 (before this one) is told apart too, and
+        // not read.
+        let (_, body) = ToServer::Login(launcher_login()).write();
+        let mut older = body.clone();
+        older[4..8].copy_from_slice(&2u32.to_le_bytes());
+        let v2 = LoginHeader::Versioned {
+            live: 2,
+            client: CLIENT_LAUNCHER,
+        };
+        assert_eq!(login_header(&older), Some(v2));
+        assert!(ToServer::read(kind::LOGIN, &older).is_err());
     }
 
     #[test]

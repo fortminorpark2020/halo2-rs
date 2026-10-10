@@ -1,5 +1,6 @@
 //! The lobby's window: winit for the window, keyboard and mouse, softbuffer
-//! to show the picture `App` draws, and gilrs for Xbox controllers.
+//! to show the picture `App` draws, and gilrs for Xbox controllers (the
+//! bumpers are LB and RB, as are Page Up and Page Down on the keyboard).
 
 use super::app::{App, Input};
 use super::canvas::{Canvas, Text};
@@ -112,6 +113,9 @@ impl Shell {
                         Button::East | Button::Select => Some(Input::B),
                         Button::West => Some(Input::X),
                         Button::North => Some(Input::Y),
+                        // gilrs calls the bumpers the triggers.
+                        Button::LeftTrigger => Some(Input::Lb),
+                        Button::RightTrigger => Some(Input::Rb),
                         Button::DPadUp => Some(Input::Up),
                         Button::DPadDown => Some(Input::Down),
                         Button::DPadLeft => Some(Input::Left),
@@ -177,6 +181,8 @@ impl ApplicationHandler for Shell {
                     Key::Named(NamedKey::ArrowDown) => Some(Input::Down),
                     Key::Named(NamedKey::ArrowLeft) => Some(Input::Left),
                     Key::Named(NamedKey::ArrowRight) => Some(Input::Right),
+                    Key::Named(NamedKey::PageUp) => Some(Input::Lb),
+                    Key::Named(NamedKey::PageDown) => Some(Input::Rb),
                     _ => None,
                 };
                 match i {

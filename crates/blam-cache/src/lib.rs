@@ -28,6 +28,9 @@ pub enum Error {
     BadMagic(&'static str),
     #[error("unsupported cache version {0} (expected 8)")]
     Version(i32),
+    /// A reader for another cache version (`mcc`) was given this one.
+    #[error("unsupported cache version {found} (expected {expected})")]
+    WrongVersion { found: i32, expected: i32 },
     #[error("corrupt map: {0}")]
     Corrupt(String),
 }
@@ -601,6 +604,15 @@ pub fn f32_at(b: &[u8], o: usize) -> f32 {
     f32::from_bits(u32_at(b, o))
 }
 
+/// The cache version from a map's first 8 bytes, or None when they don't
+/// start with `head` (8 is Halo 2 Vista's, 13 MCC's, read by `mcc`).
+pub fn cache_version(start: &[u8]) -> Option<i32> {
+    if start.len() < 8 || be_magic(start, 0) != HEAD_MAGIC {
+        return None;
+    }
+    Some(i32_at(start, 4))
+}
+
 /// Magic values are stored little-endian, so `head` appears on disk as `daeh`.
 fn be_magic(b: &[u8], o: usize) -> u32 {
     u32_at(b, o)
@@ -620,6 +632,7 @@ pub mod geometry;
 pub mod hud;
 pub mod lightmap;
 pub mod mapset;
+pub mod mcc;
 pub mod model;
 pub mod orders;
 pub mod pathfinding;

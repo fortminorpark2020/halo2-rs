@@ -12,8 +12,8 @@
 //! has loaded the map (it joined the host's game to get there), and
 //! LAUNCHER_RESULT when the engine ends the game (it hands its results to
 //! host slot 6 on every PC when the round ends; `crate::results` reads each
-//! player's team, standing, score and deaths from them), and LEFT_MATCH if
-//! the launcher closes before that.
+//! player's team, standing, score, kills, assists, deaths, betrayals and
+//! suicides from them), and LEFT_MATCH if the launcher closes before that.
 
 use crate::session::{Player, Session};
 use h2live::client::{LiveClient, LiveEvent, Profile};
@@ -355,7 +355,8 @@ pub enum Engine {
 /// How an engine event is written on the standard output with
 /// `--events`, for the lobby that started this launcher: `H2EVENT running`,
 /// `maploaded`, `closing`, or `ended` and then each player as
-/// `<relay id>,<team>,<place>,<score>,<kills>,<deaths>,<left>`.
+/// `<relay id>,<team>,<place>,<score>,<kills>,<assists>,<deaths>,<betrayals>,<suicides>,<left>`
+/// (LAUNCHER_RESULT's order).
 pub fn event_line(e: &Engine) -> String {
     match e {
         Engine::Running => format!("{EVENT} running"),
@@ -365,13 +366,16 @@ pub fn event_line(e: &Engine) -> String {
             let mut line = format!("{EVENT} ended");
             for p in players {
                 line += &format!(
-                    " {:x},{},{},{},{},{},{}",
+                    " {:x},{},{},{},{},{},{},{},{},{}",
                     p.relay_id,
                     p.team,
                     p.place,
                     p.score,
                     p.kills,
+                    p.assists,
                     p.deaths,
+                    p.betrayals,
+                    p.suicides,
                     u8::from(p.left)
                 );
             }
@@ -384,7 +388,8 @@ pub fn event_line(e: &Engine) -> String {
 pub const EVENT: &str = "H2EVENT";
 
 /// Reads a line `event_line` wrote; `None` for any other line (the log
-/// goes to the same output).
+/// goes to the same output). The lobby and the engine's copy are the same
+/// build, so only the 10-field form is read.
 pub fn parse_event_line(line: &str) -> Option<Engine> {
     let mut words = line.split_whitespace();
     if words.next()? != EVENT {
@@ -398,7 +403,9 @@ pub fn parse_event_line(line: &str) -> Option<Engine> {
             let mut players = Vec::new();
             for w in words.by_ref() {
                 let f: Vec<&str> = w.split(',').collect();
-                let [id, team, place, score, kills, deaths, left] = f[..] else {
+                let [id, team, place, score, kills, assists, deaths, betrayals, suicides, left] =
+                    f[..]
+                else {
                     return None;
                 };
                 players.push(LauncherPlayerResult {
@@ -407,7 +414,10 @@ pub fn parse_event_line(line: &str) -> Option<Engine> {
                     place: place.parse().ok()?,
                     score: score.parse().ok()?,
                     kills: kills.parse().ok()?,
+                    assists: assists.parse().ok()?,
                     deaths: deaths.parse().ok()?,
+                    betrayals: betrayals.parse().ok()?,
+                    suicides: suicides.parse().ok()?,
                     left: left == "1",
                 });
             }
@@ -797,7 +807,10 @@ mod tests {
             place: 2,
             score,
             kills: 3,
+            assists: 5,
             deaths: 4,
+            betrayals: 6,
+            suicides: 7,
             left,
         };
         let ended = Engine::Ended(vec![player(0xB5A9, -2, false), player(0x5977, 7, true)]);
@@ -808,7 +821,7 @@ mod tests {
         }
         assert_eq!(
             event_line(&Engine::Ended(vec![player(0xB5A9, -2, false)])),
-            "H2EVENT ended b5a9,1,2,-2,3,4,0"
+            "H2EVENT ended b5a9,1,2,-2,3,5,4,6,7,0"
         );
         assert_eq!(
             parse_event_line("H2EVENT ended"),
@@ -821,7 +834,11 @@ mod tests {
             "H2EVENT jumped",
             "H2EVENT running now",
             "H2EVENT ended b5a9,1,2",
-            "H2EVENT ended zz,1,2,3,4,5,0",
+            // The 7-field form of LIVE_PROTOCOL 2's launchers.
+            "H2EVENT ended b5a9,1,2,-2,3,4,0",
+            "H2EVENT ended b5a9,1,2,-2,3,5,4,6,7,0,1",
+            "H2EVENT ended zz,1,2,3,4,5,6,7,8,0",
+            "H2EVENT ended b5a9,1,2,-2,3,-5,4,6,7,0",
         ] {
             assert_eq!(parse_event_line(other), None, "{other:?}");
         }
@@ -836,7 +853,10 @@ mod tests {
             place: 0,
             score: 3,
             kills: 0,
+            assists: 0,
             deaths: 1,
+            betrayals: 0,
+            suicides: 0,
             left: false,
         };
         let out = t.next(7, true, None, Some(Engine::Ended(vec![player])));

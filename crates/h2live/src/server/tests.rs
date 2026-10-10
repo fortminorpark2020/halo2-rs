@@ -367,6 +367,35 @@ fn an_older_game_is_told_to_update() {
 }
 
 #[test]
+fn a_launcher_at_version_2_is_told_to_update() {
+    let mut w = World::new("live-v2");
+    let mut conn = w.raw(1);
+    // A LOGIN byte for byte as launchers at LIVE_PROTOCOL 2 wrote it.
+    let mut old = Writer::default();
+    old.u32(live::MAGIC_V2);
+    old.u32(2);
+    old.u8(live::CLIENT_LAUNCHER);
+    old.str("h2launch 0.1.0");
+    old.0.extend_from_slice(&key(1).verifying_key().to_bytes());
+    old.str("ALPHA");
+    Look::default().write(&mut old);
+    old.str("");
+    old.u16(1);
+    old.str("lockout");
+    old.u64(7);
+    old.u8(0);
+    conn.send(kind::LOGIN, &old.0);
+    conn.flush().unwrap();
+    w.step();
+    assert_eq!(
+        heard(&mut conn),
+        [ToPc::Refused(live::UPDATE_YOUR_LAUNCHER.into())]
+    );
+    assert_eq!(w.server.players_online(), 0);
+    assert_eq!(w.server.connections(), 0);
+}
+
+#[test]
 fn players_rename_themselves() {
     let mut w = World::new("rename");
     let a = w.sign_in(1, "Carter");
@@ -493,6 +522,7 @@ fn veteran(w: &mut World) -> Account {
         },
         games: 40,
         wins: 22,
+        tally: Default::default(),
     });
     store::save(&w.data.0.join("accounts.txt"), [&a]).unwrap();
     w.restart();
@@ -1061,7 +1091,10 @@ fn a_launcher_party_plays_custom_games() {
                 place: p.team,
                 score: 0,
                 kills: 0,
+                assists: 0,
                 deaths: 0,
+                betrayals: 0,
+                suicides: 0,
                 left: false,
             })
             .collect(),
@@ -1087,3 +1120,4 @@ fn a_launcher_party_plays_custom_games() {
 }
 
 mod matches;
+mod social;

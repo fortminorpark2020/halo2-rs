@@ -7,11 +7,16 @@
 //!
 //! ```text
 //! a <id> <public key> <gamertag> <look> <created> <seq>
-//! x <id> <playlist key> <xp> <level> <games> <wins>
+//! x <id> <playlist key> <xp> <level> <games> <wins> [<kills> <assists> <deaths> <betrayals> <suicides>]
 //! ```
 //!
 //! Ids, keys and looks are in hex, `created` is a Unix time, and `seq` goes
-//! up with every change to the account. Gamertags can hold spaces.
+//! up with every change to the account. Gamertags can hold spaces. The
+//! five numbers at the end of an `x` line are what the player did in the
+//! games that counted for them there (`Tally`); a line without them (as
+//! servers before them wrote every line) is all zeros, and a tally of
+//! zeros is written that way, so an account nothing has added to is
+//! written as it always was.
 //!
 //! `games.log` gets a line for every match, so levels can be worked out
 //! again if the rules ever change:
@@ -20,8 +25,14 @@
 //! <unix time> <match> <playlist key> <map> <game type> <counted> <player>...
 //! ```
 //!
+//! where a custom game, which has no playlist, gives `-` as its key, and
 //! with each player as
-//! `<id>:<team>:<place>:<left>:<old xp>:<new xp>:<old level>:<new level>`.
+//! `<id>:<team>:<place>:<left>:<old xp>:<new xp>:<old level>:<new level>`,
+//! followed by
+//! `:<score>:<kills>:<assists>:<deaths>:<betrayals>:<suicides>` when the
+//! host's result names them (a player it doesn't, or every player of a
+//! match whose host sent none, has the first 8 fields only). The game's
+//! results have no assists, betrayals or suicides: those are 0 there.
 //! `<counted>` is 1 if the match changed everyone's levels and 0 if it
 //! changed none. It's 2 if it counted only as a loss for its host, who
 //! quit: then the host is in place 1, having left, and everyone else in
@@ -60,6 +71,57 @@ pub struct Stats {
     pub rank: Rank,
     pub games: u32,
     pub wins: u32,
+    /// What they did in the games that counted for everyone.
+    pub tally: Tally,
+}
+
+/// What a player did in the games that counted for them in a playlist.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub kills: u32,
+    pub assists: u32,
+    pub deaths: u32,
+    pub betrayals: u32,
+    pub suicides: u32,
+}
+
+impl Tally {
+    /// Add `other` in (each number stopping at the largest a u32 holds).
+    pub fn add(&mut self, other: Tally) {
+        self.kills = self.kills.saturating_add(other.kills);
+        self.assists = self.assists.saturating_add(other.assists);
+        self.deaths = self.deaths.saturating_add(other.deaths);
+        self.betrayals = self.betrayals.saturating_add(other.betrayals);
+        self.suicides = self.suicides.saturating_add(other.suicides);
+    }
+
+    fn is_zero(&self) -> bool {
+        *self == Tally::default()
+    }
+}
+
+impl From<Tally> for h2net::live::Tally {
+    fn from(t: Tally) -> Self {
+        h2net::live::Tally {
+            kills: t.kills,
+            assists: t.assists,
+            deaths: t.deaths,
+            betrayals: t.betrayals,
+            suicides: t.suicides,
+        }
+    }
+}
+
+impl From<h2net::live::Tally> for Tally {
+    fn from(t: h2net::live::Tally) -> Self {
+        Tally {
+            kills: t.kills,
+            assists: t.assists,
+            deaths: t.deaths,
+            betrayals: t.betrayals,
+            suicides: t.suicides,
+        }
+    }
 }
 
 /// The account named by a public key: the first 8 bytes of its SHA-512.
@@ -98,9 +160,17 @@ impl Account {
         );
         for s in &self.stats {
             text += &format!(
-                "x {:016x} {} {} {} {} {}\n",
+                "x {:016x} {} {} {} {} {}",
                 self.id, s.playlist, s.rank.xp, s.rank.level, s.games, s.wins
             );
+            let t = &s.tally;
+            if !t.is_zero() {
+                text += &format!(
+                    " {} {} {} {} {}",
+                    t.kills, t.assists, t.deaths, t.betrayals, t.suicides
+                );
+            }
+            text += "\n";
         }
         text
     }
@@ -166,9 +236,25 @@ fn account_line(line: &str) -> Option<Account> {
     (named && account.id == account_id(&key)).then_some(account)
 }
 
-/// `x <id> <playlist key> <xp> <level> <games> <wins>`, after the `x `.
+/// `x <id> <playlist key> <xp> <level> <games> <wins>`, after the `x `,
+/// then the five numbers of its tally or none (all zeros).
 fn stats_line(line: &str) -> Option<(u64, Stats)> {
     let words: Vec<&str> = line.split(' ').collect();
+    let (words, tally) = match words.len() {
+        6 => (&words[..], Tally::default()),
+        11 => {
+            let n = |i: usize| words[i].parse::<u32>().ok();
+            let tally = Tally {
+                kills: n(6)?,
+                assists: n(7)?,
+                deaths: n(8)?,
+                betrayals: n(9)?,
+                suicides: n(10)?,
+            };
+            (&words[..6], tally)
+        }
+        _ => return None,
+    };
     let [id, playlist, xp, level, games, wins] = words[..] else {
         return None;
     };
@@ -185,6 +271,7 @@ fn stats_line(line: &str) -> Option<(u64, Stats)> {
         rank,
         games: games.parse().ok()?,
         wins: wins.parse().ok()?,
+        tally,
     };
     Some((id_from_hex(id)?, stats))
 }
@@ -267,7 +354,7 @@ pub struct GameRecord {
     /// When it ended (Unix time).
     pub unix: u64,
     pub id: u64,
-    /// The playlist's key.
+    /// The playlist's key (empty for a custom game).
     pub playlist: String,
     pub map: String,
     pub game_type: GameType,
@@ -296,6 +383,8 @@ pub struct RecordedPlayer {
     pub left: bool,
     pub old: Rank,
     pub new: Rank,
+    /// Their score and tally as the host's result says, if it names them.
+    pub result: Option<(i32, Tally)>,
 }
 
 impl GameRecord {
@@ -306,7 +395,13 @@ impl GameRecord {
             "{} {} {} {} {} {}",
             self.unix,
             self.id,
-            self.playlist,
+            // A custom game has no playlist: `-`, so the words still line
+            // up (no key has a `-`).
+            if self.playlist.is_empty() {
+                "-"
+            } else {
+                &self.playlist
+            },
             self.map,
             game_type.map_or("slayer", |(_, name)| name),
             self.counted as u8
@@ -323,6 +418,12 @@ impl GameRecord {
                 p.old.level,
                 p.new.level
             );
+            if let Some((score, t)) = p.result {
+                line += &format!(
+                    ":{score}:{}:{}:{}:{}:{}",
+                    t.kills, t.assists, t.deaths, t.betrayals, t.suicides
+                );
+            }
         }
         line
     }
@@ -382,12 +483,20 @@ mod tests {
             },
             games: 40,
             wins: 22,
+            tally: Tally {
+                kills: 300,
+                assists: 45,
+                deaths: 280,
+                betrayals: 2,
+                suicides: u32::MAX,
+            },
         });
         a.stats.push(Stats {
             playlist: "ffa".into(),
             rank: Rank::default(),
             games: 1,
             wins: 0,
+            tally: Tally::default(),
         });
         let b = account(2, "A  B");
         let text = a.lines() + &b.lines();
@@ -397,6 +506,60 @@ mod tests {
         assert!(a
             .lines()
             .starts_with(&format!("a {:016x} {} MASTER CHIEF ", a.id, hex(&a.key))));
+        // A tally of zeros is written as servers before tallies wrote every
+        // line, and one that isn't with its five numbers after.
+        let id = format!("{:016x}", a.id);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[1],
+            format!("x {id} double_team 1234 13 40 22 300 45 280 2 4294967295")
+        );
+        assert_eq!(lines[2], format!("x {id} ffa 0 1 1 0"));
+    }
+
+    #[test]
+    fn todays_accounts_files_read_as_they_are() {
+        // As every server before tallies wrote it, byte for byte.
+        let id = format!("{:016x}", account_id(&[1; 32]));
+        let text = format!(
+            "{}x {id} double_team 1234 13 40 22\n",
+            account(1, "KAT").lines()
+        );
+        let accounts = parse(&text).unwrap();
+        let stats = &accounts[0].stats[0];
+        assert_eq!((stats.games, stats.wins), (40, 22));
+        assert_eq!(stats.tally, Tally::default());
+        // Untouched, it's written back the same.
+        assert_eq!(accounts[0].lines(), text);
+    }
+
+    #[test]
+    fn tallies_add_up_and_stop_at_the_largest() {
+        let mut t = Tally {
+            kills: 1,
+            assists: 2,
+            deaths: 3,
+            betrayals: 4,
+            suicides: u32::MAX - 1,
+        };
+        t.add(Tally {
+            kills: 10,
+            assists: 20,
+            deaths: 30,
+            betrayals: 40,
+            suicides: 5,
+        });
+        let sum = Tally {
+            kills: 11,
+            assists: 22,
+            deaths: 33,
+            betrayals: 44,
+            suicides: u32::MAX,
+        };
+        assert_eq!(t, sum);
+        let wire = h2net::live::Tally::from(t);
+        assert_eq!((wire.kills, wire.suicides), (11, u32::MAX));
+        assert_eq!(Tally::from(wire), t);
     }
 
     #[test]
@@ -418,6 +581,30 @@ mod tests {
             format!("x {:016x} ffa 0 1 0 0\n", account_id(&[1; 32])),
             format!("{good}{good}"),
             format!("{good}hello\n"),
+            // Tallies of 1 to 4 numbers, or 6, or numbers that aren't.
+            format!("{good}x {:016x} ffa 0 1 0 0 1\n", account_id(&[1; 32])),
+            format!("{good}x {:016x} ffa 0 1 0 0 1 2\n", account_id(&[1; 32])),
+            format!("{good}x {:016x} ffa 0 1 0 0 1 2 3\n", account_id(&[1; 32])),
+            format!(
+                "{good}x {:016x} ffa 0 1 0 0 1 2 3 4\n",
+                account_id(&[1; 32])
+            ),
+            format!(
+                "{good}x {:016x} ffa 0 1 0 0 1 2 3 4 5 6\n",
+                account_id(&[1; 32])
+            ),
+            format!(
+                "{good}x {:016x} ffa 0 1 0 0 1 2 3 4 -5\n",
+                account_id(&[1; 32])
+            ),
+            format!(
+                "{good}x {:016x} ffa 0 1 0 0 1 2 3 4 4294967296\n",
+                account_id(&[1; 32])
+            ),
+            format!(
+                "{good}x {:016x} ffa 0 1 0 0 1 2 x 4 5\n",
+                account_id(&[1; 32])
+            ),
         ] {
             assert!(parse(&bad).is_err(), "{bad}");
         }
@@ -480,6 +667,16 @@ mod tests {
                     left: false,
                     old: rank(900, 10),
                     new: rank(978, 10),
+                    result: Some((
+                        -2,
+                        Tally {
+                            kills: 5,
+                            assists: 1,
+                            deaths: 9,
+                            betrayals: 1,
+                            suicides: 6,
+                        },
+                    )),
                 },
                 RecordedPlayer {
                     account: 0xcd,
@@ -488,6 +685,7 @@ mod tests {
                     left: true,
                     old: rank(0, 1),
                     new: rank(0, 1),
+                    result: None,
                 },
             ],
         };
@@ -506,9 +704,18 @@ mod tests {
         assert_eq!(
             lines[0],
             "1700000100 7 double_team lockout team_slayer 1 \
-             00000000000000ab:1:0:0:900:978:10:10 00000000000000cd:0:1:1:0:0:1:1"
+             00000000000000ab:1:0:0:900:978:10:10:-2:5:1:9:1:6 00000000000000cd:0:1:1:0:0:1:1"
         );
         assert!(lines[1].starts_with("1700000100 8 double_team lockout team_slayer 2 "));
+        // A custom game has no playlist key.
+        let custom = GameRecord {
+            playlist: String::new(),
+            counted: Counted::No,
+            ..game.clone()
+        };
+        assert!(custom
+            .line()
+            .starts_with("1700000100 7 - lockout team_slayer 0 "));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

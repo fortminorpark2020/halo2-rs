@@ -46,6 +46,14 @@
 //! match once its link to the server goes too (the relay can't say it saw
 //! it go).
 //!
+//! When a ranked match counts for everyone, each rated player's tally (kills,
+//! assists, deaths, betrayals and suicides) from the host's result is added
+//! to their record in its playlist: the host's word, as its places are (a
+//! joining PC whose counts differ doesn't dispute the game, since tallies
+//! never change a level). The game's results carry kills and deaths only.
+//! games.log keeps each player's score and tally as the host's result gave
+//! them, whether the match counted or not.
+//!
 //! A launcher party's leader starts custom games (LAUNCHER_CUSTOM) with an
 //! MCC variant from the launcher playlists and a map every member has that
 //! they play. Each is a match of its own, made here rather than by the
@@ -59,7 +67,7 @@ use super::{log, Server};
 use crate::card;
 use crate::levels::{self, Finish, Placed, Rank, MAX_LEVEL};
 use crate::matchmaker::{self, Event, Member, Seat, Ticket};
-use crate::store::{self, Counted, GameRecord, RecordedPlayer, Stats};
+use crate::store::{self, Counted, GameRecord, RecordedPlayer, Stats, Tally};
 use h2net::live::{
     Activity, ClientKind, LauncherMatch, LauncherPlayer, LauncherResult, MatchInfo, MatchOver,
     MatchPlayer, PlayerResult, RelaySeat, SearchStatus, Stage, ToPc, CUSTOM_GAME, QUICKMATCH,
@@ -124,9 +132,19 @@ pub(super) struct Launcher {
     variant: String,
     /// Its room on the relay.
     room: u64,
-    /// What each launcher's LAUNCHER_RESULT said beyond its players'
-    /// results: whether the game finished, and the team scores.
-    reports: Vec<(u64, bool, Vec<i32>)>,
+    /// What each launcher's LAUNCHER_RESULT said beyond what RESULT does.
+    reports: Vec<Report>,
+}
+
+/// A launcher's LAUNCHER_RESULT, beyond what RESULT says.
+struct Report {
+    /// The launcher that sent it.
+    from: u64,
+    /// The game finished as its variant says.
+    finished: bool,
+    team_scores: Vec<i32>,
+    /// Each player in the match it names (by account), with their score.
+    tallies: Vec<(u64, i32, Tally)>,
 }
 
 /// A match from the moment it formed until everyone hears how it went.
@@ -286,6 +304,17 @@ impl Server {
         for account in self.members_of(id) {
             self.tell(account, message);
         }
+    }
+
+    /// The MCC map and game variant of the launcher match `account` is in
+    /// and hasn't left, for their friends to see.
+    pub(super) fn playing(&self, account: u64) -> Option<(&str, &str)> {
+        let m = self
+            .matches
+            .iter()
+            .find(|m| m.has(account) && !m.gone(account))?;
+        let variant = m.launcher.as_ref().map_or("", |l| l.variant.as_str());
+        Some((m.info.map.as_str(), variant))
     }
 
     /// `account` is in a match that isn't over for it: about to start, or
@@ -672,9 +701,13 @@ impl Server {
         if m.started.is_none() || !m.has(me) || m.reported(me) || m.gone(me) {
             return;
         }
-        let players = result.players.iter().filter_map(|p| {
-            let seat = m.seats.iter().find(|s| relay_id(s.account) == p.relay_id)?;
-            Some(PlayerResult {
+        let mut players = Vec::new();
+        let mut tallies = Vec::new();
+        for p in &result.players {
+            let Some(seat) = m.seats.iter().find(|s| relay_id(s.account) == p.relay_id) else {
+                continue;
+            };
+            players.push(PlayerResult {
                 account: seat.account,
                 team: p.team,
                 place: p.place,
@@ -682,13 +715,24 @@ impl Server {
                 kills: p.kills,
                 deaths: p.deaths,
                 left: p.left,
-            })
-        });
-        m.results.push((me, players.collect()));
+            });
+            let tally = Tally {
+                kills: u32::from(p.kills),
+                assists: u32::from(p.assists),
+                deaths: u32::from(p.deaths),
+                betrayals: u32::from(p.betrayals),
+                suicides: u32::from(p.suicides),
+            };
+            tallies.push((seat.account, p.score, tally));
+        }
+        m.results.push((me, players));
         if let Some(launcher) = &mut m.launcher {
-            launcher
-                .reports
-                .push((me, result.finished, result.team_scores));
+            launcher.reports.push(Report {
+                from: me,
+                finished: result.finished,
+                team_scores: result.team_scores,
+                tallies,
+            });
         }
     }
 
@@ -873,11 +917,11 @@ impl Server {
         }
         let (id, host, teams) = (m.info.id, m.info.host, m.info.game_type.teams());
         // A launcher's host can say its game was cut short.
-        let host_report = m.launcher.as_ref().and_then(|l| {
-            let report = l.reports.iter().find(|r| r.0 == host);
-            report.map(|(_, finished, scores)| (*finished, scores.clone()))
-        });
-        let complete = host_report.as_ref().is_none_or(|r| r.0);
+        let host_report = m
+            .launcher
+            .as_ref()
+            .and_then(|l| l.reports.iter().find(|r| r.from == host));
+        let complete = host_report.is_none_or(|r| r.finished);
         let key = self
             .playlists
             .iter()
@@ -892,6 +936,31 @@ impl Server {
         // Who left the game in progress (the host too, if it quit).
         let left = |a: u64| m.left(a) || m.host_quit && a == host;
         let host_result = m.results.iter().find(|(a, _)| *a == host);
+        // Each player's score and tally, as the host's result says (the
+        // first it gives for them): a launcher's in full, the game's kills
+        // and deaths.
+        let mut tallies: Vec<(u64, i32, Tally)> = Vec::new();
+        let given = match (host_report, host_result) {
+            (Some(report), _) => report.tallies.clone(),
+            (None, Some((_, result))) => result
+                .iter()
+                .map(|r| {
+                    let tally = Tally {
+                        kills: u32::from(r.kills),
+                        deaths: u32::from(r.deaths),
+                        ..Tally::default()
+                    };
+                    (r.account, r.score, tally)
+                })
+                .collect(),
+            (None, None) => Vec::new(),
+        };
+        for (account, score, tally) in given {
+            if !tallies.iter().any(|t| t.0 == account) {
+                tallies.push((account, score, tally));
+            }
+        }
+        let tally_of = |a: u64| tallies.iter().find(|t| t.0 == a).map(|t| (t.1, t.2));
 
         // The players the game is worth something to, as they finished,
         // and the XP each won or lost.
@@ -1016,6 +1085,7 @@ impl Server {
                         rank: Rank::default(),
                         games: 0,
                         wins: 0,
+                        tally: Tally::default(),
                     });
                     a.stats.len() - 1
                 }
@@ -1025,6 +1095,10 @@ impl Server {
             stats.rank = old.after(change);
             stats.games += 1;
             stats.wins += u32::from(won);
+            // (A host's loss for quitting adds a game, but nothing it did.)
+            if let (Counted::Yes, Some((_, tally))) = (counted, tally_of(account)) {
+                stats.tally.add(tally);
+            }
             ranks.push((account, old, stats.rank));
             changed.push(a);
         }
@@ -1056,6 +1130,7 @@ impl Server {
                         left: left(s.account),
                         old,
                         new,
+                        result: tally_of(s.account),
                     }
                 })
                 .collect(),
@@ -1070,7 +1145,7 @@ impl Server {
                 if relay.is_some() {
                     self.closing_rooms.push((launcher.room, now + ROOM_GRACE));
                 }
-                let scores = host_report.map_or(Vec::new(), |r| r.1);
+                let scores = host_report.map_or(&[][..], |r| &r.team_scores[..]);
                 let scores: Vec<String> = scores.iter().map(i32::to_string).collect();
                 let closing = format!("its relay room closes in {ROOM_GRACE:.0} s");
                 match scores.len() {
@@ -1250,7 +1325,8 @@ impl Server {
         }
         let teams = game.game_type.teams();
         let players = members.iter().enumerate().map(|(i, &account)| {
-            let level = self.accounts.get(&account).map_or(1, |a| a.best_level());
+            let level = self.accounts.get(&account);
+            let level = level.map_or(1, |a| self.best_for(a, ClientKind::Launcher));
             Seat {
                 account,
                 party: id,
@@ -1260,6 +1336,7 @@ impl Server {
                 guests: 0,
             }
         });
+        let players = players.collect();
         let m = matchmaker::Match {
             id: self.matchmaker.custom(me, now),
             playlist: CUSTOM_GAME,
@@ -1269,7 +1346,7 @@ impl Server {
             variant: game,
             bots: 0,
             host: me,
-            players: players.collect(),
+            players,
         };
         log(format_args!("live: party {id} starts a custom game"));
         self.formed(m);

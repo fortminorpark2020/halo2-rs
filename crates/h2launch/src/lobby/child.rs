@@ -237,6 +237,12 @@ impl Drop for Running {
 /// The made-up results `--fake-engine` ends with: the same on every PC of
 /// the match, so the server counts them. Player `i` of `n` places `i`th
 /// with `n - i` points; on a team, everyone takes the team's best place.
+/// The counts are plausible, as Slayer's would be: the last player killed
+/// themselves once, each player's kills are their score plus their
+/// suicides, and each one's kills are the next player's deaths (the first
+/// player's land on the second, the last's on the first). Alone, no one
+/// is killed. (In a team game a "kill" may land on a teammate; it isn't
+/// called a betrayal, as only plausible numbers are needed.)
 pub fn fake_results(s: &Session) -> Vec<LauncherPlayerResult> {
     let n = s.players.len();
     let team_place = |team: i32| {
@@ -245,6 +251,15 @@ pub fn fake_results(s: &Session) -> Vec<LauncherPlayerResult> {
             .position(|p| p.team == team)
             .unwrap_or_default()
     };
+    let score = |i: usize| (n - i) as i32;
+    let suicides = |i: usize| u16::from(n >= 2 && i + 1 == n);
+    let kills = |i: usize| {
+        if n < 2 {
+            0
+        } else {
+            score(i) as u16 + suicides(i)
+        }
+    };
     s.players
         .iter()
         .enumerate()
@@ -252,9 +267,16 @@ pub fn fake_results(s: &Session) -> Vec<LauncherPlayerResult> {
             relay_id: p.xuid,
             team: p.team.clamp(0, 255) as u8,
             place: team_place(p.team).min(255) as u8,
-            score: (n - i) as i32,
-            kills: (n - i) as u16,
-            deaths: i as u16,
+            score: score(i),
+            kills: kills(i),
+            assists: if n < 2 { 0 } else { ((n - i) / 2) as u16 },
+            deaths: if n < 2 {
+                0
+            } else {
+                kills((i + n - 1) % n) + suicides(i)
+            },
+            betrayals: 0,
+            suicides: suicides(i),
             left: false,
         })
         .collect()
@@ -405,6 +427,45 @@ mod tests {
         let teams = fake_results(&session(&[1, 0, 1, 0]));
         let places: Vec<u8> = teams.iter().map(|r| r.place).collect();
         assert_eq!(places, [0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn fake_results_have_kills_that_add_up() {
+        for n in 1..=4 {
+            let teams: Vec<i32> = (0..n).collect();
+            let s = session(&teams);
+            let r = fake_results(&s);
+            assert_eq!(r.len(), n as usize);
+            // The same on every call (every PC).
+            assert_eq!(r, fake_results(&s));
+            let sum = |f: fn(&LauncherPlayerResult) -> u16| r.iter().map(f).sum::<u16>();
+            // Every kill and every suicide is someone's death.
+            assert_eq!(sum(|p| p.deaths), sum(|p| p.kills) + sum(|p| p.suicides));
+            for p in &r {
+                assert_eq!(p.betrayals, 0);
+            }
+            if n >= 2 {
+                // Slayer's sum: what the kills check would pass.
+                for p in &r {
+                    let kills = i32::from(p.kills);
+                    assert_eq!(kills, p.score + i32::from(p.suicides), "{n} players");
+                }
+                assert!(sum(|p| p.kills) > 0 && sum(|p| p.assists) > 0 && sum(|p| p.deaths) > 0);
+                assert_eq!(r[n as usize - 1].suicides, 1);
+            } else {
+                let p = r[0];
+                assert_eq!((p.kills, p.assists, p.deaths, p.suicides), (0, 0, 0, 0));
+            }
+        }
+        // Three players: kills 3, 2, 2 (the last killed themselves once),
+        // and each one's kills are the next one's deaths.
+        let r = fake_results(&session(&[0, 1, 2]));
+        let kills: Vec<u16> = r.iter().map(|p| p.kills).collect();
+        let deaths: Vec<u16> = r.iter().map(|p| p.deaths).collect();
+        let assists: Vec<u16> = r.iter().map(|p| p.assists).collect();
+        assert_eq!(kills, [3, 2, 2]);
+        assert_eq!(deaths, [2, 3, 3]);
+        assert_eq!(assists, [1, 1, 0]);
     }
 
     #[test]

@@ -9,3 +9,8 @@ description = "Reader for Halo 2 PC (Vista) .map cache files"
 thiserror = "1"
 flate2 = "1"
 wma = { path = "../wma" }
+
+[features]
+# `mcc::synthetic`: builds made-up format-13 maps and textures.dat files
+# for other crates' tests.
+synthetic = []

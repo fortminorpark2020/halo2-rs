@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 17:35 UTC. Any assistant that works on the project
+Last updated 2026-10-10 20:30 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -120,13 +120,16 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   The launcher playlists play MCC's own matchmaking variants, chosen from
   the `h2launch --variants` list; Team Snipers (opposite teams) and a
   three-player Rumble Pit worked (2026-10-10 06:30).
-- The Proxmox server (container 102) runs h2live from `launcher-lobby`
-  214ee4b since 2026-10-10 17:30 (`PROTOCOL` 26 for the Rust game,
-  `LIVE_PROTOCOL` 2 for launchers, so custom games work; rollback copy
-  `/opt/h2live/h2live.prev` is the 06:45 `launcher-live` edc64b8), with
-  the relay on UDP 47050. On the owner's PC, two lobbies played a custom
-  Team Slayer on Lockout (unranked) and a Head to Head match (counted)
-  through it (`--live 192.168.8.102`). Players outside his network need
+- The Proxmox server (container 102) runs h2live from `launcher-friends`
+  af23128 since 2026-10-10 20:30 (`PROTOCOL` 26 for the Rust game,
+  `LIVE_PROTOCOL` 3 for launchers: friends, service records, kills). The
+  rollback copies are `/opt/h2live/h2live.prev` (`launcher-lobby` 214ee4b,
+  protocol 2) and `/var/lib/h2live.v2-backup` (the data before: the new
+  server writes longer account lines the old one can't read, so a rollback
+  restores both). The relay is on UDP 47050. On the owner's PC, two lobbies
+  made friends, partied from the friends list, and played a custom Team
+  Slayer on Lockout (unranked) and a Head to Head match (counted) through
+  it (`--live 192.168.8.102`). Players outside his network need
   TCP and UDP 47050 forwarded to 192.168.8.102 in his router (his step;
   UPnP gets no answer). The binary goes over as a static musl build on a
   temporary orphan branch `deploy-h2live`, which can be deleted (the
@@ -160,8 +163,22 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   lobby's text is drawn in Halo 2's own fonts from MCC's `halo2\h2_fonts`
   (same format as Vista's; `blam_cache::font`, taken from `menu-preview`
   unchanged; scaled by capital height, digits from conduit; checked on
-  the owner's PC 08:30). Next:
-  kills in the results block, a play session by the owner, then two PCs.
+  the owner's PC 08:30).
+- `launcher-friends` (draft PR #5, on `launcher-lobby`; design in
+  `docs/notes/launcher/live-v3.md`) adds `LIVE_PROTOCOL` 3: kills,
+  assists and deaths on the carnage report, a service record screen (LB),
+  a friends list like Xbox Live 1.0's (RB: requests, accept, decline,
+  remove, status, invite, join), and Halo 2's rank icons next to every
+  level, read from MCC's own `mainmenu.map` and `textures.dat` (format 13,
+  `blam_cache::mcc`, `docs/notes/launcher/mcc-maps.md`) or a Halo 2 Vista
+  `mainmenu.map`, else numbers. Kills, assists and betrayals are read at
+  offsets inferred from their neighbours (`results.rs`); until a real game
+  with kills confirms them (`COUNTS_SEEN`), kills are sent only from
+  Slayer games that bear them out, assists as 0, and the carnage report
+  shows "-". Tested on Linux with three headless lobbies and on the
+  owner's PC with the real engine (2026-10-10 20:00 local server, 20:30
+  through Proxmox). Next: a real game with kills (to set `COUNTS_SEEN`),
+  a play session by the owner, two PCs, then clans.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.
