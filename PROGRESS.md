@@ -193,8 +193,11 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   keyboard table (0x42C) is filled with halo2.dll's own keys (as HaloX
   read them) plus MCC's; whether the engine reads it, and whether keys
   reach it at all (focus, AttachThreadInput), is the next PC check. The
-  checklist is "Controls" in `docs/notes/launcher/README.md`. Next: the
-  owner tries each layout in an offline match.
+  checklist is "Controls" in `docs/notes/launcher/README.md`. Tested on the
+  owner's PC with the real engine (2026-10-10 23:45): the pad works in
+  matches with Default and Bumper Jumper, the lobby's choice carries into
+  a lobby match, and his desktop build has it. The owner scoped the MVP to
+  the controller with those two layouts (keyboard and mouse later).
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.

@@ -92,10 +92,9 @@ pub struct ProfileSettings {
     pub volume: f32,
     /// Look inversion, the controller's (0x1D).
     pub look_inverted: bool,
-    /// The mouse's look inversion (0x1E). HaloX writes it and also flips
-    /// the mouse itself, and the launcher does the same
-    /// (`mouse_motion`); whether the engine flips it a second time is to
-    /// be checked on the PC.
+    /// The mouse's look inversion. The launcher flips the mouse itself
+    /// (`mouse_motion`), so 0x1E stays 0: on the owner's PC the engine
+    /// flipped it a second time when 0x1E was 1, undoing the inversion.
     pub mouse_inverted: bool,
     pub vibration: bool,
     /// Automatic look centering.
@@ -136,7 +135,8 @@ pub fn build_profile(s: &ProfileSettings) -> Vec<u8> {
     let f32_at =
         |p: &mut Vec<u8>, at: usize, v: f32| p[at..at + 4].copy_from_slice(&v.to_le_bytes());
     p[prof::LOOK_INVERTED] = s.look_inverted as u8;
-    p[prof::MOUSE_LOOK_INVERTED] = s.mouse_inverted as u8;
+    // Not `s.mouse_inverted`: the launcher already flips the mouse.
+    p[prof::MOUSE_LOOK_INVERTED] = 0;
     p[prof::VIBRATION_DISABLED] = (!s.vibration) as u8;
     p[prof::AUTO_CENTER] = s.auto_center as u8;
     p[prof::VERTICAL_LOOK_SENSITIVITY] = s.look_sensitivity;
@@ -464,10 +464,12 @@ mod tests {
             mouse_inverted: true,
             ..Default::default()
         });
+        assert!(mouse.mouse_inverted);
         let m = build_profile(&mouse);
+        // The launcher flips the mouse itself, so the engine's flag stays off.
         assert_eq!(
             (m[prof::LOOK_INVERTED], m[prof::MOUSE_LOOK_INVERTED]),
-            (0, 1)
+            (0, 0)
         );
         ps.key_bindings = false;
         let p = build_profile(&ps);

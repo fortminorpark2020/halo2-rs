@@ -822,7 +822,8 @@ pub struct Controls {
     pub vibration: bool,
     pub mouse_sensitivity: f32,
     /// The mouse's look inversion, kept apart from the controller's as MCC
-    /// keeps it (profile 0x1E, and the launcher flips the mouse itself).
+    /// keeps it; the launcher flips the mouse itself and profile 0x1E
+    /// stays 0 (the engine would flip it again).
     pub mouse_inverted: bool,
 }
 

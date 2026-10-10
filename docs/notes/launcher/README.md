@@ -324,8 +324,8 @@ its code (`crates/h2launch/src/controls.rs`):
 - **Keyboard and mouse, and the rest**: the profile (slot 34). Its table at
   0x42C gets 66 entries, entry *i* = action *i* and up to five Windows key
   codes (it was all zero before); look sensitivity goes to both 0x1B5 and
-  0x1B6, look inversion (the thumbstick's) to 0x1D, the mouse's own
-  inversion to 0x1E, automatic look centering to 0x23, vibration to 0x1F
+  0x1B6, look inversion (the thumbstick's) to 0x1D (0x1E, the mouse's,
+  stays 0; see below), automatic look centering to 0x23, vibration to 0x1F
   (and the launcher sends no rumble to the pad when it's off), mouse
   sensitivity to 0x410. `button_preset` (0x1C8), `lefty_toggle` (0x1CA)
   and `swap_triggers_and_bumpers` (0x1D7) stay 0 so the engine applies no
@@ -432,6 +432,28 @@ test. Whether keys reach the engine at all comes first: HaloX's findings
 point to the engine's own thread reading key state (the
 `AttachThreadInput` question) and to window focus.
 
+Checked on the owner's PC (2026-10-10, ed90716, real engine, scripted
+input and a read-only look at the player's biped):
+
+- Default and Bumper Jumper work in matches: jump, crouch, fire, reload,
+  melee, grenade, weapon switch, zoom and scores each land on their
+  button (Bumper Jumper: LB jumps, RB melees, B reloads). Swapping
+  grenades and the flashlight couldn't be seen in that test. A layout
+  picked on the lobby's CONTROLLER screen is saved and a match started
+  from the lobby uses it. The engine window came to the front in 0.2 s,
+  and AttachThreadInput succeeded on its second try.
+- Southpaw and Legacy sticks map as in the table; stick look inversion
+  works.
+- Look sensitivity: a full right stick for 0.5 s turns 60.8 degrees at 1,
+  74.3 at 3 and 121.6 at 10, so 1 to 10 is only about twice as fast.
+- Mouse sensitivity 0.8, 1.6 and 3.2 give 28.7, 57.3 and 114.6 degrees
+  per 100 counts. With 0x1E set the engine flipped the mouse a second
+  time, so 0x1E now stays 0 and only the launcher flips it.
+- The engine reads 0x42C: its own table (`kb0`) changes with ours, and
+  with `--no-key-bindings` W, Space, Left Ctrl and G do nothing. A
+  scripted left click didn't fire; not followed up (keyboard and mouse
+  are outside the owner's MVP).
+
 Not known yet, to check on the owner's PC:
 
 - Whether keys reach the engine at all: its window must be in front (the
@@ -449,11 +471,6 @@ Not known yet, to check on the owner's PC:
   ignores 0x42C: the engine may use the custom table only under some
   preset value (HaloX copies MCC's `KeyboardMouseButtonPreset` there).
   Pressing 1, 2, 4 and C (MCC's keys only) shows it in play.
-- Mouse inversion applied twice: with Mouse Inversion on, the mouse should
-  look down when pushed forward. If it doesn't, the engine also flips it
-  from 0x1E: run with `--set-profile 0x1E=u8:0` and say so.
-- Mouse sensitivity: 3.2 in Settings should turn twice as fast as 1.6 on
-  foot.
 - Whether MCC's look sensitivity byte uses Halo 2's 1 to 10, and whether
   the zeroed look acceleration (0x1B7) and dead zones (0x1B8, 0x1BC)
   matter. MCC's defaults are said to be 12% axial and radial dead zones
