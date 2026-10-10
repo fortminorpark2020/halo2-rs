@@ -7,8 +7,9 @@
 //! Beside it, on UDP, it runs the relay that carries the launcher's game
 //! traffic between PCs (`h2relay`): on the same port number unless told
 //! otherwise, so 47050/tcp and 47050/udp. The relay admits only the rooms
-//! h2live issues for matches, each player with the member key h2live gives
-//! it, so it's no use to anyone else.
+//! h2live opens for the launcher's matches, one each, each player with the
+//! member key h2live gives it over its signed-in link, so it's no use to
+//! anyone else.
 //!
 //! Its settings come from the environment: PORT (47050 unless set),
 //! H2LIVE_DATA (the folder accounts are kept in, `h2live-data` unless set),
@@ -171,7 +172,11 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    log(format_args!("h2live, protocol {}", h2net::PROTOCOL));
+    log(format_args!(
+        "h2live, protocol {} (launchers: live protocol {})",
+        h2net::PROTOCOL,
+        h2net::live::LIVE_PROTOCOL
+    ));
     let settings = settings()?;
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, settings.port)).map_err(|e| {
         let port = settings.port;
@@ -193,6 +198,9 @@ fn run() -> Result<(), String> {
     log(format_args!("listening on port {port} (Ctrl+C stops)"));
     let relay = start_relay(settings.relay, port)?;
     let relay_port = relay.as_ref().map(|r| r.local_addr().port());
+    if let Some(relay) = &relay {
+        server.set_relay(relay.handle().clone());
+    }
     let open = if settings.upnp {
         open_ports(port, relay_port)
     } else {
@@ -214,9 +222,10 @@ fn run() -> Result<(), String> {
 
 /// Start the relay on its own thread, as `relay` says (on UDP `tcp`, the
 /// sign-in port's number, unless told otherwise). Without it h2live goes
-/// on, unless it was told a port and can't have it. It admits only rooms
-/// issued through its handle (`issue`, with `member_key` for each player),
-/// which the launcher's match flow is to do; until then no room opens.
+/// on (launchers can't search then), unless it was told a port and can't
+/// have it. It admits only rooms issued through its handle (`issue`, with
+/// `member_key` for each player), which the server does for each of the
+/// launcher's matches.
 fn start_relay(relay: Relay, tcp: u16) -> Result<Option<RelayThread>, String> {
     let (udp, asked) = match relay {
         Relay::Off => {

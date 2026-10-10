@@ -3,12 +3,15 @@
 //! join a party that's open, up to 16 people with splitscreen guests. The
 //! leader can remove members, hand over the lead and make the party invite
 //! only; if the leader leaves, the member who has been in it longest leads
-//! it. Everyone signed in sees everyone else, and their party. A party
+//! it. Everyone signed in sees everyone else on the same program (the game,
+//! or the launcher), and their party; parties never mix the two. A party
 //! that changes while it searches has to search again, and no one can join
 //! one playing a match.
 
 use super::{Party, Pc, Server};
-use h2net::live::{self, Activity, OnlinePlayer, PartyInfo, PartyMember, Privacy, ToPc, MAX_PARTY};
+use h2net::live::{
+    self, Activity, ClientKind, OnlinePlayer, PartyInfo, PartyMember, Privacy, ToPc, MAX_PARTY,
+};
 use std::collections::{HashMap, HashSet};
 
 /// Unanswered invites a party keeps, and removed members it keeps out.
@@ -23,6 +26,8 @@ const PARTY_GONE: &str = "THAT PARTY HAS BROKEN UP";
 const INVITE_ONLY: &str = "THAT PARTY IS INVITE ONLY";
 const REMOVED: &str = "YOU WERE REMOVED FROM THE PARTY";
 const IN_A_MATCH: &str = "THAT PARTY IS IN A MATCH";
+/// The game's players and the launcher's can't party together.
+pub(super) const OTHER_PROGRAM: &str = "THAT PLAYER IS ON ANOTHER VERSION OF THE GAME";
 
 impl Party {
     fn new(leader: u64) -> Party {
@@ -135,6 +140,9 @@ impl Server {
         if self.pc_of(who).is_none() {
             return;
         }
+        if self.client_of(who) != self.client_of(me) {
+            return self.notice(me, OTHER_PROGRAM);
+        }
         let Some(id) = self.pc_of(me).map(|k| self.pcs[k].party) else {
             return;
         };
@@ -164,6 +172,9 @@ impl Server {
         }
         if party.activity == Activity::Playing {
             return self.notice(me, IN_A_MATCH);
+        }
+        if self.client_of(party.leader) != self.client_of(me) {
+            return self.notice(me, OTHER_PROGRAM);
         }
         let closed = party.privacy == Privacy::InviteOnly || party.booted.contains(&me);
         if closed && !party.has_invited(me) {
@@ -349,8 +360,8 @@ impl Server {
         shared
     }
 
-    /// Send everyone signed in the ONLINE list, if it changed, at most once
-    /// a second.
+    /// Send everyone signed in the ONLINE list of those on the same program
+    /// as them, if it changed, at most once a second.
     pub(super) fn send_online(&mut self, now: f64) {
         if !self.online_changed || now - self.online_sent < ONLINE_EVERY {
             return;
@@ -359,7 +370,21 @@ impl Server {
         for pc in self.pcs.iter().filter(|pc| pc.account.is_some()) {
             *sizes.entry(pc.party).or_default() += 1 + usize::from(pc.guests);
         }
-        let players = self.pcs.iter().filter_map(|pc| {
+        for client in [ClientKind::Viewer, ClientKind::Launcher] {
+            self.send_online_to(client, &sizes);
+        }
+        self.online_changed = false;
+        self.online_sent = now;
+    }
+
+    /// Send everyone signed in from `client` the ONLINE list of those on
+    /// it, with the people in each party (`sizes`).
+    fn send_online_to(&mut self, client: ClientKind, sizes: &HashMap<u64, usize>) {
+        let on = |pc: &&Pc| pc.account.is_some() && pc.client == client;
+        if !self.pcs.iter().any(|pc| on(&pc)) {
+            return;
+        }
+        let players = self.pcs.iter().filter(on).filter_map(|pc| {
             let account = self.accounts.get(&pc.account?)?;
             let party = self.parties.get(&pc.party)?;
             let size = sizes.get(&pc.party).copied().unwrap_or(1);
@@ -381,10 +406,8 @@ impl Server {
             })
         });
         let (kind, body) = ToPc::Online(players.collect()).write();
-        for pc in self.pcs.iter_mut().filter(|pc| pc.account.is_some()) {
+        for pc in self.pcs.iter_mut().filter(|pc| on(&&**pc)) {
             pc.conn.send(kind, &body);
         }
-        self.online_changed = false;
-        self.online_sent = now;
     }
 }

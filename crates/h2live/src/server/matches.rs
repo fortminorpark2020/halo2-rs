@@ -26,7 +26,27 @@
 //! Parties play custom games too: the leader hosts on a map everyone has,
 //! and every member is linked to them, those who join later as well. They
 //! change no levels.
+//!
+//! The launcher's matches (from its playlists) go the same way, on MCC's
+//! engine, with the engine's packets going through the UDP relay rather
+//! than relay legs. When one forms, the server opens a room on the relay
+//! for it (the match's id) and tells each player in it (LAUNCHER_MATCH, in
+//! place of MATCH) the MCC map and game variant, everyone in it, who hosts,
+//! and their own way into the room: the relay's port, the room, their id
+//! in it (`relay_id`: the same for their account in every match, and their
+//! XUID in the engine) and the key for that id, which only they are given.
+//! The host is asked to host (HOST_MATCH) and says when it is (HOSTING),
+//! as in the game; each other launcher says when its game joined the
+//! host's (JOINED), and the game starts (GO) once all have, or 20 seconds
+//! after HOSTING without those that haven't. At the end each launcher
+//! sends the engine's results (LAUNCHER_RESULT), which count as RESULTs
+//! do: the host's, confirmed by the others, and only if the host's says
+//! the game finished. Levels change the same way. The room closes when
+//! the match is over, however it ends. A host lost to the others ends the
+//! match once its link to the server goes too (the relay can't say it saw
+//! it go). Launcher parties can't open custom games yet.
 
+use super::party::OTHER_PROGRAM;
 use super::relay::QUIET;
 use super::{log, Server};
 use crate::card;
@@ -34,8 +54,8 @@ use crate::levels::{self, Finish, Placed, Rank, MAX_LEVEL};
 use crate::matchmaker::{self, Event, Member, Seat, Ticket};
 use crate::store::{self, Counted, GameRecord, RecordedPlayer, Stats};
 use h2net::live::{
-    Activity, MatchInfo, MatchOver, MatchPlayer, PlayerResult, SearchStatus, Stage, ToPc,
-    QUICKMATCH,
+    Activity, ClientKind, LauncherMatch, LauncherPlayer, LauncherResult, MatchInfo, MatchOver,
+    MatchPlayer, PlayerResult, RelaySeat, SearchStatus, Stage, ToPc, QUICKMATCH,
 };
 use h2net::ANY_TEAM;
 
@@ -68,6 +88,32 @@ const NEVER_ENDED: &str = "THE GAME NEVER ENDED. IT DIDN'T COUNT.";
 const NO_OPPONENTS: &str = "NO ONE PLAYED AGAINST YOU. THE GAME DIDN'T COUNT.";
 const NO_HOST: &str = "NO ONE COULD HOST THE GAME.";
 const NOT_JOINED: &str = "YOU DIDN'T JOIN THE GAME.";
+const UNFINISHED: &str = "THE GAME DIDN'T FINISH. IT DIDN'T COUNT.";
+/// Launchers' matches need the relay.
+const NO_RELAY: &str = "THIS SERVER HAS NO RELAY FOR ONLINE GAMES";
+const NO_CUSTOM_GAMES: &str = "CUSTOM GAMES AREN'T READY ON THE LAUNCHER YET";
+
+/// A player's id on the relay, and so their XUID in MCC's engine: their
+/// account (the same in every match), but for the two the relay keeps
+/// for itself (0, which the relay server sends from, and its broadcast id).
+pub fn relay_id(account: u64) -> u64 {
+    match account {
+        0 => 1,
+        u64::MAX => u64::MAX - 1,
+        account => account,
+    }
+}
+
+/// What a launcher's match has beyond the game's.
+pub(super) struct Launcher {
+    /// The MCC game variant it plays.
+    variant: String,
+    /// Its room on the relay.
+    room: u64,
+    /// What each launcher's LAUNCHER_RESULT said beyond its players'
+    /// results: whether the game finished, and the team scores.
+    reports: Vec<(u64, bool, Vec<i32>)>,
+}
 
 /// A match from the moment it formed until everyone hears how it went.
 pub(super) struct Match {
@@ -102,6 +148,8 @@ pub(super) struct Match {
     /// the joining PCs still in it, said).
     results: Vec<(u64, Vec<PlayerResult>)>,
     ended: Option<f64>,
+    /// For a launcher's match, its room on the relay and the rest.
+    launcher: Option<Launcher>,
 }
 
 impl Match {
@@ -121,6 +169,7 @@ impl Match {
             void: None,
             results: Vec::new(),
             ended: None,
+            launcher: None,
         }
     }
 
@@ -246,10 +295,17 @@ impl Server {
         if members.iter().any(|&a| self.busy(a)) {
             return self.notice(me, STILL_PLAYING);
         }
+        let client = self.client_of(me);
+        if members.iter().any(|&a| self.client_of(a) != client) {
+            return self.notice(me, OTHER_PROGRAM);
+        }
+        if client == ClientKind::Launcher && self.relay.is_none() {
+            return self.notice(me, NO_RELAY);
+        }
         let members = members.iter().filter_map(|&a| {
             let pc = &self.pcs[self.pc_of(a)?];
             let account = self.accounts.get(&a)?;
-            let ranked = self.playlists.iter().filter(|p| p.ranked);
+            let ranked = self.playlists.iter().filter(|p| p.ranked && p.client == client);
             let levels = ranked.filter_map(|p| Some((p.id, account.stats(&p.key)?.rank.level)));
             Some(Member {
                 account: a,
@@ -261,6 +317,7 @@ impl Server {
         });
         let ticket = Ticket {
             party: id,
+            client,
             playlist,
             members: members.collect(),
             previous_map,
@@ -356,12 +413,16 @@ impl Server {
                     let next = self.matchmaker.host_failed(id, now);
                     return self.matchmaker_event(next.unwrap_or(Event::NoHost { id }), now);
                 }
-                // Everyone hears who hosts now.
-                self.matches[k].info.host = host;
-                let info = self.matches[k].info.clone();
-                for account in info.players.iter().map(|p| p.account) {
+                // Everyone hears who hosts now. Launchers that joined the
+                // last one's game join the new host's afresh.
+                let m = &mut self.matches[k];
+                m.info.host = host;
+                m.linked.clear();
+                self.issue_room(k);
+                let players: Vec<u64> = self.matches[k].seats.iter().map(|s| s.account).collect();
+                for account in players {
                     if self.matches[k].has(account) {
-                        self.tell(account, &ToPc::Match(info.clone()));
+                        self.tell_match(k, account);
                     }
                 }
                 self.tell(host, &ToPc::HostMatch(id));
@@ -374,8 +435,61 @@ impl Server {
         }
     }
 
+    /// Tell `account` about match `k` (MATCH, or LAUNCHER_MATCH with their
+    /// own way into its room on the relay).
+    fn tell_match(&mut self, k: usize, account: u64) {
+        let m = &self.matches[k];
+        let message = match &m.launcher {
+            None => Some(ToPc::Match(m.info.clone())),
+            Some(launcher) => self.launcher_match(m, launcher, account),
+        };
+        if let Some(message) = message {
+            self.tell(account, &message);
+        }
+    }
+
+    /// Launcher match `m` as `account` is told it, if the relay is on.
+    fn launcher_match(&self, m: &Match, launcher: &Launcher, account: u64) -> Option<ToPc> {
+        let relay = self.relay.as_ref()?;
+        let id = relay_id(account);
+        let players = m.info.players.iter().map(|p| LauncherPlayer {
+            relay_id: relay_id(p.account),
+            account: p.account,
+            gamertag: p.gamertag.clone(),
+            team: p.team,
+            level: p.level,
+            party: p.party,
+        });
+        Some(ToPc::LauncherMatch(LauncherMatch {
+            id: m.info.id,
+            playlist: m.info.playlist,
+            ranked: m.info.ranked,
+            teams: m.info.game_type.teams(),
+            map: m.info.map.clone(),
+            variant: launcher.variant.clone(),
+            relay: RelaySeat {
+                port: relay.local_addr().port(),
+                room: launcher.room,
+                id,
+                key: relay.member_key(launcher.room, id).0,
+            },
+            host: relay_id(m.info.host),
+            countdown: m.info.countdown,
+            players: players.collect(),
+        }))
+    }
+
+    /// Open match `k`'s room on the relay, if it's a launcher's, or keep
+    /// it open: an empty room lasts a minute, and this starts that over.
+    fn issue_room(&self, k: usize) {
+        let room = self.matches[k].launcher.as_ref().map(|l| l.room);
+        if let (Some(room), Some(relay)) = (room, &self.relay) {
+            relay.issue(room);
+        }
+    }
+
     /// The matchmaker made match `m`: tell everyone in it, and ask its host
-    /// to host.
+    /// to host. A launcher's gets a room on the relay first.
     fn formed(&mut self, m: matchmaker::Match) {
         let players = m.players.iter().map(|s| {
             let account = self.accounts.get(&s.account);
@@ -404,10 +518,18 @@ impl Server {
             countdown: LINK_WAIT as u8,
             players: players.collect(),
         };
+        let launcher = m.variant.mcc.clone().map(|variant| Launcher {
+            variant,
+            room: m.id,
+            reports: Vec::new(),
+        });
+        let game = match &launcher {
+            None => format!("{:?}", m.variant.game_type),
+            Some(l) => format!("{} ({:?}) for launchers", l.variant, m.variant.game_type),
+        };
         log(format_args!(
-            "live: match {:016x}: {:?} on {}, {} PCs and {} bots",
+            "live: match {:016x}: {game} on {}, {} PCs and {} bots",
             m.id,
-            m.variant.game_type,
             m.map,
             m.players.len(),
             m.bots
@@ -429,13 +551,26 @@ impl Server {
             low: levels.clone().min().unwrap_or(1),
             high: levels.max().unwrap_or(MAX_LEVEL),
         };
+        let mut record = Match::new(info, m.players.clone());
+        let no_relay = launcher.is_some() && self.relay.is_none();
+        record.launcher = launcher;
+        if no_relay {
+            // (Searches are refused without it, so this never happens.)
+            record.void = Some(NO_RELAY);
+        }
+        self.relayed.insert(m.id, 0);
+        self.matches.push(record);
+        if no_relay {
+            return;
+        }
+        let k = self.matches.len() - 1;
+        // Before anyone has the keys to it.
+        self.issue_room(k);
         for s in &m.players {
-            self.tell(s.account, &ToPc::Match(info.clone()));
+            self.tell_match(k, s.account);
             self.tell(s.account, &ToPc::Status(joining));
         }
         self.tell(m.host, &ToPc::HostMatch(m.id));
-        self.relayed.insert(m.id, 0);
-        self.matches.push(Match::new(info, m.players));
     }
 
     /// `me` hosts match `id` now: link everyone else in it to them.
@@ -449,6 +584,7 @@ impl Server {
         let m = &mut self.matches[k];
         m.hosting = Some(now);
         let map = m.info.map.clone();
+        let launcher = m.launcher.is_some();
         let seat = |a: u64| m.seats.iter().find(|s| s.account == a).copied();
         let Some(host) = seat(me) else {
             return;
@@ -462,15 +598,29 @@ impl Server {
             low: 1,
             high: MAX_LEVEL,
         };
+        // Launchers join the host's game through the relay by themselves.
+        self.issue_room(k);
         self.tell(me, &ToPc::Status(starting));
         for j in joiners {
-            self.link(
-                id,
-                &map,
-                (me, host.level, host.team),
-                (j.account, j.level, j.team),
-            );
+            if !launcher {
+                self.link(
+                    id,
+                    &map,
+                    (me, host.level, host.team),
+                    (j.account, j.level, j.team),
+                );
+            }
             self.tell(j.account, &ToPc::Status(starting));
+        }
+    }
+
+    /// A launcher in match `id` says its game joined the host's game.
+    pub(super) fn joined(&mut self, me: u64, id: u64) {
+        let theirs = |m: &&mut Match| m.info.id == id && m.launcher.is_some();
+        if let Some(m) = self.matches.iter_mut().find(theirs) {
+            if m.info.host != me {
+                self.linked(id, me);
+            }
         }
     }
 
@@ -483,13 +633,45 @@ impl Server {
         }
     }
 
-    /// `me` says how match `id` ended (the first time only, and only if
-    /// it was there at the end).
+    /// `me` says how the game's match `id` ended (the first time only, and
+    /// only if it was there at the end).
     pub(super) fn result(&mut self, me: u64, id: u64, players: Vec<PlayerResult>) {
-        if let Some(m) = self.matches.iter_mut().find(|m| m.info.id == id) {
+        let theirs = |m: &&mut Match| m.info.id == id && m.launcher.is_none();
+        if let Some(m) = self.matches.iter_mut().find(theirs) {
             if m.started.is_some() && m.has(me) && !m.reported(me) && !m.gone(me) {
                 m.results.push((me, players));
             }
+        }
+    }
+
+    /// `me` says how launcher match `id` ended, as RESULT does, naming its
+    /// players by their relay ids (those not in the match left out).
+    pub(super) fn launcher_result(&mut self, me: u64, result: LauncherResult) {
+        let id = result.id;
+        let theirs = |m: &&mut Match| m.info.id == id && m.launcher.is_some();
+        let Some(m) = self.matches.iter_mut().find(theirs) else {
+            return;
+        };
+        if m.started.is_none() || !m.has(me) || m.reported(me) || m.gone(me) {
+            return;
+        }
+        let players = result.players.iter().filter_map(|p| {
+            let seat = m.seats.iter().find(|s| relay_id(s.account) == p.relay_id)?;
+            Some(PlayerResult {
+                account: seat.account,
+                team: p.team,
+                place: p.place,
+                score: p.score,
+                kills: p.kills,
+                deaths: p.deaths,
+                left: p.left,
+            })
+        });
+        m.results.push((me, players.collect()));
+        if let Some(launcher) = &mut m.launcher {
+            launcher
+                .reports
+                .push((me, result.finished, result.team_scores));
         }
     }
 
@@ -660,6 +842,12 @@ impl Server {
             m.host_quit = true;
         }
         let (id, host, teams) = (m.info.id, m.info.host, m.info.game_type.teams());
+        // A launcher's host can say its game was cut short.
+        let host_report = m.launcher.as_ref().and_then(|l| {
+            let report = l.reports.iter().find(|r| r.0 == host);
+            report.map(|(_, finished, scores)| (*finished, scores.clone()))
+        });
+        let complete = host_report.as_ref().is_none_or(|r| r.0);
         let key = self
             .playlists
             .iter()
@@ -754,7 +942,8 @@ impl Server {
             let staying = m.joiners().filter(|&a| !m.left(a)).count();
             let confirmed = !reports.is_empty() || staying == 0;
             let game: Vec<Placed> = placed.iter().map(|(_, p)| *p).collect();
-            let counts = levels::counts(m.info.ranked, true, agreeing, reports.len(), &game, teams);
+            let ranked = m.info.ranked;
+            let counts = levels::counts(ranked, complete, agreeing, reports.len(), &game, teams);
             if counts && confirmed {
                 counted = Counted::Yes;
                 let changes = levels::xp_changes(&game, teams);
@@ -762,6 +951,8 @@ impl Server {
             }
             if !m.info.ranked {
                 ""
+            } else if !complete {
+                UNFINISHED
             } else if agreeing * 2 < reports.len() {
                 DISPUTED
             } else if !confirmed {
@@ -844,8 +1035,22 @@ impl Server {
             log(format_args!("live: can't log to {}: {e}", games.display()));
         }
         let bytes = self.relayed.remove(&id).unwrap_or(0);
+        let relayed = match (&m.launcher, &self.relay) {
+            (Some(launcher), relay) => {
+                if let Some(relay) = relay {
+                    relay.revoke(launcher.room);
+                }
+                let scores = host_report.map_or(Vec::new(), |r| r.1);
+                let scores: Vec<String> = scores.iter().map(i32::to_string).collect();
+                match scores.len() {
+                    0 => ", its relay room closed".to_string(),
+                    _ => format!(", team scores {}, its relay room closed", scores.join("-")),
+                }
+            }
+            (None, _) => format!(", {bytes} bytes relayed"),
+        };
         log(format_args!(
-            "live: match {id:016x} is over{}{}, {bytes} bytes relayed",
+            "live: match {id:016x} is over{}{}{relayed}",
             match counted {
                 Counted::No => "",
                 Counted::Yes => ", counted",
@@ -904,6 +1109,9 @@ impl Server {
     /// it has: they host, and everyone else is linked to them. A member
     /// who left the party's custom game comes back into it.
     pub(super) fn custom(&mut self, me: u64) {
+        if self.client_of(me) == ClientKind::Launcher {
+            return self.notice(me, NO_CUSTOM_GAMES);
+        }
         if let Some((id, party)) = self.party_of(me) {
             if party.activity == Activity::Custom && party.leader != me {
                 let leader = party.leader;
