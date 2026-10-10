@@ -14,9 +14,9 @@
 FROM rust:1.99-slim-trixie AS build
 WORKDIR /src
 COPY . .
-# The workspace has the game and h2tool in it too. Cargo only needs them to
-# be there, not built, so they're left as empty programs.
-RUN for c in h2tool h2viewer; do \
+# The workspace has the game, h2tool and the launcher in it too. Cargo only
+# needs them to be there, not built, so they're left as empty programs.
+RUN for c in h2launch h2tool h2viewer; do \
         mkdir -p crates/$c/src && echo 'fn main() {}' > crates/$c/src/main.rs; \
     done
 RUN cargo build --release --locked -p h2live
