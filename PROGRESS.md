@@ -150,7 +150,10 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   runs `LIVE_PROTOCOL` 1 (its update waits on the owner's OK, asked
   07:41), so lobbies from this branch can't sign in there yet. A party
   screen (Y on the playlists: make leader, remove, invite only, leave;
-  no protocol change) was tested on Linux with three lobbies. Next:
+  no protocol change) was tested on Linux with three lobbies. The lobby
+  now keeps each game's results block in `%LOCALAPPDATA%\h2launch\results`
+  on the owner's PC (never upload them), so the first real games with
+  kills give the kills offset (Slayer: kills = score + suicides). Next:
   kills in the results block, a play session by the owner, then two PCs.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin

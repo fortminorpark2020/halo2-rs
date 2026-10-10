@@ -77,6 +77,34 @@ impl Match {
     }
 }
 
+/// How many results blocks the launcher's folder keeps.
+const RESULTS_KEPT: usize = 30;
+
+/// `folder`'s `results` folder, made if need be, with only the newest
+/// `RESULTS_KEPT - 1` blocks left in it so the next game's fits.
+fn results_folder(folder: &Path) -> Option<PathBuf> {
+    let dir = folder.join("results");
+    std::fs::create_dir_all(&dir).ok()?;
+    let mut blocks: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let name = e.file_name();
+            let name = name.to_str()?;
+            if !(name.starts_with("result-") && name.ends_with(".bin")) {
+                return None;
+            }
+            Some((e.metadata().ok()?.modified().ok()?, e.path()))
+        })
+        .collect();
+    blocks.sort();
+    let extra = blocks.len().saturating_sub(RESULTS_KEPT - 1);
+    for (_, path) in blocks.into_iter().take(extra) {
+        let _ = std::fs::remove_file(path);
+    }
+    Some(dir)
+}
+
 /// The running engine.
 pub struct Running {
     child: Child,
@@ -98,6 +126,15 @@ impl Running {
         // For tests: more flags for the engine (`--set-option`, `--pad`).
         let extra = std::env::var("H2LOBBY_ENGINE_ARGS").unwrap_or_default();
         let mut cmd = Command::new(exe);
+        // The engine's results blocks are kept in the launcher's folder
+        // (the newest few), so their layout can be worked out further
+        // from real games. They are the engine's data: they stay on this
+        // PC.
+        if std::env::var_os("H2LAUNCH_RESULT_DUMP").is_none() {
+            if let Some(dir) = results_folder(folder) {
+                cmd.env("H2LAUNCH_RESULT_DUMP", dir);
+            }
+        }
         cmd.args(m.args(&file))
             .args(extra.split_whitespace())
             .stdin(Stdio::piped())
@@ -321,6 +358,31 @@ pub fn run_fake(raw: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_results_folder_keeps_the_newest_blocks() {
+        let folder = std::env::temp_dir().join(format!("h2results-{}", std::process::id()));
+        let dir = folder.join("results");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&dir).unwrap();
+        let start = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for i in 0..RESULTS_KEPT + 4 {
+            let f = std::fs::File::create(dir.join(format!("result-1-{i:03}.bin"))).unwrap();
+            f.set_modified(start + Duration::from_secs(i as u64))
+                .unwrap();
+        }
+        std::fs::write(dir.join("notes.txt"), "kept").unwrap();
+        assert_eq!(results_folder(&folder), Some(dir.clone()));
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left.len(), RESULTS_KEPT);
+        assert_eq!(left[0], "notes.txt");
+        assert_eq!(left[1], "result-1-005.bin");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 
     fn session(teams: &[i32]) -> Session {
         let mut text = String::from("relay = 127.0.0.1:47050\nroom = 1\nsecure = 1\nhost = 0\n");

@@ -62,7 +62,13 @@ the launcher doesn't do.
 - Files in the launcher's folder (`%LOCALAPPDATA%\h2launch`, or its
   `--instance` folder): `lobby.txt`, `lobby.log` (the lobby's log, with the
   engine's lines as `engine:`), `live-key.bin` and `live-card.txt` (the same
-  account as `--live`), and `match-session.txt` (the last match's session).
+  account as `--live`), `match-session.txt` (the last match's session),
+  and `results\` (the engine's results blocks of the last 30 games,
+  `H2LAUNCH_RESULT_DUMP` for the engine's copy, so the rest of the block's
+  layout, kills first, can be worked out from real games; in Slayer a
+  player's kills are their score plus their suicides when nobody
+  betrayed, which gives the value to look for. They are the engine's data:
+  never commit or upload them).
 
 ## Screens
 
