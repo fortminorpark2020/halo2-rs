@@ -1051,7 +1051,9 @@ impl App {
         let now = self.online.now();
         for event in self.online.poll(now) {
             match event {
-                LiveEvent::Welcomed => {}
+                // Launchers' matches only; the server never makes one for
+                // the game.
+                LiveEvent::Welcomed | LiveEvent::LauncherMatch(_) => {}
                 LiveEvent::Refused(why) | LiveEvent::Lost(why) => {
                     println!("live: {}", why.to_lowercase());
                     // A match's links go through the service: it's over

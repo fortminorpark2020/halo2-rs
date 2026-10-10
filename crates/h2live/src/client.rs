@@ -11,19 +11,34 @@
 //! (for `h2net::Host::add_connection`); start (`Go`); and at the end send
 //! how it went (`ToServer::Result`, see `results`), or that it left
 //! (`ToServer::LeftMatch`). Then the levels come (`MatchOver`).
+//!
+//! The launcher (h2launch) signs in through this too, without the game's
+//! renderer or engine: `LiveClient::launcher`, then parties and searches
+//! as the game does (`send`), from its own playlists. A match comes as
+//! `LiveEvent::LauncherMatch`: join its room on the relay (`join_relay`,
+//! at the address the server was dialled at, `LiveClient::server_ip`) and
+//! start halo2.dll's online game on its map and variant, as host if it
+//! names this PC's relay id as the host (then say `ToServer::Hosting`
+//! once hosting, after `HostMatch`), or else joining the host (then say
+//! `ToServer::Joined`). `Go` starts it; at the end send the engine's
+//! results (`ToServer::LauncherResult`, everyone, the host's counting),
+//! or that it left (`ToServer::LeftMatch`). Then the levels come
+//! (`MatchOver`).
 
 use crate::levels::{self, Finish};
 use crate::store;
 use ed25519_dalek::{Signer, SigningKey};
 use h2net::live::{
-    self, LinkInfo, Login, MatchInfo, MatchOver, OnlinePlayer, PartyInfo, PlayerResult,
-    PlaylistInfo, SearchStatus, ToPc, ToServer, Welcome,
+    self, LauncherMatch, LinkInfo, Login, LoginClient, MatchInfo, MatchOver, OnlinePlayer,
+    PartyInfo, PlayerResult, PlaylistInfo, SearchStatus, ToPc, ToServer, Welcome,
 };
 use h2net::Connection;
+use h2relay::{ClientConfig, MemberKey, RelayClient};
 use h2sim::game::{clean_name, Look};
 use h2sim::Game;
 use std::collections::VecDeque;
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 /// Notices and invites kept.
@@ -60,6 +75,9 @@ pub struct View {
     pub status: Option<SearchStatus>,
     /// The match we're in, from MATCH until MATCH_OVER.
     pub game: Option<MatchInfo>,
+    /// A launcher's: the match it's in, from LAUNCHER_MATCH until
+    /// MATCH_OVER.
+    pub launcher_game: Option<LauncherMatch>,
     /// The latest notices, oldest first.
     pub notices: Vec<String>,
     /// The latest round trip to the server, in milliseconds.
@@ -102,6 +120,10 @@ pub enum LiveEvent {
         leader: u64,
         map: String,
     },
+    /// A launcher's match is ready: join its room on the relay
+    /// (`join_relay`) and host it or join its host. It comes again, with
+    /// another host, if the one asked didn't start hosting.
+    LauncherMatch(LauncherMatch),
 }
 
 /// One end of a game relayed through the server: a connection to the
@@ -133,6 +155,37 @@ impl RelayLeg {
         conn.put_back(messages);
         Ok(Some(conn))
     }
+}
+
+/// Where a launcher's match is on the relay: the relay's port at `server`,
+/// the address this PC dialled the server at (`LiveClient::server_ip`).
+pub fn relay_addr(game: &LauncherMatch, server: IpAddr) -> SocketAddr {
+    SocketAddr::new(server, game.relay.port)
+}
+
+/// The key a launcher's match gave this PC for its id in the match's room.
+pub fn member_key(game: &LauncherMatch) -> MemberKey {
+    MemberKey(game.relay.key)
+}
+
+/// Join a launcher's match's room on the relay at `server` (see
+/// `relay_addr`) as this PC's relay id, with `config` and the key the match
+/// gave. The engine's packets then go through the client returned.
+pub fn join_relay(
+    game: &LauncherMatch,
+    server: IpAddr,
+    config: ClientConfig,
+) -> io::Result<RelayClient> {
+    let config = ClientConfig {
+        member_key: Some(member_key(game)),
+        ..config
+    };
+    RelayClient::connect_with(
+        relay_addr(game, server),
+        game.relay.room,
+        game.relay.id,
+        config,
+    )
 }
 
 /// How a finished game ended, as a RESULT says: for each PC's account, the
@@ -194,14 +247,46 @@ pub fn identity(path: &Path) -> io::Result<SigningKey> {
 }
 
 impl LiveClient {
-    /// Sign in over `conn` as the holder of `key`, as `profile` says, at
-    /// time `now` (in seconds, on a clock of the caller's). The stat card
-    /// at `card_path` goes with it, if there is one, and the server's new
-    /// cards are kept there.
+    /// Sign the game in over `conn` as the holder of `key`, as `profile`
+    /// says, at time `now` (in seconds, on a clock of the caller's). The
+    /// stat card at `card_path` goes with it, if there is one, and the
+    /// server's new cards are kept there.
     pub fn new(
+        conn: Connection,
+        key: SigningKey,
+        profile: &Profile,
+        card_path: &Path,
+        now: f64,
+    ) -> LiveClient {
+        let client = LoginClient::viewer();
+        LiveClient::sign_in(conn, key, profile, client, card_path, now)
+    }
+
+    /// Sign a launcher in, as `new` signs in the game, saying the
+    /// launcher's `version` (for the server's log). Its profile's maps are
+    /// MCC's, each with `live::map_hash` of its file.
+    pub fn launcher(
+        conn: Connection,
+        key: SigningKey,
+        profile: &Profile,
+        version: &str,
+        card_path: &Path,
+        now: f64,
+    ) -> LiveClient {
+        // One too long would only get us dropped.
+        let mut version = version.to_string();
+        while version.len() > live::MAX_NAME {
+            version.pop();
+        }
+        let client = LoginClient::Launcher { version };
+        LiveClient::sign_in(conn, key, profile, client, card_path, now)
+    }
+
+    fn sign_in(
         mut conn: Connection,
         key: SigningKey,
         profile: &Profile,
+        client: LoginClient,
         card_path: &Path,
         now: f64,
     ) -> LiveClient {
@@ -211,6 +296,7 @@ impl LiveClient {
             .iter()
             .filter(|(name, _)| name.len() <= live::MAX_NAME);
         let login = Login {
+            client,
             key: key.verifying_key().to_bytes(),
             gamertag: clean_name(&profile.gamertag),
             look: profile.look,
@@ -247,6 +333,14 @@ impl LiveClient {
     /// Our account, once signed in.
     pub fn account(&self) -> Option<u64> {
         self.view.welcome.as_ref().map(|w| w.account)
+    }
+
+    /// The address the server was dialled at (as the system found it), to
+    /// reach the relay beside it (`relay_addr`). None over a connection
+    /// within this process (a test's).
+    pub fn server_ip(&self) -> Option<IpAddr> {
+        let stream = self.conn.stream()?;
+        Some(stream.peer_addr().ok()?.ip().to_canonical())
     }
 
     /// Open a relay leg for `link` (from LINK) over `conn`, a new
@@ -393,11 +487,18 @@ impl LiveClient {
                 if view.game.as_ref().is_some_and(|g| g.id == over.id) {
                     view.game = None;
                 }
+                if view.launcher_game.as_ref().is_some_and(|g| g.id == over.id) {
+                    view.launcher_game = None;
+                }
                 self.keep_card(&over.card);
                 events.push(LiveEvent::MatchOver(over));
             }
             ToPc::CustomOpen { party, leader, map } => {
                 events.push(LiveEvent::CustomOpen { party, leader, map });
+            }
+            ToPc::LauncherMatch(game) => {
+                view.launcher_game = Some(game.clone());
+                events.push(LiveEvent::LauncherMatch(game));
             }
             // Only relay legs are told they're linked.
             ToPc::Linked => {}

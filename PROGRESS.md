@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 05:45 UTC. Any assistant that works on the project
+Last updated 2026-10-10 06:50 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -91,29 +91,42 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   60 fps, mouse and controller). Code is on `h2launch-m1`, then
   `h2launch-m2`, in draft PR #2 (it also carries `relay`: the UDP relay
   h2live runs on UDP 47050 for the engine's packets).
-- Milestone 2 (two launchers in one match through the relay) is being
-  tested on the owner's PC by a Remote Control session in `C:\h2work\launch`.
-  What is known (static reads of halo2.dll 1.3528 there, in our own words;
-  details in `docs/notes/launcher/`): the engine sends only through host
-  slot 41 and receives through slot 43; port 1000 carries game links, 1002
-  out-of-band traffic, and first contact must come on 1002. Options flag
-  0x08 makes the launch job host a session; with it clear the engine
-  searches instead and sends an 18-byte search to its own id on 1002 once
-  a second. As of b602c19 the session file gives 0x08 (and 0x40, meaning
-  unknown) to the host only, and the launcher forwards those self-addressed
-  1002 sends to every launcher in the match. With that (PC runs 05:20 UTC)
-  the host answers the search (broadcast-reply) and the guest sends a
-  join-request, but the host refuses it (join-refuse), the guest's session
-  never leaves state 0 and it restarts. Next: find which check refuses
-  (likely the guest's join-request claiming the host's machine identity,
-  or the host's observer failing to open a channel to the guest).
+- Milestone 2's engine side is done (2026-10-10, owner's PC, launchers on
+  one PC through a local h2relay; h2launch-m2 0385192): two and three
+  launchers play one match; a timed match ends by itself on every PC;
+  leaving works, and a new launcher for the same machine joins a match in
+  progress. What it took and the engine facts (own words) are in
+  `docs/notes/launcher/README.md`: the host alone gets options flag 0x08
+  (the others search and join, system-link style), the launcher forwards
+  the guest's self-addressed search on port 1002 to every launcher, and
+  each machine writes its own id at 0x58. Left for the go/no-go: two
+  separate PCs, which needs a relay reachable from outside (h2live on the
+  Proxmox server, below).
 - Design rule kept so far: no patches, hooks, byte writes or calls by RVA
   into halo2.dll; read-only diagnostics (`--diag`, `--watch`) only. If the
   only way forward needs more, ask the owner first.
-- h2live launcher support (milestone 3) is on `live-launcher` (3a330e1,
-  WIP, unreviewed): `LIVE_PROTOCOL` 1 with a versioned LOGIN, launcher
-  playlists, a relay room per match, LAUNCHER_MATCH, JOINED and
-  LAUNCHER_RESULT. It may change once the engine's join flow is known.
+- Milestone 3 is on `launcher-live` (h2launch-m2 plus the merged
+  `live-launcher` WIP): h2live speaks `LIVE_PROTOCOL` 1 to launchers,
+  has launcher playlists 10-17, issues a relay room and key per match and
+  sends LAUNCHER_MATCH; `h2launch --live <server>` signs in, searches,
+  writes the session from that match, and tells the server HOSTING,
+  JOINED, LAUNCHER_RESULT and LEFT_MATCH. A local h2live on the owner's PC
+  (`H2LIVE_BIND=127.0.0.1`) matched two launchers and they played
+  (2026-10-10 06:00). LAUNCHER_RESULT carries each player's team, standing,
+  score and deaths from the engine's results block (host slot 6, 0x5D138
+  bytes; layout in `crates/h2launch/src/results.rs`). Next: kills,
+  assists and betrayals in that block (needs a game with real kills).
+  The launcher playlists play MCC's own matchmaking variants, chosen from
+  the `h2launch --variants` list; Team Snipers (opposite teams) and a
+  three-player Rumble Pit worked (2026-10-10 06:30).
+- The Proxmox server (container 102) runs h2live from `launcher-live`
+  edc64b8 since 2026-10-10 06:45 (still `PROTOCOL` 26 for the Rust game;
+  rollback copy `/opt/h2live/h2live.prev`), with the relay on UDP 47050.
+  Two launchers on the owner's PC played a match through it
+  (`--live 192.168.8.102`). Players outside his network need TCP and UDP
+  47050 forwarded to 192.168.8.102 in his router (his step). The binary
+  went over on a temporary orphan branch `deploy-h2live`, which can be
+  deleted (the container proxy refuses branch deletes).
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.

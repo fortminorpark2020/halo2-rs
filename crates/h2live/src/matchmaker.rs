@@ -8,11 +8,16 @@
 //! arrives. Then the parties are split into teams, a map and game are
 //! picked, and the PC with the best connection is asked to host.
 //!
+//! Parties search only the playlists of the program they run (the game's,
+//! or the launcher's), so the game's players and the launcher's are never
+//! in one match.
+//!
 //! Nothing here reads a clock: the caller passes the time in seconds, so
 //! tests can run minutes of searching in an instant.
 
 use crate::levels::{self, MAX_LEVEL};
 use crate::playlists::{Bots, Playlist, Variant};
+use h2net::live::ClientKind;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
@@ -60,6 +65,8 @@ const MISSING_CONTENT: &str = "You or someone in your party is missing some cont
 #[derive(Debug, Clone)]
 pub struct Ticket {
     pub party: u64,
+    /// The program the party plays on: only its playlists can be searched.
+    pub client: ClientKind,
     /// The playlist's id, or `QUICKMATCH`.
     pub playlist: u8,
     /// The party's PCs, one for each signed-in player.
@@ -493,7 +500,7 @@ impl Matchmaker {
         let playlist = &self.playlists[i];
         let people: usize = ticket.members.iter().map(Member::people).sum();
         let guests = ticket.members.iter().any(|m| m.guests > 0);
-        if ticket.members.is_empty() {
+        if ticket.members.is_empty() || playlist.client != ticket.client {
             Some(INVALID)
         } else if people > usize::from(playlist.party_max.min(playlist.max))
             || balance_needed(playlist, &[people]).is_none()

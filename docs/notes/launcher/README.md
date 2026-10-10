@@ -93,6 +93,9 @@ then (`--no-watchdog` turns both off, for a debugger session).
 ```
 --check                 Check the install and print what a launch would use;
                         does not start the engine.
+--variants              List the settings of every matchmaking game variant
+                        (halo2\hopper_game_variants), read through halo2.dll's
+                        data access; does not start the engine.
 --mcc <folder>          MCC's folder, if it is not found by itself.
 --map <name>            Map to play (lockout by default): lockout, midship,
                         zanzibar, ...
@@ -125,6 +128,12 @@ then (`--no-watchdog` turns both off, for a debugger session).
 --me <index>            Which machine in the session this launcher is.
 --relay-wait <seconds>  How long to wait for the relay before the engine
                         starts (default 15).
+--live <server>         Sign in to h2live (host, host:port or ws:// URL),
+                        search a playlist and play the match it makes (see
+                        "Matchmaking through h2live" below).
+--playlist <n>          The launcher playlist to search (default 11, Head
+                        to Head).
+--live-wait <seconds>   How long to search before giving up (default 600).
 --recv-port <mode>      How the receive call's fourth argument is read: auto
                         (default), value, pointer or ignore.
 --send-return <len|0|1> What the send calls return for a packet that went.
@@ -196,6 +205,57 @@ played one match on Lockout through the relay (2026-10-10 05:30 UTC): the
 guest's search reached the host, the host answered, the guest joined, and
 both loaded the map and played with about 1 MB of game traffic each way. The log has every network call (`net:` lines) and a
 summary with the relay's counters at the end.
+
+Later runs there (2026-10-10) showed:
+
+- A match ends by itself only if the variant gives it a time or score
+  limit. The variant copy's time limit is at options 0x354 (seconds; 0 is
+  none, which `01_slayer` gives) and its score to win at 0x350 (25), so
+  `--set-option 0x354=i32:60` makes a one-minute match. At the end every PC
+  gets host slot 6 (`set_game_result`, a 0x5D138-byte block), then about
+  7 s of scoreboard, then `restart_game(0)`, and the launcher quits.
+- A player who quits writes its own result through slot 6 first. In a
+  two-player match the host then ends the match normally; with three, the
+  match goes on, and a new launcher for the same machine joins it in
+  progress.
+- Three launchers play one match the same way as two.
+- `--variants` loaded all 180 hopper variants. After the variant copy the
+  options hold its name at 0x304 (UTF-16), game type at 0x344 (1 CTF,
+  2 Slayer, 3 Oddball, 4 King, 7 Juggernaut, 8 Territories, 9 Assault),
+  flags at 0x348 (bit 0 is teams on), rounds at 0x34C (0 means one), score
+  to win at 0x350, time limit at 0x354 and the player limit at 0x378 (16,
+  or 3 and 4 in 2-on-1 and 3-on-1). `H2LAUNCH_VARIANTS_RAW=1` also prints
+  every other non-zero dword in 0x340..0x430. h2live's launcher playlists
+  now name these variants (`crates/h2live/src/playlists.txt`).
+
+## Matchmaking through h2live (milestone 3, being built)
+
+With `--live <server>` the launcher signs in to h2live (its own key is kept
+as `live-key.bin` in its log folder, so each `--instance` is its own
+account), searches a launcher playlist (`--playlist`, default 11, Head to
+Head) and waits for the match the server makes. The match names the map,
+the variant, who hosts, the room on the relay beside the server and this
+PC's key for it; the launcher writes the session from that and starts the
+engine as with `--session`. While the engine runs it tells the server when
+the host is up (HOSTING), when a joining PC has loaded the map (JOINED),
+when the game ended (LAUNCHER_RESULT, with each player's team, standing,
+score and deaths read from the engine's results block; see
+`crates/h2launch/src/results.rs` for what is known of its layout), and that
+it left (LEFT_MATCH) if it closes before the end. Kills aren't found in the
+block yet, so they go as 0. Every launcher logs the block's players as
+`result:` lines; `H2LAUNCH_RESULT_DUMP=<folder>` also keeps a copy of the
+block on the PC, for working out more of it (never commit or upload it).
+
+To try it on one PC, start h2live listening on this PC only, then two
+launchers:
+
+```
+set H2LIVE_BIND=127.0.0.1
+set H2LIVE_DATA=C:\h2work\live-data
+target\release\h2live.exe
+h2launch --live 127.0.0.1 --instance a --name Alpha
+h2launch --live 127.0.0.1 --instance b --name Bravo --pad none
+```
 
 ## Input script
 

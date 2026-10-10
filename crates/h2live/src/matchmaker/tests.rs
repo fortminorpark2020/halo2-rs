@@ -13,6 +13,10 @@ const BIG_TEAM: u8 = 5;
 const TEAM_TRAINING: u8 = 6;
 const TEAM_SNIPERS: u8 = 7;
 const TEAM_HARDCORE: u8 = 8;
+// And the launcher's.
+const MCC_RUMBLE_PIT: u8 = 10;
+const MCC_HEAD_TO_HEAD: u8 = 11;
+const MCC_TEAM_SLAYER: u8 = 13;
 
 /// Every map in the built-in playlists, everyone's copy the same.
 fn every_map() -> Vec<(String, u64)> {
@@ -54,9 +58,18 @@ fn players(from: u64, n: u64) -> Vec<Member> {
 fn party(party: u64, playlist: u8, members: Vec<Member>) -> Ticket {
     Ticket {
         party,
+        client: ClientKind::Viewer,
         playlist,
         members,
         previous_map: None,
+    }
+}
+
+/// A party of launchers.
+fn launchers(id: u64, playlist: u8, members: Vec<Member>) -> Ticket {
+    Ticket {
+        client: ClientKind::Launcher,
+        ..party(id, playlist, members)
     }
 }
 
@@ -832,6 +845,74 @@ fn quickmatch_picks_the_busiest_playlist_the_party_fits() {
     );
     let nine = party(50, QUICKMATCH, players(50, 9));
     assert_eq!(mm.search(nine, 0.0), Err(NO_PLAYLIST));
+}
+
+#[test]
+fn the_games_players_and_the_launchers_never_meet() {
+    let mut mm = matchmaker();
+    // Each can search only its own playlists.
+    let launcher = |id: u64, playlist: u8| launchers(id, playlist, vec![member(id, 5)]);
+    assert_eq!(mm.search(launcher(1, HEAD_TO_HEAD), 0.0), Err(INVALID));
+    assert_eq!(mm.search(solo(2, MCC_HEAD_TO_HEAD, 5), 0.0), Err(INVALID));
+    // So one of each searching Head to Head never makes a match...
+    mm.search(launcher(1, MCC_HEAD_TO_HEAD), 0.0).unwrap();
+    mm.search(solo(2, HEAD_TO_HEAD, 5), 0.0).unwrap();
+    assert!(formed(&run(&mut mm, 0.0, 30.0)).is_empty());
+    // ...but another of either does, with its own kind.
+    mm.search(launcher(3, MCC_HEAD_TO_HEAD), 30.0).unwrap();
+    mm.search(solo(4, HEAD_TO_HEAD, 5), 30.0).unwrap();
+    let mut made: Vec<(u8, Vec<u64>)> = formed(&run(&mut mm, 30.0, 31.0))
+        .into_iter()
+        .map(|(_, m)| (m.playlist, accounts(&m)))
+        .collect();
+    made.sort();
+    assert_eq!(
+        made,
+        [(HEAD_TO_HEAD, vec![2, 4]), (MCC_HEAD_TO_HEAD, vec![1, 3])]
+    );
+    // Quickmatch picks among the party's own kind of playlist only.
+    for seed in 0..20 {
+        let mut mm = Matchmaker::new(built_in(), seed);
+        for id in 1..=6 {
+            mm.search(solo(id, RUMBLE_PIT, 5), 0.0).unwrap();
+        }
+        let picked = mm.search(launcher(9, QUICKMATCH), 0.0).unwrap();
+        let playlist = built_in().into_iter().find(|p| p.id == picked).unwrap();
+        assert_eq!(playlist.client, ClientKind::Launcher, "{picked}");
+        let picked = mm.search(solo(10, QUICKMATCH, 5), 0.0).unwrap();
+        assert_eq!(picked, RUMBLE_PIT);
+    }
+    // A launcher party searching with the launcher's Rumble Pit busy goes
+    // there.
+    let mut mm = matchmaker();
+    for id in 1..=2 {
+        mm.search(launcher(id, MCC_RUMBLE_PIT), 0.0).unwrap();
+    }
+    assert_eq!(mm.search(launcher(5, QUICKMATCH), 0.0), Ok(MCC_RUMBLE_PIT));
+    // And a party of four where launchers play in fours.
+    mm.search(launchers(6, MCC_TEAM_SLAYER, players(6, 2)), 0.0)
+        .unwrap();
+    let four = launchers(10, QUICKMATCH, players(10, 4));
+    assert_eq!(mm.search(four, 0.0), Ok(MCC_TEAM_SLAYER));
+}
+
+#[test]
+fn launcher_matches_play_mcc_variants() {
+    let mut mm = matchmaker();
+    for id in 1..=2 {
+        let ticket = launchers(id, MCC_HEAD_TO_HEAD, vec![member(id, 5)]);
+        mm.search(ticket, 0.0).unwrap();
+    }
+    let made = formed(&run(&mut mm, 0.0, 1.0));
+    let [(_, m)] = &made[..] else {
+        panic!("{made:?}");
+    };
+    assert_eq!((m.variant.game_type, m.bots), (GameType::Slayer, 0));
+    let playlist = built_in().into_iter().find(|p| p.id == MCC_HEAD_TO_HEAD);
+    let playlist = playlist.unwrap();
+    assert!(playlist.maps.contains(&m.map));
+    assert!(m.variant.mcc.is_some());
+    assert!(playlist.variants.contains(&m.variant));
 }
 
 #[test]

@@ -12,6 +12,13 @@
 //! and the server ping each other every second, and each gives up on the
 //! other after 15 seconds without a word.
 //!
+//! Two programs sign in (see `h2net::live`): the game, taken only at the
+//! server's own game `PROTOCOL`, and the launcher, taken at the service's
+//! `LIVE_PROTOCOL` whatever the game's `PROTOCOL` is. Each sees only its
+//! own playlists and players, and parties never mix them. The launcher's
+//! matches are played on MCC's engine through the UDP relay, which this
+//! server opens a room on for each of them (see `matches`).
+//!
 //! Each time a player signs in they get their account on a stat card the
 //! server signed (see `card`), and show it the next time. A card newer than
 //! what the server has brings the account back, after the server lost its
@@ -22,8 +29,12 @@ use crate::matchmaker::Matchmaker;
 use crate::playlists::{self, Playlist};
 use crate::store::{self, Account};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use h2net::live::{self, Activity, Login, PlaylistInfo, Privacy, ToPc, ToServer, Welcome};
+use h2net::live::{
+    self, Activity, ClientKind, Login, LoginClient, LoginHeader, PlaylistInfo, Privacy, ToPc,
+    ToServer, Welcome,
+};
 use h2net::Connection;
+use h2relay::RelayHandle;
 use h2sim::game::{clean_name, Look};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
@@ -77,9 +88,10 @@ struct Pc {
     /// While signing in: what it signed in with, and the challenge it must
     /// sign.
     login: Option<(Login, [u8; 32])>,
-    /// Signed in as this account, in this party.
+    /// Signed in as this account, in this party, from this program.
     account: Option<u64>,
     party: u64,
+    client: ClientKind,
     /// The maps the PC has (file name and hash).
     maps: Vec<(String, u64)>,
     /// Splitscreen guests playing on it.
@@ -108,6 +120,7 @@ impl Pc {
             login: None,
             account: None,
             party: 0,
+            client: ClientKind::Viewer,
             maps: Vec::new(),
             guests: 0,
             profile: None,
@@ -183,6 +196,8 @@ pub struct Server {
     playlists_sent: f64,
     /// Dropped connections, and when to let them go.
     lingering: Vec<(Connection, f64)>,
+    /// Ended launcher matches' relay rooms, and when to close them.
+    closing_rooms: Vec<(u64, f64)>,
     /// When each address started signing in, in the last minute.
     sign_ins: HashMap<IpAddr, Vec<f64>>,
     parties: HashMap<u64, Party>,
@@ -196,6 +211,11 @@ pub struct Server {
     online_sent: f64,
     /// The Unix time when the server's clock read 0.
     epoch: u64,
+    /// The UDP relay the launcher's matches are played through, if it's on.
+    relay: Option<RelayHandle>,
+    /// The game's `PROTOCOL` it takes: this build's. (A test pretends it
+    /// was bumped.)
+    game_protocol: u32,
 }
 
 impl Server {
@@ -233,6 +253,7 @@ impl Server {
             matches: Vec::new(),
             playlists_sent: f64::NEG_INFINITY,
             lingering: Vec::new(),
+            closing_rooms: Vec::new(),
             sign_ins: HashMap::new(),
             parties: HashMap::new(),
             party_ids: 0,
@@ -240,7 +261,17 @@ impl Server {
             online_changed: false,
             online_sent: f64::NEG_INFINITY,
             epoch,
+            relay: None,
+            game_protocol: h2net::PROTOCOL,
         })
+    }
+
+    /// Play the launcher's matches through `relay` (h2relay's, running
+    /// beside this server with `Admission::Issued`): a room on it for each
+    /// match, with a key for each player. Without one, launchers can sign in
+    /// and form parties but not search.
+    pub fn set_relay(&mut self, relay: RelayHandle) {
+        self.relay = Some(relay);
     }
 
     /// Connections open now (control links and relay legs).
@@ -356,6 +387,12 @@ impl Server {
         self.pcs.iter().position(|pc| pc.account == Some(account))
     }
 
+    /// The program a signed-in player plays on.
+    fn client_of(&self, account: u64) -> ClientKind {
+        self.pc_of(account)
+            .map_or(ClientKind::Viewer, |k| self.pcs[k].client)
+    }
+
     /// Send a signed-in player `message`.
     fn tell(&mut self, account: u64, message: &ToPc) {
         if let Some(k) = self.pc_of(account) {
@@ -400,12 +437,14 @@ impl Server {
             if self.pcs[k].gone.is_some() {
                 break;
             }
+            let refusal = match kind {
+                live::kind::LOGIN => self.login_refusal(&body),
+                _ => None,
+            };
             if body.len() >= live::MAX_MESSAGE {
                 self.drop_pc(k, "sent too much at once");
-            } else if kind == live::kind::LOGIN
-                && live::login_protocol(&body) != Some(h2net::PROTOCOL)
-            {
-                self.refuse(k, live::UPDATE_YOUR_GAME);
+            } else if let Some(why) = refusal {
+                self.refuse(k, why);
             } else {
                 let handled = match ToServer::read(kind, &body) {
                     Ok(message) => self.handle(k, message, now),
@@ -415,6 +454,31 @@ impl Server {
                     self.drop_pc(k, &format!("unexpected message {kind}"));
                 }
             }
+        }
+    }
+
+    /// Why a PC that sent LOGIN `body` is turned away for its version, if
+    /// it is: the game at another `PROTOCOL` than this server's, or a
+    /// versioned LOGIN at another `LIVE_PROTOCOL`. A launcher's own version
+    /// is no matter.
+    fn login_refusal(&self, body: &[u8]) -> Option<&'static str> {
+        match live::login_header(body) {
+            Some(LoginHeader::Game { protocol }) if protocol == self.game_protocol => None,
+            Some(LoginHeader::Versioned { live, .. }) if live == live::LIVE_PROTOCOL => {
+                match ToServer::read(live::kind::LOGIN, body) {
+                    Ok(ToServer::Login(Login {
+                        client: LoginClient::Viewer { protocol },
+                        ..
+                    })) if protocol != self.game_protocol => Some(live::UPDATE_YOUR_GAME),
+                    // (One that doesn't read is dropped as it's read.)
+                    _ => None,
+                }
+            }
+            Some(LoginHeader::Versioned {
+                client: live::CLIENT_LAUNCHER,
+                ..
+            }) => Some(live::UPDATE_YOUR_LAUNCHER),
+            _ => Some(live::UPDATE_YOUR_GAME),
         }
     }
 
@@ -456,6 +520,8 @@ impl Server {
             (Some(me), ToServer::CustomMap(map)) => self.custom_map(me, &map),
             (Some(me), ToServer::Hosting(id)) => self.hosting(me, id, now),
             (Some(me), ToServer::Result { id, players }) => self.result(me, id, players),
+            (Some(me), ToServer::Joined(id)) => self.joined(me, id),
+            (Some(me), ToServer::LauncherResult(result)) => self.launcher_result(me, result),
             (Some(me), ToServer::LeftMatch { id, host_lost }) => {
                 self.left_match(me, id, host_lost);
             }
@@ -499,12 +565,17 @@ impl Server {
         }
         let pc = &mut self.pcs[k];
         pc.account = Some(id);
+        pc.client = login.client.kind();
         pc.maps = login.maps;
         pc.guests = login.guests;
         // The first ping goes at once.
         pc.pinged = now - live::PING_EVERY;
+        let program = match &login.client {
+            LoginClient::Viewer { .. } => String::new(),
+            LoginClient::Launcher { version } => format!(" (launcher {})", printable(version)),
+        };
         log(format_args!(
-            "live: {} signed in from {}",
+            "live: {} signed in from {}{program}",
             self.accounts[&id].gamertag, pc.ip
         ));
         self.welcome(id);
@@ -581,12 +652,15 @@ impl Server {
         changed
     }
 
-    /// Tell a player who they're signed in as.
+    /// Tell a player who they're signed in as, with their levels in their
+    /// program's playlists.
     fn welcome(&mut self, id: u64) {
         let Some(account) = self.accounts.get(&id) else {
             return;
         };
-        let levels = self.playlists.iter().filter_map(|p| {
+        let client = self.client_of(id);
+        let theirs = self.playlists.iter().filter(|p| p.client == client);
+        let levels = theirs.filter_map(|p| {
             let s = account.stats(&p.key)?;
             Some((p.id, s.rank.level, s.games))
         });
@@ -600,13 +674,15 @@ impl Server {
         self.tell(id, &ToPc::Welcome(welcome));
     }
 
-    /// The playlists as a player sees them, with how many people search
-    /// and play each, and their maps.
+    /// The playlists of a player's program as they see them, with how many
+    /// people search and play each, and their maps.
     fn playlists_for(&self, id: u64, counts: &[(u16, u16)]) -> Vec<PlaylistInfo> {
         let account = self.accounts.get(&id);
+        let client = self.client_of(id);
         self.playlists
             .iter()
             .zip(counts)
+            .filter(|(p, _)| p.client == client)
             .map(|(p, &(searching, playing))| {
                 let stats = account.and_then(|a| a.stats(&p.key));
                 PlaylistInfo {
@@ -655,6 +731,19 @@ impl Server {
             }
         }
     }
+}
+
+/// `text` as a log line can show it: anything but printable ASCII as `?`
+/// (so what a PC sends can't start a line of its own).
+fn printable(text: &str) -> String {
+    let shown = |c: char| {
+        if c.is_ascii_graphic() || c == ' ' {
+            c
+        } else {
+            '?'
+        }
+    };
+    text.chars().map(shown).collect()
 }
 
 /// `signature` is `key`'s, over the proof for `nonce`.

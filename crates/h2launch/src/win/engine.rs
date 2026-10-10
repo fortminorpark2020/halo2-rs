@@ -466,7 +466,7 @@ const V_GET_NAME: usize = 1;
 const V_COPY_TO_GAME_OPTIONS: usize = 7;
 
 /// Parses a game-variant `.bin` and copies it into the options.
-fn load_variant(
+pub(super) fn load_variant(
     data_access: *mut c_void,
     bytes: &[u8],
     opts: &mut GameOptions,
@@ -607,6 +607,7 @@ fn run_launch(w: &Worker) -> Result<(), String> {
             ))
         }
     );
+    crate::live::tell(crate::live::Engine::Running);
     super::wake();
     Ok(())
 }

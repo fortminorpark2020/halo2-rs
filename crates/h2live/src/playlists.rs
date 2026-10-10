@@ -1,8 +1,8 @@
 //! Matchmaking playlists: who can search each one, how many play, and the
 //! games and maps it rotates through. Halo 2's launch playlists (and Team
-//! Snipers and Team Hardcore, which came later) are built in, as far as
-//! this game can play them, and a `playlists.txt` replaces them without a
-//! rebuild.
+//! Snipers and Team Hardcore, which came later) are built in twice: as far
+//! as this game can play them, and for the launcher, on MCC's engine. A
+//! `playlists.txt` replaces them all without a rebuild.
 //!
 //! A playlists file has one setting per line. Blank lines and lines
 //! starting with `#` are skipped. For example:
@@ -23,6 +23,9 @@
 //!   Halo 2's own text (`<key>_title` and `<key>_description` in
 //!   `mainmenu.map`), in saved levels and in settings. The name is the rest
 //!   of the line, shown when a PC has no text of its own for the key.
+//! - `client viewer|launcher`: who plays it: the game (h2viewer, the
+//!   default) or the launcher (h2launch, on MCC's engine). Each sees only
+//!   its own playlists, and their players never meet.
 //! - `ranked yes|no`: games change levels. The default is no.
 //! - `humans <min> <max>`: the fewest and most people in a game, from 2 to
 //!   16. Required.
@@ -41,11 +44,18 @@
 //!   `default`, `swat`, `rockets`, `snipers`, `swords`, `shotguns`,
 //!   `hardcore` (battle rifle starts, no motion sensor) and `team_snipers`
 //!   (snipers with no motion sensor). At least one, all team games or all
-//!   free-for-all.
-//! - `maps <name>...`: map file names without `.map`. At least one and at
-//!   most 64; the line can repeat.
+//!   free-for-all. Not in launcher playlists.
+//! - `mcc_variant <game type> <variant>`: in launcher playlists instead, a
+//!   game in the rotation: the game type (as above, saying whether it's a
+//!   team game) and the MCC game variant's name, which the launcher loads.
+//! - `maps <name>...`: map file names without `.map` (MCC's, in launcher
+//!   playlists). At least one and at most 64; the line can repeat.
+//!
+//! Launcher playlists have no bots and no splitscreen guests, and their
+//! map and variant names are file names: letters, digits and `_ - .`,
+//! not starting with a dot.
 
-use h2net::live::{MAX_NAME, MAX_PLAYLIST_MAPS};
+use h2net::live::{ClientKind, MAX_NAME, MAX_PLAYLIST_MAPS};
 use h2sim::GameType;
 use std::path::Path;
 
@@ -98,6 +108,8 @@ pub struct Playlist {
     pub key: String,
     /// The name players see when their PC has no text for `key`.
     pub name: String,
+    /// Who plays it: the game, or the launcher (on MCC's engine).
+    pub client: ClientKind,
     /// Games change levels.
     pub ranked: bool,
     /// Red against blue; otherwise everyone for themselves.
@@ -111,7 +123,7 @@ pub struct Playlist {
     pub guests: bool,
     pub bots: Bots,
     pub variants: Vec<Variant>,
-    /// Map file names, without `.map`.
+    /// Map file names, without `.map` (MCC's, for the launcher).
     pub maps: Vec<String>,
 }
 
@@ -128,16 +140,20 @@ pub enum Bots {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Variant {
     pub game_type: GameType,
-    /// One of `PRESETS`.
+    /// One of `PRESETS` (empty in launcher playlists).
     pub preset: String,
     /// Points to win (seconds in the timed game types).
     pub score: u32,
-    /// Seconds before the game ends anyway; 0 for no limit.
+    /// Seconds before the game ends anyway; 0 for no limit (or, in
+    /// launcher playlists, as the MCC variant says).
     pub time_limit: u16,
+    /// In launcher playlists, the MCC game variant's name (like
+    /// `01_slayer`), which says the rest.
+    pub mcc: Option<String>,
 }
 
 /// Halo 2's launch playlists and two later ones, as far as this game can
-/// play them.
+/// play them, and for the launcher.
 pub fn built_in() -> Vec<Playlist> {
     parse(BUILT_IN).expect("the built-in playlists are valid")
 }
@@ -216,6 +232,7 @@ fn start(args: &[&str]) -> Result<Playlist, String> {
         id,
         key: key.to_string(),
         name: name.join(" "),
+        client: ClientKind::Viewer,
         ranked: false,
         teams: false,
         min: 0,
@@ -231,6 +248,8 @@ fn start(args: &[&str]) -> Result<Playlist, String> {
 /// Apply one setting line to `p`.
 fn setting(p: &mut Playlist, word: &str, args: &[&str]) -> Result<(), String> {
     match (word, args) {
+        ("client", ["viewer"]) => p.client = ClientKind::Viewer,
+        ("client", ["launcher"]) => p.client = ClientKind::Launcher,
         ("ranked", [yes]) => p.ranked = yes_no(yes)?,
         ("guests", [yes]) => p.guests = yes_no(yes)?,
         ("humans", [min, max]) => {
@@ -258,14 +277,7 @@ fn setting(p: &mut Playlist, word: &str, args: &[&str]) -> Result<(), String> {
             p.bots = Bots::Fill(n);
         }
         ("variant", [game_type, preset, score, time_limit]) => {
-            let Some(&(game_type, _)) = GAME_TYPES.iter().find(|(_, name)| name == game_type)
-            else {
-                let names: Vec<&str> = GAME_TYPES.iter().map(|(_, name)| *name).collect();
-                return Err(format!(
-                    "unknown game type \"{game_type}\" (the game types are {})",
-                    names.join(", ")
-                ));
-            };
+            let game_type = game_type_named(game_type)?;
             let Some(preset) = PRESETS
                 .iter()
                 .find(|n| preset_word(n).eq_ignore_ascii_case(preset))
@@ -281,9 +293,24 @@ fn setting(p: &mut Playlist, word: &str, args: &[&str]) -> Result<(), String> {
                 preset: preset.to_string(),
                 score: number(score)?,
                 time_limit: number(time_limit)?,
+                mcc: None,
+            });
+        }
+        ("mcc_variant", [game_type, name]) => {
+            let game_type = game_type_named(game_type)?;
+            if !file_name(name) {
+                return Err(format!("\"{name}\" isn't an MCC variant's file name"));
+            }
+            p.variants.push(Variant {
+                game_type,
+                preset: String::new(),
+                score: 0,
+                time_limit: 0,
+                mcc: Some(name.to_string()),
             });
         }
         ("maps", [_, ..]) => p.maps.extend(args.iter().map(|m| m.to_string())),
+        ("client", _) => return Err("expected client viewer or client launcher".into()),
         ("ranked" | "guests", _) => return Err(format!("expected {word} yes or {word} no")),
         ("humans", _) => return Err("expected humans <fewest> <most>".into()),
         ("party", _) => return Err("expected party <most people>".into()),
@@ -291,6 +318,7 @@ fn setting(p: &mut Playlist, word: &str, args: &[&str]) -> Result<(), String> {
         ("variant", _) => {
             return Err("expected variant <game type> <preset> <score> <time limit>".into())
         }
+        ("mcc_variant", _) => return Err("expected mcc_variant <game type> <variant>".into()),
         ("maps", _) => return Err("expected maps <name>...".into()),
         _ => return Err(format!("unknown setting \"{word}\"")),
     }
@@ -307,7 +335,10 @@ fn check(p: &mut Playlist) -> Result<(), String> {
         p.party_max = p.max;
     }
     let Some(first) = p.variants.first() else {
-        return Err("no variant lines".into());
+        return Err(match p.client {
+            ClientKind::Viewer => "no variant lines".into(),
+            ClientKind::Launcher => "no mcc_variant lines".into(),
+        });
     };
     p.teams = first.game_type.teams();
     if p.variants.iter().any(|v| v.game_type.teams() != p.teams) {
@@ -325,11 +356,49 @@ fn check(p: &mut Playlist) -> Result<(), String> {
     if p.ranked && p.guests {
         return Err("ranked playlists can't have guests".into());
     }
+    if p.client == ClientKind::Launcher {
+        if p.variants.iter().any(|v| v.mcc.is_none()) {
+            return Err("launcher playlists play MCC variants (mcc_variant lines)".into());
+        }
+        if p.guests {
+            return Err("launcher playlists can't have guests".into());
+        }
+        if p.bots != Bots::None {
+            return Err("launcher playlists can't have bots".into());
+        }
+        if let Some(bad) = p.maps.iter().find(|m| !file_name(m)) {
+            return Err(format!("\"{bad}\" isn't an MCC map's file name"));
+        }
+    } else if p.variants.iter().any(|v| v.mcc.is_some()) {
+        return Err("only launcher playlists play MCC variants".into());
+    }
     match p.bots {
         Bots::Even if !p.teams => Err("only team games have teams to even out".into()),
         Bots::Fill(_) if p.ranked => Err("ranked playlists can't fill with bots".into()),
         _ => Ok(()),
     }
+}
+
+/// The game type a playlists file names `word`.
+fn game_type_named(word: &str) -> Result<GameType, String> {
+    match GAME_TYPES.iter().find(|(_, name)| *name == word) {
+        Some(&(game_type, _)) => Ok(game_type),
+        None => {
+            let names: Vec<&str> = GAME_TYPES.iter().map(|(_, name)| *name).collect();
+            Err(format!(
+                "unknown game type \"{word}\" (the game types are {})",
+                names.join(", ")
+            ))
+        }
+    }
+}
+
+/// `name` can be an MCC file's name, without its extension, as the
+/// launcher opens it: letters, digits and `_ - .`, not starting with a dot
+/// (so never a path), and no longer than any name in a message.
+pub fn file_name(name: &str) -> bool {
+    let ok = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
+    !name.is_empty() && name.len() <= MAX_NAME && !name.starts_with('.') && name.chars().all(ok)
 }
 
 fn yes_no(word: &str) -> Result<bool, String> {
@@ -368,7 +437,12 @@ maps warlock
 
     #[test]
     fn the_launch_playlists_are_built_in() {
-        let playlists = built_in();
+        let all = built_in();
+        let playlists: Vec<Playlist> = all
+            .iter()
+            .filter(|p| p.client == ClientKind::Viewer)
+            .cloned()
+            .collect();
         let names: Vec<(u8, &str, &str)> = playlists
             .iter()
             .map(|p| (p.id, p.key.as_str(), p.name.as_str()))
@@ -398,6 +472,7 @@ maps warlock
                 preset: "DEFAULT".into(),
                 score: 100,
                 time_limit: 720,
+                mcc: None,
             }
         );
         assert_eq!(rumble.variants[1].preset, "ROCKETS");
@@ -455,11 +530,213 @@ maps warlock
             .all(|v| v.preset == "HARDCORE" || v.preset == "TEAM SNIPERS"));
     }
 
+    /// MCC's Halo 2 multiplayer maps, by file name.
+    const MCC_MAPS: [&str; 25] = [
+        "ascension",
+        "backwash",
+        "beavercreek",
+        "burial_mounds",
+        "coagulation",
+        "colossus",
+        "containment",
+        "cyclotron",
+        "deltatap",
+        "derelict",
+        "dune",
+        "elongation",
+        "foundation",
+        "gemini",
+        "headlong",
+        "highplains",
+        "lockout",
+        "midship",
+        "needle",
+        "street_sweeper",
+        "triplicate",
+        "turf",
+        "warlock",
+        "waterworks",
+        "zanzibar",
+    ];
+
+    /// The MCC matchmaking variants the built-in playlists use, as
+    /// `h2launch --variants` listed them on the owner's PC (2026-10-10):
+    /// file name without `.bin`, and whether the variant has teams on.
+    const MCC_HOPPER_VARIANTS: [(&str, bool); 29] = [
+        ("H2_3_Plots", true),
+        ("H2_BTB_Multi_Bomb", true),
+        ("H2_BTB_Multi_Flag", true),
+        ("H2_BTB_Slayer", true),
+        ("H2_FFA_HeadtoHead_b", false),
+        ("H2_FFA_Rockets_b", false),
+        ("H2_FFA_Shotguns_b", false),
+        ("H2_Hardcore_Team_Ball", true),
+        ("H2_Hardcore_Team_King", true),
+        ("H2_Hardcore_Team_Slayer", true),
+        ("H2_Multi_Bomb", true),
+        ("H2_Multi_Flag_CTF_3", true),
+        ("H2_Team_BRs", true),
+        ("H2_Team_Ball", true),
+        ("H2_Team_Crazy_King", true),
+        ("H2_Team_Rockets_b", true),
+        ("H2_Team_SWAT", true),
+        ("H2_Team_Slayer", true),
+        ("H2_Team_Slayer_2v2_a", true),
+        ("H2_Team_Snipers", true),
+        ("h2_2v2_team_ball_120points_brPrimary_magSecondary", true),
+        ("h2_2v2_team_slayer_25kills_brPrimary_magSecondary", true),
+        ("h2_4v4_team_hardcoreFlag_3points", true),
+        ("h2_8v8_team_3plots_br_smg_600points", true),
+        ("h2_arena_snipers_09_2018", true),
+        ("h2_ffa_ball_brPrimary_smgSecondary_60points", false),
+        ("h2_ffa_crazyKing_brPrimary_arSecondary_120points", false),
+        ("h2_ffa_slayerSwords_25kills", false),
+        ("h2_ffa_slayer_smgPrimary_magSecondary_25kills", false),
+    ];
+
+    #[test]
+    fn the_launcher_has_halo_2s_playlists_on_mccs_maps() {
+        let all = built_in();
+        let launcher: Vec<&Playlist> = all
+            .iter()
+            .filter(|p| p.client == ClientKind::Launcher)
+            .collect();
+        let names: Vec<(u8, &str, &str, bool, bool)> = launcher
+            .iter()
+            .map(|p| (p.id, p.key.as_str(), p.name.as_str(), p.ranked, p.teams))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (10, "mcc_ffa", "Rumble Pit", true, false),
+                (11, "mcc_head_to_head", "Head to Head", true, false),
+                (12, "mcc_double_team", "Double Team", true, true),
+                (13, "mcc_team_slayer", "Team Slayer", true, true),
+                (14, "mcc_small_team", "Team Skirmish", true, true),
+                (15, "mcc_big_team", "Big Team Battle", false, true),
+                (16, "mcc_team_snipers", "Team Snipers", false, true),
+                (17, "mcc_team_hardcore", "Team Hardcore", true, true),
+            ]
+        );
+        for p in &launcher {
+            // No bots or guests: MCC's engine plays one person on each PC.
+            assert_eq!((p.bots, p.guests), (Bots::None, false), "{}", p.key);
+            // Each variant is one of MCC's matchmaking variants, with teams
+            // on exactly when its game type is a team game.
+            for v in &p.variants {
+                let name = v.mcc.as_deref().unwrap();
+                let known = MCC_HOPPER_VARIANTS.iter().find(|(n, _)| *n == name);
+                let (_, teams) = known.unwrap_or_else(|| panic!("{}: {name}", p.key));
+                assert_eq!(*teams, v.game_type.teams(), "{}: {name}", p.key);
+            }
+            for map in &p.maps {
+                assert!(MCC_MAPS.contains(&map.as_str()), "{}: {map}", p.key);
+            }
+            // As many people as the game's own playlist (but for Big Team
+            // Battle, which has no bots to make up the numbers), and the
+            // same game types.
+            let game = all.iter().find(|g| format!("mcc_{}", g.key) == p.key);
+            let game = game.unwrap();
+            assert_eq!((p.max, p.party_max), (game.max, game.party_max));
+            let types = |p: &Playlist| {
+                let mut t: Vec<&str> = p
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        GAME_TYPES
+                            .iter()
+                            .find(|(g, _)| *g == v.game_type)
+                            .unwrap()
+                            .1
+                    })
+                    .collect();
+                t.sort();
+                t.dedup();
+                t
+            };
+            assert_eq!(types(p), types(game), "{}", p.key);
+        }
+        // Every map is played somewhere.
+        for map in MCC_MAPS {
+            let played = launcher.iter().any(|p| p.maps.iter().any(|m| m == map));
+            assert!(played, "{map}");
+        }
+        // The game's playlists play no MCC variants.
+        let games = all.iter().filter(|p| p.client == ClientKind::Viewer);
+        assert!(games.flat_map(|p| &p.variants).all(|v| v.mcc.is_none()));
+    }
+
+    #[test]
+    fn launcher_playlists_name_mcc_variants() {
+        let text = "playlist 20 mcc_test Test\nclient launcher\nhumans 2 4\n\
+                    mcc_variant team_slayer my_variant-2.v1\nmaps lockout zanzibar\n";
+        let p = &parse(text).unwrap()[0];
+        assert_eq!(p.client, ClientKind::Launcher);
+        assert!(p.teams);
+        assert_eq!(
+            p.variants,
+            [Variant {
+                game_type: GameType::TeamSlayer,
+                preset: String::new(),
+                score: 0,
+                time_limit: 0,
+                mcc: Some("my_variant-2.v1".into()),
+            }]
+        );
+        let check = |extra: &str| parse(&format!("{text}{extra}\n")).unwrap_err();
+        assert_eq!(
+            check("variant team_slayer default 50 600"),
+            "line 1: playlist mcc_test: launcher playlists play MCC variants (mcc_variant lines)"
+        );
+        assert_eq!(
+            check("bots fill 8"),
+            "line 1: playlist mcc_test: launcher playlists can't have bots"
+        );
+        assert_eq!(
+            check("guests yes"),
+            "line 1: playlist mcc_test: launcher playlists can't have guests"
+        );
+        assert_eq!(
+            check("maps ..\\lockout"),
+            "line 1: playlist mcc_test: \"..\\lockout\" isn't an MCC map's file name"
+        );
+        assert_eq!(
+            check("mcc_variant slayer x"),
+            "line 1: playlist mcc_test: mixes team and free-for-all game types"
+        );
+        assert_eq!(
+            check("client xbox"),
+            "line 6: expected client viewer or client launcher"
+        );
+        for bad in ["../secret", ".hidden", "a/b", "c:d", "x*", "ü"] {
+            assert_eq!(
+                check(&format!("mcc_variant slayer {bad}")),
+                format!("line 6: \"{bad}\" isn't an MCC variant's file name")
+            );
+        }
+        assert_eq!(
+            check("mcc_variant team_slayer"),
+            "line 6: expected mcc_variant <game type> <variant>"
+        );
+        assert_eq!(
+            parse("playlist 20 t T\nclient launcher\nhumans 2 4\nmaps x\n").unwrap_err(),
+            "line 1: playlist t: no mcc_variant lines"
+        );
+        // The game's playlists can't play them.
+        assert_eq!(
+            error_with("mcc_variant team_slayer 01_slayer"),
+            "line 1: playlist double_team: only launcher playlists play MCC variants"
+        );
+        assert!(file_name("01_slayer") && file_name("street_sweeper"));
+        assert!(!file_name("") && !file_name(&"x".repeat(MAX_NAME + 1)));
+    }
+
     #[test]
     fn a_file_replaces_the_built_in_playlists() {
         let playlists = parse(DOUBLE_TEAM).unwrap();
         assert_eq!(playlists.len(), 1);
         let p = &playlists[0];
+        assert_eq!(p.client, ClientKind::Viewer);
         assert_eq!(p.maps, ["lockout", "midship", "warlock"]);
         assert_eq!(p.variants[1].game_type, GameType::TeamOddball);
         assert!(p.teams && !p.guests);

@@ -612,6 +612,7 @@ unsafe extern "system" fn set_game_state(_this: *mut c_void, state: i32) -> usiz
         }
         if state == 1 {
             super::mark(&super::STATE1_AT);
+            crate::live::tell(crate::live::Engine::MapLoaded);
         }
     });
     0
@@ -655,7 +656,50 @@ unsafe extern "system" fn set_game_result(_this: *mut c_void, result: *mut c_voi
         profile::GAME_RESULT_SIZE,
         super::now()
     );
+    let block = result as usize;
+    panic_guard(6, move || game_result(block));
     0
+}
+
+/// What `set_game_result` does with the block at `block`: log what it says,
+/// keep a copy if asked, and tell the match's thread (see `crate::live`).
+fn game_result(block: usize) {
+    let bytes: &[u8] = if block == 0 {
+        &[]
+    } else {
+        // SAFETY: the engine hands us a GAME_RESULT_SIZE block for the
+        // length of the call; it is only read, and copied before we return.
+        unsafe { std::slice::from_raw_parts(block as *const u8, profile::GAME_RESULT_SIZE) }
+    };
+    for line in crate::results::describe(bytes) {
+        log!("result: {line}");
+    }
+    // H2LAUNCH_RESULT_DUMP=<folder>: keep a copy of the block on this PC,
+    // for working out more of its layout. It is the engine's data: never
+    // commit or upload it.
+    if let (Some(dir), false) = (std::env::var_os("H2LAUNCH_RESULT_DUMP"), bytes.is_empty()) {
+        let path = std::path::Path::new(&dir).join(format!(
+            "result-{}-{:.0}.bin",
+            std::process::id(),
+            super::now() * 1000.0
+        ));
+        match std::fs::write(&path, bytes) {
+            Ok(()) => log!("result block kept in {}", path.display()),
+            Err(e) => log!("result block not kept: {e}"),
+        }
+    }
+    // The game ended (every PC gets this at the end), unless we asked the
+    // engine to quit: then it is our own result as a quitter (seen on the
+    // owner's PC), and closing says we left.
+    let quitting = matches!(
+        super::QUIT.load(Ordering::SeqCst),
+        super::QUIT_USER | super::QUIT_CONSOLE
+    );
+    if !quitting {
+        let players = crate::results::players(bytes);
+        let players = players.iter().map(|p| p.for_server()).collect();
+        crate::live::tell(crate::live::Engine::Ended(players));
+    }
 }
 
 unsafe extern "system" fn get_game_event_manager(_this: *mut c_void) -> *mut c_void {

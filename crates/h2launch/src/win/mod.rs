@@ -26,6 +26,7 @@ mod host;
 mod input;
 mod log;
 mod screen;
+mod variants;
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -271,6 +272,9 @@ pub fn run() -> i32 {
     if args.check {
         return check::run(&args);
     }
+    if args.variants {
+        return variants::run(&args);
+    }
     launch(args)
 }
 
@@ -466,12 +470,51 @@ fn launch(mut args: Args) -> i32 {
     };
     log!("MCC folder: {root}");
 
+    // --live: the server makes the match; it names the map and variant.
+    let live = args.live.clone().map(|server| {
+        let maps_dir = crate::mccroot::join(&root, r"halo2\h2_maps_win64_dx11");
+        let log: crate::live::Log = std::sync::Arc::new(|l: &str| log!("{l}"));
+        let ready = crate::live::prepare(
+            &server,
+            args.playlist,
+            Duration::from_secs_f64(args.live_wait),
+            &args.name,
+            std::path::Path::new(&maps_dir),
+            &dir,
+            log,
+        )
+        .unwrap_or_else(|e| {
+            log!("live: {e}");
+            finish("no match from the server");
+        });
+        if crate::maps::find(&ready.map).is_none() {
+            log!(
+                "live: the server picked map {:?}, which isn't known",
+                ready.map
+            );
+            crate::live::install(ready.link);
+            crate::live::close();
+            finish("unknown map from the server");
+        }
+        if args.map.is_some() || args.variant.is_some() {
+            log!("live: the server's map and variant are used, not --map or --variant");
+        }
+        args.map = Some(ready.map.clone());
+        args.variant = Some(ready.variant.clone());
+        ready
+    });
+
     let map = match &args.map {
         Some(m) => crate::maps::find(m).expect("checked by the parser"),
         None => crate::maps::by_id(crate::maps::LOCKOUT).expect("Lockout is in the table"),
     };
-    let session = match &args.session {
-        Some(p) => {
+    let session = match (&args.session, live) {
+        (_, Some(ready)) => {
+            log!("{}", ready.session.describe(ready.me));
+            crate::live::install(ready.link);
+            Some((ready.session, ready.me))
+        }
+        (Some(p), None) => {
             let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
                 log!("session file {p}: {e}");
                 finish("session file not readable");
@@ -488,7 +531,7 @@ fn launch(mut args: Args) -> i32 {
             log!("{}", sess.describe(me));
             Some((sess, me))
         }
-        None => {
+        (None, None) => {
             if args.me.is_some() {
                 log!("--me does nothing without --session");
             }
@@ -915,6 +958,8 @@ pub(crate) fn finish(reason: &str) -> ! {
         }
     }
     FINISH_AT.store(now().max(1e-9).to_bits(), Ordering::SeqCst);
+    // A match from --live: tell the server, before the slower steps.
+    crate::live::close();
     let closing = CONSOLE_CLOSING.load(Ordering::SeqCst);
     gfx::finish_screenshots(if closing { 0.5 } else { 3.0 });
     let out = outcome(reason);
