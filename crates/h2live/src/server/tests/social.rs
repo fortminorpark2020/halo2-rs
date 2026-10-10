@@ -278,6 +278,79 @@ fn friends_see_what_friends_are_doing() {
 }
 
 #[test]
+fn joinable_follows_invites_declined_and_pushed_out() {
+    let mut w = World::new("friends-invites");
+    let a = launcher(&mut w, 1, "Alpha");
+    let b = launcher(&mut w, 2, "Bravo");
+    befriend(&mut w, a, b);
+    let alpha = |w: &World| listed(w, b, "ALPHA").unwrap();
+    let party = w.party(a).id;
+    w.send(a, ToServer::Privacy(Privacy::InviteOnly));
+    w.until(|w| !alpha(w).joinable);
+    // Invited, then declined: no longer joinable.
+    w.send(a, ToServer::Invite(w.id(b)));
+    w.until(|w| alpha(w).joinable);
+    w.send(b, ToServer::Decline(party));
+    w.until(|w| !alpha(w).joinable);
+    // Invited, then pushed out by 32 newer invites (the cap): the same.
+    w.send(a, ToServer::Invite(w.id(b)));
+    w.until(|w| alpha(w).joinable);
+    for n in 0..32 {
+        let i = launcher(&mut w, 10 + n, &format!("Guest{n}"));
+        w.send(a, ToServer::Invite(w.id(i)));
+    }
+    w.until(|w| !alpha(w).joinable);
+    assert_eq!(
+        w.server.can_join(w.id(b), party),
+        Err("THAT PARTY IS INVITE ONLY")
+    );
+
+    // Removed from an open party, then pushed out of its 32 removed
+    // players: joinable again.
+    w.send(a, ToServer::Privacy(Privacy::Open));
+    w.send(b, ToServer::JoinParty(party));
+    w.until(|w| w.members(a).contains(&w.id(b)));
+    w.send(a, ToServer::Kick(w.id(b)));
+    w.until(|w| !w.members(a).contains(&w.id(b)));
+    w.until(|w| alpha(w).party == party && !alpha(w).joinable);
+    for i in 2..34 {
+        w.send(i, ToServer::JoinParty(party));
+        w.until(|w| w.members(a).contains(&w.id(i)));
+        w.send(a, ToServer::Kick(w.id(i)));
+        w.until(|w| !w.members(a).contains(&w.id(i)));
+    }
+    w.until(|w| alpha(w).joinable);
+    assert_eq!(w.server.can_join(w.id(b), party), Ok(()));
+}
+
+#[test]
+fn requests_show_new_gamertags_both_ways() {
+    let mut w = World::new("friends-renamed");
+    let a = launcher(&mut w, 1, "Alpha");
+    let b = launcher(&mut w, 2, "Bravo");
+    w.send(a, ToServer::FriendRequest("BRAVO".into()));
+    w.until(|w| listed(w, b, "ALPHA").is_some() && listed(w, a, "BRAVO").is_some());
+    // The one asked renames: the asker's "request sent" row follows.
+    w.send(
+        b,
+        ToServer::Profile {
+            gamertag: "Kat".into(),
+            look: Look::default(),
+        },
+    );
+    w.until(|w| listed(w, a, "KAT").is_some_and(|f| f.relation == Relation::WeAsked));
+    // The asker renames: the "requests to you" row follows.
+    w.send(
+        a,
+        ToServer::Profile {
+            gamertag: "Jun".into(),
+            look: Look::default(),
+        },
+    );
+    w.until(|w| listed(w, b, "JUN").is_some_and(|f| f.relation == Relation::AskedUs));
+}
+
+#[test]
 fn declining_and_removing_are_quiet() {
     let mut w = World::new("friends-quiet");
     let a = launcher(&mut w, 1, "Alpha");

@@ -17,12 +17,14 @@
 //! changes, at most once a second: every second the server works out
 //! everyone's presence (where they're signed in, gamertag, highest level,
 //! what their party is doing and where, and how open and full it is), and
-//! an account whose presence changed marks each of its friends, and
-//! itself, as needing a new list (whether a friend's party can be joined
-//! depends on its own party too). A request, an answer or a removal marks
-//! both players, signing in marks the player, and an invite marks the one
-//! invited. A list the same as the last one sent to that PC isn't sent
-//! again.
+//! an account whose presence changed marks each of its friends, those it
+//! has a request with either way, and itself, as needing a new list
+//! (whether a friend's party can be joined depends on its own party too).
+//! A request, an answer or a removal marks both players, signing in marks
+//! the player, an invite marks the one invited (and any invite it pushed
+//! out), and so does declining one, and a removal from a party marks any
+//! removed player it pushed out. A list the same as the last one sent to
+//! that PC isn't sent again.
 //!
 //! A service record (RECORD, answered with SERVICE_RECORD) is a player's
 //! level, games, wins and tally in each ranked playlist of the asker's
@@ -284,10 +286,14 @@ impl Server {
                 .keys()
                 .filter(|id| !presences.contains_key(id)),
         );
+        // (Requests either way show their gamertag and level too.)
         for id in changed {
             self.friends_changed(id);
-            for friend in self.friends.friends_of(id) {
-                self.friends_changed(friend);
+            let mut theirs = self.friends.friends_of(id);
+            theirs.extend(self.friends.asked_by(id));
+            theirs.extend(self.friends.asking(id));
+            for other in theirs {
+                self.friends_changed(other);
             }
         }
         // (Those who signed out are passed on now, and dropped.)

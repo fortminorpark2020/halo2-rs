@@ -153,13 +153,15 @@ impl Server {
             return;
         }
         party.invited.retain(|&(to, _)| to != who);
-        if party.invited.len() == INVITES {
-            party.invited.remove(0);
-        }
+        let dropped = (party.invited.len() == INVITES).then(|| party.invited.remove(0).0);
         party.invited.push((who, me));
         self.tell(who, &ToPc::Invited { party: id, from });
-        // An invite-only party may be one they can join now.
+        // An invite-only party may be one they can join now (and, for the
+        // oldest invite dropped to make room, one they no longer can).
         self.friends_changed(who);
+        if let Some(dropped) = dropped {
+            self.friends_changed(dropped);
+        }
     }
 
     /// Whether `me` could join party `id` now, and if not what they're told
@@ -228,6 +230,8 @@ impl Server {
             return;
         };
         let (_, from) = party.invited.remove(i);
+        // Without the invite, an invite-only party can't be joined.
+        self.friends_changed(me);
         let Some(name) = self.accounts.get(&me).map(|a| a.gamertag.clone()) else {
             return;
         };
@@ -254,10 +258,12 @@ impl Server {
         if who == me || !party.members.contains(&who) {
             return;
         }
-        if party.booted.len() == BOOTED {
-            party.booted.remove(0);
-        }
+        let forgotten = (party.booted.len() == BOOTED).then(|| party.booted.remove(0));
         party.booted.push(who);
+        // The oldest removed player dropped to make room may join it again.
+        if let Some(forgotten) = forgotten {
+            self.friends_changed(forgotten);
+        }
         self.remove_member(id, who);
         self.new_party(who);
         self.notice(who, REMOVED);
