@@ -7,8 +7,9 @@
 use ed25519_dalek::SigningKey;
 use h2live::client::{LiveClient, LiveEvent, Profile};
 use h2net::live::{self, ToServer};
+use h2relay::{ClientConfig, RelayClient, State};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -270,6 +271,41 @@ fn the_program_serves_pcs_and_web_requests_and_stops_cleanly() {
     pcs.until(|p| !p.events[charlie].is_empty());
     let refused = LiveEvent::Refused(live::GAMERTAG_TAKEN.into());
     assert_eq!(pcs.events[charlie], [refused]);
+    program.stop();
+}
+
+#[test]
+fn the_program_relays_launcher_traffic_on_udp() {
+    let data = TempDir::new("relay-data");
+    let mut program = Program::start(&data.0);
+    // On UDP, the same port number as the sign-ins.
+    let line = program.wait_for("relay on UDP port");
+    let port = program.port;
+    assert!(
+        line.contains(&format!("relay on UDP port {port} ")),
+        "{line}"
+    );
+    let relay = SocketAddr::from(([127, 0, 0, 1], port));
+    let config = ClientConfig::default;
+    let alpha = RelayClient::connect_with(relay, 7, 1, config()).unwrap();
+    let bravo = RelayClient::connect_with(relay, 7, 2, config()).unwrap();
+    let start = Instant::now();
+    while [&alpha, &bravo].iter().any(|c| c.state() != State::Joined) {
+        assert!(start.elapsed() < WAIT, "{:?}", alpha.state());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    program.wait_for("relay: room 0000000000000007 opened by 127.0.0.1:");
+    alpha.send_unreliable(2, 1000, b"over UDP").unwrap();
+    let mut buf = [0; 64];
+    let got = loop {
+        if let Some(got) = bravo.recv(&mut buf) {
+            break got;
+        }
+        assert!(start.elapsed() < WAIT, "nothing came");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(got, (1, 1000, 8));
+    assert_eq!(&buf[..8], b"over UDP");
     program.stop();
 }
 

@@ -10,4 +10,5 @@
 !crates/h2sim/src
 !crates/h2net/src
 !crates/h2live/src
+!crates/h2relay/src
 **/*.map

@@ -8,6 +8,8 @@ description = "Online play, like Halo 2 on Xbox Live: accounts, parties, levels,
 [dependencies]
 h2sim = { path = "../h2sim" }
 h2net = { path = "../h2net" }
+# The UDP relay for the launcher's game traffic, run beside the sign-in port.
+h2relay = { path = "../h2relay" }
 ed25519-dalek = "2"
 sha2 = "0.10"
 getrandom = "0.3"

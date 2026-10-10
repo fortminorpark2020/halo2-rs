@@ -4,6 +4,11 @@ Online play needs one server that everyone's game signs in to. It keeps
 accounts and levels, finds matches, and passes the games between players.
 There are three ways to run it. Option A is the easy one.
 
+The server uses one port number twice: TCP 47050 for signing in, and UDP
+47050 for the relay that carries the launcher's games between PCs (the
+game's own packets go over UDP so that one lost packet doesn't hold up
+everyone). Friends outside your home network need both.
+
 ## Option A: a free server on Render (recommended)
 
 Nothing to install, no router settings, and it works for every friend on any
@@ -35,6 +40,9 @@ Good to know:
   signed copy of its own levels and hands it back when it signs in.
 - When Claude changes the server, Render updates it by itself a few minutes
   later. A game being played right then ends.
+- Render's free plan only carries TCP, so the launcher's games (which go
+  through the UDP relay) can't be played through it. For those, use option
+  B or C.
 
 ## Option B: the server on your own PC
 
@@ -49,26 +57,35 @@ internet address.
    networks and choose **Allow access**.
 3. Read what it says. Most lines start with the date and time.
    - `listening on port 47050`: it's running.
+   - `relay on UDP port 47050`: the relay for the launcher's games is
+     running beside it.
    - `accounts are kept in ...`: the folder (`h2live-data`) holding everyone's
      accounts. Back it up now and then.
    - Then one of these:
      - `READY: ws://203.0.113.5:47050`: players can reach it. Paste that
-       address to Claude.
-     - `FORWARD TCP 47050 TO 192.168.1.20`: your router didn't open the way in
-       by itself. Open the router's settings page (its address and password are
-       usually on a sticker on the router), find **Port Forwarding** (sometimes
-       called Virtual Server or NAT), and add one for TCP port 47050 to the
-       address at the end of the line. Also give this PC a fixed address there
-       (often called DHCP reservation) so the forward keeps pointing at it.
-       h2live goes on showing this line afterwards; that's fine. If you get
-       stuck, tell Claude the router's make and model. Your address for
-       friends is `ws://<your internet address>:47050`: search "what is my
-       IP" to find it, and paste that to Claude.
+       address to Claude. (The router opened UDP 47050 for the relay too,
+       unless a `FORWARD UDP 47050` line follows: then forward just that one
+       as below.)
+     - `FORWARD TCP AND UDP 47050 TO 192.168.1.20`: your router didn't open
+       the way in by itself. Open the router's settings page (its address
+       and password are usually on a sticker on the router), find **Port
+       Forwarding** (sometimes called Virtual Server or NAT), and forward port
+       47050 for both TCP and UDP to the address at the end of the line. Many
+       routers have a **Both** or **TCP/UDP** choice that does it in one
+       rule; otherwise add two rules, one for each. Also give this PC a fixed
+       address there (often called DHCP reservation) so the forwards keep
+       pointing at it. h2live goes on showing this line afterwards; that's
+       fine. If you get stuck, tell Claude the router's make and model. Your
+       address for friends is `ws://<your internet address>:47050`: search
+       "what is my IP" to find it, and paste that to Claude.
      - `CGNAT: USE THE HOSTED OPTION`: your internet provider shares one
        internet address between several homes, so nobody outside can reach
        this PC. Use option A.
    - `FAILED: port 47050 is in use`: h2live is running already, in another
      window.
+   - `relay off: can't listen on UDP port 47050`: something else on this PC
+     has that UDP port. Signing in still works, but launcher games can't go
+     through this server until that's closed (or the relay is moved, below).
    - Anything else is detail, for Claude if something goes wrong.
 4. Leave the window open while anyone plays. Ctrl+C or closing the window
    stops it.
@@ -87,12 +104,30 @@ it from your PC.
   to a Linux build of `h2live`, installs it as the `h2live` service (program
   in `/opt/h2live`, accounts in `/var/lib/h2live`). Running it again updates
   the program and keeps every account.
-- `journalctl -u h2live` shows its log, with the READY, FORWARD or CGNAT line
-  described in option B. FORWARD means the router needs a port forward for
-  TCP 47050 to the container's address, and the container's address should
-  be reserved in the router so it doesn't change.
+- `journalctl -u h2live` shows its log, with the `relay on UDP port 47050`
+  line and the READY, FORWARD or CGNAT line described in option B. FORWARD
+  means the router needs port forwards for TCP 47050 and UDP 47050 to the
+  container's address, and the container's address should be reserved in
+  the router so it doesn't change. The install script also says whether the
+  relay is listening.
+- The container has no firewall of its own unless one was added. If the
+  Proxmox firewall is turned on for it (Datacenter, the node, or the
+  container's own Firewall tab), add rules there letting in TCP 47050 and
+  UDP 47050.
 - On the same network, games reach it at `ws://<container address>:47050`
-  (a `server=` line in `profile.txt`, below).
+  (a `server=` line in `profile.txt`, below), and launchers send their game
+  traffic to UDP 47050 at the same address.
+
+## Moving or turning off the relay
+
+The relay listens on UDP at the same number as the sign-in port unless told
+otherwise. A `relay=47051` line in `h2live.txt` next to the program (or the
+setting `H2LIVE_RELAY=47051`, for the container) moves it to another port;
+`relay=off` turns it off. Forward whichever UDP port it uses.
+
+For tests on one PC, `h2relay.exe` runs the relay on its own, without the
+rest of the server: `h2relay` listens on UDP 47050, and `h2relay 47051` or
+`h2relay 127.0.0.1:47051` somewhere else.
 
 ## What friends do
 
