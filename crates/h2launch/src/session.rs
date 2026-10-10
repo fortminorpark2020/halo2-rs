@@ -131,15 +131,20 @@ impl Session {
         Ok(s)
     }
 
-    /// `player = <xuid> machine=<i> [team=<t>] [name=<gamertag>]`.
+    /// `player = <xuid> machine=<i> [team=<t>] [name=<gamertag>]`. The
+    /// name is the rest of the line, so it can have spaces.
     fn player(n: usize, v: &str) -> Result<Player, String> {
+        let (v, name) = match v.find(" name=") {
+            Some(at) => (&v[..at], Some(v[at + " name=".len()..].trim())),
+            None => (v, None),
+        };
         let mut words = v.split_whitespace();
         let xuid = number(n, "player xuid", words.next().unwrap_or(""))?;
         let mut p = Player {
             xuid,
             machine: usize::MAX,
             team: 0,
-            name: None,
+            name: name.filter(|s| !s.is_empty()).map(str::to_string),
         };
         for w in words {
             let (k, val) = w
@@ -336,6 +341,38 @@ impl Session {
             opts.put_i32(at + player::CONTROLLER, controller);
         }
         opts.put_u64(off::LOCAL_NETWORK_ID, self.machines[me]);
+    }
+
+    /// The session as a file `parse` reads back, with `me` as this
+    /// launcher's machine.
+    pub fn to_text(&self) -> String {
+        let mut out = format!(
+            "relay = {}\nroom = {:#x}\nsecure = {:#x}\nhost = {}\n",
+            self.relay, self.room, self.secure, self.host
+        );
+        if let Some(k) = &self.key {
+            out += &format!("key = {k}\n");
+        }
+        if let Some(t) = self.threshold {
+            out += &format!("threshold = {t}\n");
+        }
+        if let Some(me) = self.me {
+            out += &format!("me = {me}\n");
+        }
+        for m in &self.machines {
+            out += &format!("machine = {m:#x}\n");
+        }
+        for p in &self.players {
+            out += &format!(
+                "player = {:#x} machine={} team={}",
+                p.xuid, p.machine, p.team
+            );
+            if let Some(name) = &p.name {
+                out += &format!(" name={name}");
+            }
+            out.push('\n');
+        }
+        out
     }
 
     /// One line for the log.
@@ -537,6 +574,17 @@ threshold = 2
         );
         let s = Session::parse(&nobody_on_1).unwrap();
         assert!(s.resolve_me(Some(1)).is_err());
+    }
+
+    #[test]
+    fn a_session_written_out_reads_back_the_same() {
+        let mut s = Session::parse(TWO).unwrap();
+        s.key = Some("000102030405060708090a0b0c0d0e0f".into());
+        s.me = Some(1);
+        s.players[1].name = Some("Master Chief".into());
+        let back = Session::parse(&s.to_text()).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.players[1].name.as_deref(), Some("Master Chief"));
     }
 
     #[test]

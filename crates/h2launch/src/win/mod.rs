@@ -245,6 +245,32 @@ pub(crate) fn script_time() -> Option<f64> {
     Some(now() - base)
 }
 
+/// The MCC folder (`--mcc` if given, else the Steam install), for the
+/// lobby.
+pub fn mcc_root(cli: Option<&str>) -> Option<String> {
+    engine::find_root(cli).0
+}
+
+/// With `--events`: a line `quit` from the lobby on the standard input
+/// closes the engine as closing its window does (the player left the
+/// game, or the engine stayed up after it).
+fn listen_for_quit() {
+    let spawned = std::thread::Builder::new()
+        .name("h2launch-lobby".into())
+        .spawn(|| {
+            for line in std::io::stdin().lines() {
+                let Ok(line) = line else { break };
+                if line.trim() == "quit" {
+                    log!("the lobby asked the engine to close");
+                    request_quit(QUIT_USER);
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        log!("no thread for the lobby's input ({e})");
+    }
+}
+
 // ---------------------------------------------------------------- start
 
 pub fn run() -> i32 {
@@ -529,6 +555,12 @@ fn launch(mut args: Args) -> i32 {
             });
             log!("session file {p}");
             log!("{}", sess.describe(me));
+            if args.events {
+                // Started by the lobby: it hears what the engine does, and
+                // can ask it to close.
+                crate::live::install_events();
+                listen_for_quit();
+            }
             Some((sess, me))
         }
         (None, None) => {

@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 06:50 UTC. Any assistant that works on the project
+Last updated 2026-10-10 07:30 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -127,6 +127,17 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   47050 forwarded to 192.168.8.102 in his router (his step). The binary
   went over on a temporary orphan branch `deploy-h2live`, which can be
   deleted (the container proxy refuses branch deletes).
+- Milestone 4 (the lobby) is on `launcher-lobby`, based on
+  `launcher-live`: `h2launch` with no flags opens a window of its own
+  (winit, softbuffer, a system font through ab_glyph, gilrs pads) that signs
+  in to h2live, shows the playlists, the party, players online and
+  invitations, searches, shows the pregame lobby, runs each match's engine
+  as a child (`--session <file> --events`, which prints `H2EVENT` lines),
+  tells the server what the engine did, and shows the carnage report.
+  `--offline` is now how to start an offline match. Design, keys and the
+  headless test harness: `docs/notes/launcher/lobby.md`. Tested on Linux
+  with a local h2live and two headless lobbies on the stand-in engine
+  (`--fake-engine`). Next: the same on the owner's PC with the real engine.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.

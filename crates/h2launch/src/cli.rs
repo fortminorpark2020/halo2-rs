@@ -11,6 +11,13 @@ a relay (--session).
 
 Usage: h2launch [flags]
 
+  --lobby                 Open the lobby: sign in to h2live, form a party,
+                          search the playlists, and play each match in a
+                          new copy of the launcher (also what no flags at
+                          all do). --live names the server for this run;
+                          otherwise lobby.txt in the launcher's folder does.
+  --offline               Start an offline match on the engine (on --map
+                          with --variant) instead of opening the lobby.
   --check                 Check the install and print what a launch would use;
                           does not start the engine.
   --variants              List the settings of every matchmaking game variant
@@ -57,6 +64,12 @@ Usage: h2launch [flags]
                           folder.
   --playlist <n>          The launcher playlist to search (default 11, Head
                           to Head: two players).
+  --events                With --session: say what the engine does on the
+                          standard output (H2EVENT lines), for the lobby
+                          that started this launcher.
+  --fake-engine           With --session: stand in for the engine and end
+                          the game after a few seconds with made-up results
+                          (for testing the lobby without MCC).
   --live-wait <seconds>   How long to search before giving up (default 600).
   --relay-wait <seconds>  How long to wait for the relay to take us in before
                           the engine starts (default 15).
@@ -146,6 +159,14 @@ pub struct Args {
     pub live: Option<String>,
     pub playlist: u8,
     pub live_wait: f64,
+    /// `--lobby`.
+    pub lobby: bool,
+    /// `--offline`: the engine, not the lobby, with no other flag.
+    pub offline: bool,
+    /// `--events`: engine events on the standard output.
+    pub events: bool,
+    /// `--fake-engine`.
+    pub fake_engine: bool,
     pub relay_wait: f64,
     pub recv_port: RecvPort,
     pub send_return: SendReturn,
@@ -189,6 +210,10 @@ impl Default for Args {
             live: None,
             playlist: DEFAULT_PLAYLIST,
             live_wait: 600.0,
+            lobby: false,
+            offline: false,
+            events: false,
+            fake_engine: false,
             relay_wait: 15.0,
             recv_port: RecvPort::Auto,
             send_return: SendReturn::Len,
@@ -270,6 +295,10 @@ where
             "--version" => switch(&mut a, |a| a.version = true)?,
             "--check" => switch(&mut a, |a| a.check = true)?,
             "--variants" => switch(&mut a, |a| a.variants = true)?,
+            "--lobby" => switch(&mut a, |a| a.lobby = true)?,
+            "--offline" => switch(&mut a, |a| a.offline = true)?,
+            "--events" => switch(&mut a, |a| a.events = true)?,
+            "--fake-engine" => switch(&mut a, |a| a.fake_engine = true)?,
             "--groundhog" => switch(&mut a, |a| a.groundhog = true)?,
             "--attach-input" => switch(&mut a, |a| a.attach_input = true)?,
             "--no-attach-input" => switch(&mut a, |a| a.attach_input = false)?,
@@ -414,6 +443,15 @@ where
     }
     if a.live.is_some() && a.session.is_some() {
         return Err("--live and --session can't go together".into());
+    }
+    if (a.events || a.fake_engine) && a.session.is_none() {
+        return Err("--events and --fake-engine need --session".into());
+    }
+    if a.lobby && a.session.is_some() {
+        return Err("--lobby and --session can't go together".into());
+    }
+    if a.offline && (a.lobby || a.live.is_some() || a.session.is_some()) {
+        return Err("--offline can't go with --lobby, --live or --session".into());
     }
     Ok(a)
 }
@@ -637,6 +675,16 @@ mod tests {
         );
         assert!(parse(["--playlist", "300"]).is_err());
         assert!(parse(["--live", "x", "--session", "m.txt"]).is_err());
+        let a = parse(["--lobby", "--live", "example.org"]).unwrap();
+        assert!(a.lobby && !a.events && !a.fake_engine);
+        let a = parse(["--session", "m.txt", "--events", "--fake-engine"]).unwrap();
+        assert!(a.events && a.fake_engine);
+        assert!(parse(["--events"]).is_err());
+        assert!(parse(["--fake-engine"]).is_err());
+        assert!(parse(["--lobby", "--session", "m.txt"]).is_err());
+        assert!(parse(["--offline"]).unwrap().offline);
+        assert!(parse(["--offline", "--lobby"]).is_err());
+        assert!(parse(["--offline", "--live", "x"]).is_err());
     }
 
     #[test]

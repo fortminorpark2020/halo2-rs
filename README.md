@@ -47,11 +47,14 @@ install. No game files are included in this repository.
   2's launch playlists and its later Team Snipers and Team Hardcore
   (replaceable by a `playlists.txt`), and matchmaking (level ranges that
   widen, even teams, map choice and host choice).
-- `h2launch`: a separate experiment (Windows only) that starts MCC's own
-  classic Halo 2 engine from your Master Chief Collection install, without
-  running MCC, straight into an offline Slayer match on Lockout. It reads the
-  game's `halo2.dll` and never changes any MCC file. Early work in progress; it
-  is not part of the game above. See `docs/notes/launcher/README.md`.
+- `h2launch`: the launcher (Windows only, work in progress) that starts MCC's
+  own classic Halo 2 engine from your Master Chief Collection install,
+  without running MCC. Double-click it to open its lobby: pick a gamertag,
+  form a party, search a playlist, play the match on the real engine, and
+  see the carnage report with your new level afterwards. `--offline` starts
+  an offline Slayer match on Lockout instead. It reads the game's
+  `halo2.dll` and never changes any MCC file. It is not part of the game
+  above. See `docs/notes/launcher/README.md`.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
 - `h2viewer`: the game: Halo 2 style menus and lobby, Halo 2's maps with their
