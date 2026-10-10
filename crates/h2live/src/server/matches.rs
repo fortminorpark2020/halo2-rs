@@ -64,6 +64,11 @@ const LINK_WAIT: f64 = 20.0;
 /// Seconds after the game ends (see `Match::over_by_results`) that
 /// everyone has to send their results.
 const RESULTS_WAIT: f64 = 30.0;
+/// Seconds a launcher match's relay room stays open after the match ends:
+/// the engines still talk through their postgame (about 7 s seen on the
+/// owner's PC), and a joining PC that loses the host there waits out the
+/// engine's 45 s timeout before it leaves. An estimate with room to spare.
+const ROOM_GRACE: f64 = 30.0;
 /// Seconds after GO that a game is given up on: this long past its time
 /// limit, or this long if it has none.
 const OVERTIME: f64 = 300.0;
@@ -778,6 +783,7 @@ impl Server {
     /// Move matches along: ask another PC to host if the one asked left,
     /// start games, and end matches whose results are in (or can't come).
     pub(super) fn run_matches(&mut self, now: f64) {
+        self.close_rooms(now);
         let mut k = 0;
         while k < self.matches.len() {
             let m = &mut self.matches[k];
@@ -813,6 +819,18 @@ impl Server {
                 k += 1;
             }
         }
+    }
+
+    /// Close the relay rooms of ended launcher matches whose grace is up.
+    fn close_rooms(&mut self, now: f64) {
+        let relay = &self.relay;
+        self.closing_rooms.retain(|&(room, at)| {
+            let due = now >= at;
+            if let (true, Some(relay)) = (due, relay) {
+                relay.revoke(room);
+            }
+            !due
+        });
     }
 
     /// Start match `k`'s game, without PCs that aren't linked to the host.
@@ -1040,14 +1058,15 @@ impl Server {
         let bytes = self.relayed.remove(&id).unwrap_or(0);
         let relayed = match (&m.launcher, &self.relay) {
             (Some(launcher), relay) => {
-                if let Some(relay) = relay {
-                    relay.revoke(launcher.room);
+                if relay.is_some() {
+                    self.closing_rooms.push((launcher.room, now + ROOM_GRACE));
                 }
                 let scores = host_report.map_or(Vec::new(), |r| r.1);
                 let scores: Vec<String> = scores.iter().map(i32::to_string).collect();
+                let closing = format!("its relay room closes in {ROOM_GRACE:.0} s");
                 match scores.len() {
-                    0 => ", its relay room closed".to_string(),
-                    _ => format!(", team scores {}, its relay room closed", scores.join("-")),
+                    0 => format!(", {closing}"),
+                    _ => format!(", team scores {}, {closing}", scores.join("-")),
                 }
             }
             (None, _) => format!(", {bytes} bytes relayed"),

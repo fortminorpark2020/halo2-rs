@@ -19,6 +19,7 @@
 use crate::session::{Player, Session};
 use h2live::client::{LiveClient, LiveEvent, Profile};
 use h2net::live::{LauncherMatch, LauncherResult, ToServer};
+use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -136,6 +137,10 @@ pub struct Lobby {
     client: LiveClient,
     start: Instant,
     log: Log,
+    /// Events that came in the same poll as the one `wait` stopped at
+    /// (HOST_MATCH comes right after the match itself), for whoever reads
+    /// next.
+    pending: VecDeque<LiveEvent>,
 }
 
 impl Lobby {
@@ -157,8 +162,13 @@ impl Lobby {
             .map_err(|_| "dialling stopped".to_string())??;
         let start = Instant::now();
         let client = LiveClient::launcher(conn, key, profile, crate::BUILD, card_path, 0.0);
-        let mut lobby = Lobby { client, start, log };
-        lobby.wait(timeout, |_, e| match e {
+        let mut lobby = Lobby {
+            client,
+            start,
+            log,
+            pending: VecDeque::new(),
+        };
+        lobby.wait(timeout, |e| match e {
             LiveEvent::Welcomed => Some(Ok(())),
             LiveEvent::Refused(why) => Some(Err(format!("the server turned us away: {why}"))),
             _ => None,
@@ -191,10 +201,18 @@ impl Lobby {
             )),
         }
         self.client.send(ToServer::Search(playlist));
-        self.wait(timeout, |_, e| match e {
+        self.wait(timeout, |e| match e {
             LiveEvent::LauncherMatch(m) => Some(m.clone()),
             _ => None,
         })
+    }
+
+    /// The events to read next: those left over, then the server's new
+    /// ones.
+    fn events(&mut self) -> VecDeque<LiveEvent> {
+        let mut events = std::mem::take(&mut self.pending);
+        events.extend(self.client.poll(self.start.elapsed().as_secs_f64()));
+        events
     }
 
     /// Poll until `pick` takes an event, logging every event, for up to
@@ -202,18 +220,15 @@ impl Lobby {
     fn wait<T>(
         &mut self,
         timeout: Duration,
-        mut pick: impl FnMut(&mut LiveClient, &LiveEvent) -> Option<T>,
+        mut pick: impl FnMut(&LiveEvent) -> Option<T>,
     ) -> Result<T, String> {
         let until = Instant::now() + timeout;
         loop {
-            for e in self.client.poll(self.start.elapsed().as_secs_f64()) {
-                log_event(&self.log, &e);
-                if let LiveEvent::Lost(why) = &e {
-                    return Err(format!("lost the server: {why}"));
-                }
-                if let Some(t) = pick(&mut self.client, &e) {
-                    return Ok(t);
-                }
+            let mut events = self.events();
+            let picked = read_until(&mut events, &self.log, &mut pick);
+            self.pending = events;
+            if let Some(picked) = picked {
+                return picked;
             }
             if Instant::now() >= until {
                 return Err(format!("nothing came in {} s", timeout.as_secs()));
@@ -302,6 +317,25 @@ pub fn prepare(
         variant: game.variant,
         link,
     })
+}
+
+/// Read `events` in order, logging each, until `pick` takes one or one
+/// says the server is lost. What comes after it stays in `events`, unread.
+fn read_until<T>(
+    events: &mut VecDeque<LiveEvent>,
+    log: &Log,
+    pick: &mut impl FnMut(&LiveEvent) -> Option<T>,
+) -> Option<Result<T, String>> {
+    while let Some(e) = events.pop_front() {
+        log_event(log, &e);
+        if let LiveEvent::Lost(why) = &e {
+            return Some(Err(format!("lost the server: {why}")));
+        }
+        if let Some(t) = pick(&e) {
+            return Some(Ok(t));
+        }
+    }
+    None
 }
 
 /// What the launcher tells the thread about the engine.
@@ -438,7 +472,7 @@ fn run(mut lobby: Lobby, id: u64, host: bool, rx: Receiver<Engine>, done: Sender
     loop {
         let mut out = Vec::new();
         let mut closing = false;
-        for e in lobby.client.poll(lobby.start.elapsed().as_secs_f64()) {
+        for e in lobby.events() {
             log_event(&lobby.log, &e);
             out.extend(told.next(id, host, Some(&e), None));
         }
@@ -615,6 +649,32 @@ mod tests {
                 host_lost: false
             }]
         );
+    }
+
+    #[test]
+    fn what_came_with_the_match_is_kept_for_the_match_thread() {
+        // The server sends HOST_MATCH right after the match: one poll can
+        // bring both, and the host must still hear it was asked to host.
+        let log: Log = Arc::new(|_: &str| {});
+        let mut events: VecDeque<LiveEvent> = [
+            LiveEvent::Welcomed,
+            LiveEvent::LauncherMatch(game(0x1111, 0x1111, false)),
+            LiveEvent::HostMatch(0x77),
+        ]
+        .into();
+        let mut pick = |e: &LiveEvent| match e {
+            LiveEvent::LauncherMatch(m) => Some(m.id),
+            _ => None,
+        };
+        let picked = read_until(&mut events, &log, &mut pick);
+        assert_eq!(picked, Some(Ok(0x77)));
+        assert_eq!(events, [LiveEvent::HostMatch(0x77)]);
+        let mut t = Told::default();
+        t.next(0x77, true, None, Some(Engine::Running));
+        let out = t.next(0x77, true, events.front(), None);
+        assert_eq!(out, vec![ToServer::Hosting(0x77)]);
+        // Nothing left: nothing picked.
+        assert_eq!(read_until(&mut VecDeque::new(), &log, &mut pick), None);
     }
 
     #[test]

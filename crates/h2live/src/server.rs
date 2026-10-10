@@ -196,6 +196,8 @@ pub struct Server {
     playlists_sent: f64,
     /// Dropped connections, and when to let them go.
     lingering: Vec<(Connection, f64)>,
+    /// Ended launcher matches' relay rooms, and when to close them.
+    closing_rooms: Vec<(u64, f64)>,
     /// When each address started signing in, in the last minute.
     sign_ins: HashMap<IpAddr, Vec<f64>>,
     parties: HashMap<u64, Party>,
@@ -251,6 +253,7 @@ impl Server {
             matches: Vec::new(),
             playlists_sent: f64::NEG_INFINITY,
             lingering: Vec::new(),
+            closing_rooms: Vec::new(),
             sign_ins: HashMap::new(),
             parties: HashMap::new(),
             party_ids: 0,
