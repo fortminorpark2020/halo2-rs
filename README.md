@@ -53,7 +53,9 @@ install. No game files are included in this repository.
   form a party, search a playlist, play the match on the real engine, and
   see the carnage report with your new level afterwards. Custom Game (under
   the playlists) lets the party leader pick any game type and map for the
-  party, unranked; it works alone too. `--offline` starts
+  party, unranked; it works alone too. Y on the playlists opens the party:
+  its leader can hand the lead to another member, remove someone, or make
+  the party invite only, and anyone can leave it there. `--offline` starts
   an offline Slayer match on Lockout instead. It reads the game's
   `halo2.dll` and never changes any MCC file. It is not part of the game
   above. See `docs/notes/launcher/README.md`.

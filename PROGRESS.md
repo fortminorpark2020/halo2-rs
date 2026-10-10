@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 07:50 UTC. Any assistant that works on the project
+Last updated 2026-10-10 08:10 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -148,7 +148,9 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   lobbies, and on the owner's PC with the real engine against a local
   h2live (a party game and a solo game, 07:45). The Proxmox server still
   runs `LIVE_PROTOCOL` 1 (its update waits on the owner's OK, asked
-  07:41), so lobbies from this branch can't sign in there yet. Next:
+  07:41), so lobbies from this branch can't sign in there yet. A party
+  screen (Y on the playlists: make leader, remove, invite only, leave;
+  no protocol change) was tested on Linux with three lobbies. Next:
   kills in the results block, a play session by the owner, then two PCs.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin

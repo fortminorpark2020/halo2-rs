@@ -13,8 +13,8 @@ use crate::live::{self, Engine, Log, Told};
 use crate::session::Session;
 use h2live::client::{LiveClient, LiveEvent, Profile, View};
 use h2net::live::{
-    Activity, LauncherMatch, LauncherPlayerResult, MatchOver, OnlinePlayer, Privacy, Stage,
-    ToServer, CUSTOM_GAME, GAMERTAG_TAKEN,
+    Activity, LauncherMatch, LauncherPlayerResult, MatchOver, OnlinePlayer, PartyInfo, PartyMember,
+    Privacy, Stage, ToServer, CUSTOM_GAME, GAMERTAG_TAKEN,
 };
 use h2net::Connection;
 use std::collections::VecDeque;
@@ -84,6 +84,9 @@ enum Screen {
     /// The party and the playlists, or the search while the party searches.
     Live,
     Players,
+    /// The party's members: the leader makes another leader, removes
+    /// them or sets who can join; anyone leaves.
+    Party,
     /// The party leader picks a custom game's game type and map.
     Custom,
     Pregame,
@@ -96,6 +99,8 @@ enum Screen {
 enum Popup {
     Quit,
     LeaveGame,
+    /// The leader asked to remove this member from the party.
+    Kick(u64),
 }
 
 /// What a click on part of the screen does.
@@ -166,6 +171,8 @@ pub struct App {
     /// player.
     sel: usize,
     psel: usize,
+    /// The selected party member.
+    msel: usize,
     /// The custom game screen's selected row, the game picked (in
     /// `names::CUSTOM_GAMES`) and the map (in `Config::maps`), and when
     /// the server was asked for it.
@@ -206,6 +213,7 @@ impl App {
             now,
             sel: 0,
             psel: 0,
+            msel: 0,
             crow: 0,
             cgame: 0,
             cmap: 0,
@@ -245,6 +253,7 @@ impl App {
             return match p {
                 Popup::Quit => "quit",
                 Popup::LeaveGame => "leave",
+                Popup::Kick(_) => "remove",
             }
             .into();
         }
@@ -258,6 +267,7 @@ impl App {
             Screen::Live if self.searching() => "searching",
             Screen::Live => "live",
             Screen::Players => "players",
+            Screen::Party => "party",
             Screen::Custom => "custom",
             Screen::Pregame => "pregame",
             Screen::InGame => "ingame",
@@ -456,7 +466,9 @@ impl App {
 
     /// The invitation to show: the latest, on the party screens.
     fn invite(&self) -> Option<(u64, String)> {
-        if !matches!(self.screen, Screen::Live | Screen::Players) || self.popup.is_some() {
+        if !matches!(self.screen, Screen::Live | Screen::Players | Screen::Party)
+            || self.popup.is_some()
+        {
             return None;
         }
         self.view()?.invites.last().cloned()
@@ -703,6 +715,11 @@ impl App {
         if self.screen == Screen::Custom && (!self.leader() || self.searching()) {
             self.screen = Screen::Live;
         }
+        if self.screen == Screen::Party && self.searching() {
+            self.screen = Screen::Live;
+        }
+        let n = self.party().map_or(0, |p| p.members.len());
+        self.msel = self.msel.min(n.saturating_sub(1));
         if self
             .asked
             .is_some_and(|t| now.saturating_duration_since(t) >= CUSTOM_WAIT)
@@ -779,6 +796,7 @@ impl App {
             }
             Screen::Live => self.live_input(i),
             Screen::Players => self.players_input(i),
+            Screen::Party => self.party_input(i),
             Screen::Custom => self.custom_input(i),
             Screen::Pregame => {}
             Screen::InGame => {
@@ -822,6 +840,11 @@ impl App {
                 self.client = None;
                 self.popup = None;
                 self.screen = Screen::SignIn;
+            }
+            (Popup::Kick(who), Input::A) => {
+                self.popup = None;
+                self.log(&format!("lobby: removing {who:#x} from the party"));
+                self.send(ToServer::Kick(who));
             }
             (Popup::LeaveGame, Input::A) => {
                 self.popup = None;
@@ -900,16 +923,55 @@ impl App {
                 self.psel = 0;
                 self.screen = Screen::Players;
             }
-            Input::Y => {
-                let members = self
-                    .view()
-                    .and_then(|v| v.party.as_ref())
-                    .map_or(0, |p| p.members.len());
-                if members > 1 {
-                    self.send(ToServer::LeaveParty);
-                }
+            Input::Y if self.party().is_some() => {
+                // Start on this PC's player.
+                let me = self.account();
+                self.msel = self
+                    .party()
+                    .and_then(|p| p.members.iter().position(|m| Some(m.account) == me))
+                    .unwrap_or(0);
+                self.screen = Screen::Party;
             }
             Input::B => self.popup = Some(Popup::Quit),
+            _ => {}
+        }
+    }
+
+    fn party(&self) -> Option<&PartyInfo> {
+        self.view().and_then(|v| v.party.as_ref())
+    }
+
+    /// The selected party member, and whether it is this PC's player.
+    fn picked_member(&self) -> Option<(&PartyMember, bool)> {
+        let m = self.party()?.members.get(self.msel)?;
+        Some((m, Some(m.account) == self.account()))
+    }
+
+    fn party_input(&mut self, i: Input) {
+        let n = self.party().map_or(0, |p| p.members.len());
+        let leader = self.leader();
+        let picked = self.picked_member().map(|(m, me)| (m.account, me));
+        match (i, picked) {
+            (Input::Up, _) => self.msel = self.msel.saturating_sub(1),
+            (Input::Down, _) => self.msel = (self.msel + 1).min(n.saturating_sub(1)),
+            (Input::A, Some((_, true))) if n > 1 => {
+                self.log("lobby: leaving the party");
+                self.send(ToServer::LeaveParty);
+                self.screen = Screen::Live;
+            }
+            (Input::A, Some((who, false))) if leader => {
+                self.log(&format!("lobby: making {who:#x} party leader"));
+                self.send(ToServer::Promote(who));
+            }
+            (Input::X, Some((who, false))) if leader => self.popup = Some(Popup::Kick(who)),
+            (Input::Y, _) if leader => {
+                let privacy = match self.party().map(|p| p.privacy) {
+                    Some(Privacy::Open) => Privacy::InviteOnly,
+                    _ => Privacy::Open,
+                };
+                self.send(ToServer::Privacy(privacy));
+            }
+            (Input::B, _) => self.screen = Screen::Live,
             _ => {}
         }
     }
@@ -1028,6 +1090,7 @@ impl App {
             Some(Hit::Row(r)) => {
                 let sel = match self.screen {
                     Screen::Players => &mut self.psel,
+                    Screen::Party => &mut self.msel,
                     _ => &mut self.sel,
                 };
                 if *sel == r {
@@ -1072,6 +1135,7 @@ impl App {
             Screen::Live if self.searching() => "MATCHMAKING",
             Screen::Live => "PLAYLISTS",
             Screen::Players => "PLAYERS ONLINE",
+            Screen::Party => "PARTY",
             Screen::Custom => "CUSTOM GAME",
             Screen::Pregame => "PREGAME LOBBY",
             Screen::InGame => "IN GAME",
@@ -1085,6 +1149,7 @@ impl App {
             Screen::Connecting => self.draw_connecting(p),
             Screen::Live => self.draw_live(p),
             Screen::Players => self.draw_players(p),
+            Screen::Party => self.draw_party_screen(p),
             Screen::Custom => self.draw_custom(p),
             Screen::Pregame => self.draw_pregame(p),
             Screen::InGame => self.draw_in_game(p),
@@ -1114,6 +1179,19 @@ impl App {
                     "Leave the game in progress? In a ranked playlist it counts as a loss.",
                     &[(Input::A, "Leave"), (Input::B, "Stay")],
                 ),
+                Popup::Kick(who) => {
+                    let name = self
+                        .party()
+                        .and_then(|pt| pt.members.iter().find(|m| m.account == who))
+                        .map_or("this player".into(), |m| m.gamertag.clone());
+                    p.popup(
+                        "REMOVE PLAYER",
+                        &format!(
+                            "Remove {name} from your party? They can come back only if invited."
+                        ),
+                        &[(Input::A, "Remove"), (Input::B, "Cancel")],
+                    );
+                }
             }
         } else if let Some((_, from)) = self.invite() {
             p.popup(
@@ -1234,8 +1312,8 @@ impl App {
                 hints.push((Input::A, if custom { "Custom game" } else { "Search" }));
             }
             hints.push((Input::X, "Players"));
-            if v.party.as_ref().is_some_and(|pt| pt.members.len() > 1) {
-                hints.push((Input::Y, "Leave party"));
+            if v.party.is_some() {
+                hints.push((Input::Y, "Party"));
             }
             hints.push((Input::B, "Quit"));
             p.hints(&hints);
@@ -1406,6 +1484,90 @@ impl App {
                 "Press X to invite players.",
             );
         }
+    }
+
+    /// The party screen: its members, each one's level and part.
+    fn draw_party_screen(&self, p: &mut Pen) {
+        let Some(pt) = self.party() else {
+            return;
+        };
+        p.panel(60.0, 110.0, 1160.0, 530.0);
+        p.text(84.0, 142.0, 16.0, HEAD, Align::Left, "GAMERTAG");
+        p.text(560.0, 142.0, 16.0, HEAD, Align::Center, "LEVEL");
+        p.text(660.0, 142.0, 16.0, HEAD, Align::Left, "PART");
+        let privacy = match pt.privacy {
+            Privacy::Open => "Anyone can join",
+            Privacy::InviteOnly => "Invite only",
+        };
+        p.text(1196.0, 142.0, 16.0, DIM, Align::Right, privacy);
+        let me = self.account();
+        let rows = 9;
+        let first = first_row(self.msel, pt.members.len(), rows);
+        for (k, m) in pt.members.iter().enumerate().skip(first).take(rows) {
+            let y = 156.0 + (k - first) as f32 * 50.0;
+            let on = k == self.msel;
+            p.row(72.0, y, 1136.0, 46.0, on, Hit::Row(k));
+            let col = if on { WHITE } else { TEXT };
+            if m.account == pt.leader {
+                p.circle(90.0, y + 23.0, 6.0, GOLD);
+            }
+            let name = p.fit(24.0, 400.0, &m.gamertag);
+            p.text(108.0, y + 32.0, 24.0, col, Align::Left, &name);
+            let level = if m.level > 0 { m.level } else { m.best.max(1) };
+            p.text(
+                560.0,
+                y + 32.0,
+                22.0,
+                col,
+                Align::Center,
+                &level.to_string(),
+            );
+            let mut part = if m.account == pt.leader {
+                "Party leader".to_string()
+            } else {
+                "Member".to_string()
+            };
+            if Some(m.account) == me {
+                part.push_str(" (you)");
+            }
+            if m.guests > 0 {
+                part.push_str(&format!(", +{} guest", m.guests));
+                if m.guests > 1 {
+                    part.push('s');
+                }
+            }
+            p.text(660.0, y + 32.0, 20.0, DIM, Align::Left, &part);
+        }
+        if pt.members.len() == 1 {
+            p.text(
+                640.0,
+                260.0,
+                17.0,
+                DIM,
+                Align::Center,
+                "No one else is in your party. Invite players from Players (X on the playlists).",
+            );
+        }
+        let mut hints = Vec::new();
+        match self.picked_member() {
+            Some((_, true)) if pt.members.len() > 1 => hints.push((Input::A, "Leave party")),
+            Some((_, false)) if self.leader() => {
+                hints.push((Input::A, "Make party leader"));
+                hints.push((Input::X, "Remove"));
+            }
+            _ => {}
+        }
+        if self.leader() {
+            hints.push((
+                Input::Y,
+                match pt.privacy {
+                    Privacy::Open => "Make invite only",
+                    Privacy::InviteOnly => "Let anyone join",
+                },
+            ));
+        }
+        hints.push((Input::B, "Back"));
+        p.hints(&hints);
     }
 
     fn draw_custom(&self, p: &mut Pen) {

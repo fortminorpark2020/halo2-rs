@@ -70,8 +70,8 @@ the launcher doesn't do.
    launcher's folder with the server's address.
 2. Xbox Live: the playlists (name, your level in it, people searching and
    playing) and the party (members and their levels in the chosen
-   playlist). A searches (party leader only), X opens the players list, B
-   leaves the party or quits.
+   playlist). A searches (party leader only), X opens the players list, Y
+   the party screen, B quits.
 3. Players: everyone signed in. A invites them, X joins their open party,
    B goes back. An invitation pops up over the party screens: A accepts, B
    declines.
@@ -94,7 +94,14 @@ the launcher doesn't do.
    launcher playlist plays, then makes an unranked match for the party
    with the leader hosting and teams alternating down the party; from
    there it goes as a playlist's match does. It works alone too.
-9. Offline: the server couldn't be reached or was lost. A tries again, Y
+9. Party: the members, each one's level and part (leader, member, you,
+   guests) and whether anyone can join. The leader picks another member
+   and makes them leader (A, PROMOTE) or removes them (X, asked first;
+   KICK, after which they come back only if invited), and Y switches
+   between open and invite only (PRIVACY). Anyone picks their own row to
+   leave (A, LEAVE_PARTY). It goes back to the playlists while the party
+   searches.
+10. Offline: the server couldn't be reached or was lost. A tries again, Y
    goes back to the sign-in screen, B quits. B on the party screen asks
    before quitting, and offers Y to sign out.
 
@@ -155,6 +162,12 @@ engine and showed the carnage report with "Unranked: levels don't change",
 and ALPHA was back on the custom game screen after it. The server's side
 is also covered by `a_launcher_party_plays_custom_games` in
 `crates/h2live/src/server/tests.rs`.
+
+The party screen the same way (2026-10-10), with three lobbies: ALPHA
+invited BRAVO and CHARLIE, made the party invite only, removed BRAVO (who
+got "YOU WERE REMOVED FROM THE PARTY" and a party of their own), made
+CHARLIE leader, and left; CHARLIE was then leader of an invite-only party
+of one.
 
 On the owner's PC (2026-10-10 07:42 to 07:45), the same with the real
 engine against a local h2live (`127.0.0.1:47260`), with a 60 s time limit:
