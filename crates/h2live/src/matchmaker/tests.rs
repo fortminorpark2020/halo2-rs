@@ -907,10 +907,12 @@ fn launcher_matches_play_mcc_variants() {
     let [(_, m)] = &made[..] else {
         panic!("{made:?}");
     };
-    assert_eq!(m.variant.mcc.as_deref(), Some("01_slayer"));
     assert_eq!((m.variant.game_type, m.bots), (GameType::Slayer, 0));
     let playlist = built_in().into_iter().find(|p| p.id == MCC_HEAD_TO_HEAD);
-    assert!(playlist.unwrap().maps.contains(&m.map));
+    let playlist = playlist.unwrap();
+    assert!(playlist.maps.contains(&m.map));
+    assert!(m.variant.mcc.is_some());
+    assert!(playlist.variants.contains(&m.variant));
 }
 
 #[test]

@@ -93,6 +93,9 @@ then (`--no-watchdog` turns both off, for a debugger session).
 ```
 --check                 Check the install and print what a launch would use;
                         does not start the engine.
+--variants              List the settings of every matchmaking game variant
+                        (halo2\hopper_game_variants), read through halo2.dll's
+                        data access; does not start the engine.
 --mcc <folder>          MCC's folder, if it is not found by itself.
 --map <name>            Map to play (lockout by default): lockout, midship,
                         zanzibar, ...
@@ -216,6 +219,14 @@ Later runs there (2026-10-10) showed:
   match goes on, and a new launcher for the same machine joins it in
   progress.
 - Three launchers play one match the same way as two.
+- `--variants` loaded all 180 hopper variants. After the variant copy the
+  options hold its name at 0x304 (UTF-16), game type at 0x344 (1 CTF,
+  2 Slayer, 3 Oddball, 4 King, 7 Juggernaut, 8 Territories, 9 Assault),
+  flags at 0x348 (bit 0 is teams on), rounds at 0x34C (0 means one), score
+  to win at 0x350, time limit at 0x354 and the player limit at 0x378 (16,
+  or 3 and 4 in 2-on-1 and 3-on-1). `H2LAUNCH_VARIANTS_RAW=1` also prints
+  every other non-zero dword in 0x340..0x430. h2live's launcher playlists
+  now name these variants (`crates/h2live/src/playlists.txt`).
 
 ## Matchmaking through h2live (milestone 3, being built)
 

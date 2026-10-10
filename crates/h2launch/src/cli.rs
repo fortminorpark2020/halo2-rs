@@ -13,6 +13,9 @@ Usage: h2launch [flags]
 
   --check                 Check the install and print what a launch would use;
                           does not start the engine.
+  --variants              List the settings of every matchmaking game variant
+                          (halo2\\hopper_game_variants), read through halo2.dll's
+                          data access; does not start the engine.
   --mcc <folder>          MCC's folder (the one holding halo2\\halo2.dll), if it
                           is not found by itself.
   --map <name>            Map to play (lockout by default). Names as in the
@@ -114,6 +117,8 @@ pub struct Args {
     pub help: bool,
     pub version: bool,
     pub check: bool,
+    /// `--variants`: list the matchmaking variants' settings and stop.
+    pub variants: bool,
     pub mcc: Option<String>,
     pub map: Option<String>,
     pub variant: Option<String>,
@@ -158,6 +163,7 @@ impl Default for Args {
             help: false,
             version: false,
             check: false,
+            variants: false,
             mcc: None,
             map: None,
             variant: None,
@@ -263,6 +269,7 @@ where
             "--help" | "-h" | "/?" => switch(&mut a, |a| a.help = true)?,
             "--version" => switch(&mut a, |a| a.version = true)?,
             "--check" => switch(&mut a, |a| a.check = true)?,
+            "--variants" => switch(&mut a, |a| a.variants = true)?,
             "--groundhog" => switch(&mut a, |a| a.groundhog = true)?,
             "--attach-input" => switch(&mut a, |a| a.attach_input = true)?,
             "--no-attach-input" => switch(&mut a, |a| a.attach_input = false)?,
@@ -475,6 +482,7 @@ mod tests {
     fn every_flag() {
         let a = parse([
             "--check",
+            "--variants",
             "--mcc",
             r"D:\MCC",
             "--map=midship",
@@ -538,7 +546,7 @@ mod tests {
         assert_eq!(a.pad, Pad::Slot(2));
         assert!(a.name_set);
         assert!(!a.watchdog);
-        assert!(a.check && a.groundhog && a.host_fonts && a.diag && a.no_variant);
+        assert!(a.check && a.variants && a.groundhog && a.host_fonts && a.diag && a.no_variant);
         assert!(!a.attach_input);
         assert_eq!(a.mcc.as_deref(), Some(r"D:\MCC"));
         assert_eq!(a.map.as_deref(), Some("midship"));

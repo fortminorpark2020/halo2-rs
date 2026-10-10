@@ -26,6 +26,7 @@ mod host;
 mod input;
 mod log;
 mod screen;
+mod variants;
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -270,6 +271,9 @@ pub fn run() -> i32 {
     }
     if args.check {
         return check::run(&args);
+    }
+    if args.variants {
+        return variants::run(&args);
     }
     launch(args)
 }

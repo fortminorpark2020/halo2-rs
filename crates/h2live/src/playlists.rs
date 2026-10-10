@@ -559,6 +559,41 @@ maps warlock
         "zanzibar",
     ];
 
+    /// The MCC matchmaking variants the built-in playlists use, as
+    /// `h2launch --variants` listed them on the owner's PC (2026-10-10):
+    /// file name without `.bin`, and whether the variant has teams on.
+    const MCC_HOPPER_VARIANTS: [(&str, bool); 29] = [
+        ("H2_3_Plots", true),
+        ("H2_BTB_Multi_Bomb", true),
+        ("H2_BTB_Multi_Flag", true),
+        ("H2_BTB_Slayer", true),
+        ("H2_FFA_HeadtoHead_b", false),
+        ("H2_FFA_Rockets_b", false),
+        ("H2_FFA_Shotguns_b", false),
+        ("H2_Hardcore_Team_Ball", true),
+        ("H2_Hardcore_Team_King", true),
+        ("H2_Hardcore_Team_Slayer", true),
+        ("H2_Multi_Bomb", true),
+        ("H2_Multi_Flag_CTF_3", true),
+        ("H2_Team_BRs", true),
+        ("H2_Team_Ball", true),
+        ("H2_Team_Crazy_King", true),
+        ("H2_Team_Rockets_b", true),
+        ("H2_Team_SWAT", true),
+        ("H2_Team_Slayer", true),
+        ("H2_Team_Slayer_2v2_a", true),
+        ("H2_Team_Snipers", true),
+        ("h2_2v2_team_ball_120points_brPrimary_magSecondary", true),
+        ("h2_2v2_team_slayer_25kills_brPrimary_magSecondary", true),
+        ("h2_4v4_team_hardcoreFlag_3points", true),
+        ("h2_8v8_team_3plots_br_smg_600points", true),
+        ("h2_arena_snipers_09_2018", true),
+        ("h2_ffa_ball_brPrimary_smgSecondary_60points", false),
+        ("h2_ffa_crazyKing_brPrimary_arSecondary_120points", false),
+        ("h2_ffa_slayerSwords_25kills", false),
+        ("h2_ffa_slayer_smgPrimary_magSecondary_25kills", false),
+    ];
+
     #[test]
     fn the_launcher_has_halo_2s_playlists_on_mccs_maps() {
         let all = built_in();
@@ -586,19 +621,40 @@ maps warlock
         for p in &launcher {
             // No bots or guests: MCC's engine plays one person on each PC.
             assert_eq!((p.bots, p.guests), (Bots::None, false), "{}", p.key);
-            // The stock variant everywhere, until the hopper variants'
-            // file names are read from the owner's install.
+            // Each variant is one of MCC's matchmaking variants, with teams
+            // on exactly when its game type is a team game.
             for v in &p.variants {
-                assert_eq!(v.mcc.as_deref(), Some("01_slayer"), "{}", p.key);
+                let name = v.mcc.as_deref().unwrap();
+                let known = MCC_HOPPER_VARIANTS.iter().find(|(n, _)| *n == name);
+                let (_, teams) = known.unwrap_or_else(|| panic!("{}: {name}", p.key));
+                assert_eq!(*teams, v.game_type.teams(), "{}: {name}", p.key);
             }
             for map in &p.maps {
                 assert!(MCC_MAPS.contains(&map.as_str()), "{}: {map}", p.key);
             }
             // As many people as the game's own playlist (but for Big Team
-            // Battle, which has no bots to make up the numbers).
+            // Battle, which has no bots to make up the numbers), and the
+            // same game types.
             let game = all.iter().find(|g| format!("mcc_{}", g.key) == p.key);
             let game = game.unwrap();
             assert_eq!((p.max, p.party_max), (game.max, game.party_max));
+            let types = |p: &Playlist| {
+                let mut t: Vec<&str> = p
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        GAME_TYPES
+                            .iter()
+                            .find(|(g, _)| *g == v.game_type)
+                            .unwrap()
+                            .1
+                    })
+                    .collect();
+                t.sort();
+                t.dedup();
+                t
+            };
+            assert_eq!(types(p), types(game), "{}", p.key);
         }
         // Every map is played somewhere.
         for map in MCC_MAPS {

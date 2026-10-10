@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 06:00 UTC. Any assistant that works on the project
+Last updated 2026-10-10 06:35 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -115,10 +115,9 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   (2026-10-10 06:00). LAUNCHER_RESULT carries each player's team, standing,
   score and deaths from the engine's results block (host slot 6, 0x5D138
   bytes; layout in `crates/h2launch/src/results.rs`). Next: kills,
-  assists and betrayals in that block (needs a game with real kills), the
-  MCC hopper variant per
-  playlist (all say `01_slayer` now, which has no time limit; options
-  0x354 is the time limit in seconds, 0x350 the score to win), and
+  assists and betrayals in that block (needs a game with real kills), a
+  test of a team playlist (the launcher playlists now play MCC's own
+  matchmaking variants, chosen from the `h2launch --variants` list), and
   deploying h2live with the relay to the Proxmox server.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin

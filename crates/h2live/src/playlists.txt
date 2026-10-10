@@ -119,23 +119,32 @@ maps coagulation
 
 # The launcher's playlists: the same Halo 2 playlists, played on MCC's
 # Halo 2 engine through the launcher (h2launch). Their maps are MCC's map
-# file names (halo2\h2_maps_win64_dx11), and their games MCC game variants
-# named by file. Launcher playlists can't have bots or splitscreen guests,
-# so ranked team games wait for even teams.
+# file names (halo2\h2_maps_win64_dx11), and their games MCC's own
+# matchmaking variants, named by file (halo2\hopper_game_variants, without
+# .bin). Launcher playlists can't have bots or splitscreen guests, so
+# ranked team games wait for even teams.
 #
-# STILL TO FILL IN: every playlist below plays MCC's stock variant
-# 01_slayer for now. The exact file names of MCC's matchmaking (hopper)
-# variants, in halo2\hopper_game_variants on the owner's PC, are still to
-# be read from his install, and then go in these mcc_variant lines. Until
-# then a team playlist says team_slayer (so the server makes teams) while
-# 01_slayer may well play free-for-all in the engine.
+# Each plays the same game types as the game's playlist of the same name
+# above, with the MCC variant closest to it. The variants' own score and
+# time limits apply (read on the owner's PC with `h2launch --variants`,
+# 2026-10-10, and noted after each line); every one used here has teams on
+# exactly when its game type is a team game.
 
 playlist 10 mcc_ffa Rumble Pit
 client launcher
 ranked yes
 humans 3 8
 party 1
-mcc_variant slayer 01_slayer
+# SLAYER FFA: 25 kills, 12 minutes
+mcc_variant slayer h2_ffa_slayer_smgPrimary_magSecondary_25kills
+# Rockets: 25 kills, 10 minutes
+mcc_variant slayer H2_FFA_Rockets_b
+# Shotguns: 25 kills, 12 minutes
+mcc_variant slayer H2_FFA_Shotguns_b
+# ODDBALL: 60 seconds with the ball, 12 minutes
+mcc_variant oddball h2_ffa_ball_brPrimary_smgSecondary_60points
+# CRAZY KING: 120 seconds on the hill, 12 minutes
+mcc_variant king h2_ffa_crazyKing_brPrimary_arSecondary_120points
 maps lockout cyclotron ascension midship warlock deltatap gemini elongation
 maps backwash foundation derelict highplains
 
@@ -144,7 +153,10 @@ client launcher
 ranked yes
 humans 2 2
 party 1
-mcc_variant slayer 01_slayer
+# Head to Head: 15 kills, 10 minutes
+mcc_variant slayer H2_FFA_HeadtoHead_b
+# SWORDS: 25 kills, 10 minutes
+mcc_variant slayer h2_ffa_slayerSwords_25kills
 maps lockout midship warlock cyclotron gemini elongation derelict
 
 playlist 12 mcc_double_team Double Team
@@ -152,7 +164,14 @@ client launcher
 ranked yes
 humans 4 4
 party 2
-mcc_variant team_slayer 01_slayer
+# Team Slayer 2v2: 25 kills, 10 minutes
+mcc_variant team_slayer H2_Team_Slayer_2v2_a
+# SLAYER BR SMALL: 25 kills, 12 minutes
+mcc_variant team_slayer h2_2v2_team_slayer_25kills_brPrimary_magSecondary
+# Team Rockets: 50 kills, 10 minutes
+mcc_variant team_slayer H2_Team_Rockets_b
+# ODDBALL BR SMALL: 120 seconds with the ball, 12 minutes
+mcc_variant team_oddball h2_2v2_team_ball_120points_brPrimary_magSecondary
 maps lockout midship warlock ascension gemini elongation cyclotron
 
 playlist 13 mcc_team_slayer Team Slayer
@@ -160,7 +179,12 @@ client launcher
 ranked yes
 humans 4 8
 party 4
-mcc_variant team_slayer 01_slayer
+# TEAM SLAYER: 50 kills, 12 minutes
+mcc_variant team_slayer H2_Team_Slayer
+# TEAM SLAYER BR: 50 kills, 12 minutes
+mcc_variant team_slayer H2_Team_BRs
+# SWAT: 50 kills, 12 minutes
+mcc_variant team_slayer H2_Team_SWAT
 maps lockout midship ascension zanzibar headlong coagulation beavercreek
 maps colossus turf foundation backwash highplains needle street_sweeper
 
@@ -169,7 +193,16 @@ client launcher
 ranked yes
 humans 4 8
 party 2
-mcc_variant team_slayer 01_slayer
+# Multi Flag CTF: 3 captures, 12 minutes
+mcc_variant ctf H2_Multi_Flag_CTF_3
+# Multi Bomb: 3 scores, 12 minutes
+mcc_variant assault H2_Multi_Bomb
+# Team Crazy King: 120 seconds on the hill, 12 minutes
+mcc_variant team_king H2_Team_Crazy_King
+# Team Ball: 120 seconds with the ball, 12 minutes
+mcc_variant team_oddball H2_Team_Ball
+# 3 Plots: 300 seconds of territory, 12 minutes
+mcc_variant territories H2_3_Plots
 maps beavercreek midship colossus turf zanzibar ascension backwash deltatap
 
 playlist 15 mcc_big_team Big Team Battle
@@ -177,7 +210,14 @@ client launcher
 ranked no
 humans 4 16
 party 8
-mcc_variant team_slayer 01_slayer
+# BIG TEAM CTF: 3 captures, 15 minutes
+mcc_variant ctf H2_BTB_Multi_Flag
+# BIG TEAM ASSAULT: 3 scores, 15 minutes
+mcc_variant assault H2_BTB_Multi_Bomb
+# BIG TEAM 3 PLOTS: 600 seconds of territory, 15 minutes
+mcc_variant territories h2_8v8_team_3plots_br_smg_600points
+# Team Slayer: 100 kills, 15 minutes
+mcc_variant team_slayer H2_BTB_Slayer
 maps coagulation waterworks headlong zanzibar containment triplicate
 maps burial_mounds turf dune
 
@@ -186,7 +226,10 @@ client launcher
 ranked no
 humans 2 8
 party 4
-mcc_variant team_slayer 01_slayer
+# Snipers, teams: 50 kills, 12 minutes
+mcc_variant team_slayer H2_Team_Snipers
+# TEAM SNIPERS (MCC's 2018 arena variant): 50 kills, 12 minutes
+mcc_variant team_slayer h2_arena_snipers_09_2018
 maps lockout ascension zanzibar headlong coagulation beavercreek colossus
 maps turf cyclotron deltatap midship foundation
 
@@ -195,6 +238,15 @@ client launcher
 ranked yes
 humans 4 8
 party 4
-mcc_variant team_slayer 01_slayer
+# HARDCORE TEAM SLAYER: 50 kills, 15 minutes
+mcc_variant team_slayer H2_Hardcore_Team_Slayer
+# TEAM SNIPERS (MCC's 2018 arena variant): 50 kills, 12 minutes
+mcc_variant team_slayer h2_arena_snipers_09_2018
+# HARDCORE CTF 3: 3 captures, 15 minutes
+mcc_variant ctf h2_4v4_team_hardcoreFlag_3points
+# Hardcore Team Ball: 300 seconds with the ball, 15 minutes
+mcc_variant team_oddball H2_Hardcore_Team_Ball
+# Hardcore Team King: 300 seconds on the hill, 15 minutes
+mcc_variant team_king H2_Hardcore_Team_King
 maps midship lockout warlock deltatap cyclotron beavercreek ascension zanzibar
 maps coagulation
