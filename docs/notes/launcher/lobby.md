@@ -115,7 +115,7 @@ the launcher doesn't do.
    launcher playlist plays, then makes an unranked match for the party
    with the leader hosting and teams alternating down the party; from
    there it goes as a playlist's match does. It works alone too.
-9. Party: the members, each one's level and part (leader, member, you,
+9. Party: the members, each one's level and role (leader, member, you,
    guests) and whether anyone can join. The leader picks another member
    and makes them leader (A, PROMOTE) or removes them (X, asked first;
    KICK, after which they come back only if invited), and Y switches

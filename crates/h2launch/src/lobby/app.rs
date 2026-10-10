@@ -1159,7 +1159,7 @@ impl App {
         p.text(
             1220.0,
             712.0,
-            13.0,
+            14.5,
             DIM,
             Align::Right,
             "Keyboard: Enter = A, Esc = B, X, Y, arrows",
@@ -1486,7 +1486,7 @@ impl App {
         }
     }
 
-    /// The party screen: its members, each one's level and part.
+    /// The party screen: its members, each one's level and role.
     fn draw_party_screen(&self, p: &mut Pen) {
         let Some(pt) = self.party() else {
             return;
@@ -1494,7 +1494,7 @@ impl App {
         p.panel(60.0, 110.0, 1160.0, 530.0);
         p.text(84.0, 142.0, 16.0, HEAD, Align::Left, "GAMERTAG");
         p.text(560.0, 142.0, 16.0, HEAD, Align::Center, "LEVEL");
-        p.text(660.0, 142.0, 16.0, HEAD, Align::Left, "PART");
+        p.text(660.0, 142.0, 16.0, HEAD, Align::Left, "ROLE");
         let privacy = match pt.privacy {
             Privacy::Open => "Anyone can join",
             Privacy::InviteOnly => "Invite only",
@@ -1522,21 +1522,21 @@ impl App {
                 Align::Center,
                 &level.to_string(),
             );
-            let mut part = if m.account == pt.leader {
+            let mut role = if m.account == pt.leader {
                 "Party leader".to_string()
             } else {
                 "Member".to_string()
             };
             if Some(m.account) == me {
-                part.push_str(" (you)");
+                role.push_str(" (you)");
             }
             if m.guests > 0 {
-                part.push_str(&format!(", +{} guest", m.guests));
+                role.push_str(&format!(", +{} guest", m.guests));
                 if m.guests > 1 {
-                    part.push('s');
+                    role.push('s');
                 }
             }
-            p.text(660.0, y + 32.0, 20.0, DIM, Align::Left, &part);
+            p.text(660.0, y + 32.0, 20.0, DIM, Align::Left, &role);
         }
         if pt.members.len() == 1 {
             p.text(
