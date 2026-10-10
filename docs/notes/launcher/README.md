@@ -192,7 +192,7 @@ so writing the host's id there gets the guest refused), the machines at
 0x60, the players from 0xE8 (XUID, machine id, team, players on that
 machine, machine index, controller), the machine count at 0x2F0 and this
 machine's id again at 0x2F8. With that, two launchers on the owner's PC
-played one match on Lockout through the relay (2026-10-10 05:50 UTC): the
+played one match on Lockout through the relay (2026-10-10 05:30 UTC): the
 guest's search reached the host, the host answered, the guest joined, and
 both loaded the map and played with about 1 MB of game traffic each way. The log has every network call (`net:` lines) and a
 summary with the relay's counters at the end.
