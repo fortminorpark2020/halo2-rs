@@ -144,6 +144,12 @@ inferred say so on their constants too.
 `for_server` fills `kills`, `assists`, `deaths`, `betrayals` and
 `suicides`, each clamped to `u16::MAX` as deaths is now.
 
+(Review fix: the counts go into players' saved tallies for good, so until
+`results::COUNTS_SEEN` is set after real games bear the offsets out,
+`for_server(kills)` sends kills only when `kills_hold` says this Slayer
+game's kills fit every player's score, and assists and betrayals as 0.
+The log keeps the numbers read either way.)
+
 **The kills check.** A new function confirms or refutes the offsets in the
 first real game:
 
@@ -688,11 +694,16 @@ than their window as they go, so they don't grow.
   Offline presences are dropped once their change has been passed on, so
   the map holds only who is signed in (plus that tick's sign-outs).
 - An account whose presence changed marks each of its friends that is
-  signed in on a launcher as needing a new list. It marks itself too:
-  each `joinable` flag in its own list depends on its own party and guests.
+  signed in on a launcher as needing a new list, and (review fix) those it
+  has a friend request with either way, whose rows show its gamertag and
+  level. It marks itself too: each `joinable` flag in its own list depends
+  on its own party and guests.
 - A change to a list (a request, an accept, a decline, a removal) marks both
   players. Signing in marks the player. An INVITE marks the one invited, as
-  it can make an invite-only party joinable for them.
+  it can make an invite-only party joinable for them; and (review fix)
+  declining an invite marks the one declining, an invite pushed out by the
+  32-invite cap marks its invitee, and a removed player pushed out of a
+  party's 32 removed marks them, since each changes what `can_join` says.
 - Then each marked player gets one FRIENDS, with the joinable flag worked
   out for them, and the marks are cleared. So a player hears at most one
   list a second, however busy their friends are. A list the same, byte for

@@ -234,10 +234,12 @@ pub struct App {
     msel: usize,
     /// The friends screen's selected row and its account, which the
     /// selection follows as `paccount` does; and the options popup's
-    /// selected option.
+    /// selected row and its option, which the selection follows when a
+    /// new list adds or drops Invite or Join.
     fsel: usize,
     faccount: Option<u64>,
     osel: usize,
+    opick: Option<FriendOption>,
     /// The gamertag typed in the add friend popup.
     friend_tag: String,
     /// The carnage report's selected row (in the order shown).
@@ -298,6 +300,7 @@ impl App {
             fsel: 0,
             faccount: None,
             osel: 0,
+            opick: None,
             friend_tag: String::new(),
             csel: 0,
             record_of: 0,
@@ -406,6 +409,10 @@ impl App {
             self.settings.gamertag
         ));
         self.client = None;
+        // Another server, maybe, with the same account numbers: nothing
+        // kept from the last one counts.
+        self.records.clear();
+        self.record_asks.clear();
         self.dialing = Some((h2net::dial(&url, SIGN_IN_WAIT), Instant::now()));
         self.signing_in = Some(Instant::now());
         self.screen = Screen::Connecting;
@@ -774,6 +781,11 @@ impl App {
             played.extend(g.m.players.iter().map(|p| p.account));
         }
         self.records.retain(|(r, _)| !played.contains(&r.account));
+        // A record on screen that was dropped is asked for again, rather
+        // than saying the server didn't answer.
+        if self.screen == Screen::Record && played.contains(&self.record_of) {
+            self.ask_record(self.record_of);
+        }
         let Some(g) = self.game.as_mut().filter(|g| g.m.id == over.id) else {
             return;
         };
@@ -980,6 +992,22 @@ impl App {
                 self.popup = None;
             }
         }
+        // The option picked, where it is now (the same row, clamped, if
+        // it's gone).
+        if let Some(Popup::FriendOptions(a)) = self.popup {
+            let options = self.friend_options(a);
+            let at = self
+                .opick
+                .and_then(|o| options.iter().position(|&p| p == o));
+            self.pick_option(a, at.unwrap_or(self.osel));
+        }
+    }
+
+    /// Select row `i` of friend `who`'s options popup (clamped).
+    fn pick_option(&mut self, who: u64, i: usize) {
+        let options = self.friend_options(who);
+        self.osel = i.min(options.len().saturating_sub(1));
+        self.opick = options.get(self.osel).copied();
     }
 
     /// The lobby is closing: close the engine of a match being played
@@ -1146,8 +1174,8 @@ impl App {
         match i {
             // Up from the first goes to the last, and down from the last
             // to the first.
-            Input::Up => self.osel = (self.osel + n - 1) % n,
-            Input::Down => self.osel = (self.osel + 1) % n,
+            Input::Up => self.pick_option(who, (self.osel + n - 1) % n),
+            Input::Down => self.pick_option(who, (self.osel + 1) % n),
             Input::B => self.popup = None,
             Input::A => {
                 let Some(&pick) = options.get(self.osel) else {
@@ -1271,8 +1299,9 @@ impl App {
                 self.send(ToServer::FriendDecline(f.account));
             }
             (Input::A, Some(f)) if f.relation == Relation::Friend => {
-                self.osel = 0;
-                self.popup = Some(Popup::FriendOptions(f.account));
+                let who = f.account;
+                self.pick_option(who, 0);
+                self.popup = Some(Popup::FriendOptions(who));
             }
             (Input::X, Some(f)) if f.relation == Relation::Friend && f.joinable => {
                 self.log(&format!("lobby: joining {}'s party", f.gamertag));
@@ -1549,8 +1578,8 @@ impl App {
             Some(Hit::Row(r)) if matches!(self.popup, Some(Popup::FriendOptions(_))) => {
                 if self.osel == r {
                     self.input(Input::A);
-                } else {
-                    self.osel = r;
+                } else if let Some(Popup::FriendOptions(who)) = self.popup {
+                    self.pick_option(who, r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Friends => {
@@ -2633,7 +2662,17 @@ impl App {
             (Relation::Friend, Online::Offline) => "Offline".into(),
             (Relation::Friend, Online::Game) => "Online (h2viewer)".into(),
             (Relation::Friend, Online::Launcher) => {
-                let game = || format!("{} on {}", names::variant(&f.variant), names::map(&f.map));
+                // A friend who left a match their party still plays has
+                // no map or game type: then the playlist alone.
+                let known = !f.map.is_empty() && !f.variant.is_empty();
+                let game = |what: String, alone: String| match known {
+                    true => format!(
+                        "{what}: {} on {}",
+                        names::variant(&f.variant),
+                        names::map(&f.map)
+                    ),
+                    false => alone,
+                };
                 match f.activity {
                     Activity::Lobby => "In a lobby".into(),
                     Activity::Searching if f.playlist == QUICKMATCH => {
@@ -2642,10 +2681,11 @@ impl App {
                     Activity::Searching => format!("Searching {}", self.playlist_name(f.playlist)),
                     // A launcher's custom game is a match on playlist 255.
                     Activity::Playing | Activity::Custom if f.playlist == CUSTOM_GAME => {
-                        format!("Custom game: {}", game())
+                        game("Custom game".into(), "In a custom game".into())
                     }
                     Activity::Playing | Activity::Custom => {
-                        format!("{}: {}", self.playlist_name(f.playlist), game())
+                        let name = self.playlist_name(f.playlist);
+                        game(name.clone(), format!("Playing {name}"))
                     }
                 }
             }
@@ -3590,6 +3630,62 @@ mod tests {
         assert_eq!(a.label(), "unfriend");
         a.input(Input::A);
         assert_eq!(sent(&mut server), [ToServer::FriendRemove(11)]);
+
+        // A new list that drops Join keeps Remove friend picked...
+        a.screen = Screen::Friends;
+        assert!(a.pick("dan"));
+        a.input(Input::A);
+        a.input(Input::Up);
+        assert_eq!(a.opick, Some(Remove));
+        view(&mut a).friends[0].joinable = false;
+        a.tick(a.now);
+        assert_eq!((a.osel, a.opick), (2, Some(Remove)));
+        // ... and one that drops Invite keeps Service record picked.
+        a.input(Input::Up);
+        assert_eq!(a.opick, Some(Record));
+        view(&mut a).friends[0].party = 500;
+        a.tick(a.now);
+        assert_eq!((a.osel, a.opick), (0, Some(Record)));
+        // Join back: the same option still, on its new row.
+        view(&mut a).friends[0].joinable = true;
+        a.tick(a.now);
+        assert_eq!((a.osel, a.opick), (1, Some(Record)));
+        a.input(Input::A);
+        assert_eq!(a.label(), "record");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_friend_who_left_their_partys_match_shows_its_playlist_alone() {
+        let dir = scratch("left-match");
+        let (a, _server) = live_app(&dir);
+        let mut dan = friend(14, "DAN", Relation::Friend, Online::Launcher);
+        dan.activity = Activity::Playing;
+        dan.playlist = CUSTOM_GAME;
+        assert_eq!(a.friend_status(&dan).0, "In a custom game");
+        dan.map = "lockout".into();
+        dan.variant = "H2_Team_Slayer".into();
+        let status = a.friend_status(&dan).0;
+        assert!(status.starts_with("Custom game: ") && status.ends_with(" on Lockout"));
+        dan.playlist = 11;
+        dan.map.clear();
+        assert!(a.friend_status(&dan).0.starts_with("Playing "));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn signing_in_again_forgets_the_records_kept() {
+        let dir = scratch("records-forgotten");
+        let (mut a, _server) = live_app(&dir);
+        a.keep_record(ServiceRecord {
+            account: 2,
+            found: None,
+        });
+        a.record_asks.push((3, a.now));
+        a.fields[0] = "ALPHA".into();
+        a.fields[1] = "127.0.0.1:1".into();
+        a.connect();
+        assert!(a.cached_record(2).is_none() && a.record_asks.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3689,8 +3785,8 @@ mod tests {
         a.input(Input::Lb);
         assert_eq!(a.label(), "record");
         assert!(sent(&mut server).is_empty());
-        a.input(Input::B);
-        // MATCH_OVER drops the records of everyone in the match.
+        // MATCH_OVER drops the records of everyone in the match, and the
+        // one on screen is asked for again (it's loading, not unanswered).
         a.on_event(LiveEvent::MatchOver(MatchOver {
             id: 0x77,
             counted: true,
@@ -3700,7 +3796,8 @@ mod tests {
             players: vec![(1, 5), (2, 4)],
         }));
         assert!(a.cached_record(2).is_none());
-        a.input(Input::Lb);
+        assert_eq!(a.label(), "record");
+        assert!(matches!(a.record_view(), RecordView::Loading));
         assert_eq!(sent(&mut server), [ToServer::Record(2)]);
         // A second ask while waiting sends nothing; after RECORD_WAIT with
         // no answer, the screen says so and A asks again.

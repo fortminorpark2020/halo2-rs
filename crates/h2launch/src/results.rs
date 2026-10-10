@@ -20,6 +20,11 @@
 //!   the three seen, and not yet seen above zero: the games read so far had
 //!   no kills. `check_kills` says in the log whether the first real games
 //!   bear them out.
+//!
+//! Until the inferred counts are seen right (`COUNTS_SEEN`), they don't go
+//! into anyone's saved tally on a guess: kills go to the server only from
+//! a Slayer game whose kills bear the offset out (`kills_hold`), and
+//! assists and betrayals go as 0. The log keeps what was read either way.
 
 use h2net::live::LauncherPlayerResult;
 
@@ -45,6 +50,13 @@ pub const IN_A_ROW: usize = 0x38;
 /// Seconds alive. Seen (59 in a 60 s game).
 pub const ALIVE: usize = 0x3C;
 
+/// Whether kills, assists and betrayals have been seen right in real
+/// games on the owner's PC (set it once `check_kills` has said "the
+/// offsets hold" and the assists and betrayals in the log match the games
+/// played). Until then `for_server` sends kills only when asked to and
+/// assists and betrayals as 0.
+pub const COUNTS_SEEN: bool = false;
+
 /// One player's line of the block.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerResult {
@@ -69,19 +81,24 @@ pub struct PlayerResult {
 impl PlayerResult {
     /// As LAUNCHER_RESULT names it: counts too big for its u16s are kept
     /// at the largest. The server ranks by standing and score; the counts
-    /// go on the carnage report and the service record.
-    pub fn for_server(&self) -> LauncherPlayerResult {
+    /// go on the carnage report and the service record, and into the
+    /// players' tallies for good. So until `COUNTS_SEEN`, kills are sent
+    /// only if `kills` (this game bore them out, `kills_hold`), and
+    /// assists and betrayals are sent as 0.
+    pub fn for_server(&self, kills: bool) -> LauncherPlayerResult {
         let byte = |v: i32| v.clamp(0, i32::from(u8::MAX)) as u8;
         let count = |v: u32| v.min(u32::from(u16::MAX)) as u16;
+        let kills = COUNTS_SEEN || kills;
+        let inferred = |v: u32| if COUNTS_SEEN { count(v) } else { 0 };
         LauncherPlayerResult {
             relay_id: self.xuid,
             team: byte(self.team),
             place: byte(self.standing),
             score: self.score,
-            kills: count(self.kills),
-            assists: count(self.assists),
+            kills: if kills { count(self.kills) } else { 0 },
+            assists: inferred(self.assists),
             deaths: count(self.deaths),
-            betrayals: count(self.betrayals),
+            betrayals: inferred(self.betrayals),
             suicides: count(self.suicides),
             left: false,
         }
@@ -169,22 +186,10 @@ pub fn describe(b: &[u8]) -> Vec<String> {
 /// equal the score alone points at a variant without a suicide penalty
 /// (`h2launch --variants` shows it) before it points at the offset.
 pub fn check_kills(players: &[PlayerResult]) -> String {
-    // A game with no kills proves nothing: where every death was a
-    // suicide, each score was minus the suicides, and the sum is 0. The
-    // kills read must be 0 too, so a wrong offset that reads a number in
-    // such a game is still reported below.
-    let nothing = players
-        .iter()
-        .all(|p| p.kills == 0 && i64::from(p.score) + i64::from(p.suicides) == 0);
-    if nothing {
+    if no_kills(players) {
         return "kills: nothing to check (no one killed anyone)".into();
     }
-    let fits = |p: &PlayerResult| {
-        let k = i64::from(p.kills);
-        let base = i64::from(p.score) + i64::from(p.suicides);
-        k == base || k == base + i64::from(p.betrayals)
-    };
-    match players.iter().find(|p| !fits(p)) {
+    match players.iter().find(|p| !kills_fit(p)) {
         None => {
             "kills: every player's kills are their score plus suicides: the offsets hold".into()
         }
@@ -194,6 +199,32 @@ pub fn check_kills(players: &[PlayerResult]) -> String {
             p.index, p.kills, p.score, p.suicides, p.betrayals
         ),
     }
+}
+
+/// A game with no kills proves nothing: where every death was a suicide,
+/// each score was minus the suicides, and the sum is 0. The kills read
+/// must be 0 too, so a wrong offset that reads a number in such a game is
+/// still caught by `kills_fit`.
+fn no_kills(players: &[PlayerResult]) -> bool {
+    players
+        .iter()
+        .all(|p| p.kills == 0 && i64::from(p.score) + i64::from(p.suicides) == 0)
+}
+
+/// A player's kills are their score plus their suicides (plus their
+/// betrayals, either way), as in Slayer.
+fn kills_fit(p: &PlayerResult) -> bool {
+    let k = i64::from(p.kills);
+    let base = i64::from(p.score) + i64::from(p.suicides);
+    k == base || k == base + i64::from(p.betrayals)
+}
+
+/// Whether a game's kills bear the inferred offset out, so they may go to
+/// the server (`PlayerResult::for_server`): a Slayer game (`slayer`) where
+/// someone killed someone and every player's kills fit their score, which
+/// `check_kills` logs as "the offsets hold".
+pub fn kills_hold(players: &[PlayerResult], slayer: bool) -> bool {
+    slayer && !no_kills(players) && players.iter().all(kills_fit)
 }
 
 #[cfg(test)]
@@ -274,17 +305,23 @@ mod tests {
         );
         // The other player's are untouched.
         assert_eq!(players(&b)[0].kills, 0);
-        let r = p.for_server();
-        assert_eq!(
-            (r.kills, r.assists, r.deaths, r.betrayals, r.suicides),
-            (7, 3, 2, 1, 2)
-        );
+        // Until the counts are seen right, the server gets kills only
+        // when the game bore them out, and assists and betrayals as 0.
+        let r = p.for_server(true);
+        let sent = (r.kills, r.assists, r.deaths, r.betrayals, r.suicides);
+        match COUNTS_SEEN {
+            true => assert_eq!(sent, (7, 3, 2, 1, 2)),
+            false => assert_eq!(sent, (7, 0, 2, 0, 2)),
+        }
+        let r = p.for_server(false);
+        assert_eq!(r.kills, if COUNTS_SEEN { 7 } else { 0 });
+        assert_eq!((r.deaths, r.suicides), (2, 2));
     }
 
     #[test]
     fn a_player_goes_to_the_server_by_relay_id_and_place() {
         let p = &players(&block())[1];
-        let r = p.for_server();
+        let r = p.for_server(true);
         assert_eq!(r.relay_id, 0x0009_0000_0000_0002);
         assert_eq!((r.team, r.place, r.score, r.deaths), (1, 1, -2, 2));
         assert_eq!((r.kills, r.suicides, r.left), (0, 2, false));
@@ -299,12 +336,12 @@ mod tests {
             suicides: 80_000,
             ..p.clone()
         };
-        let r = odd.for_server();
+        let r = odd.for_server(true);
         assert_eq!((r.team, r.place), (0, 255));
-        assert_eq!(
-            [r.kills, r.assists, r.deaths, r.betrayals, r.suicides],
-            [u16::MAX; 5]
-        );
+        assert_eq!([r.kills, r.deaths, r.suicides], [u16::MAX; 3]);
+        if COUNTS_SEEN {
+            assert_eq!([r.assists, r.betrayals], [u16::MAX; 2]);
+        }
     }
 
     #[test]
@@ -353,6 +390,12 @@ mod tests {
         );
         let off = [player(0, 10, 11, 1, 0), player(3, 4, 9, 0, 2)];
         assert!(check_kills(&off).starts_with("kills: player 3 has kills 9"));
+        // Kills go to the server only from a Slayer game that holds.
+        assert!(kills_hold(&good, true));
+        assert!(!kills_hold(&good, false));
+        assert!(!kills_hold(&off, true));
+        assert!(!kills_hold(&wrong, true));
+        assert!(!kills_hold(&suicides, true));
         assert_eq!(
             check_kills(&[]),
             "kills: nothing to check (no one killed anyone)"

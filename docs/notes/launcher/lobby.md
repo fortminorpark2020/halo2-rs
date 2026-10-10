@@ -74,7 +74,8 @@ the launcher doesn't do.
   for LB and E or Page Down for RB), mouse (click a row to select it, again
   to pick it; click a button hint) and Xbox controllers (gilrs: d-pad or
   left stick, A, B, X, Y, the bumpers LB and RB; Start is A and Back is
-  B). LB always opens a service record and RB the friends list. Where a
+  B). Where the screens below say so, LB opens a service record (yours,
+  or the selected player's) and RB the friends list. Where a
   gamertag is typed (the sign-in screen, the add friend popup) letters are
   typed, not buttons.
 - Levels are drawn with Halo 2's own level icons (the 50 rank icons, big
@@ -96,8 +97,11 @@ the launcher doesn't do.
   are read at offsets inferred from the order Halo games keep them in and
   not yet seen above zero; in a Slayer game the engine's log says whether
   each player's kills are their score plus their suicides, as they must
-  be (`result: kills: ...`). They are the engine's data: never commit or
-  upload them).
+  be (`result: kills: ...`). Until they are seen right
+  (`results::COUNTS_SEEN`), the server is sent kills only from a Slayer
+  game that bears them out, and assists and betrayals as 0, so a wrong
+  guess never goes into anyone's tally. They are the engine's data: never
+  commit or upload them).
 
 ## Screens
 
