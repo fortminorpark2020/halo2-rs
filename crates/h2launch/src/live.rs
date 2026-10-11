@@ -17,7 +17,7 @@
 
 use crate::session::{Player, Session};
 use h2live::client::{LiveClient, LiveEvent, Profile};
-use h2net::live::{LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer};
+use h2net::live::{AccountOp, LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer};
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
@@ -632,6 +632,22 @@ pub fn describe(m: &ToServer) -> String {
             r.finished,
             r.players.len()
         ),
+        ToServer::ProvePassword { computer, .. } => {
+            format!("PROVE_PASSWORD from {computer:?} (password sealed)")
+        }
+        ToServer::Account { seq, op, .. } => {
+            let what = match op {
+                AccountOp::List => "LIST".to_string(),
+                AccountOp::Create { gamertag, .. } => format!("CREATE {gamertag} (sealed)"),
+                AccountOp::SetPassword { account, .. } => {
+                    format!("SET_PASSWORD {account:016x} (sealed)")
+                }
+                AccountOp::SignOut { account } => format!("SIGN_OUT {account:016x}"),
+                AccountOp::Remove { account } => format!("REMOVE {account:016x}"),
+                AccountOp::ChangePassword { .. } => "CHANGE_PASSWORD (sealed)".to_string(),
+            };
+            format!("account request {seq}: {what}")
+        }
         other => format!("{other:?}"),
     }
 }

@@ -1051,12 +1051,14 @@ impl App {
         let now = self.online.now();
         for event in self.online.poll(now) {
             match event {
-                // Launchers' matches, friends and service records only; the
-                // server never sends the game those.
+                // Launchers' matches, friends, service records and accounts
+                // only; the server never sends the game those.
                 LiveEvent::Welcomed
                 | LiveEvent::LauncherMatch(_)
                 | LiveEvent::Friends
-                | LiveEvent::ServiceRecord(_) => {}
+                | LiveEvent::ServiceRecord(_)
+                | LiveEvent::Accounts
+                | LiveEvent::KeyChanged { .. } => {}
                 LiveEvent::Refused(why) | LiveEvent::Lost(why) => {
                     println!("live: {}", why.to_lowercase());
                     // A match's links go through the service: it's over

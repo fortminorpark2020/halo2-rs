@@ -115,7 +115,7 @@ impl Server {
 
     /// `account`'s friends list needs sending again at the end of this
     /// poll: a friend action changed it, and its notice goes now.
-    fn friends_changed_now(&mut self, account: u64) {
+    pub(super) fn friends_changed_now(&mut self, account: u64) {
         self.friends_now.insert(account);
     }
 

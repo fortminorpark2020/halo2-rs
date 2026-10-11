@@ -145,6 +145,28 @@ impl Account {
         }
     }
 
+    /// A new account the server's owner made, with `gamertag`, made at
+    /// `created`: named by a random key that no PC holds (so the id is the
+    /// key's, as for every account, and parties, friends, the relay and
+    /// games.log need nothing new), drawn again while `taken` says the id
+    /// is someone's.
+    pub fn named(gamertag: String, created: u64, taken: impl Fn(u64) -> bool) -> Account {
+        loop {
+            let mut key = [0; 32];
+            getrandom::fill(&mut key).expect("random numbers");
+            let mut account = Account::new(key, created);
+            // Not 0 or u64::MAX, which `relay_id` gives other ids in their
+            // place (u64::MAX is h2relay's BROADCAST), nor the ids it gives
+            // them, so an account's relay id is its own.
+            let reserved = [0, 1, u64::MAX - 1, u64::MAX];
+            if reserved.contains(&account.id) || taken(account.id) {
+                continue;
+            }
+            account.gamertag = gamertag;
+            return account;
+        }
+    }
+
     /// Its lines in accounts.txt (and on its stat card).
     pub fn lines(&self) -> String {
         let mut look = Writer::default();
@@ -289,6 +311,11 @@ pub fn load(path: &Path) -> Result<Vec<Account>, String> {
 /// over the old one.
 pub fn replace(path: &Path, text: &str) -> std::io::Result<()> {
     write_whole(path, text, false)
+}
+
+/// `replace`, letting only the file's owner read it (logins.txt).
+pub(crate) fn replace_private(path: &Path, text: &str) -> std::io::Result<()> {
+    write_whole(path, text, true)
 }
 
 /// `replace`, and for a `secret` only its owner can read the file.

@@ -1,11 +1,13 @@
 //! The h2live program itself, as players' PCs find it: over TCP on this
-//! PC, with web requests and WebSockets on the one port. (Unix only: it's
-//! stopped as Ctrl+C would, with a signal.)
+//! PC, with web requests and WebSockets on the one port; and its command
+//! line (`h2live user ...`), with the program running and without. (Unix
+//! only: it's stopped as Ctrl+C would, with a signal.)
 
 #![cfg(unix)]
 
 use ed25519_dalek::SigningKey;
-use h2live::client::{LiveClient, LiveEvent, Profile};
+use h2live::client::{Access, LiveClient, LiveEvent, Profile};
+use h2live::password::Secret;
 use h2net::live::{self, ToServer};
 use h2relay::{ClientConfig, Failure, Refusal, RelayClient, State};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -48,7 +50,12 @@ impl Program {
     /// Start it on any free port (as a host would give it one, so it
     /// leaves the router alone), keeping its accounts in `data`.
     fn start(data: &Path) -> Program {
-        let (mut program, stdout) = Program::launch(data);
+        Program::start_with(data, &[])
+    }
+
+    /// `start`, with more of the environment (`H2LIVE_SIGNUP`, say).
+    fn start_with(data: &Path, env: &[(&str, &str)]) -> Program {
+        let (mut program, stdout) = Program::launch_with(data, env);
         let (tx, lines) = mpsc::channel();
         std::thread::spawn(move || {
             for line in stdout.lines().map_while(Result::ok) {
@@ -62,13 +69,11 @@ impl Program {
     /// Start it, leaving what it says once it has said which port it's on
     /// to the caller to read (or not).
     fn launch(data: &Path) -> (Program, BufReader<ChildStdout>) {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_h2live"))
-            .env("PORT", "0")
-            .env("H2LIVE_DATA", data)
-            .env_remove("H2LIVE_SECRET")
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        Program::launch_with(data, &[])
+    }
+
+    fn launch_with(data: &Path, env: &[(&str, &str)]) -> (Program, BufReader<ChildStdout>) {
+        let mut child = program(data, env).stdout(Stdio::piped()).spawn().unwrap();
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         while !line.contains("listening on port ") {
@@ -151,6 +156,54 @@ impl Drop for Program {
     }
 }
 
+/// The program, to run on any free port with its accounts in `data`, and
+/// `env` (which `H2LIVE_SIGNUP`, say, is unset unless it names).
+fn program(data: &Path, env: &[(&str, &str)]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_h2live"));
+    command
+        .env("PORT", "0")
+        .env("H2LIVE_DATA", data)
+        .env_remove("H2LIVE_SECRET")
+        .env_remove("H2LIVE_SIGNUP");
+    command.envs(env.iter().copied());
+    command
+}
+
+/// What the command line did: its exit code, and what it said on the
+/// standard output and error.
+struct Ran {
+    code: i32,
+    out: String,
+    err: String,
+}
+
+/// Run the command line (`h2live` with `args`) on the data folder `data`,
+/// giving it `stdin`.
+fn h2live(data: &Path, args: &[&str], stdin: &str) -> Ran {
+    let mut child = program(data, &[])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    Ran {
+        code: output.status.code().unwrap(),
+        out: String::from_utf8(output.stdout).unwrap(),
+        err: String::from_utf8(output.stderr).unwrap(),
+    }
+}
+
+/// A password, as tests type it.
+const PASSWORD: &str = "K7MP-4QR9-XW2T";
+
 /// PCs signed in to the program, polled as games poll them (every frame),
 /// on a clock of their own.
 struct Pcs {
@@ -188,6 +241,45 @@ impl Pcs {
             .push(LiveClient::new(conn, key, &profile, &card, now));
         self.events.push(Vec::new());
         self.pcs.len() - 1
+    }
+
+    /// PC number `n` dials the program as a launcher and signs in as
+    /// `gamertag`, with `password` if any. Its index.
+    fn connect_launcher(
+        &mut self,
+        port: u16,
+        n: u8,
+        gamertag: &str,
+        password: Option<&str>,
+    ) -> usize {
+        let url = format!("ws://127.0.0.1:{port}/live");
+        let conn = h2net::dial(&url, WAIT).recv().unwrap().unwrap();
+        let profile = Profile {
+            gamertag: gamertag.into(),
+            ..Profile::default()
+        };
+        let card = self.home.0.join(format!("card-{n}.txt"));
+        let key = SigningKey::from_bytes(&[n; 32]);
+        let now = self.start.elapsed().as_secs_f64();
+        let mut pc = LiveClient::launcher(conn, key, &profile, "test", &card, now);
+        pc.set_access(Access {
+            pin: None,
+            password: password.map(Secret::new),
+            computer: format!("PC {n}"),
+        });
+        self.pcs.push(pc);
+        self.events.push(Vec::new());
+        self.pcs.len() - 1
+    }
+
+    /// PC `i` was welcomed, or turned away (why), once it is.
+    fn answer(&mut self, i: usize) -> Result<(), String> {
+        let answered = |e: &LiveEvent| matches!(e, LiveEvent::Welcomed | LiveEvent::Refused(_));
+        self.until(|p| p.heard(i, answered));
+        match self.events[i].iter().find(|e| answered(e)) {
+            Some(LiveEvent::Refused(why)) => Err(why.clone()),
+            _ => Ok(()),
+        }
     }
 
     /// Poll every PC until `done`.
@@ -383,4 +475,142 @@ fn the_program_rests_while_pcs_do_nothing() {
         pings.len() == 4 && pings.iter().all(|&ms| ms < 20),
         "{pings:?}"
     );
+}
+
+#[test]
+fn accounts_are_made_from_the_command_line_while_the_program_runs() {
+    let data = TempDir::new("cli-running");
+    let mut program = Program::start_with(&data.0, &[("H2LIVE_SIGNUP", "closed")]);
+    program.wait_for("sign-up: closed");
+    program.wait_for("no admins yet");
+    let ran = h2live(
+        &data.0,
+        &["user", "add", "kat", "--password-stdin"],
+        &format!("{PASSWORD}\n"),
+    );
+    assert_eq!(
+        (ran.code, ran.out.as_str()),
+        (0, "KAT created.\n"),
+        "{}",
+        ran.err
+    );
+    assert!(ran.err.contains("hashing took "), "{}", ran.err);
+    // The program made it (and said so); nothing secret was said.
+    program.wait_for("live: command line: made the account KAT");
+    let mut pcs = Pcs::new();
+    let a = pcs.connect_launcher(program.port, 1, "Kat", Some(PASSWORD));
+    assert_eq!(pcs.answer(a), Ok(()));
+    let kat = pcs.pcs[a].account().unwrap();
+    // That PC needs no password now.
+    let b = pcs.connect_launcher(program.port, 1, "Kat", None);
+    assert_eq!(pcs.answer(b), Ok(()));
+    assert_eq!(pcs.pcs[b].account(), Some(kat));
+    // Another does.
+    let c = pcs.connect_launcher(program.port, 2, "Kat", None);
+    assert_eq!(pcs.answer(c), Err(live::PASSWORD_NEEDED.into()));
+    let ran = h2live(&data.0, &["user", "list"], "");
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    let row = ran.out.lines().find(|l| l.starts_with("KAT ")).unwrap();
+    assert!(row.contains(" 1/5 "), "{}", ran.out);
+    assert!(ran.out.contains("PC \"PC 1\""), "{}", ran.out);
+    assert!(ran.out.ends_with("1 account\n"), "{}", ran.out);
+    let ran = h2live(&data.0, &["user", "key"], "");
+    assert!(ran.out.starts_with("identity key: "), "{}", ran.out);
+    program.stop();
+    assert!(!program.said.iter().any(|l| l.contains("argon2")));
+    // The socket goes with the program.
+    assert!(!data.0.join("admin.sock").exists());
+}
+
+#[test]
+fn a_second_program_on_the_same_folder_stops() {
+    let data = TempDir::new("cli-second");
+    let mut first = Program::start(&data.0);
+    let second = program(&data.0, &[]).output().unwrap();
+    assert!(!second.status.success());
+    let said = String::from_utf8(second.stdout).unwrap();
+    assert!(said.contains("FAILED: another h2live is using "), "{said}");
+    // The first goes on.
+    let health = first.get("/health");
+    assert!(health.ends_with("\r\n\r\nOK"), "{health}");
+    first.stop();
+}
+
+#[test]
+fn the_command_line_works_on_its_own_while_the_program_is_stopped() {
+    let data = TempDir::new("cli-stopped");
+    let ran = h2live(&data.0, &["user", "add", "Kat", "--admin"], "");
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    let lines: Vec<&str> = ran.out.lines().collect();
+    assert_eq!(lines.len(), 2, "{}", ran.out);
+    let password = lines[0]
+        .strip_prefix("KAT created. Password: ")
+        .and_then(|rest| rest.strip_suffix(" (shown once; it isn't kept anywhere)"))
+        .unwrap();
+    assert_eq!(password.len(), 14);
+    assert_eq!(lines[1], "KAT is an admin.");
+    // Only its hash is kept, where only the folder's owner can read it.
+    let logins = data.0.join("logins.txt");
+    let kept = std::fs::read_to_string(&logins).unwrap();
+    assert!(kept.contains("$argon2id$") && !kept.contains(password));
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&logins).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    // With an admin, sign-up closes by itself.
+    let mut program = Program::start(&data.0);
+    program.wait_for("sign-up: closed");
+    let mut pcs = Pcs::new();
+    let a = pcs.connect_launcher(program.port, 1, "kat", Some(password));
+    assert_eq!(pcs.answer(a), Ok(()));
+    pcs.until(|p| p.pcs[a].view.accounts.is_some());
+    assert!(pcs.pcs[a].view.accounts.as_ref().unwrap().admin);
+    let b = pcs.connect(program.port, 2, "Gamer");
+    assert_eq!(pcs.answer(b), Err(live::NO_ACCOUNT.into()));
+    program.stop();
+    // And on its own again.
+    let ran = h2live(&data.0, &["user", "list"], "");
+    assert!(ran.out.contains("1/5"), "{}", ran.out);
+}
+
+#[test]
+fn a_password_argument_is_a_usage_error() {
+    let data = TempDir::new("cli-usage");
+    for args in [
+        &["user", "add", "Kat", "hunter2"][..],
+        &["user", "passwd", "Kat", "hunter2"],
+        &["user", "add", "Kat", "--password", "hunter2"],
+        &["user", "add", "1Kat"],
+        &["user", "remove"],
+        &["user", "list", "--yes"],
+        &["useradd", "Kat"],
+    ] {
+        let ran = h2live(&data.0, args, "");
+        assert_eq!(ran.code, 2, "{args:?}: {}", ran.err);
+        assert!(ran.err.contains("usage: h2live user list"), "{}", ran.err);
+        assert!(!ran.err.contains("hunter2"), "{}", ran.err);
+        assert_eq!(ran.out, "");
+    }
+    assert!(!data.0.join("accounts.txt").exists());
+    assert!(!data.0.join("logins.txt").exists());
+}
+
+#[test]
+fn the_command_line_refuses_a_missing_folder() {
+    let data = TempDir::new("cli-missing");
+    let missing = data.0.join("not-here");
+    let ran = h2live(&missing, &["user", "list"], "");
+    assert_eq!(ran.code, 1);
+    let why = format!(
+        "no h2live data in {}; pass --data or set H2LIVE_DATA",
+        missing.display()
+    );
+    assert!(ran.err.contains(&why), "{}", ran.err);
+    let elsewhere = missing.join("deeper");
+    let ran = h2live(
+        &data.0,
+        &["user", "list", "--data", elsewhere.to_str().unwrap()],
+        "",
+    );
+    assert_eq!(ran.code, 1);
+    assert!(!missing.exists());
 }

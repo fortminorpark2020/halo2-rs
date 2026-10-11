@@ -257,6 +257,33 @@ impl Friends {
         }
     }
 
+    /// Drop every friendship and request `id` is in (its account was
+    /// removed). The other accounts that were in them.
+    pub fn forget(&mut self, id: u64) -> Vec<u64> {
+        let mut others: Vec<u64> = self.friends_of(id);
+        for &other in &others {
+            if let Some(set) = self.friends.get_mut(&other) {
+                set.remove(&id);
+                if set.is_empty() {
+                    self.friends.remove(&other);
+                }
+            }
+        }
+        self.friends.remove(&id);
+        self.requests.retain(|r| {
+            let other = match (r.from == id, r.to == id) {
+                (true, _) => r.to,
+                (_, true) => r.from,
+                _ => return true,
+            };
+            others.push(other);
+            false
+        });
+        others.sort_unstable();
+        others.dedup();
+        others
+    }
+
     /// Where the request from `from` to `to` is in the list, if it's there.
     fn waiting(&self, from: u64, to: u64) -> Option<usize> {
         self.requests
@@ -414,6 +441,31 @@ mod tests {
         assert!(f.decline(1, 50));
         assert_eq!(f.ask(5, 1, 0), Ok(Asked::Sent));
         assert_eq!(f.asked_by(1).last(), Some(&5));
+    }
+
+    #[test]
+    fn a_removed_account_is_forgotten() {
+        let mut f = Friends::default();
+        f.ask(1, 2, 0).unwrap();
+        f.accept(2, 1).unwrap();
+        f.ask(1, 3, 1).unwrap();
+        f.ask(4, 1, 2).unwrap();
+        f.ask(2, 3, 3).unwrap();
+        f.ask(3, 4, 4).unwrap();
+        f.accept(4, 3).unwrap();
+        assert_eq!(f.forget(1), [2, 3, 4]);
+        assert!(f.friends_of(1).is_empty() && f.friends_of(2).is_empty());
+        assert!(f.asked_by(1).is_empty() && f.asking(1).is_empty());
+        // What didn't name it stays.
+        assert_eq!(f.asking(2), [3]);
+        assert!(f.are_friends(3, 4));
+        assert_eq!(
+            f.text(),
+            "f 0000000000000003 0000000000000004
+r 0000000000000002 0000000000000003 3
+"
+        );
+        assert!(f.forget(1).is_empty());
     }
 
     #[test]

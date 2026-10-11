@@ -23,10 +23,21 @@
 //! is, so a new game version never locks launchers out. The messages the
 //! game sends and is sent are the same as ever (so `PROTOCOL` stays as it
 //! was); the launcher's own ones (LAUNCHER_MATCH, JOINED, LAUNCHER_RESULT,
-//! LAUNCHER_CUSTOM, RECORD and SERVICE_RECORD, and the friends messages)
-//! are versioned by `LIVE_PROTOCOL` and only ever go to and from
-//! launchers. The game reads a kind it doesn't know as bad data and drops
-//! the link, so the server never sends it one of those.
+//! LAUNCHER_CUSTOM, RECORD and SERVICE_RECORD, the friends messages, and
+//! the accounts messages below) are versioned by `LIVE_PROTOCOL` and only
+//! ever go to and from launchers. The game reads a kind it doesn't know as
+//! bad data and drops the link, so the server never sends it one of those.
+//!
+//! Accounts the server's owner makes (version 4): a launcher still signs
+//! in with its PC's key, and a PC the account knows ("a device") needs
+//! nothing more. A PC new to the account proves it with the account's
+//! password once (PROVE_PASSWORD in place of PROVE). The password never
+//! crosses the link in clear: before its CHALLENGE, the server sends a
+//! launcher a key made for this connection, signed with the server's own
+//! identity key (SEAL_KEY), and the launcher seals each password to it
+//! (`Sealed`; the sealing itself is `h2live::seal`). Admins make and change
+//! accounts with ACCOUNT, signed with the PC's key, and every launcher is
+//! sent the accounts it may see (ACCOUNTS).
 
 use crate::conn::Connection;
 use crate::PROTOCOL;
@@ -45,8 +56,9 @@ pub const MAGIC_V2: u32 = u32::from_le_bytes(*b"H2L2");
 /// server takes launchers at this version only, whatever the game's
 /// `PROTOCOL`. (2: LAUNCHER_CUSTOM. 3: kills, assists, betrayals and
 /// suicides in LAUNCHER_RESULT; RECORD and SERVICE_RECORD; the friends
-/// messages.)
-pub const LIVE_PROTOCOL: u32 = 3;
+/// messages. 4: owner-made accounts: SEAL_KEY, PROVE_PASSWORD, ACCOUNT,
+/// ACCOUNTS.)
+pub const LIVE_PROTOCOL: u32 = 4;
 /// The kinds of program a versioned LOGIN can say it is, as a byte.
 pub const CLIENT_VIEWER: u8 = 0;
 pub const CLIENT_LAUNCHER: u8 = 1;
@@ -81,6 +93,27 @@ pub const SERVER_FULL: &str = "SERVER FULL";
 pub const TOO_MANY_SIGN_INS: &str = "TOO MANY SIGN-INS, WAIT A MINUTE";
 /// The same account signed in again from another PC.
 pub const SIGNED_IN_ELSEWHERE: &str = "SIGNED IN ON ANOTHER PC";
+/// A launcher whose PC the account doesn't know (or a server that makes no
+/// accounts for new PCs): it asks its player for the password.
+pub const PASSWORD_NEEDED: &str = "TYPE YOUR PASSWORD. THIS PC ISN'T SIGNED IN TO THAT ACCOUNT.";
+/// The same for a wrong password and a gamertag no account has.
+pub const WRONG_PASSWORD: &str = "WRONG GAMERTAG OR PASSWORD";
+/// Too many wrong passwords for the account, or from the address.
+pub const TOO_MANY_TRIES: &str = "TOO MANY WRONG PASSWORDS. TRY AGAIN IN 10 MINUTES.";
+/// The server checked as many passwords as it will in a minute.
+pub const SERVER_BUSY: &str = "THE SERVER IS BUSY. TRY AGAIN IN A MINUTE.";
+/// The account has as many PCs as it may (`MAX_PCS` in h2live's logins).
+pub const TOO_MANY_PCS: &str =
+    "THIS ACCOUNT IS ON TOO MANY PCS. ASK THE SERVER'S OWNER TO SIGN IT OUT OF ALL PCS.";
+/// The PC's key no longer signs in to its account.
+pub const SIGNED_OUT: &str = "YOU WERE SIGNED OUT OF THIS PC. SIGN IN WITH YOUR PASSWORD.";
+pub const ACCOUNT_REMOVED: &str = "THIS ACCOUNT WAS REMOVED.";
+/// The game (which can't send a password) on a server that makes no
+/// accounts for new PCs.
+pub const NO_ACCOUNT: &str = "THIS SERVER IS INVITE ONLY. ASK ITS OWNER FOR AN ACCOUNT.";
+/// A NOTICE: the gamertag asked for (PROFILE) isn't taken on, because only
+/// the server's owner renames accounts here.
+pub const ASK_TO_RENAME: &str = "ASK THE SERVER'S OWNER TO CHANGE YOUR GAMERTAG.";
 
 /// Longest names (gamertags, maps, keys, presets) and text (reasons,
 /// notices), in bytes.
@@ -115,6 +148,24 @@ pub const MAX_FRIEND_REQUESTS: usize = 100;
 pub const MAX_FRIEND_ENTRIES: usize = MAX_FRIENDS + MAX_FRIEND_REQUESTS;
 /// Most playlists a SERVICE_RECORD lists.
 pub const MAX_RECORD_PLAYLISTS: usize = 64;
+/// Longest password, in bytes (as typed, less spaces and dashes).
+pub const MAX_PASSWORD: usize = 64;
+/// One password as it's sealed: its length, then its bytes padded with
+/// zeros to `MAX_PASSWORD`, so a box's length says nothing of it.
+pub const SEALED_ONE: usize = 1 + MAX_PASSWORD;
+/// Most bytes a sealed box holds: two passwords (the old and the new) and
+/// the 16-byte tag.
+pub const MAX_SEALED: usize = 2 * SEALED_ONE + 16;
+/// Fewest: the tag and one byte.
+const MIN_SEALED: usize = 17;
+/// Most accounts an ACCOUNTS lists. At most about 23 KB, with every
+/// gamertag at `MAX_NAME`: under half of `MAX_MESSAGE`.
+pub const MAX_ACCOUNT_ROWS: usize = 300;
+/// What an ACCOUNTS row's flags say: the account is an admin, has a
+/// password, and is signed in now.
+pub const ROW_ADMIN: u8 = 1;
+pub const ROW_PASSWORD: u8 = 2;
+pub const ROW_ONLINE: u8 = 4;
 
 /// What a launcher is told about friends (NOTICE). `{X}` stands for a
 /// gamertag, as the server has it: `friend_notice` puts it in, and
@@ -159,6 +210,8 @@ pub mod kind {
     pub const PING: u8 = 3;
     pub const PONG: u8 = 4;
     pub const PROFILE: u8 = 5;
+    /// A launcher's PROVE with the account's password, sealed.
+    pub const PROVE_PASSWORD: u8 = 6;
     pub const INVITE: u8 = 10;
     pub const ACCEPT: u8 = 11;
     pub const DECLINE: u8 = 12;
@@ -189,6 +242,9 @@ pub mod kind {
     pub const FRIEND_ACCEPT: u8 = 51;
     pub const FRIEND_DECLINE: u8 = 52;
     pub const FRIEND_REMOVE: u8 = 53;
+    /// A launcher's account request (an admin's, or changing its own
+    /// password).
+    pub const ACCOUNT: u8 = 60;
     // PC to server, first on a relay leg.
     pub const LINK_HELLO: u8 = 40;
     // Host to server, on its fan-out leg once linked.
@@ -215,6 +271,12 @@ pub mod kind {
     pub const SERVICE_RECORD: u8 = 117;
     /// To a launcher: its whole friends list.
     pub const FRIENDS: u8 = 118;
+    /// To a launcher, before CHALLENGE: the key to seal passwords to on
+    /// this connection, signed by the server's identity key.
+    pub const SEAL_KEY: u8 = 119;
+    /// To a launcher: the accounts it may see, and the answer to an
+    /// ACCOUNT.
+    pub const ACCOUNTS: u8 = 120;
     // Server to PC, on a relay leg once its other end is there.
     pub const LINKED: u8 = 41;
 }
@@ -226,6 +288,14 @@ pub enum ToServer {
     Login(Login),
     /// The server's challenge signed with the PC's key (see `proof`).
     Prove([u8; 64]),
+    /// A launcher: PROVE for a PC the account doesn't know yet, with the
+    /// account's password sealed to this connection's SEAL_KEY, and the
+    /// PC's name (for the owner's list of the account's PCs).
+    ProvePassword {
+        signature: [u8; 64],
+        computer: String,
+        password: Sealed,
+    },
     /// Still here; answer with the same number. Both ends ping.
     Ping(u32),
     Pong(u32),
@@ -297,6 +367,14 @@ pub enum ToServer {
     /// A launcher: stop being friends with this account, or take back the
     /// request we sent it.
     FriendRemove(u64),
+    /// A launcher: an account request, numbered (each above the last on
+    /// this connection) and signed with the PC's key (see
+    /// `account_proof`).
+    Account {
+        seq: u32,
+        op: AccountOp,
+        sig: [u8; 64],
+    },
     /// First on a relay leg: which leg this is.
     LinkHello {
         token: [u8; 16],
@@ -360,6 +438,18 @@ pub enum ToPc {
     ServiceRecord(ServiceRecord),
     /// To a launcher: its whole friends list, which replaces the last.
     Friends(Vec<Friend>),
+    /// To a launcher, just before CHALLENGE: an X25519 key made for this
+    /// connection, the server's Ed25519 identity key, and that key's
+    /// signature over `h2live::seal::key_proof` of the challenge and the
+    /// X25519 key.
+    SealKey {
+        key: [u8; 32],
+        server: [u8; 32],
+        sig: [u8; 64],
+    },
+    /// To a launcher: the accounts it may see, and how its last account
+    /// request went.
+    Accounts(Accounts),
     Ping(u32),
     Pong(u32),
     /// On a relay leg: the other end is there, and what follows is theirs.
@@ -831,6 +921,83 @@ pub struct Friend {
     pub joinable: bool,
 }
 
+/// Passwords sealed to the server (see `h2live::seal`): the sender's
+/// X25519 key for this box, and the box (ChaCha20-Poly1305: one or two
+/// padded passwords, then the tag). Its Debug shows only its length.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Sealed {
+    pub key: [u8; 32],
+    pub boxed: Vec<u8>,
+}
+
+impl std::fmt::Debug for Sealed {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Sealed({} bytes)", self.boxed.len())
+    }
+}
+
+/// What a launcher's ACCOUNT asks for. Every operation but
+/// `ChangePassword` is an admin's, and none touches the admin's own account
+/// or another admin's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountOp {
+    /// Just send ACCOUNTS.
+    List,
+    /// A new account (not an admin) with this gamertag and password.
+    Create {
+        gamertag: String,
+        password: Sealed,
+    },
+    /// A new password for an account; its PCs stay signed in.
+    SetPassword {
+        account: u64,
+        password: Sealed,
+    },
+    /// Sign an account out of every PC.
+    SignOut {
+        account: u64,
+    },
+    Remove {
+        account: u64,
+    },
+    /// The PC's own account: the old password, then the new.
+    ChangePassword {
+        passwords: Sealed,
+    },
+}
+
+/// An account as ACCOUNTS lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRow {
+    pub account: u64,
+    pub gamertag: String,
+    /// `ROW_ADMIN`, `ROW_PASSWORD` and `ROW_ONLINE`.
+    pub flags: u8,
+    /// PCs that sign in to it without a password.
+    pub pcs: u8,
+    /// Its highest level.
+    pub best: u8,
+}
+
+/// What a launcher is told of accounts (ACCOUNTS): after WELCOME, after
+/// each of its ACCOUNTs, and whenever an account changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Accounts {
+    /// This PC's account is an admin's, and has a password.
+    pub admin: bool,
+    pub password: bool,
+    /// The ACCOUNT this answers (its `seq`), or 0 if none.
+    pub answers: u32,
+    /// How that went, and what to show.
+    pub ok: bool,
+    pub text: String,
+    /// How many accounts the server has.
+    pub total: u16,
+    /// Every account (by gamertag, the first `MAX_ACCOUNT_ROWS`) for an
+    /// admin; only its own for anyone else.
+    pub rows: Vec<AccountRow>,
+}
+
 /// A friend notice (see `FRIEND_ASKED`) with `gamertag` in it.
 pub fn friend_notice(notice: &str, gamertag: &str) -> String {
     notice.replace("{X}", gamertag)
@@ -855,6 +1022,15 @@ pub fn is_friend_notice(text: &str) -> bool {
 /// challenge and the key.
 pub fn proof(nonce: &[u8; 32], key: &[u8; 32]) -> Vec<u8> {
     [&b"h2live-login"[..], nonce, key].concat()
+}
+
+/// What a launcher signs to make an account request: a fixed text, the
+/// server's challenge, the request's number (little-endian) and its
+/// operation as ACCOUNT writes it.
+pub fn account_proof(nonce: &[u8; 32], seq: u32, op: &AccountOp) -> Vec<u8> {
+    let mut w = Writer::default();
+    op.write(&mut w);
+    [&b"h2live-account-4"[..], nonce, &seq.to_le_bytes(), &w.0].concat()
 }
 
 /// What a LOGIN says first, if it's a LOGIN at all.
@@ -897,6 +1073,23 @@ fn read_bytes<const N: usize>(r: &mut Reader) -> Result<[u8; N], Malformed> {
         *x = r.u8()?;
     }
     Ok(b)
+}
+
+/// Bytes, after their length (two bytes). Binary data goes this way, never
+/// as a `str` (which is read as text, losing what isn't UTF-8).
+fn blob(w: &mut Writer, b: &[u8]) {
+    let b = &b[..b.len().min(u16::MAX as usize)];
+    w.u16(b.len() as u16);
+    w.0.extend_from_slice(b);
+}
+
+/// Bytes written by `blob`, from `min` to `max` of them.
+fn read_blob(r: &mut Reader, min: usize, max: usize) -> Result<Vec<u8>, Malformed> {
+    let n = r.u16()? as usize;
+    if n < min || n > max {
+        return Err(Malformed);
+    }
+    (0..n).map(|_| r.u8()).collect()
 }
 
 /// A string of at most `max` bytes.
@@ -1570,6 +1763,116 @@ impl ServiceRecord {
     }
 }
 
+impl Sealed {
+    fn write(&self, w: &mut Writer) {
+        bytes(w, &self.key);
+        blob(w, &self.boxed);
+    }
+
+    fn read(r: &mut Reader) -> Result<Sealed, Malformed> {
+        Ok(Sealed {
+            key: read_bytes(r)?,
+            boxed: read_blob(r, MIN_SEALED, MAX_SEALED)?,
+        })
+    }
+}
+
+impl AccountOp {
+    fn write(&self, w: &mut Writer) {
+        match self {
+            AccountOp::List => w.u8(0),
+            AccountOp::Create { gamertag, password } => {
+                w.u8(1);
+                w.str(gamertag);
+                password.write(w);
+            }
+            AccountOp::SetPassword { account, password } => {
+                w.u8(2);
+                w.u64(*account);
+                password.write(w);
+            }
+            AccountOp::SignOut { account } => {
+                w.u8(3);
+                w.u64(*account);
+            }
+            AccountOp::Remove { account } => {
+                w.u8(4);
+                w.u64(*account);
+            }
+            AccountOp::ChangePassword { passwords } => {
+                w.u8(5);
+                passwords.write(w);
+            }
+        }
+    }
+
+    fn read(r: &mut Reader) -> Result<AccountOp, Malformed> {
+        Ok(match r.u8()? {
+            0 => AccountOp::List,
+            1 => AccountOp::Create {
+                gamertag: read_str(r, MAX_NAME)?,
+                password: Sealed::read(r)?,
+            },
+            2 => AccountOp::SetPassword {
+                account: r.u64()?,
+                password: Sealed::read(r)?,
+            },
+            3 => AccountOp::SignOut { account: r.u64()? },
+            4 => AccountOp::Remove { account: r.u64()? },
+            5 => AccountOp::ChangePassword {
+                passwords: Sealed::read(r)?,
+            },
+            _ => return Err(Malformed),
+        })
+    }
+}
+
+impl Accounts {
+    fn write(&self, w: &mut Writer) {
+        w.bool(self.admin);
+        w.bool(self.password);
+        w.u32(self.answers);
+        w.bool(self.ok);
+        w.str(&self.text);
+        w.u16(self.total);
+        let rows = &self.rows[..self.rows.len().min(MAX_ACCOUNT_ROWS)];
+        w.u16(rows.len() as u16);
+        for row in rows {
+            w.u64(row.account);
+            w.str(&row.gamertag);
+            w.u8(row.flags);
+            w.u8(row.pcs);
+            w.u8(row.best);
+        }
+    }
+
+    fn read(r: &mut Reader) -> Result<Accounts, Malformed> {
+        let (admin, password, answers) = (read_bool(r)?, read_bool(r)?, r.u32()?);
+        let (ok, text, total) = (read_bool(r)?, read_str(r, MAX_TEXT)?, r.u16()?);
+        let n = read_count16(r, MAX_ACCOUNT_ROWS)?;
+        let rows = (0..n)
+            .map(|_| {
+                Ok(AccountRow {
+                    account: r.u64()?,
+                    gamertag: read_str(r, MAX_NAME)?,
+                    flags: r.u8()?,
+                    pcs: r.u8()?,
+                    best: r.u8()?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Accounts {
+            admin,
+            password,
+            answers,
+            ok,
+            text,
+            total,
+            rows,
+        })
+    }
+}
+
 impl Friend {
     fn write(&self, w: &mut Writer) {
         w.u64(self.account);
@@ -1652,6 +1955,16 @@ impl ToServer {
             ToServer::Prove(signature) => {
                 bytes(&mut w, signature);
                 kind::PROVE
+            }
+            ToServer::ProvePassword {
+                signature,
+                computer,
+                password,
+            } => {
+                bytes(&mut w, signature);
+                w.str(computer);
+                password.write(&mut w);
+                kind::PROVE_PASSWORD
             }
             ToServer::Ping(n) => {
                 w.u32(*n);
@@ -1761,6 +2074,12 @@ impl ToServer {
                 w.u64(*account);
                 kind::FRIEND_REMOVE
             }
+            ToServer::Account { seq, op, sig } => {
+                w.u32(*seq);
+                op.write(&mut w);
+                bytes(&mut w, sig);
+                kind::ACCOUNT
+            }
             ToServer::LinkHello { token, account } => {
                 bytes(&mut w, token);
                 w.u64(*account);
@@ -1791,6 +2110,11 @@ impl ToServer {
         let message = match kind {
             kind::LOGIN => ToServer::Login(Login::read(r)?),
             kind::PROVE => ToServer::Prove(read_bytes(r)?),
+            kind::PROVE_PASSWORD => ToServer::ProvePassword {
+                signature: read_bytes(r)?,
+                computer: read_str(r, MAX_NAME)?,
+                password: Sealed::read(r)?,
+            },
             kind::PING => ToServer::Ping(r.u32()?),
             kind::PONG => ToServer::Pong(r.u32()?),
             kind::PROFILE => ToServer::Profile {
@@ -1835,6 +2159,11 @@ impl ToServer {
             kind::FRIEND_ACCEPT => ToServer::FriendAccept(r.u64()?),
             kind::FRIEND_DECLINE => ToServer::FriendDecline(r.u64()?),
             kind::FRIEND_REMOVE => ToServer::FriendRemove(r.u64()?),
+            kind::ACCOUNT => ToServer::Account {
+                seq: r.u32()?,
+                op: AccountOp::read(r)?,
+                sig: read_bytes(r)?,
+            },
             kind::LINK_HELLO => ToServer::LinkHello {
                 token: read_bytes(r)?,
                 account: r.u64()?,
@@ -1957,6 +2286,16 @@ impl ToPc {
                 }
                 kind::FRIENDS
             }
+            ToPc::SealKey { key, server, sig } => {
+                bytes(&mut w, key);
+                bytes(&mut w, server);
+                bytes(&mut w, sig);
+                kind::SEAL_KEY
+            }
+            ToPc::Accounts(accounts) => {
+                accounts.write(&mut w);
+                kind::ACCOUNTS
+            }
             ToPc::Ping(n) => {
                 w.u32(*n);
                 kind::PING
@@ -2018,6 +2357,12 @@ impl ToPc {
                 let friends = (0..n).map(|_| Friend::read(r)).collect::<Result<_, _>>()?;
                 ToPc::Friends(friends)
             }
+            kind::SEAL_KEY => ToPc::SealKey {
+                key: read_bytes(r)?,
+                server: read_bytes(r)?,
+                sig: read_bytes(r)?,
+            },
+            kind::ACCOUNTS => ToPc::Accounts(Accounts::read(r)?),
             kind::PING => ToPc::Ping(r.u32()?),
             kind::PONG => ToPc::Pong(r.u32()?),
             kind::LINKED => ToPc::Linked,
@@ -2137,6 +2482,77 @@ mod tests {
         }
     }
 
+    /// A box of `n` bytes, every one 0xAB (171), from a key of 0x5A.
+    fn sealed(n: usize) -> Sealed {
+        Sealed {
+            key: [0x5A; 32],
+            boxed: vec![0xAB; n],
+        }
+    }
+
+    /// An account request of each kind.
+    fn account_ops() -> Vec<AccountOp> {
+        vec![
+            AccountOp::List,
+            AccountOp::Create {
+                gamertag: "KAT".into(),
+                password: sealed(SEALED_ONE + 16),
+            },
+            AccountOp::SetPassword {
+                account: 0xfeed_0000_0000_0002,
+                password: sealed(SEALED_ONE + 16),
+            },
+            AccountOp::SignOut { account: 3 },
+            AccountOp::Remove { account: 4 },
+            AccountOp::ChangePassword {
+                passwords: sealed(MAX_SEALED),
+            },
+        ]
+    }
+
+    /// The new messages to the server (version 4).
+    fn account_messages() -> Vec<ToServer> {
+        let mut messages = vec![ToServer::ProvePassword {
+            signature: [9; 64],
+            computer: "DESKTOP-1".into(),
+            password: sealed(SEALED_ONE + 16),
+        }];
+        for (seq, op) in (1..).zip(account_ops()) {
+            messages.push(ToServer::Account {
+                seq,
+                op,
+                sig: [8; 64],
+            });
+        }
+        messages
+    }
+
+    fn accounts(rows: usize) -> Accounts {
+        let row = AccountRow {
+            account: 0xfeed_0000_0000_0001,
+            gamertag: "JOHN".into(),
+            flags: ROW_ADMIN | ROW_PASSWORD | ROW_ONLINE,
+            pcs: 2,
+            best: 17,
+        };
+        let rows = (0..rows)
+            .map(|i| AccountRow {
+                account: row.account + i as u64,
+                flags: row.flags >> i,
+                ..row.clone()
+            })
+            .collect();
+        Accounts {
+            admin: true,
+            password: true,
+            answers: 7,
+            ok: true,
+            text: "CREATED KAT".into(),
+            total: 2,
+            rows,
+        }
+    }
+
     fn every_message_to_the_server() -> Vec<ToServer> {
         let result = PlayerResult {
             account: 5,
@@ -2207,6 +2623,9 @@ mod tests {
             ToServer::FriendDecline(24),
             ToServer::FriendRemove(25),
         ]
+        .into_iter()
+        .chain(account_messages())
+        .collect()
     }
 
     fn service_record() -> ServiceRecord {
@@ -2434,6 +2853,19 @@ mod tests {
                 found: None,
             }),
             ToPc::Friends(friends()),
+            ToPc::SealKey {
+                key: [10; 32],
+                server: [11; 32],
+                sig: [12; 64],
+            },
+            ToPc::Accounts(Accounts {
+                admin: false,
+                ok: false,
+                answers: 0,
+                text: String::new(),
+                ..accounts(0)
+            }),
+            ToPc::Accounts(accounts(2)),
         ]
     }
 
@@ -2453,18 +2885,21 @@ mod tests {
             kinds.push(kind);
         }
         // Every kind once: pings and pongs once each way, and LOGIN and
-        // SERVICE_RECORD twice (the game's and a launcher's; found and not).
-        assert_eq!(kinds.len(), 33 + 22);
+        // SERVICE_RECORD twice (the game's and a launcher's; found and not),
+        // ACCOUNT six times (each operation) and ACCOUNTS twice.
+        assert_eq!(kinds.len(), 40 + 25);
         kinds.sort_unstable();
         kinds.dedup();
-        assert_eq!(kinds.len(), 33 + 22 - 2 - 1 - 1);
+        assert_eq!(kinds.len(), 40 + 25 - 2 - 1 - 1 - 5 - 1);
+        assert_eq!(kinds.len(), TO_SERVER.len() + TO_PC.len() - 2);
     }
 
     /// Every kind a PC sends the server, and every kind the server sends
     /// a PC (PING and PONG go both ways).
-    const TO_SERVER: [u8; 32] = [
+    const TO_SERVER: [u8; 34] = [
         kind::LOGIN,
         kind::PROVE,
+        kind::PROVE_PASSWORD,
         kind::PING,
         kind::PONG,
         kind::PROFILE,
@@ -2493,10 +2928,11 @@ mod tests {
         kind::FRIEND_ACCEPT,
         kind::FRIEND_DECLINE,
         kind::FRIEND_REMOVE,
+        kind::ACCOUNT,
         kind::LINK_HELLO,
         kind::FANOUT,
     ];
-    const TO_PC: [u8; 21] = [
+    const TO_PC: [u8; 23] = [
         kind::CHALLENGE,
         kind::WELCOME,
         kind::REFUSED,
@@ -2515,6 +2951,8 @@ mod tests {
         kind::LAUNCHER_MATCH,
         kind::SERVICE_RECORD,
         kind::FRIENDS,
+        kind::SEAL_KEY,
+        kind::ACCOUNTS,
         kind::PING,
         kind::PONG,
         kind::LINKED,
@@ -2522,7 +2960,7 @@ mod tests {
 
     #[test]
     fn no_two_kinds_one_way_share_a_number() {
-        assert_eq!(LIVE_PROTOCOL, 3);
+        assert_eq!(LIVE_PROTOCOL, 4);
         let mut to_server = TO_SERVER.to_vec();
         let mut to_pc = TO_PC.to_vec();
         for kinds in [&mut to_server, &mut to_pc] {
@@ -2847,6 +3285,138 @@ mod tests {
         };
         assert_eq!(login_header(&older), Some(v2));
         assert!(ToServer::read(kind::LOGIN, &older).is_err());
+        // And one at version 3 (before owner-made accounts).
+        older[4..8].copy_from_slice(&3u32.to_le_bytes());
+        let v3 = LoginHeader::Versioned {
+            live: 3,
+            client: CLIENT_LAUNCHER,
+        };
+        assert_eq!(login_header(&older), Some(v3));
+        assert!(ToServer::read(kind::LOGIN, &older).is_err());
+    }
+
+    #[test]
+    fn sealed_boxes_have_their_limits() {
+        for (n, ok) in [
+            (16, false),
+            (17, true),
+            (SEALED_ONE + 16, true),
+            (MAX_SEALED, true),
+            (MAX_SEALED + 1, false),
+        ] {
+            let m = ToServer::ProvePassword {
+                signature: [1; 64],
+                computer: "PC".into(),
+                password: sealed(n),
+            };
+            let (kind, body) = m.write();
+            assert_eq!(ToServer::read(kind, &body).is_ok(), ok, "{n} bytes");
+            let m = ToServer::Account {
+                seq: 1,
+                op: AccountOp::ChangePassword {
+                    passwords: sealed(n),
+                },
+                sig: [2; 64],
+            };
+            let (kind, body) = m.write();
+            assert_eq!(ToServer::read(kind, &body).is_ok(), ok, "{n} bytes");
+        }
+        // An operation past the last.
+        let (kind, mut body) = ToServer::Account {
+            seq: 1,
+            op: AccountOp::List,
+            sig: [2; 64],
+        }
+        .write();
+        body[4] = 6;
+        assert!(ToServer::read(kind, &body).is_err());
+        // A computer's name longer than any name.
+        let (kind, body) = ToServer::ProvePassword {
+            signature: [1; 64],
+            computer: "C".repeat(MAX_NAME + 1),
+            password: sealed(81),
+        }
+        .write();
+        assert!(ToServer::read(kind, &body).is_err());
+    }
+
+    #[test]
+    fn account_lists_have_their_limits() {
+        let row = |i: usize| AccountRow {
+            account: i as u64,
+            gamertag: "G".repeat(15),
+            flags: ROW_PASSWORD,
+            pcs: 5,
+            best: 50,
+        };
+        let most = Accounts {
+            rows: (0..MAX_ACCOUNT_ROWS).map(row).collect(),
+            total: 1000,
+            ..accounts(0)
+        };
+        let (kind, mut body) = ToPc::Accounts(most.clone()).write();
+        assert!(body.len() < MAX_MESSAGE / 2, "{}", body.len());
+        assert_eq!(ToPc::read(kind, &body), Ok(ToPc::Accounts(most.clone())));
+        // 301 rows don't read...
+        let mut w = Writer::default();
+        w.u64(300);
+        w.str(&"G".repeat(15));
+        w.0.extend_from_slice(&[ROW_PASSWORD, 5, 50]);
+        let at = body.len() - MAX_ACCOUNT_ROWS * w.0.len() - 2;
+        body[at..at + 2].copy_from_slice(&(MAX_ACCOUNT_ROWS as u16 + 1).to_le_bytes());
+        body.extend(&w.0);
+        assert!(ToPc::read(kind, &body).is_err());
+        // ...and are written as their first 300.
+        let mut more = most.clone();
+        more.rows.push(row(300));
+        let (kind, body) = ToPc::Accounts(more).write();
+        assert_eq!(ToPc::read(kind, &body), Ok(ToPc::Accounts(most)));
+        // The longest the server sends: every gamertag at MAX_NAME.
+        let longest = Accounts {
+            rows: (0..MAX_ACCOUNT_ROWS)
+                .map(|i| AccountRow {
+                    gamertag: "G".repeat(MAX_NAME),
+                    ..row(i)
+                })
+                .collect(),
+            ..accounts(0)
+        };
+        let (_, body) = ToPc::Accounts(longest).write();
+        assert!(body.len() < MAX_MESSAGE / 2, "{}", body.len());
+    }
+
+    #[test]
+    fn requests_show_no_box_bytes() {
+        // Boxes are all 0xAB bytes from a key of 0x5A: neither shows.
+        for m in account_messages() {
+            let shown = format!("{m:?}");
+            assert!(!shown.contains("171") && !shown.contains("90,"), "{shown}");
+            let boxed = shown.contains("password") || shown.contains("ChangePassword");
+            assert_eq!(boxed, shown.contains("Sealed("), "{shown}");
+        }
+        assert_eq!(format!("{:?}", sealed(81)), "Sealed(81 bytes)");
+    }
+
+    #[test]
+    fn account_requests_sign_their_number_and_operation() {
+        let nonce = [3; 32];
+        let ops = account_ops();
+        let proof = account_proof(&nonce, 1, &ops[3]);
+        assert!(proof.starts_with(b"h2live-account-4"));
+        assert_eq!(&proof[16..48], &nonce);
+        assert_eq!(&proof[48..52], &1u32.to_le_bytes());
+        // The operation as ACCOUNT writes it: its byte, then its account.
+        assert_eq!(&proof[52..], &[&[3][..], &3u64.to_le_bytes()].concat());
+        assert_ne!(account_proof(&nonce, 2, &ops[3]), proof);
+        assert_ne!(account_proof(&[4; 32], 1, &ops[3]), proof);
+        let other = AccountOp::SignOut { account: 4 };
+        assert_ne!(account_proof(&nonce, 1, &other), proof);
+        assert_ne!(account_proof(&nonce, 1, &ops[4]), proof);
+        // Every operation signs differently.
+        let mut all: Vec<Vec<u8>> = ops.iter().map(|op| account_proof(&nonce, 1, op)).collect();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), ops.len());
     }
 
     #[test]

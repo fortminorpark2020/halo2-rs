@@ -1119,5 +1119,6 @@ fn a_launcher_party_plays_custom_games() {
     drop(relay);
 }
 
+mod accounts;
 mod matches;
 mod social;
