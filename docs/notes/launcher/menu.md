@@ -1579,7 +1579,7 @@ the saved controls away from the owner's own. Each script starts with
     host's quit-time result on, and the lobby sends it as LAUNCHER_RESULT
     with `finished` false, then LEFT_MATCH, so h2live takes the host as
     leaving at the end. No HOST LEFT wording, nothing counts, and the
-    host gets the carnage report too. To be checked again on the PC.
+    host gets the carnage report too. Checked again below.
 15. **No engine message ends the game for everyone**: with
     `--end-game-message N`, 2 ended the host's game only (repeated in two
     lobbies, the guest sat about 17 s in a game that had stopped for it);
@@ -1587,6 +1587,38 @@ the saved controls away from the owner's own. Each script starts with
     violation); the other ids tried did nothing. End Game doesn't post
     one; the flag stays for research.
 16. and 17. Not run yet.
+
+#### Re-check on the owner's PC (2026-10-11, about 23:40 UTC, 76414d6)
+
+The engines ran with `--pad none`, because a pad plugged into the PC was
+moving and its presses reached the first run.
+
+- **14, through the real server** (h2.mohnjorrow.com, two lobbies on the
+  PC): pass. The host's lobby logged `left end`, then `ended` with both
+  players, then the result with `finished` false, then LEFT_MATCH; the
+  server's verdict (not counted, no reason) came 46 ms later, and the
+  host's engine was gone 5.0 s after End Game. Host and guest both landed
+  on the carnage report ("Unranked: levels don't change"), with no HOST
+  LEFT wording. The guest's engine ended its game by itself and its lobby
+  closed it about 20 s later. Whether the party was freed wasn't looked at.
+- **End Game before the server's GO** can't really happen: the host's
+  menu only exists once its map has loaded, and the host's load waits for
+  the guest, so both reach `maploaded` within 0.2 s and the guest's join
+  goes at once. Forced by holding the guest's engine for 25 s, the server
+  dropped the guest at LINK_WAIT and the host went on alone; End Game then
+  sent a one-player result and the host got the carnage report. The
+  "You ended the game." path is still unseen on the PC.
+- **8, with no flag** (reload message 5 by default): pass. A new look
+  sensitivity and Bumper Jumper were each posted when the menu closed and
+  served at the engine's next read; LB jumped and the turn was faster; no
+  NEXT GAME tags. With `--reload-message 0` the changes were never served,
+  the tags and the footer came back, and LB didn't jump.
+- **6**: pass. 24 steps of Mouse Sensitivity (1.6 to 4) gave one
+  `H2EVENT controls` and one save, on leaving the page.
+- **13's count**: a fresh sign-in starts on the first playlist; seven downs
+  reach the seventh playlist and eight reach Custom Game, as `lobby.md`
+  says. The earlier seven came from a script that had opened and closed
+  the invite list first.
 
 ## 10. Tests
 
