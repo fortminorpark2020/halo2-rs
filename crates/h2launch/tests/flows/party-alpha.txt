@@ -22,7 +22,7 @@
 0.2 y                       # the party screen
 0 wait party 5
 0.2 y                       # invite only
-0 see Invite only 10
+0 see Let anyone join 10    # Y's hint once the server has it so
 0 pick BRAVO
 0.2 x                       # remove BRAVO: asked first
 0 wait remove 5

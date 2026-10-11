@@ -484,9 +484,11 @@ H2FLOWS_SHOTS=/tmp/flow-shots cargo test --release -p h2launch --test flows
 
 `H2FLOWS_SHOTS` keeps each lobby's screenshots in a folder of its own
 there, and the flows' folders (with every `lobby.log`) after they pass.
-A failing flow stops every lobby and prints the end of each one's log;
-its folder (in the system's temporary folder, `h2flows-<flow>-<pid>`)
-is kept.
+A failing flow stops every lobby and prints the end of each one's log,
+and of its stderr when it wrote any (`<instance>.stderr` in the flow's
+folder: a panic's message and location, or an error from before the log
+opened); its folder (in the system's temporary folder,
+`h2flows-<flow>-<pid>`) is kept.
 
 To add a flow: write one script per lobby in `tests/flows/` (the sign-in
 lines at the top of each are the same), and a `#[test]` that calls

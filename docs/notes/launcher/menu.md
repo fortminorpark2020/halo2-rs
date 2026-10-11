@@ -961,13 +961,17 @@ No visible change; the log says more.
   frame on the CPU`. On the lobby's own screens the whole draw is timed.
 - The flows test (`crates/h2launch/tests/flows.rs`, lobby.md "The flows
   test"): real headless lobbies against an h2live and relay in the test
-  process. In the gate: matchmaking, a custom game, and the party screen
-  with three lobbies (about 15 s in the container). Ignored: friends, a
-  setting kept across runs, a taken gamertag and the quit popup. A party
-  of two can't search any default launcher playlist alone (Head to Head
-  takes parties of one, and Team Snipers wants a third player to even
-  its teams), so in the matchmaking flow BRAVO accepts ALPHA's
-  invitation, then leaves, and both search Head to Head.
+  process. In the gate: matchmaking, a party searching together
+  (`party_matchmaking`, three lobbies), a custom game, and the party
+  screen with three lobbies (about 35 s in the container, most of it
+  `party_matchmaking`'s 20 s countdown). Ignored: friends, a setting
+  kept across runs, a taken gamertag and the quit popup. A party of two
+  can't search any default launcher playlist alone (Head to Head takes
+  parties of one, and Team Snipers wants a third player to even its
+  teams), so in the matchmaking flow BRAVO accepts ALPHA's invitation,
+  then leaves, and both search Head to Head. The party search is
+  `party_matchmaking`'s: ALPHA and BRAVO, a party of two, search Team
+  Snipers, and CHARLIE searching it alone evens the teams.
 - Scripts may end a line with a `# comment`; the headless lobby runs
   without any font (its text isn't drawn, but `see` still reads it).
 - On the container, flat, at 1280x720: about 1 ms a frame on the start

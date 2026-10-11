@@ -53,7 +53,13 @@ install. No game files are included in this repository.
   screen, as on the Xbox: press A or Start (Enter or Space on a keyboard,
   or click) for the main menu, which has ONLINE and SETTINGS (up and
   down to pick, A to choose, B to go back). Its pictures and fonts are
-  read from your MCC install; without them it is plain shapes. ONLINE
+  read from your Halo 2 Vista (Project Cartographer) folder if the
+  launcher finds one, otherwise from MCC's own Halo 2 files; without
+  either the menus are plain shapes. It looks for Cartographer in
+  `C:\Games\Halo 2 Project Cartographer` and in Halo 2 Vista's usual
+  folders under Program Files; if yours is somewhere else, add the line
+  `vista = <folder>` (the Cartographer folder or its `maps` folder) to
+  `%LOCALAPPDATA%\h2launch\lobby.txt`, or set `H2LOBBY_VISTA` to it. ONLINE
   takes you to its lobby: pick a gamertag the first time (after that it
   signs you in by itself), form a party (the sign-in screen offers the
   project's server, h2.mohnjorrow.com, by default), search a playlist,
@@ -75,10 +81,12 @@ install. No game files are included in this repository.
   party panel and the party screen show each member's level in the playlist
   you have selected. On
   a keyboard, Q and E (or Page Up and Page Down) are LB and RB. Levels show
-  as Halo 2's own level icons, read from your MCC install (or from a Halo 2
-  Vista install if MCC's can't be read); without either they are numbers. Friends and service records need the matching
+  as Halo 2's own level icons, read from the same place (your Halo 2 Vista
+  folder first, otherwise MCC's files); without either they are numbers.
+  Friends and service records need the matching
   server: an older launcher signing in to it is told UPDATE YOUR LAUNCHER.
-  Its text is in Halo 2's own fonts, read from your MCC install.
+  Its text is in Halo 2's own fonts, from the same place (Halo 2 Vista's
+  first, otherwise MCC's); without either it uses a system font.
   Settings (SETTINGS on the main menu, the row after Custom Game, or X on
   a controller at the sign-in screen) holds Halo 2's controller settings,
   in the order of its CONTROLLER screen: Thumbstick Layout (Default, Southpaw, Legacy, Legacy

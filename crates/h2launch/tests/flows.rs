@@ -8,7 +8,9 @@
 //!
 //! The lobbies wait for each other only through their scripts (`wait`,
 //! `see`, `pick`). A flow fails when any lobby's script does, or when it
-//! takes too long; the message holds the end of each lobby's log.
+//! takes too long; the message holds the end of each lobby's log and of
+//! what it wrote to stderr (`<instance>.stderr` in the flow's folder: a
+//! panic's message, or an error from before the log opened).
 //! `H2FLOWS_SHOTS=<folder>` keeps each lobby's screenshots there, and
 //! the flows' folders (with each lobby's `lobby.log`) after they pass.
 //!
@@ -31,7 +33,7 @@ use std::time::{Duration, Instant};
 const PATHS: &[&str] = &["/live", "/link"];
 /// How long one stage of a flow (its lobbies together) may take.
 const STAGE: Duration = Duration::from_secs(150);
-/// Lines of each lobby's log shown when a flow fails.
+/// Lines of each lobby's log (and of its stderr) shown when a flow fails.
 const TAIL: usize = 40;
 
 /// h2live on a port of its own on this PC, with its relay beside it, until
@@ -105,11 +107,21 @@ struct Flow {
     live: Live,
 }
 
-/// A lobby running a script, and where its log is.
+/// A lobby running a script, and where its log and its stderr are.
 struct Lobby {
     instance: String,
     child: Child,
     log: PathBuf,
+    stderr: PathBuf,
+}
+
+/// The last `TAIL` lines of the file at `path`, and how many there are
+/// (none when it is missing).
+fn tail(path: &Path) -> (usize, String) {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(TAIL)..];
+    (tail.len(), tail.join("\n"))
 }
 
 impl Flow {
@@ -131,6 +143,15 @@ impl Flow {
         assert!(script.is_file(), "no script {}", script.display());
         let instance = format!("{}-{instance}", self.name);
         let log = self.dir.join("h2launch").join(&instance).join("lobby.log");
+        // Its stderr, which only Rust's panic message and the errors from
+        // before the log opens go to (its stdout repeats the log). Added
+        // to by each stage that runs this instance.
+        let stderr = self.dir.join(format!("{instance}.stderr"));
+        let stderr_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr)
+            .expect("open the lobby's stderr file");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_h2launch"));
         cmd.args(["--lobby", "--live"])
             .arg(format!("127.0.0.1:{}", self.live.port))
@@ -158,7 +179,7 @@ impl Flow {
             .env_remove("H2LOBBY_SHOTS")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::from(stderr_file));
         if let Some(shots) = std::env::var_os("H2FLOWS_SHOTS") {
             cmd.env("H2LOBBY_SHOTS", Path::new(&shots).join(&instance));
         }
@@ -167,12 +188,14 @@ impl Flow {
             instance,
             child,
             log,
+            stderr,
         }
     }
 
     /// Run a stage: the lobbies (instance, script) together, until every
     /// one has finished its script. Panics, with the end of each one's
-    /// log, if any fails or the stage takes longer than `STAGE`.
+    /// log and stderr, if any fails or the stage takes longer than
+    /// `STAGE`.
     fn stage(&self, lobbies: &[(&str, &str)]) {
         let mut running: Vec<Lobby> = lobbies
             .iter()
@@ -208,16 +231,20 @@ impl Flow {
         for l in &mut running {
             let _ = l.child.kill();
             let _ = l.child.wait();
-            let text = std::fs::read_to_string(&l.log).unwrap_or_default();
-            let lines: Vec<&str> = text.lines().collect();
-            let tail = &lines[lines.len().saturating_sub(TAIL)..];
+            let (n, lines) = tail(&l.log);
             message.push_str(&format!(
-                "--- {} ({}), last {} lines:\n{}\n",
+                "--- {} ({}), last {n} lines:\n{lines}\n",
                 l.instance,
                 l.log.display(),
-                tail.len(),
-                tail.join("\n")
             ));
+            let (n, lines) = tail(&l.stderr);
+            if n > 0 {
+                message.push_str(&format!(
+                    "--- {} stderr ({}), last {n} lines:\n{lines}\n",
+                    l.instance,
+                    l.stderr.display(),
+                ));
+            }
         }
         panic!("{message}");
     }
