@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 02:55 UTC. Any assistant that works on the project
+Last updated 2026-10-11 09:20 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -40,6 +40,9 @@ Milestones:
   2026-10-09.
 - Controllers: Halo 2's button and thumbstick layouts, plus Bumper Jumper and
   Recon (not in the original, added on request).
+- 2026-10-11: accounts on his server are made by him, for the MVP "a simple
+  username and password I create for my test users": a gamertag and a
+  password, typed once on each PC. Signing in with Steam may come later.
 
 ## The owner's PC (where all launcher testing happens)
 
@@ -138,6 +141,38 @@ player is on `hunt-wip` (6822f71) in `C:\h2work\hunt`, notes in
 `HUNT-NOTES.md`; kills, deaths and streaks are confirmed there, betrayals,
 assists and the team offset aren't. The PC's own log of the day is
 `reports\2026-10-10_mcc-pivot_pc-work-log.md` in the Cartographer folder.
+
+Owner-made accounts (2026-10-11) are built and tested on
+`launcher-accounts` (on `launcher-menu` f0b718b: stage 1 16e80d5, h2live
+and `LIVE_PROTOCOL` 4; stage 2 3323850, the launcher; stage 3, docs and
+the install script), not pushed or deployed. `PROTOCOL` stays 26, so the
+hold on the Proxmox server's `PROTOCOL` 27 update is unchanged. Design and
+details: `docs/notes/launcher/accounts.md`. Each account is a gamertag and
+a password; a PC types it once and is remembered (up to 5 PCs); h2live
+keeps hashes in `logins.txt`; sign-up is `open`, `closed` or `auto`;
+admins make accounts from the launcher's Accounts row or with `h2live
+user ...` on the server; launchers pin the server's key. Tested on Linux
+with a closed local server, the command line and headless lobbies (the
+run is at the end of `lobby.md`). A v3 launcher can't sign in to a v4
+server, nor the other way round, so the deploy goes in this order, each
+step with the owner's go-ahead:
+1. The server: build h2live (static musl) from the merged branch and run
+   the updated `deploy/proxmox/install-h2live.sh` in container 102. It
+   keeps `/opt/h2live/h2live.prev` and a dated copy of `/var/lib/h2live`,
+   sets sign-up closed, and installs the `/usr/local/bin/h2live` wrapper.
+   Existing accounts (the owner's, FRIENDTEST, MENUTEST and any friends')
+   are kept and sign in from their PCs as before. Then `h2live user list`,
+   `h2live user admin <OWNER> on`, `h2live user passwd <OWNER>` (note
+   "hashing took N ms"), and `h2live user key`.
+2. Rebuild the owner's launcher (`C:\Games\Halo 2 Live`) and the friends'
+   zip with `H2LAUNCH_SERVER_KEY` set to that key, and rewrite the zip's
+   READ ME on his PC ("type the gamertag and password John gave you, once
+   on each PC"). The READ ME isn't in the repository. The built-in key
+   covers h2.mohnjorrow.com only; the desktop build, on 192.168.8.102,
+   learns the key the first time it signs in (on his own network).
+3. The owner makes his friends' accounts from his launcher's Accounts row.
+Rollback: `install -m755 /opt/h2live/h2live.prev /opt/h2live/h2live &&
+systemctl restart h2live`, and the old zip.
 
 After the MVP: clans, keyboard and mouse, the other layouts, and the
 owner's idea (2026-10-11) of Halo 2 Anniversary weapon and Spartan models

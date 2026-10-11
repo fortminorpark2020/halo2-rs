@@ -140,9 +140,14 @@ the launcher doesn't do.
   controller settings: `button_layout`, `thumbstick_layout`,
   `look_sensitivity`, `look_inversion`, `auto_look_centering`, `vibration`,
   `mouse_sensitivity` and `mouse_inversion`; a file from before them reads
-  with Halo 2's defaults, and unknown lines are skipped), `lobby.log` (the lobby's log, with the
-  engine's lines as `engine:`), `live-key.bin` and `live-card.txt` (the same
-  account as `--live`), `match-session.txt` (the last match's session),
+  with Halo 2's defaults, and unknown lines are skipped; never a
+  password), `lobby.log` (the lobby's log, with the
+  engine's lines as `engine:`), `live-key.bin` (this PC's key: what the
+  server remembers as one of the account's PCs, so it signs in with no
+  password; the same as `--live`'s) and `live-card.txt` (the account's
+  stat card), `live-servers.txt` (each server's identity key, pinned the
+  first time it was signed in to, or built in for the owner's server with
+  `H2LAUNCH_SERVER_KEY`; see `accounts.md`), `match-session.txt` (the last match's session),
   and `results\` (the engine's results blocks of the last 30 games,
   `H2LAUNCH_RESULT_DUMP` for the engine's copy, so the rest of the block's
   layout can be worked out from real games. Kills, assists and betrayals
@@ -179,8 +184,26 @@ the launcher doesn't do.
    over the main menu (A accepts and shows the playlists), and a match the
    party is put in opens the pregame lobby from either, as from any
    screen.
-1. Sign in: type a gamertag the first time; kept in `lobby.txt` in the
-   launcher's folder with the server's address. B goes back to the main
+1. Sign in (`LIVE_PROTOCOL` 4, `accounts.md`): GAMERTAG, PASSWORD and
+   SERVER; Tab, up and down move between them. The first time on a PC,
+   type the gamertag and the password the server's owner gave you; the
+   password ("Only on a new PC") is drawn as stars, never saved or logged,
+   sent only sealed to the server's key, and forgotten when the sign-in
+   ends. The gamertag the server signs you in as is kept in `lobby.txt`
+   in the launcher's folder with the server's address, and from then on
+   ONLINE signs in with this PC's key alone. A refusal comes back to the
+   form, on the field to fix, with what to do: "This PC isn't signed in to
+   that account. Type your password.", "Wrong gamertag or password." (the
+   password cleared), "Too many wrong passwords. Try again in 10
+   minutes.", "This account is on too many PCs. Ask the server's owner to
+   sign it out of all PCs.", or "You were signed out of this PC. Type
+   your password." (also while signed in, after any match that's
+   playing). A server of another version gives the offline screen with
+   "The server runs a different version from this launcher. Ask its owner
+   for the right one." Before anything is sent, the server must prove its
+   key: if it isn't the one pinned for that address, SERVER KEY CHANGED
+   shows both short codes; A ("Trust the new key") pins the new one and
+   signs in again, B goes back to the main menu. B goes back to the main
    menu, and so does B while signing in (which calls it off).
 2. Xbox Live: the playlists (name, your level in it, people searching and
    playing) and the party (members and their levels in the playlist
@@ -293,6 +316,28 @@ the launcher doesn't do.
    back. See "Controls" in `README.md` for what the engine is given and
    what is an estimate.
 
+14. Accounts (`LIVE_PROTOCOL` 4, `accounts.md`): the playlists' last row,
+   after Settings, once the server has sent ACCOUNTS: "Accounts" for an
+   admin, "My account" for everyone else. The first row is "Change my
+   password" (CHANGE PASSWORD: the current password, the new one twice,
+   checked here first; greyed for an account with no password yet). An
+   admin then has "Create account" (NEW ACCOUNT: type the gamertag; the
+   password is made up, A on it makes another, CREATE asks the server and
+   ACCOUNT CREATED shows the password once) and every account on the
+   server, each with "n PCs" and the tags ADMIN, NO PASSWORD, ONLINE and
+   (YOU); nine rows show at once and the list scrolls, and the selection
+   stays on its account as the list changes. The right side shows the
+   selected account's PCs (n of 5), password, whether it's online, its
+   level and a note. A on an account opens its options: Give a new
+   password, Sign out of all PCs, Remove account, each asked first; on
+   your own account or another admin's they are greyed ("Use the server's
+   command line for that."). A new password is shown once (NEW PASSWORD)
+   and forgotten. One request is out at a time ("Working..."); with no
+   answer in 10 s the lobby says "No answer from the server. Check the
+   list." and asks for it again. The server's answers come as notices or
+   in the popup. B goes back to the playlists. The gamertag and password
+   fields need a keyboard until menu Phase 2's on-screen keyboard.
+
 ## Testing without MCC
 
 `--fake-engine` stands in for the engine on any platform: it reads the
@@ -347,9 +392,15 @@ then `wait live`), without the form.
 
 The screens are `start`, `main`, `signin`, `connecting`, `live`,
 `searching`, `players`, `party`, `custom`, `pregame`, `ingame`,
-`carnage-waiting`, `carnage`, `failed`, `friends`, `record` and
-`settings`, and the popups `invite`, `quit`, `leave`, `remove` (a party
-member), `addfriend`, `friend` (a friend's options) and `unfriend`.
+`carnage-waiting`, `carnage`, `failed`, `friends`, `record`,
+`settings` and `accounts`, and the popups `invite`, `quit`, `leave`,
+`remove` (a party member), `addfriend`, `friend` (a friend's options),
+`unfriend`, `newaccount`, `newpassword` (a password shown once, after
+creating an account too), `accountoptions`, `confirmaccount`,
+`changepassword` and `keychanged`. `pick <gamertag>` also selects an
+account's row on the accounts screen. On the sign-in form `type` goes into
+the focused field and `tab` moves to the next (gamertag, password,
+server).
 
 Two lobbies on one machine against a local server:
 
@@ -407,3 +458,24 @@ folder; the lobbies signed in again and the friendship was still there.
 ALPHA invited BRAVO from the options popup (BRAVO joined), then removed
 BRAVO, whose list went empty. Afterwards `accounts.txt` had 11-word `x`
 lines, `games.log` 14-field entries and `friends.txt` nothing.
+
+Owner-made accounts (2026-10-11, `LIVE_PROTOCOL` 4, release builds, a
+local h2live with `H2LIVE_SIGNUP=closed`): `h2live user add "ADMIN ONE"
+--admin` and `h2live user add "FRIEND ONE"` over the admin socket (about
+30 ms a hash), `user list` and `user key`; a second h2live on the folder
+stopped with "another h2live is using". FRIEND ONE typed the gamertag and
+password (in lower case, with spaces for the dashes) and reached the
+playlists; started again, it signed in with no password. ADMIN ONE,
+signed in by its PC, opened Accounts, created KAT (the password shown
+once), gave FRIEND ONE a new password and signed it out of all PCs:
+FRIEND ONE's lobby, on the playlists, went to the form with "You were
+signed out of this PC. Type your password." and signed in with the
+password `h2live user passwd` then gave it. ADMIN ONE's own options were
+greyed. KAT signed in with the password ACCOUNT CREATED showed, changed it
+on My account, and another instance was refused the old one and let in
+with the new. With the server stopped, `user add` worked on the folder,
+and the account signed in once it was back. Started with another
+`H2LIVE_SECRET`, a pinned lobby with a password typed showed SERVER KEY
+CHANGED and sent nothing (the server only saw the connection close), and
+one that trusted the new key signed in by its PC. No log held a password,
+a hash or a sealed box.

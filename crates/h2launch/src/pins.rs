@@ -8,8 +8,8 @@
 //! be the server hears a password. A key is pinned the first time a server
 //! is signed in to, or, for the owner's server (`settings::DEFAULT_SERVER`),
 //! when the launcher is built with `H2LAUNCH_SERVER_KEY` (its 64 hex
-//! digits, which `h2live key` prints). A key learned from the server wins
-//! over the built-in one.
+//! digits, which `h2live user key` prints). A key learned from the server
+//! wins over the built-in one.
 //!
 //! ```text
 //! # h2launch: the matchmaking servers' identity keys, as last seen.

@@ -8,6 +8,26 @@
 # firewall guards this container (the Proxmox firewall, say), it must let
 # both in. To move or turn off the relay, add for example
 # `Environment=H2LIVE_RELAY=off` to the unit below.
+#
+# Accounts on this server are made by its owner only (sign-up closed), each
+# a gamertag and a password: see docs/notes/launcher/accounts.md. So this
+# script also:
+# - stops the service, then keeps the program it replaces as
+#   /opt/h2live/h2live.prev and a copy of the data folder as
+#   /var/lib/h2live.backup-<date>-<time> (logins.txt and secret.txt there
+#   can't be rebuilt from anything else);
+# - writes /opt/h2live/h2live.txt (the data folder and sign-up closed),
+#   which the server and its command line both read, and sets sign-up
+#   closed in the unit too, so losing one of them doesn't open it;
+# - makes the files the server writes private to it (UMask=0077);
+# - installs /usr/local/bin/h2live, which runs the server's command line
+#   (`h2live user list`, `h2live user add <gamertag>` and the rest) as the
+#   h2live user.
+#
+# To go back to the program before: as root,
+#   install -m755 /opt/h2live/h2live.prev /opt/h2live/h2live && systemctl restart h2live
+# For the exact data from before an update too, stop h2live and copy that
+# update's backup folder back over /var/lib/h2live first.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 [ "$(id -u)" = 0 ] || { echo "run this as root"; exit 1; }
@@ -17,8 +37,44 @@ id h2live >/dev/null 2>&1 ||
     useradd --system --home-dir /var/lib/h2live --shell /usr/sbin/nologin h2live
 install -d -o h2live -g h2live -m 750 /var/lib/h2live
 install -d -m 755 /opt/h2live
+
+# Stopped first, so the backup is of files at rest (it starts again below).
+if systemctl is-active --quiet h2live; then
+    systemctl stop h2live
+fi
+# The program it replaces, unless it's the same one (so running this again
+# keeps the one before).
+if [ -f /opt/h2live/h2live ] && ! cmp -s "$here/h2live" /opt/h2live/h2live; then
+    cp -p /opt/h2live/h2live /opt/h2live/h2live.prev
+    echo "kept the program before as /opt/h2live/h2live.prev"
+fi
+# A copy of the data folder each time this runs. Old copies pile up: delete
+# them by hand (rm -r /var/lib/h2live.backup-...) once they're not needed.
+if [ -n "$(ls -A /var/lib/h2live)" ]; then
+    backup=/var/lib/h2live.backup-$(date +%Y%m%d-%H%M%S)
+    cp -a /var/lib/h2live "$backup"
+    echo "copied the data folder to $backup"
+fi
 install -m 755 "$here/h2live" /opt/h2live/h2live.new
 mv /opt/h2live/h2live.new /opt/h2live/h2live
+
+# The settings beside the program, read by the server and by "h2live user".
+# Lines other than data= and signup= that someone added are kept.
+settings=/opt/h2live/h2live.txt
+note1="# h2live's settings, written by install-h2live.sh. The server and"
+note2="# its command line (h2live user ...) read them; the unit's Environment= wins."
+{
+    echo "$note1"
+    echo "$note2"
+    echo "data=/var/lib/h2live"
+    echo "signup=closed"
+    if [ -f "$settings" ]; then
+        grep -vxF -e "$note1" -e "$note2" "$settings" |
+            grep -viE '^[[:space:]]*(data|signup)[[:space:]]*=' || true
+    fi
+} >"$settings.new"
+chmod 644 "$settings.new"
+mv "$settings.new" "$settings"
 
 cat >/etc/systemd/system/h2live.service <<'UNIT'
 [Unit]
@@ -30,21 +86,46 @@ After=network-online.target
 User=h2live
 Group=h2live
 Environment=H2LIVE_DATA=/var/lib/h2live
+Environment=H2LIVE_SIGNUP=closed
 ExecStart=/opt/h2live/h2live
 Restart=always
 RestartSec=3
 NoNewPrivileges=yes
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
 UNIT
+
+# The command line, as the h2live user. Without arguments it would start a
+# second server, which the service already is, so the wrapper refuses.
+cat >/usr/local/bin/h2live.new <<'WRAPPER'
+#!/bin/sh
+# h2live's command line on this machine: "h2live user ..." makes and
+# changes the server's accounts, as the h2live user, on the data folder
+# that /opt/h2live/h2live.txt names (/var/lib/h2live). While the service
+# runs, it asks the server; while it's stopped, it opens the folder itself.
+# (The server keeps its key in secret.txt there. If the unit is ever given
+# H2LIVE_SECRET instead, set the same here, or "h2live user key" run while
+# the service is stopped shows another key.)
+if [ "$#" -eq 0 ]; then
+    echo "usage: h2live user list|add|passwd|revoke|remove|admin|rename|key ... (h2live help)" >&2
+    echo "The server itself runs as the h2live service (systemctl status h2live)." >&2
+    exit 2
+fi
+exec runuser -u h2live -- /opt/h2live/h2live "$@"
+WRAPPER
+chmod 755 /usr/local/bin/h2live.new
+mv /usr/local/bin/h2live.new /usr/local/bin/h2live
 
 systemctl daemon-reload
 systemctl enable h2live >/dev/null
 systemctl restart h2live
 sleep 6
 systemctl --no-pager --lines=0 status h2live | head -3
-journalctl -u h2live --no-pager -n 20 -o cat
+# This start's lines: the sign-up setting, and how many accounts from an
+# older server now sign in from their PCs as before.
+journalctl -u h2live --no-pager -n 25 -o cat
 curl -fsS http://127.0.0.1:47050/health >/dev/null 2>&1 && echo "health: ok" ||
     echo "health: no answer yet (curl missing or still starting)"
 if command -v ss >/dev/null; then
@@ -54,3 +135,12 @@ if command -v ss >/dev/null; then
         echo "relay: not on UDP 47050 (see the log above)"
     fi
 fi
+cat <<'HINT'
+
+Accounts (as root here, or "pct exec <container> -- h2live ..." on the host):
+  h2live user list                   every account, its PCs and whether it's an admin
+  h2live user admin <gamertag> on    make an account an admin (its launcher shows Accounts)
+  h2live user passwd <gamertag>      give it a new password (shown once)
+  h2live user add <gamertag>         make an account (its password is shown once)
+  h2live user key                    the server's key, for H2LAUNCH_SERVER_KEY
+HINT
