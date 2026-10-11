@@ -237,6 +237,36 @@ impl Running {
     }
 }
 
+#[cfg(test)]
+impl Running {
+    /// A stand-in engine for tests that runs until it is dropped: a
+    /// process waiting on its input, which says nothing.
+    pub fn waiting() -> Running {
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "pause"]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = Command::new("cat");
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("a stand-in process");
+        let stdin = child.stdin.take();
+        let (_, said) = mpsc::channel();
+        Running {
+            child,
+            stdin,
+            said,
+            done: false,
+            asked: None,
+        }
+    }
+}
+
 impl Drop for Running {
     fn drop(&mut self) {
         if !self.done {

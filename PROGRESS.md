@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 (menu 2.1). Any assistant that works on the project
+Last updated 2026-10-11 (menu 2.2). Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -123,8 +123,19 @@ Next, in order:
    `lobby.log` should name the Cartographer folder for menus, fonts and
    rank icons, MCC's with `H2LOBBY_VISTA=off`, and give a ms line for
    each screen kept on show for about a second (30 frames at that window
-   size; a short one such as signing in may have none). Next: 2.2, menu
-   music and UI sounds.
+   size; a short one such as signing in may have none). 2.2 is done
+   (2026-10-11): Halo 2's menu music and menu sounds from Cartographer's
+   `mainmenu.map` (`lobby/sound.rs`, `lobby/audio.rs` on cpal; menu.md
+   "What Phase 2.2 built"): music on the start screen and main menu,
+   faded on the playlists, party, custom game and match screens (Halo 2's
+   rule; the settings keep it); cursor, select, back, error, advance and
+   message sounds from `App::take_cues`; silent and paused while an engine
+   runs; silent without Cartographer (`H2LOBBY_SOUND=off`, `menu_sound =
+   off`). On the owner's PC (check P2): music on start and main from
+   Cartographer's files, fading on the playlists; the sounds with the
+   pad and the keyboard; silence in a match and the music again on the
+   main menu after; with `H2LOBBY_VISTA=off`, silence and no error. Next:
+   2.3, the intro movie.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

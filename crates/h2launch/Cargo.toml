@@ -25,6 +25,8 @@ winit = "0.30"
 softbuffer = "0.4"
 ab_glyph = "0.2"
 gilrs = { version = "0.11.2", default-features = false, features = ["xinput"] }
+# The lobby's menu music and sounds, from Halo 2 Vista's files.
+cpal = "0.16"
 
 [dev-dependencies]
 # Made-up format-13 maps for the rank icons' tests.

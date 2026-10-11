@@ -14,11 +14,13 @@
 //! without one.
 
 pub mod app;
+pub mod audio;
 pub mod canvas;
 pub mod child;
 pub mod names;
 pub mod ranks;
 pub mod settings;
+pub mod sound;
 pub mod sources;
 mod window;
 
@@ -26,6 +28,7 @@ use crate::cli::Args;
 use crate::live::Log;
 use app::{App, Config, Input, Menus};
 use canvas::{Canvas, Text};
+use sound::MenuSound;
 use sources::Vista;
 use std::ffi::OsStr;
 use std::io::Write;
@@ -91,9 +94,12 @@ pub fn run(args: &Args) -> i32 {
     };
     let no_window = std::env::var_os("H2LOBBY_HEADLESS").is_some();
     let (kind, maps) = engine_and_maps(args, &log);
+    // The menus' lines in lobby.txt.
+    let prefs = settings::Settings::load(&folder.join("lobby.txt")).menu;
     // Halo 2 Vista's folder (Project Cartographer's), found once: the
-    // fonts, the rank icons and the menus come from it first.
-    let (vista, vista_off) = find_vista(&folder, &log);
+    // fonts, the rank icons, the menus and their sounds come from it
+    // first.
+    let (vista, vista_off) = find_vista(&prefs, &log);
     let usual = sources::usual_dirs();
     // The Vista folders the rank icons and menus may also look in.
     let vista_dirs: &[&Path] = if vista_off { &[] } else { &usual };
@@ -133,6 +139,8 @@ pub fn run(args: &Args) -> i32 {
         mcc_maps: mcc.as_deref(),
     };
     let menus = Arc::new(menus(&found, fonts.as_deref(), &log));
+    // Read on a thread of its own; silent without Vista's files.
+    let sound = MenuSound::start(vista.as_ref(), &prefs, !no_window, &log);
     let cfg = Config {
         folder,
         exe,
@@ -147,10 +155,10 @@ pub fn run(args: &Args) -> i32 {
     };
     let app = App::new(cfg);
     if no_window {
-        return headless(app, text, &log);
+        return headless(app, text, sound, &log);
     }
     hide_own_console(&log);
-    match window::run(app, text) {
+    match window::run(app, text, sound) {
         Ok(()) => 0,
         Err(e) => {
             log(&format!("lobby: {e}"));
@@ -160,12 +168,11 @@ pub fn run(args: &Args) -> i32 {
 }
 
 /// Halo 2 Vista's folder (`sources::find`, with `H2LOBBY_VISTA` and
-/// lobby.txt's `vista` in `folder`), the log saying where or why not; and
+/// lobby.txt's `vista` in `prefs`), the log saying where or why not; and
 /// whether Vista is switched off, when nothing may come from the folders
 /// it is usually in either.
-fn find_vista(folder: &Path, log: &Log) -> (Option<Vista>, bool) {
-    let saved = settings::Settings::load(&folder.join("lobby.txt")).menu;
-    let saved = saved.vista.as_deref();
+fn find_vista(prefs: &settings::MenuPrefs, log: &Log) -> (Option<Vista>, bool) {
+    let saved = prefs.vista.as_deref();
     let env = std::env::var_os(sources::ENV);
     let env = env.as_deref();
     let vista = sources::find(env, saved, &sources::usual_dirs());
@@ -526,7 +533,7 @@ fn parse_script(text: &str) -> Result<Vec<(f64, Step)>, String> {
 
 /// The lobby without a window, for tests: runs `H2LOBBY_SCRIPT`
 /// (`run_script`), with screenshots in `H2LOBBY_SHOTS`.
-fn headless(app: App, text: Text, log: &Log) -> i32 {
+fn headless(app: App, text: Text, sound: MenuSound, log: &Log) -> i32 {
     let script = match std::env::var("H2LOBBY_SCRIPT") {
         Ok(path) => match std::fs::read_to_string(&path)
             .map_err(|e| format!("{path}: {e}"))
@@ -541,17 +548,19 @@ fn headless(app: App, text: Text, log: &Log) -> i32 {
         Err(_) => Vec::new(),
     };
     let shots: Option<PathBuf> = std::env::var_os("H2LOBBY_SHOTS").map(PathBuf::from);
-    run_script(app, text, log, script, shots)
+    run_script(app, text, sound, log, script, shots)
 }
 
 /// Runs a script on a lobby with no window, saves a screenshot in
 /// `shots` whenever the screen changes (on the start screen and main menu
 /// once their intros are over, with the script held until then), and
 /// returns 0 if every wait was met. A lobby that quits with steps still
-/// to come, or a wait unmet, fails.
+/// to come, or a wait unmet, fails. The sound goes where `sound` says
+/// (nowhere, or a WAV file).
 fn run_script(
     mut app: App,
     mut text: Text,
+    mut sound: MenuSound,
     log: &Log,
     script: Vec<(f64, Step)>,
     shots: Option<PathBuf>,
@@ -581,6 +590,7 @@ fn run_script(
     loop {
         let now = Instant::now();
         app.tick(now);
+        sound.update(&app.take_cues(), app.music_on(), app.engine_running());
         app.draw(&mut canvas, &mut text);
         let label = app.label();
         if label != last {
@@ -775,7 +785,8 @@ mod tests {
             vista: None,
         });
         let script = parse_script(script).unwrap();
-        let code = run_script(app, Text::none(), &log, script, None);
+        let sound = MenuSound::off(&log);
+        let code = run_script(app, Text::none(), sound, &log, script, None);
         let _ = std::fs::remove_dir_all(&dir);
         let lines = lines.lock().unwrap().clone();
         (code, lines)

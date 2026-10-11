@@ -5,6 +5,7 @@
 
 use super::app::{App, Input};
 use super::canvas::{Canvas, Text};
+use super::sound::MenuSound;
 use gilrs::{Axis, Button, EventType, Gilrs};
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -25,6 +26,8 @@ type Surface = softbuffer::Surface<Rc<Window>, Rc<Window>>;
 
 struct Shell {
     app: App,
+    /// The menus' music and sounds, played as `app` asks.
+    sound: MenuSound,
     text: Text,
     canvas: Canvas,
     window: Option<Rc<Window>>,
@@ -45,7 +48,7 @@ struct Shell {
 }
 
 /// Open the window and run the lobby until it closes.
-pub fn run(app: App, text: Text) -> Result<(), String> {
+pub fn run(app: App, text: Text, sound: MenuSound) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     let pads = match Gilrs::new() {
         Ok(g) => Some(g),
@@ -56,6 +59,7 @@ pub fn run(app: App, text: Text) -> Result<(), String> {
     };
     let mut shell = Shell {
         app,
+        sound,
         text,
         canvas: Canvas::new(1, 1),
         window: None,
@@ -231,6 +235,9 @@ impl ApplicationHandler for Shell {
         self.pads();
         let now = Instant::now();
         self.app.tick(now);
+        let cues = self.app.take_cues();
+        let music = self.app.music_on();
+        self.sound.update(&cues, music, self.app.engine_running());
         if self.app.quitting() {
             el.exit();
             return;

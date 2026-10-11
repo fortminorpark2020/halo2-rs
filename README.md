@@ -59,7 +59,15 @@ install. No game files are included in this repository.
   `C:\Games\Halo 2 Project Cartographer` and in Halo 2 Vista's usual
   folders under Program Files; if yours is somewhere else, add the line
   `vista = <folder>` (the Cartographer folder or its `maps` folder) to
-  `%LOCALAPPDATA%\h2launch\lobby.txt`, or set `H2LOBBY_VISTA` to it. ONLINE
+  `%LOCALAPPDATA%\h2launch\lobby.txt`, or set `H2LOBBY_VISTA` to it. With
+  Cartographer's files the menus also have Halo 2's sound: its main menu
+  music on the start screen and the main menu (it fades out on the
+  playlists, as on the Xbox, and comes back on the main menu), and its
+  menu sounds when you move, choose, go back, are told you can't do
+  something, start a search, or get an invitation. Nothing plays during a
+  match. Without Cartographer the menus are silent for now (MCC's own
+  sounds can't be read yet); `menu_sound = off` in `lobby.txt` (or
+  `H2LOBBY_SOUND=off`) silences them. ONLINE
   takes you to its lobby: pick a gamertag the first time (after that it
   signs you in by itself), form a party (the sign-in screen offers the
   project's server, h2.mohnjorrow.com, by default), search a playlist,
@@ -124,8 +132,10 @@ install. No game files are included in this repository.
   graphics card; plain shapes in Halo 2's colours when the files aren't
   there. The menu art, the fonts and the rank icons come from your Halo 2
   Vista (Project Cartographer) folder if the launcher finds one, otherwise
-  from MCC's own Halo 2 files (`H2LOBBY_VISTA=off` tries it without).
-- `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
+  from MCC's own Halo 2 files (`H2LOBBY_VISTA=off` tries it without); the
+  menu music and sounds from Cartographer's only.
+- `wma`: Windows Media Audio 2 decoder for the announcer's lines (and the
+  launcher's menu music), ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
 - `h2viewer`: the game: Halo 2 style menus and lobby, Halo 2's maps with their
   lighting, Spartans, weapons, HUD and sounds, bots, splitscreen for up to four

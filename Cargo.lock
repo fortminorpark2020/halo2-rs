@@ -1080,6 +1080,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "blam-cache",
+ "cpal",
  "gilrs",
  "h2live",
  "h2net",

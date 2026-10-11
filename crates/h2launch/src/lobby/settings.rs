@@ -91,10 +91,12 @@ impl Settings {
 /// phases add theirs here): `vista = <folder>`, the Halo 2 Vista
 /// (Project Cartographer) folder or its maps folder, or `off`
 /// (`sources::find`; `H2LOBBY_VISTA` wins over it, unless it names a
-/// folder without a mainmenu.map).
+/// folder without a mainmenu.map); and `menu_sound = on` or `off`, the
+/// menus' music and sounds (`sound::silent`; on unless it says off).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MenuPrefs {
     pub vista: Option<PathBuf>,
+    pub sound: Option<bool>,
 }
 
 impl MenuPrefs {
@@ -103,6 +105,13 @@ impl MenuPrefs {
     fn set(&mut self, key: &str, value: &str) -> bool {
         match key {
             "vista" => self.vista = (!value.is_empty()).then(|| PathBuf::from(value)),
+            "menu_sound" => {
+                self.sound = match value.to_ascii_lowercase().as_str() {
+                    "on" => Some(true),
+                    "off" => Some(false),
+                    _ => None,
+                }
+            }
             _ => return false,
         }
         true
@@ -113,6 +122,10 @@ impl MenuPrefs {
         let mut out = String::new();
         if let Some(v) = &self.vista {
             out.push_str(&format!("vista = {}\n", v.display()));
+        }
+        if let Some(on) = self.sound {
+            let word = if on { "on" } else { "off" };
+            out.push_str(&format!("menu_sound = {word}\n"));
         }
         out
     }
@@ -217,6 +230,17 @@ mod tests {
         assert_eq!(Settings::parse("vista =\n").menu, MenuPrefs::default());
         let off = Settings::parse("vista = off\n").menu.vista;
         assert_eq!(off.as_deref(), Some(Path::new("off")));
+        // The menus' sound: on, off, or (unset, or anything else) unsaid.
+        let mut s = Settings::parse("gamertag = JOHN\nmenu_sound = OFF\n");
+        assert_eq!(s.menu.sound, Some(false));
+        assert!(s.to_text().ends_with("menu_sound = off\n"));
+        assert_eq!(Settings::parse(&s.to_text()), s);
+        s.menu.sound = Some(true);
+        assert_eq!(Settings::parse(&s.to_text()).menu.sound, Some(true));
+        for line in ["", "menu_sound =\n", "menu_sound = loud\n"] {
+            assert_eq!(Settings::parse(line).menu.sound, None, "{line:?}");
+        }
+        assert!(!Settings::default().to_text().contains("menu_sound"));
     }
 
     #[test]

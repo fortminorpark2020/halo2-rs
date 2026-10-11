@@ -11,6 +11,7 @@ use super::child::{Kind, Match, Running, Said};
 use super::names;
 use super::ranks::{RankIcons, Size};
 use super::settings::{self, Settings, GAMERTAG_LEN};
+use super::sound::Cue;
 use super::sources::Vista;
 use crate::controls::{self, button, Controls};
 use crate::live::{self, Engine, Log, Told};
@@ -96,6 +97,9 @@ const MENU_FRAMES: u32 = 30;
 /// doesn't go on, and on the main menu it only focuses a row. Windows'
 /// default double-click time is 0.5 s; 0.4 s is our own choice.
 const DOUBLE_CLICK: f64 = 0.4;
+/// Cues kept for the sound to take (`App::take_cues`); older ones are
+/// dropped when nothing takes them (no sound, and the tests).
+const CUES_KEPT: usize = 16;
 
 /// The start screen's and main menu's layouts, pictures and fonts
 /// (`h2ui`), read once when the lobby opens.
@@ -369,6 +373,72 @@ pub struct App {
     /// The last click: when (on the menus' clock), the screen it was on,
     /// and whether a popup took it (`DOUBLE_CLICK`).
     last_click: Option<(f64, Screen, bool)>,
+    /// The sounds asked for since the sound last took them (`take_cues`).
+    cues: Vec<Cue>,
+    /// The menu music is wanted (`music_rule`).
+    music_on: bool,
+    /// The press `input_inner` acted on last, after letters and Backspace
+    /// were turned into buttons: B's changes sound as Back.
+    pressed: Option<Input>,
+    /// Something asked for couldn't be done (`refuse`).
+    refused: bool,
+    /// The invitation shown last (its party), so a new one sounds once.
+    invite_seen: Option<u64>,
+}
+
+/// What the cue of a press is worked out from (`App::cue_state`), taken
+/// before and after it.
+#[derive(Clone, Debug, PartialEq)]
+struct CueState {
+    screen: Screen,
+    popup: Option<Popup>,
+    /// The invitation shown (its party).
+    invite: Option<u64>,
+    /// The focused row (or field) of the list on show.
+    focus: usize,
+    /// The values a press can change in place: the custom game's game and
+    /// map, and the controller settings.
+    values: (usize, usize, Controls),
+    refused: bool,
+}
+
+/// The sound of a press, from the state before and after it (`back`: the
+/// press was B): Error if it was refused, Back or Select if the screen,
+/// popup or invitation changed, Cursor if only the focus or a value did.
+fn cue_for(before: &CueState, after: &CueState, back: bool) -> Option<Cue> {
+    if after.refused {
+        return Some(Cue::Error);
+    }
+    let moved = before.screen != after.screen
+        || before.popup != after.popup
+        || before.invite != after.invite;
+    if moved {
+        return Some(if back { Cue::Back } else { Cue::Select });
+    }
+    if before.focus != after.focus || before.values != after.values {
+        return Some(Cue::Cursor);
+    }
+    None
+}
+
+/// Whether the menu music is wanted on `screen`, it being `current` (Halo
+/// 2's rule, menu.md section 5): on at the start screen and the main
+/// menu; off on the ONLINE screens (searching too), the party, the custom
+/// game and the match's screens; elsewhere as it was, so the settings keep
+/// it and the carnage report stays silent after a game.
+fn music_rule(screen: Screen, current: bool) -> bool {
+    match screen {
+        Screen::Start | Screen::Main => true,
+        Screen::Live | Screen::Party | Screen::Custom | Screen::Pregame | Screen::InGame => false,
+        Screen::SignIn
+        | Screen::Connecting
+        | Screen::Players
+        | Screen::Carnage
+        | Screen::Failed
+        | Screen::Record
+        | Screen::Friends
+        | Screen::Settings => current,
+    }
 }
 
 /// How long each screen takes to draw on the CPU, for the log (menu.md,
@@ -449,6 +519,11 @@ impl App {
             size: (0, 0),
             menu_times: MenuTimes::default(),
             last_click: None,
+            cues: Vec::new(),
+            music_on: true,
+            pressed: None,
+            refused: false,
+            invite_seen: None,
         }
     }
 
@@ -508,6 +583,82 @@ impl App {
     /// The text drawn in the last frame, each string as it was drawn.
     pub fn drawn(&self) -> &[String] {
         &self.drawn
+    }
+
+    /// The sounds asked for since the last call, oldest first.
+    pub fn take_cues(&mut self) -> Vec<Cue> {
+        std::mem::take(&mut self.cues)
+    }
+
+    /// The menu music is wanted (`music_rule`, kept by `tick`).
+    pub fn music_on(&self) -> bool {
+        self.music_on
+    }
+
+    fn cue(&mut self, c: Cue) {
+        if self.cues.len() == CUES_KEPT {
+            self.cues.remove(0);
+        }
+        self.cues.push(c);
+    }
+
+    /// What a press's cue is worked out from (`cue_for`).
+    fn cue_state(&self) -> CueState {
+        let focus = match (self.popup, self.screen) {
+            (Some(Popup::FriendOptions(_)), _) => self.osel,
+            (Some(_), _) => 0,
+            (None, Screen::Main) => self.main_focus.item,
+            (None, Screen::Live) => self.sel,
+            (None, Screen::Players) => self.psel,
+            (None, Screen::Party) => self.msel,
+            (None, Screen::Custom) => self.crow,
+            (None, Screen::Settings) => self.srow,
+            (None, Screen::Friends) => self.fsel,
+            (None, Screen::Carnage) => self.csel,
+            (None, Screen::Record) => self.record_first,
+            (None, Screen::SignIn) => self.field,
+            (
+                None,
+                Screen::Start
+                | Screen::Connecting
+                | Screen::Pregame
+                | Screen::InGame
+                | Screen::Failed,
+            ) => 0,
+        };
+        CueState {
+            screen: self.screen,
+            popup: self.popup,
+            invite: self.invite().map(|(party, _)| party),
+            focus,
+            values: (self.cgame, self.cmap, self.settings.controls),
+            refused: self.refused,
+        }
+    }
+
+    /// Run a press (`act`), then ask for its sound: a cue it asked for
+    /// itself (Advance) stands, else `cue_for` from before and after.
+    fn sounding(&mut self, act: impl FnOnce(&mut App)) {
+        let before = self.cue_state();
+        let asked = self.cues.len();
+        self.pressed = None;
+        self.refused = false;
+        act(self);
+        let after = self.cue_state();
+        self.refused = false;
+        if !after.refused && self.cues.len() > asked {
+            return;
+        }
+        if let Some(c) = cue_for(&before, &after, self.pressed == Some(Input::B)) {
+            self.cue(c);
+        }
+    }
+
+    /// Say why something asked for can't be done, with Halo 2's error
+    /// sound.
+    fn refuse(&mut self, text: String) {
+        self.refused = true;
+        self.toast(text);
     }
 
     // ------------------------------------------------------------ server
@@ -813,6 +964,26 @@ impl App {
         } else {
             format!("{tag}'S PARTY CAN'T BE JOINED")
         }
+    }
+
+    /// Y on a player: a friend request when one makes sense (`can_ask`),
+    /// else why not, in the server's words (no words for ourselves).
+    fn ask_friend_or_refuse(&mut self, account: u64, gamertag: &str) {
+        if self.can_ask(account) {
+            return self.ask_friend(gamertag);
+        }
+        let why = match self.friend(account).map(|f| f.relation) {
+            Some(Relation::Friend) => h2net::live::ALREADY_FRIENDS,
+            Some(Relation::WeAsked) => h2net::live::ALREADY_ASKED,
+            Some(Relation::AskedUs) => h2net::live::ASKED_YOU,
+            // Ourselves: only the error sound.
+            None => {
+                self.refused = true;
+                return;
+            }
+        };
+        let tag = gamertag.to_uppercase();
+        self.refuse(h2net::live::friend_notice(why, &tag));
     }
 
     /// Send a friend request to `gamertag` (it's cleaned first; nothing
@@ -1221,6 +1392,15 @@ impl App {
         self.record_asks
             .retain(|(_, at)| now.saturating_duration_since(*at) < RECORD_WAIT);
         self.ask_member_records();
+        self.music_on = !self.engine_running() && music_rule(self.screen, self.music_on);
+        // A new invitation on show sounds once.
+        let shown = self.invite().map(|(party, _)| party);
+        if shown.is_some() && shown != self.invite_seen {
+            self.cue(Cue::Notify);
+        }
+        if shown.is_some() {
+            self.invite_seen = shown;
+        }
     }
 
     /// Keep the selections on the friends and players screens on the
@@ -1312,7 +1492,13 @@ impl App {
         }
     }
 
+    /// A press from the controller, a key (`key`), a click on a button or
+    /// the headless script, with its sound (`sounding`).
     pub fn input(&mut self, i: Input) {
+        self.sounding(|a| a.input_inner(i));
+    }
+
+    fn input_inner(&mut self, i: Input) {
         // Letters are buttons, except where a name is typed; Backspace is
         // B where it doesn't rub a letter out.
         let typing = (self.screen == Screen::SignIn && self.popup.is_none())
@@ -1330,6 +1516,7 @@ impl App {
             Input::Backspace if !typing => Input::B,
             other => other,
         };
+        self.pressed = Some(i);
         if let Some(p) = self.popup {
             return self.popup_input(p, i);
         }
@@ -1571,8 +1758,8 @@ impl App {
                 }
             }
             Input::Y => {
-                if let Some(p) = picked.filter(|p| self.can_ask(p.account)) {
-                    self.ask_friend(&p.gamertag);
+                if let Some(p) = picked {
+                    self.ask_friend_or_refuse(p.account, &p.gamertag);
                 }
             }
             Input::A | Input::B => {
@@ -1655,7 +1842,7 @@ impl App {
             }
             (Input::X, Some(f)) if f.relation == Relation::Friend => {
                 let why = self.cannot_join(&f);
-                self.toast(why);
+                self.refuse(why);
             }
             (Input::X, Some(f)) if f.relation == Relation::WeAsked => {
                 self.log(&format!(
@@ -1714,7 +1901,7 @@ impl App {
                 if self.leader() {
                     self.send(ToServer::Cancel);
                 } else {
-                    self.toast("Only the party leader can stop the search.".into());
+                    self.refuse("Only the party leader can stop the search.".into());
                 }
             }
             return;
@@ -1727,7 +1914,7 @@ impl App {
             Input::A if self.sel == n + 1 => self.open_settings(),
             Input::A if self.sel == n => {
                 if !self.leader() {
-                    self.toast("Only the party leader can start a custom game.".into());
+                    self.refuse("Only the party leader can start a custom game.".into());
                     return;
                 }
                 self.open_custom();
@@ -1738,7 +1925,7 @@ impl App {
                 };
                 let (id, name) = (pl.id, pl.name.clone());
                 if !self.leader() {
-                    self.toast("Only the party leader can pick a playlist.".into());
+                    self.refuse("Only the party leader can pick a playlist.".into());
                     return;
                 }
                 self.log(&format!("lobby: searching {name:?} (playlist {id})"));
@@ -1746,6 +1933,7 @@ impl App {
                     c.view.status = None;
                 }
                 self.send(ToServer::Search(id));
+                self.cue(Cue::Advance);
             }
             Input::X => {
                 self.select_player(0);
@@ -1848,7 +2036,7 @@ impl App {
             return;
         }
         let Some((map, _)) = self.cfg.maps.get(self.cmap).cloned() else {
-            self.toast("No Halo 2 maps were found in MCC's folder.".into());
+            self.refuse("No Halo 2 maps were found in MCC's folder.".into());
             return;
         };
         let (variant, _) = names::CUSTOM_GAMES[self.cgame % names::CUSTOM_GAMES.len()];
@@ -1860,6 +2048,7 @@ impl App {
             map,
             variant: variant.into(),
         });
+        self.cue(Cue::Advance);
     }
 
     // ---------------------------------------------------------- settings
@@ -1874,7 +2063,7 @@ impl App {
     }
 
     /// An engine is running for the match.
-    fn engine_running(&self) -> bool {
+    pub fn engine_running(&self) -> bool {
         self.game.as_ref().is_some_and(|g| g.child.is_some())
     }
 
@@ -1984,8 +2173,8 @@ impl App {
             Input::Up => self.select_player(self.psel.saturating_sub(1)),
             Input::Down => self.select_player((self.psel + 1).min(others.len().saturating_sub(1))),
             Input::Y => {
-                if let Some(p) = picked.filter(|p| self.can_ask(p.account)) {
-                    self.ask_friend(&p.gamertag);
+                if let Some(p) = picked {
+                    self.ask_friend_or_refuse(p.account, &p.gamertag);
                 }
             }
             Input::Lb => {
@@ -2017,8 +2206,12 @@ impl App {
         p.open && p.openings > 0 && ours != Some(p.party)
     }
 
-    /// A click at window pixel (`x`, `y`).
+    /// A click at window pixel (`x`, `y`), with its sound (`sounding`).
     pub fn click(&mut self, x: f32, y: f32) {
+        self.sounding(|a| a.click_inner(x, y));
+    }
+
+    fn click_inner(&mut self, x: f32, y: f32) {
         let clock = self.menu_clock();
         let over = self.popup.is_some() || self.invite().is_some();
         let before = self.last_click.replace((clock, self.screen, over));
@@ -2033,7 +2226,7 @@ impl App {
         if !over {
             match self.screen {
                 Screen::Start if second => return,
-                Screen::Start => return self.input(Input::A),
+                Screen::Start => return self.input_inner(Input::A),
                 Screen::Main => {
                     if let Some(row) = self.main_row_at(x, y) {
                         if row == self.main_focus.item && !second {
@@ -2058,7 +2251,7 @@ impl App {
             .find(|a| x >= a.x && x < a.x + a.w && y >= a.y && y < a.y + a.h)
             .map(|a| a.hit);
         match hit {
-            Some(Hit::Press(i)) => self.input(i),
+            Some(Hit::Press(i)) => self.input_inner(i),
             Some(Hit::Field(f)) => self.field = f,
             Some(Hit::Step(r, on)) => {
                 if self.screen == Screen::Settings {
@@ -2066,32 +2259,32 @@ impl App {
                 } else {
                     self.crow = r;
                 }
-                self.input(if on { Input::Right } else { Input::Left });
+                self.input_inner(if on { Input::Right } else { Input::Left });
             }
             Some(Hit::Row(r)) if matches!(self.popup, Some(Popup::FriendOptions(_))) => {
                 if self.osel == r {
-                    self.input(Input::A);
+                    self.input_inner(Input::A);
                 } else if let Some(Popup::FriendOptions(who)) = self.popup {
                     self.pick_option(who, r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Friends => {
                 if self.fsel == r {
-                    self.input(Input::A);
+                    self.input_inner(Input::A);
                 } else {
                     self.select_friend(r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Players => {
                 if self.psel == r {
-                    self.input(Input::A);
+                    self.input_inner(Input::A);
                 } else {
                     self.select_player(r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Settings => {
                 if self.srow == r {
-                    self.input(Input::A);
+                    self.input_inner(Input::A);
                 } else {
                     self.srow = r;
                 }
@@ -2100,7 +2293,7 @@ impl App {
             Some(Hit::Row(r)) if self.screen == Screen::Carnage => self.csel = r,
             Some(Hit::Row(r)) if self.screen == Screen::Custom => {
                 if self.crow == r && r == CUSTOM_ROWS - 1 {
-                    self.input(Input::A);
+                    self.input_inner(Input::A);
                 } else {
                     self.crow = r;
                 }
@@ -2111,7 +2304,7 @@ impl App {
                     _ => &mut self.sel,
                 };
                 if *sel == r {
-                    self.input(Input::A);
+                    self.input_inner(Input::A);
                 } else {
                     *sel = r;
                 }
@@ -5120,6 +5313,216 @@ mod tests {
         });
         a.screen = Screen::Carnage;
         a.csel = 1;
+    }
+
+    #[test]
+    fn presses_ask_for_halo_2s_sounds() {
+        let dir = scratch("cues");
+        let mut a = app(&dir);
+        // B on the start screen opens the quit popup, and B shuts it.
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        a.input(Input::Char('b'));
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(a.label(), "main");
+        // Down moves the focus; at the end it doesn't, and is silent.
+        a.input(Input::Down);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::Down);
+        assert!(a.take_cues().is_empty());
+        a.input(Input::Up);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        // A on ONLINE (no gamertag yet: the sign-in form).
+        a.input(Input::A);
+        assert_eq!(a.label(), "signin");
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        // Typing is silent; Tab moves to the other field.
+        a.input(Input::Char('j'));
+        assert!(a.take_cues().is_empty());
+        a.input(Input::Tab);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        // SETTINGS, a value changed in place, and B back from it.
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        assert_eq!(a.take_cues(), [Cue::Cursor, Cue::Select]);
+        a.input(Input::Right);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::Backspace);
+        assert_eq!(a.label(), "main");
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        // A click on a main menu row focuses it, then picks it.
+        a.size = (1280, 720);
+        let row = (0..720)
+            .step_by(4)
+            .flat_map(|y| (0..1280).step_by(8).map(move |x| (x as f32, y as f32)))
+            .find(|&(x, y)| a.main_row_at(x, y) == Some(LIVE_ROW))
+            .unwrap();
+        a.click(row.0, row.1);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.last_click = None;
+        a.click(row.0, row.1);
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(a.label(), "signin");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refusal_sounds_as_an_error_and_a_search_advances() {
+        let dir = scratch("cue-refused");
+        let (mut a, mut server) = live_app(&dir);
+        view(&mut a).playlists = vec![PlaylistInfo {
+            id: 11,
+            key: "h2h".into(),
+            name: "Head to Head".into(),
+            ranked: true,
+            teams: false,
+            guests: false,
+            min: 2,
+            max: 2,
+            party_max: 1,
+            searching: 0,
+            playing: 0,
+            level: 1,
+            maps: Vec::new(),
+        }];
+        // A party BRAVO leads: we may not pick a playlist.
+        let mut pt = party(7, Activity::Lobby);
+        pt.leader = 2;
+        pt.members.push(PartyMember {
+            account: 2,
+            gamertag: "BRAVO".into(),
+            look: Default::default(),
+            best: 1,
+            level: 1,
+            guests: 0,
+        });
+        view(&mut a).party = Some(pt);
+        a.sel = 0;
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Error]);
+        let said = "Only the party leader can pick a playlist.";
+        assert!(a.toasts.iter().any(|(t, _)| t == said));
+        assert!(sent(&mut server).is_empty());
+        // Nor a custom game (the row after the playlists).
+        a.input(Input::Down);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Error]);
+        // Leading it, A searches: Advance, and only that.
+        view(&mut a).party.as_mut().unwrap().leader = 1;
+        a.input(Input::Up);
+        a.take_cues();
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        assert_eq!(sent(&mut server), [ToServer::Search(11)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_invitation_sounds_once() {
+        let dir = scratch("cue-invite");
+        let (mut a, _server) = live_app(&dir);
+        a.screen = Screen::Main;
+        a.tick(Instant::now());
+        assert!(a.take_cues().is_empty());
+        view(&mut a).invites = vec![(55, "BRAVO".into())];
+        a.tick(Instant::now());
+        assert_eq!(a.take_cues(), [Cue::Notify]);
+        a.tick(Instant::now());
+        assert!(a.take_cues().is_empty());
+        assert_eq!(a.label(), "invite");
+        // Another: once more. Declining it with B sounds as Back.
+        view(&mut a).invites.push((56, "CHARLIE".into()));
+        a.tick(Instant::now());
+        assert_eq!(a.take_cues(), [Cue::Notify]);
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        // The one under it was seen, but is shown again: it sounds again.
+        a.tick(Instant::now());
+        assert_eq!(a.take_cues(), [Cue::Notify]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_music_follows_halo_2s_rule_and_stops_for_the_engine() {
+        let all = [
+            Screen::Start,
+            Screen::Main,
+            Screen::SignIn,
+            Screen::Connecting,
+            Screen::Live,
+            Screen::Players,
+            Screen::Party,
+            Screen::Custom,
+            Screen::Pregame,
+            Screen::InGame,
+            Screen::Carnage,
+            Screen::Failed,
+            Screen::Record,
+            Screen::Friends,
+            Screen::Settings,
+        ];
+        let on = [Screen::Start, Screen::Main];
+        let off = [
+            Screen::Live,
+            Screen::Party,
+            Screen::Custom,
+            Screen::Pregame,
+            Screen::InGame,
+        ];
+        for s in all {
+            for current in [false, true] {
+                let want = if on.contains(&s) {
+                    true
+                } else if off.contains(&s) {
+                    false
+                } else {
+                    current
+                };
+                assert_eq!(music_rule(s, current), want, "{s:?} {current}");
+            }
+        }
+        // Main to the playlists turns it off, back to Main on, and the
+        // settings keep it.
+        let dir = scratch("music");
+        let mut a = app(&dir);
+        assert!(a.music_on());
+        a.input(Input::A);
+        a.screen = Screen::Live;
+        a.tick(Instant::now());
+        assert!(!a.music_on());
+        a.screen = Screen::Settings;
+        a.tick(Instant::now());
+        assert!(!a.music_on());
+        a.screen = Screen::Main;
+        a.tick(Instant::now());
+        assert!(a.music_on());
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        a.tick(Instant::now());
+        assert!(a.music_on());
+        // An engine running: off, on any screen; after it, the carnage
+        // report stays silent until the main menu.
+        carnage(&mut a);
+        a.screen = Screen::Main;
+        a.game.as_mut().unwrap().child = Some(Running::waiting());
+        assert!(a.engine_running());
+        a.tick(Instant::now());
+        assert!(!a.music_on());
+        a.game.as_mut().unwrap().child = None;
+        a.screen = Screen::Carnage;
+        a.tick(Instant::now());
+        assert!(!a.music_on());
+        a.screen = Screen::Main;
+        a.tick(Instant::now());
+        assert!(a.music_on());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

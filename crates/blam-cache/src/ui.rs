@@ -35,6 +35,8 @@ const TAG_REF_SIZE: usize = 0x8;
 const WIGL_OVERLAY_ALPHA_MOD: usize = 0x44;
 const WIGL_OVERLAY_COLOR: usize = 0x6C;
 const WIGL_SOUNDS: usize = 0x90;
+/// How many sound references the globals hold from `WIGL_SOUNDS` on.
+pub const WIGL_SOUND_COUNT: usize = 13;
 const WIGL_ANIMATIONS: usize = 0x120;
 const ANIMATION_SIZE: usize = 0x2C;
 const WIGL_SKINS: usize = 0x138;
@@ -253,6 +255,54 @@ pub struct Sounds {
     pub error: Option<String>,
     pub advance: Option<String>,
     pub retreat: Option<String>,
+    /// Every one of the globals' `WIGL_SOUND_COUNT` sound references, in
+    /// order (the five above are the first five).
+    pub all: Vec<Option<String>>,
+}
+
+/// Where the sounds the five named fields leave out sit in `Sounds::all`,
+/// as Halo 2 Vista's mainmenu.map (Project Cartographer's) has them:
+/// 5 `sound\ui\transport`, 6 `cursor1` again (the on-screen keyboard's
+/// cursor, by its place), 7 `virtual_keyboard_click`, 8 `receive_message`,
+/// 9 `forward1` again (a tab of a tabbed screen, by its place), 10
+/// `sound\game_sfx\multiplayer\countdown_for_respawn`, 11 none and 12
+/// `pickup_health`. Which one is the sign-in sound is our inference from
+/// the order: the first after the five.
+const SOUND_LOGIN: usize = 5;
+const SOUND_KEYBOARD_CLICK: usize = 7;
+const SOUND_RECEIVE_MESSAGE: usize = 8;
+const SOUND_TAB: usize = 9;
+const SOUND_COUNTDOWN: usize = 10;
+
+impl Sounds {
+    fn at(&self, k: usize) -> Option<&str> {
+        self.all.get(k)?.as_deref()
+    }
+
+    /// A message or an invitation arriving.
+    pub fn receive_message(&self) -> Option<&str> {
+        self.at(SOUND_RECEIVE_MESSAGE)
+    }
+
+    /// Each second of a countdown's last ones.
+    pub fn countdown(&self) -> Option<&str> {
+        self.at(SOUND_COUNTDOWN)
+    }
+
+    /// A key of the on-screen keyboard.
+    pub fn keyboard_click(&self) -> Option<&str> {
+        self.at(SOUND_KEYBOARD_CLICK)
+    }
+
+    /// Signing in (inferred; see `SOUND_LOGIN`).
+    pub fn login(&self) -> Option<&str> {
+        self.at(SOUND_LOGIN)
+    }
+
+    /// Changing tabs on a tabbed screen.
+    pub fn tab(&self) -> Option<&str> {
+        self.at(SOUND_TAB)
+    }
 }
 
 /// A dialog's size: its header and button legend go in its size's bounds.
@@ -871,13 +921,16 @@ pub fn parse_globals(
     if d.len() < WIGL_SIZE {
         return Err(Error::Corrupt("menu globals too small".into()));
     }
-    let sound = |at: usize| tag_ref(r, d, WIGL_SOUNDS + at * TAG_REF_SIZE).map(|t| t.name);
+    let all: Vec<Option<String>> = (0..WIGL_SOUND_COUNT)
+        .map(|k| tag_ref(r, d, WIGL_SOUNDS + k * TAG_REF_SIZE).map(|t| t.name))
+        .collect();
     let sounds = Sounds {
-        cursor: sound(0),
-        select: sound(1),
-        error: sound(2),
-        advance: sound(3),
-        retreat: sound(4),
+        cursor: all[0].clone(),
+        select: all[1].clone(),
+        error: all[2].clone(),
+        advance: all[3].clone(),
+        retreat: all[4].clone(),
+        all,
     };
     let raw = r.block(d, WIGL_ANIMATIONS, ANIMATION_SIZE);
     let animations = raw
@@ -1576,6 +1629,10 @@ mod tests {
             .tag("skin", r"ui\list_skins\main_menu", Meta::Struct(skin()))
             .tag("wigl", r"ui\ui_shared_globals", Meta::Struct(globals()))
             .tag("wgtz", r"ui\main_menu", Meta::Struct(wgtz));
+        // The menu sounds (not real sound tags; only their names are read).
+        for k in (0..WIGL_SOUND_COUNT).filter(|&k| k != 11) {
+            b = b.tag("snd!", &sound_name(k), Meta::Raw(vec![0; 0x20]));
+        }
         b.language = vec![
             ("press_start".into(), "PRESS ANY KEY TO CONTINUE".into()),
             ("settings_header".into(), "SETTINGS".into()),
@@ -1585,6 +1642,11 @@ mod tests {
             ),
         ];
         b
+    }
+
+    /// The made-up name of the globals' sound `k`.
+    fn sound_name(k: usize) -> String {
+        format!(r"ui\sounds\sound{k}")
     }
 
     /// A list skin: focus fades 0.5 to 1 in 120 ms; a bar that doesn't
@@ -1608,21 +1670,23 @@ mod tests {
             .block(0x24, vec![bar, sheen])
     }
 
-    /// The shared globals: two sounds, the full screen header's bounds, a
-    /// fade animation, the button legends' strings and one skin.
+    /// The shared globals: every sound but one, the full screen header's
+    /// bounds, a fade animation, the button legends' strings and one skin.
     fn globals() -> Struct {
         let mut d = Struct::new(WIGL_SIZE);
-        for k in 0..5 {
-            d = d.tag_ref(WIGL_SOUNDS + 8 * k, "snd!", "");
+        for k in 0..WIGL_SOUND_COUNT {
+            let name = match k {
+                11 => String::new(),
+                k => sound_name(k),
+            };
+            d = d.tag_ref(WIGL_SOUNDS + 8 * k, "snd!", &name);
         }
         let fade = Struct::new(ANIMATION_SIZE)
             .u32(4, 250)
             .block(8, vec![keyframe(0.0, 1024.0), keyframe(1.0, 0.0)])
             .block(0x14, Vec::new())
             .block(0x24, Vec::new());
-        d.tag_ref(WIGL_SOUNDS, "bitm", r"ui\start_screen")
-            .tag_ref(WIGL_SOUNDS + 2 * 8, "bitm", r"ui\list_bkd")
-            .tag_ref(WIGL_MUSIC, "lsnd", "")
+        d.tag_ref(WIGL_MUSIC, "lsnd", "")
             .tag_ref(WIGL_BUTTON_KEYS, "unic", r"ui\button_keys")
             .i16(WIGL_BOUNDS, 567)
             .i16(WIGL_BOUNDS + 2, -730)
@@ -1735,9 +1799,24 @@ mod tests {
             let keys = r.unicode_strings(DatumIndex(u32_at(d, WIGL_BUTTON_KEYS + 4)));
             parse_globals(r, d, Vec::new(), &keys).unwrap()
         });
-        assert_eq!(g.sounds.cursor.as_deref(), Some(r"ui\start_screen"));
-        assert_eq!(g.sounds.error.as_deref(), Some(r"ui\list_bkd"));
-        assert_eq!(g.sounds.select, None);
+        // All 13 sounds, the first five by name too, and the ones after
+        // them by what they are for; the twelfth is none.
+        let names: Vec<Option<String>> = (0..WIGL_SOUND_COUNT)
+            .map(|k| (k != 11).then(|| sound_name(k)))
+            .collect();
+        assert_eq!(g.sounds.all, names);
+        let s = &g.sounds;
+        let five = [&s.cursor, &s.select, &s.error, &s.advance, &s.retreat];
+        for (k, named) in five.iter().enumerate() {
+            assert_eq!(named.as_deref(), Some(sound_name(k).as_str()));
+        }
+        assert_eq!(s.login(), Some(sound_name(5).as_str()));
+        assert_eq!(s.keyboard_click(), Some(sound_name(7).as_str()));
+        assert_eq!(s.receive_message(), Some(sound_name(8).as_str()));
+        assert_eq!(s.tab(), Some(sound_name(9).as_str()));
+        assert_eq!(s.countdown(), Some(sound_name(10).as_str()));
+        assert_eq!(s.at(11), None);
+        assert_eq!(Sounds::default().receive_message(), None);
         assert_eq!(g.music, None);
         assert_eq!(g.music_fade_ms, 5500);
         assert_eq!(g.header_fonts[0], Font::Title);
@@ -1777,7 +1856,7 @@ mod tests {
         assert!(ui.globals.button_key("a_select_b_back").is_some());
         assert_eq!(
             ui.globals.sounds.cursor.as_deref(),
-            Some(r"ui\start_screen")
+            Some(sound_name(0).as_str())
         );
         let main = ui.screen(r"ui\main_menu").unwrap();
         assert_eq!(
@@ -2155,6 +2234,13 @@ mod tests {
             ui.globals.sounds.error.as_deref(),
             Some("sound\\ui\\flag_fail")
         );
+        // The sounds after the first five, by the names they have there.
+        let s = &ui.globals.sounds;
+        assert_eq!(s.all.len(), WIGL_SOUND_COUNT);
+        let ends = |name: Option<&str>, end: &str| name.is_some_and(|n| n.ends_with(end));
+        assert!(ends(s.receive_message(), "receive_message"), "{s:?}");
+        assert!(ends(s.countdown(), "countdown_for_respawn"), "{s:?}");
+        assert!(ends(s.keyboard_click(), "virtual_keyboard_click"), "{s:?}");
         assert!(ui.globals.button_key("a_select_b_back").is_some());
     }
 

@@ -1011,7 +1011,9 @@ fn ui(path: &str, what: &[String]) -> Res {
             "overlay {:.2?} (alpha mod {:.2}), text {:.2?}, music {:?} (fade {} ms)",
             g.overlay_color, g.overlay_alpha_mod, g.text_color, g.music, g.music_fade_ms
         );
-        println!("sounds {:?}", g.sounds);
+        for (k, name) in g.sounds.all.iter().enumerate() {
+            println!("sound {k:2}: {}", name.as_deref().unwrap_or("-"));
+        }
         let sizes = ["full", "large", "half", "quarter"];
         for (k, size) in sizes.iter().enumerate() {
             println!(
