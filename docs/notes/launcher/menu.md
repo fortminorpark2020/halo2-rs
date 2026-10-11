@@ -1,7 +1,9 @@
 # The launcher's Halo 2 menus
 
 The plan for re-creating the original Xbox Halo 2 menus in the launcher, on
-`launcher-menu` (based on `launcher-friends`). Nothing here is built yet.
+`launcher-menu` (based on `launcher-friends`). Phase 0's reader and drawing
+pieces are built, and the start screen and main menu draw from the tags;
+the lobby doesn't show them yet ("What Phase 0 built", section 7).
 
 The owner asked (2026-10-10): "I also want to re-create the original halo 2
 menu from the halo 2 xbox version", and "make the main menu a priority". At
@@ -218,7 +220,8 @@ stay as PC extras but leave the button legends.
   - shaders compiled at run time with `D3DCompile` from
     `d3dcompiler_47.dll`, which ships with Windows;
   - plain, multiply and additive blending;
-  - wrap and clamp samplers;
+  - wrap and clamp samplers, chosen for each axis (art scrolling across
+    is clamped up and down);
   - texture atlases for art and glyphs;
   - the engine's context state saved and put back each frame
     (`ID3D11DeviceContext1::SwapDeviceContextState`).
@@ -322,8 +325,8 @@ Two more things to measure before choosing A:
     `Textures`) and Vista (`MapSet`).
   - `paint`: menu-preview's `Painter`, now writing a `DrawList`. That is a
     list of textured quads with a blend mode (plain, multiply or additive)
-    and a wrap flag, plus solid fills. Text arrives as glyph quads, so a
-    backend draws only quads.
+    and a wrap flag for each axis, plus solid fills. Text arrives as glyph
+    quads, so a backend draws only quads.
 - **Backends.**
   - The lobby's CPU `Canvas`, for Linux, CI and headless PNGs. It works in
     gamma space, so menu-preview's linear-colour conversion is not ported.
@@ -561,11 +564,69 @@ Windows cross-build, and a run on the owner's PC.
 - the probe passes on the owner's PC;
 - a test screen made from synthetic tags draws headless on Linux.
 
+#### What Phase 0 built (2026-10-10)
+
+Steps 3 to 6, and the drawing half of phase 1's two screens. Steps 1 and 2
+(input and layouts) are separate work.
+
+- `blam_cache::ui` reads the UI tags of both kinds of map (`Menus::open`),
+  and `blam_cache::mcc` gained the format-13 pieces of section 3. Their
+  predicted layouts are listed in `mcc-maps.md`.
+- `crates/h2ui`: `layout`, `anim`, `text`, `art`, `paint`, the CPU
+  backend (`cpu`) and the two screens (`screens`).
+  - `tags` builds both screens' layouts from `wgit start_screen`, `wgit
+    main_menu`, `wgit game_shell_background` (the framing), the list's
+    `skin` (its place, rows shown, the focus fades) and `wigl`'s screen
+    animations. A piece the tags don't have keeps the built-in numbers,
+    and a bitmap whose picture is missing draws its flat shape.
+  - `art::read` decodes the pictures those layouts name, MCC's through
+    textures.dat and Vista's from the map, only the images their frames
+    show.
+  - `shell::Shell::open(<mainmenu.map or its folder>, log)` does both and
+    logs once where each piece came from (lines starting `menus:`). It
+    never fails; with nothing readable it is the flat look.
+  - The still background (the navy and the framing) is a list of its own,
+    `screens::background`: it doesn't move, so it is drawn once for a
+    window size and copied in under each frame (`cpu::Kept`).
+- Not done: the lobby's `app.rs` doesn't use any of it yet (that waits
+  for the lobby settings branch to merge) and `H2LOBBY_MENU` isn't read.
+  On the container's 2.1 GHz Xeon at 1080p, with stand-in pictures of the
+  real sizes, a main menu frame takes about 7 ms on the CPU and the kept
+  background about 30 ms once (flat: about 2 ms and 8 ms); the owner's
+  numbers decide on the D3D11 backend.
+
+**On the owner's PC** (from the clone; nothing is saved but the PNGs, and
+those stay on the PC, as they hold Halo 2's art and glyphs). With `<MCC>`
+for `C:\Program Files (x86)\Steam\steamapps\common\Halo The Master Chief
+Collection` and `<Vista>` for the Project Cartographer folder:
+
+```
+cargo run --release -p blam-cache --example mcc_ui_probe -- "<MCC>\halo2\h2_maps_win64_dx11\mainmenu.map" "<Vista>\maps\mainmenu.map"
+cargo run --release -p h2ui --example menu_png -- C:\h2work\menu-png --mcc "<MCC>\halo2\h2_maps_win64_dx11\mainmenu.map" --vista "<Vista>\maps\mainmenu.map"
+```
+
+- The probe prints checks A to H of section 9.2; its output goes into
+  this file in our own words.
+- `menu_png` prints the `menus:` lines for each map, then each screen's
+  quads and its CPU time a frame at 1920x1080 and 1280x720. It writes
+  `start-<look>-<size>.png` and `main-<look>-<size>.png` for the looks
+  flat, standin, mcc and vista. Text is in Halo 2's fonts from the
+  folder beside the map (MCC's `halo2\h2_fonts`), or from a fonts folder
+  given after the output folder.
+- The ignored tests that read the real files (PowerShell):
+
+```
+$env:H2_MCC_MAPS = "<MCC>\halo2\h2_maps_win64_dx11"
+$env:H2_MAPS = "<Vista>\maps"
+cargo test --release -p blam-cache mainmenu -- --ignored
+cargo test --release -p h2ui real_ -- --ignored
+```
+
 ### Phase 1: start screen and main menu (the first thing the owner sees)
 
 1. The new `Start` and `Main` screens, in front of today's sign-in.
 2. **Start screen:**
-   - the logo, centred at (-511, 90) and fading in over 250 ms;
+   - the logo, its top left at (-511, 90), fading in over 250 ms;
    - the tracks and the brace;
    - the pulsing "PRESS START".
    - The pulse is 1.5 s, an estimate, until its animation is read.
@@ -771,6 +832,11 @@ and write the results here in our own words.
 
 The logs say which path drops input.
 
+**Result** (2026-10-10): input was dead because the launcher handed the
+engine an all-zero gamepad table (slot 116) and an empty keyboard table
+(profile 0x42C). Fixed on `launcher-controls`; the pad works in matches
+with Default and Bumper Jumper. Details in `README.md` here, "Controls".
+
 **B. The UI-shell experiment** (being run separately). In this order:
 
 1. Does `mainmenu.map` boot in UI shell with no patch, and play the
@@ -784,12 +850,83 @@ The logs say which path drops input.
 5. Does neutral input in slot 36 keep the engine idle?
 6. Does `main_menu_music` play?
 
+**Results** (owner's PC, 2026-10-10, halo2.dll 1.3528, read-only: only
+options, host answers through `--slot-return` stubs, and diagnostics):
+
+1. **Boot.** `--offline` with options `game_mode` (0x0C) = 4 and both map
+   id fields (0x10, 0x14) = 0 boots with no patch. The engine opens
+   shared.map, single_player_shared.map and mainmenu.map (twice), and
+   nothing else; frames start at about 0.5 s and run at 60 fps (600 per
+   10 s). It never calls set_game_state, so the launcher sees no game
+   state at all. Map ids 1 and -1 behave the same. `game_mode` 3
+   (multiplayer) with ids 0, 1 and 2 also loads only mainmenu.map, reaches
+   no map-loaded state, and shows the same picture; on quit it goes
+   through states 10, 7, 5. mainmenu's own map id wasn't found: halo2.dll
+   builds scenario paths in code, and no plain table gives an id.
+2. **What it shows.** A flat dark navy frame, rgb(21,28,51), with no logo,
+   start screen, list or text. Stretched about 120 times, the frame holds
+   a real moving scene under it (shapes change between 4, 16 and 25 s) at
+   about 1/255 of full brightness, so something covers the scene almost
+   completely; whether it is the carrier flythrough can't be told at that
+   level. Scripted Start, A and d-pad presses (with `--pad-map h2`) don't
+   change the frame. In the first 30 s the shell calls host slots 0, 1, 2,
+   10, 23 (about 1,850 calls in the first 0.7 s: phase 1, then phase 5
+   with progress stuck at 0.02; a match goes on to phase 4 and then
+   loads), 32, 33, 34, 36, 39, 43, 47, 48, 51, 55, 57 get_string (79
+   calls, 47 ids from two string tables), 88 get_player_xuid (once a
+   frame), 94 (once), 99 (14), 100, 104 (once), 116 and 118, and events
+   31 (once a frame), 142 and 147. A match calls 22, 54, 72, 74 and 75 and
+   events 144 and 146 instead, and the shell never calls them. Returning 1
+   from each of 57, 94, 99, 100, 104 and 118 in turn (`--slot-return`)
+   changes nothing: the frame stays navy (mean colour 21, 28, 51 in every
+   region measured). What MCC answers that makes the shell draw is still
+   unknown; the stuck launch timer (phase 5 at 0.02) is the best lead.
+3. **Drawing over it.** Both work, in UI shell and in a match, and leave
+   the engine's frames clean:
+   - copying a block of ours into back buffer 0 in `end_frame`
+     (CopySubresourceRegion): about 1.6 us a frame;
+   - a quad drawn with our own shaders (compiled at run time with
+     d3dcompiler_47's D3DCompile) inside our own device context state,
+     swapped in and out with `ID3D11DeviceContext1::SwapDeviceContextState`:
+     about 22 us a frame including a new render target view each frame.
+     Drawn on every other frame, the frames without it show no trace and
+     the engine's picture is normal, so its state is restored.
+   - `end_frame` comes before the engine's Present (one Present per
+     end_frame). The back buffer is 960x540 R8G8B8A8_UNORM, one sample, in
+     a 2-buffer DISCARD swap chain, so buffer 0 is always the one to draw
+     into.
+4. **Switching engines.** UI shell to first frame: about 0.5 s. Asking an
+   engine to quit to its process exiting: about 5 s, nearly all of it the
+   launcher's own wait for the engine to finish (5.0 s from quit to the
+   final summary, both for the shell and for a match). A Lockout match
+   from start to map loaded: 6.0 s. So menu to match is about 11 s today
+   (about 6 s if the menu engine is closed at once rather than waited
+   for), and match back to menu about 5.5 s.
+5. **Neutral input.** With no pad and no script the shell stays idle:
+   frames keep coming and nothing changes for as long as it runs (up to
+   40 s tried).
+6. **Music.** Nothing in the logs shows any (get_audio_setting is asked
+   once; no sound-related host calls or events). It has to be checked by
+   ear on the PC.
+7. **Second round** (same rules). None of these changed the picture (still a flat 21, 28, 51 everywhere) or the launch timer (phase 5 at 0.02, then 1 at 0.00, then 5 at 0.02, then nothing):
+   - answering 1 from update_launch_timer (slot 23);
+   - posting engine messages 1, 5, 7, 8, 9 and 14 three seconds after the first frame;
+   - answering true for setting 6, the only game setting the shell asks for;
+   - giving the first eight video-setting floats and the profile brightness a middle value.
+   GetGUID (event 147) already returns a valid pointer. The cover over the scene doesn't come from any host answer tried so far.
+
+**Decision (2026-10-10):** option C. The menus are drawn in our own window over Halo 2's navy framing; the quad proof is kept for phase 4 (in-game overlays) and for option A if a way to uncover the shell's scene turns up.
+
 **C. Layouts.**
 
 1. Play a match with `--pad-map h2`, then with a table that swaps A and B.
    Does the engine follow slot 116?
 2. If not, set `BUTTON_PRESET` to 1, 2 and 3 in the profile. Does Southpaw,
    Boxer or Green Thumb follow? The numbering is unknown.
+
+**Result** (2026-10-10): the engine follows slot 116, so every layout is
+built there and `BUTTON_PRESET` wasn't needed. Default and Bumper Jumper
+were checked button by button; the other layouts wait until after the MVP.
 
 ### 9.2 MCC's UI tags (the probe, `mcc_ui_probe`)
 

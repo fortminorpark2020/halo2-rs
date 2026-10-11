@@ -179,6 +179,14 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   owner's PC with the real engine (2026-10-10 20:00 local server, 20:30
   through Proxmox). Next: a real game with kills (to set `COUNTS_SEEN`),
   a play session by the owner, two PCs, then clans.
+- The original Xbox menus for the launcher are on `launcher-menu` (plan:
+  `docs/notes/launcher/menu.md`). Phase 0 is built there: `blam_cache::ui`
+  reads the UI tags of MCC's and Vista's `mainmenu.map` (`Menus::open`),
+  `blam_cache::mcc` reads the format-13 pieces they need
+  (`docs/notes/launcher/mcc-maps.md`), and the new `crates/h2ui` draws the
+  start screen and main menu as draw lists on the CPU. Not wired into the
+  lobby yet. Next: run `mcc_ui_probe` and `menu_png` on the owner's PC
+  (commands in menu.md, "What Phase 0 built").
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.

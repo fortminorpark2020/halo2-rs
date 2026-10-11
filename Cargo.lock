@@ -1152,6 +1152,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2ui"
+version = "0.1.0"
+dependencies = [
+ "blam-cache",
+ "png",
+]
+
+[[package]]
 name = "h2viewer"
 version = "0.1.0"
 dependencies = [

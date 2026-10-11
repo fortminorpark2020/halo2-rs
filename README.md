@@ -76,6 +76,11 @@ install. No game files are included in this repository.
   an offline Slayer match on Lockout instead. It reads the game's
   `halo2.dll` and never changes any MCC file. It is not part of the game
   above. See `docs/notes/launcher/README.md`.
+- `h2ui`: the original Xbox Halo 2 menus for the launcher (work in progress,
+  not in the lobby yet): the start screen and main menu laid out from your
+  `mainmenu.map`'s menu tags and pictures (MCC's or Halo 2 Vista's), drawn
+  without a graphics card; plain shapes in Halo 2's colours when the files
+  aren't there.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
 - `h2viewer`: the game: Halo 2 style menus and lobby, Halo 2's maps with their
