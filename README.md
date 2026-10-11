@@ -61,11 +61,13 @@ install. No game files are included in this repository.
   `vista = <folder>` (the Cartographer folder or its `maps` folder) to
   `%LOCALAPPDATA%\h2launch\lobby.txt`, or set `H2LOBBY_VISTA` to it. With
   Cartographer's files the menus also have Halo 2's sound: its main menu
-  music on the start screen and the main menu (it fades out on the
-  playlists, as on the Xbox, and comes back on the main menu), and its
-  menu sounds when you move, choose, go back, are told you can't do
-  something, start a search, or get an invitation. Nothing plays during a
-  match. Without Cartographer the menus are silent for now (MCC's own
+  music on the start screen and the main menu (as on the Xbox it fades
+  out over about 5 seconds on the playlists, and starts again from the
+  beginning back on the main menu; it never starts or stops more often
+  than once every 6 seconds), and its menu sounds when you leave the
+  start screen, move, choose, go back, are told you can't do something,
+  start a search, or get an invitation or a friend request. Nothing
+  plays during a match. Without Cartographer the menus are silent for now (MCC's own
   sounds can't be read yet); `menu_sound = off` in `lobby.txt` (or
   `H2LOBBY_SOUND=off`) silences them. ONLINE
   takes you to its lobby: pick a gamertag the first time (after that it

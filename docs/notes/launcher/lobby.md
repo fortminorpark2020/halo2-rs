@@ -142,22 +142,30 @@ the launcher doesn't do.
   every screen, read from Vista's `mainmenu.map` (and the `shared.map`
   beside it) on a thread of their own, about 1 s in the container. The
   music is off on the playlists (searching too), the party, the custom
-  game and the match's screens, and fades over the globals' 5.5 s; every
-  other screen keeps it as it was, so the settings keep it and the
-  carnage report stays silent after a game. Presses sound by what they
-  did: the focus moving is `cursor`, a screen or popup opening `select`,
-  B `back`, a refusal (the leader-only notices, a friend who can't be
-  joined or asked) `error`, a search or a custom game asked for
-  `advance`, and a new invitation `message`. While a match's engine
-  runs the music fades in 0.5 s, presses are silent and the audio
-  stream pauses; it plays again after. The log's `sound:` line says what
-  loaded (each sound's length, the music's start and loops, the decoding
-  time) or why nothing did, then where it plays. Silent, without ever
-  opening an audio device: without Vista's files, with `H2LOBBY_SOUND=off`,
-  or with `menu_sound = off` in `lobby.txt`. `H2LOBBY_AUDIO_WAV=<file>`
-  records the sound into a 44.1 kHz WAV instead of playing it (with a
-  window or headless; headless without it plays nowhere). The decoded
-  music (about 5.5 minutes in all) takes about 60 MB of memory.
+  game and the match's screens, and fades out over its track's own 5 s
+  when it stops; every other screen keeps it as it was, so the settings
+  keep it and the carnage report stays silent after a game. As in Halo
+  2, it starts or stops at most once every 6 s (a change asked for
+  sooner waits), and each start plays it again from its beginning.
+  Presses sound by what they did: the focus moving is `cursor`, a screen
+  or popup opening `select` (Halo 2's `advance` on a screen opening
+  isn't played; menu.md "What Phase 2.2 built"), a request sent to the
+  server (make leader, privacy, an invitation, a friend request or its
+  answer) `select`, B `back` (the leader's B stopping a search too), a
+  refusal (the leader-only notices, a friend who can't be joined or
+  asked) `error`, a search or a custom game asked for `advance`, A on
+  the start screen `select` then `transport`, and a new invitation or a
+  friend request to us `message`, all at their tags' gains. While a
+  match's engine runs the music fades in 0.5 s, presses are silent and
+  the audio stream pauses; it plays again after. The log's `sound:` line
+  says what loaded (each sound's length, the music's start and loops,
+  the decoding time) or why nothing did, then where it plays. Silent,
+  without ever opening an audio device: without Vista's files, with
+  `H2LOBBY_SOUND=off`, or with `menu_sound = off` in `lobby.txt`.
+  `H2LOBBY_AUDIO_WAV=<file>` records the sound into a 44.1 kHz WAV
+  instead of playing it (with a window or headless; headless without it
+  plays nowhere). The decoded music (about 5.5 minutes in all) takes
+  about 60 MB of memory.
 - Every screen's CPU time is logged once per window size, averaged over
   its first 30 frames there (menu.md's CPU budget): the menus as `menus:
   1920x1080, start screen 3.4 ms a frame on the CPU (background 20 ms
@@ -384,14 +392,6 @@ line (`--set-option 0x354=i32:60 --pad none`, say). A script line is
 
 A `#` that starts a line or follows a space starts a comment.
 
-To hear (or measure) the menus' sound headless, give the Cartographer
-folder and a WAV to record into: `H2LOBBY_VISTA='<...>/Halo 2 Project
-Cartographer' H2LOBBY_AUDIO_WAV=menu.wav`. With the script `0 wait start
-10`, `20 a`, `0 wait main 10`, `1 down`, `1 up`, `2 quit` (2026-10-11, the
-container's copy) the WAV held 23 s of music from its first 0.05 s, and
-taking away a second run's with no presses left only the select and two
-cursor sounds, where the presses were. Keep such WAVs on the PC: they are
-the game's sound.
 `see` takes its last word as the seconds when it is a number (so
 `see 12 of 100 120` waits for "12 of 100"; the start screen's and main
 menu's text counts once it has faded in), and fails the run as `wait`
@@ -406,6 +406,15 @@ The screens are `start`, `main`, `signin`, `connecting`, `live`,
 `carnage-waiting`, `carnage`, `failed`, `friends`, `record` and
 `settings`, and the popups `invite`, `quit`, `leave`, `remove` (a party
 member), `addfriend`, `friend` (a friend's options) and `unfriend`.
+
+To hear (or measure) the menus' sound headless, give the Cartographer
+folder and a WAV to record into: `H2LOBBY_VISTA='<...>/Halo 2 Project
+Cartographer' H2LOBBY_AUDIO_WAV=menu.wav`. With the script `0 wait start
+10`, `20 a`, `0 wait main 10`, `1 down`, `1 up`, `2 quit` (2026-10-11, the
+container's copy) the WAV held 23 s of music from its first 0.05 s, and
+taking away a second run's with no presses left only the select and two
+cursor sounds, where the presses were (A on the start screen now adds
+`transport`). Keep such WAVs on the PC: they are the game's sound.
 
 Two lobbies on one machine against a local server:
 

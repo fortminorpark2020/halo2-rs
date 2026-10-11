@@ -421,6 +421,19 @@ fn cue_for(before: &CueState, after: &CueState, back: bool) -> Option<Cue> {
     None
 }
 
+/// `text` is the server's notice that someone sent us a friend request
+/// (`h2net::live::ASKED_YOU`, with whatever gamertag in it).
+fn is_asked_you(text: &str) -> bool {
+    match h2net::live::ASKED_YOU.split_once("{X}") {
+        Some((before, after)) => {
+            text.len() > before.len() + after.len()
+                && text.starts_with(before)
+                && text.ends_with(after)
+        }
+        None => text == h2net::live::ASKED_YOU,
+    }
+}
+
 /// Whether the menu music is wanted on `screen`, it being `current` (Halo
 /// 2's rule, menu.md section 5): on at the start screen and the main
 /// menu; off on the ONLINE screens (searching too), the party, the custom
@@ -791,6 +804,11 @@ impl App {
                 if !h2net::live::is_friend_notice(&text) {
                     self.asked = None;
                 }
+                // A friend request to us is a message: Halo 2 sounds every
+                // one (the notification screen, 0x2b740a).
+                if is_asked_you(&text) {
+                    self.cue(Cue::Notify);
+                }
                 self.toast(text);
             }
             LiveEvent::LauncherMatch(m) => self.on_match(m),
@@ -995,6 +1013,7 @@ impl App {
         }
         self.log(&format!("lobby: sending {tag} a friend request"));
         self.send(ToServer::FriendRequest(tag));
+        self.cue(Cue::Select);
     }
 
     fn playlist_name(&self, id: u8) -> String {
@@ -1393,7 +1412,18 @@ impl App {
             .retain(|(_, at)| now.saturating_duration_since(*at) < RECORD_WAIT);
         self.ask_member_records();
         self.music_on = !self.engine_running() && music_rule(self.screen, self.music_on);
-        // A new invitation on show sounds once.
+        // A new invitation on show sounds once. One that has gone from the
+        // list (declined, accepted, taken back) is forgotten, so the same
+        // party inviting again sounds again; one only hidden (a popup, a
+        // screen without invitations) is kept, and doesn't.
+        let seen_gone = self.invite_seen.is_some_and(|seen| {
+            !self
+                .view()
+                .is_some_and(|v| v.invites.iter().any(|(party, _)| *party == seen))
+        });
+        if seen_gone {
+            self.invite_seen = None;
+        }
         let shown = self.invite().map(|(party, _)| party);
         if shown.is_some() && shown != self.invite_seen {
             self.cue(Cue::Notify);
@@ -1539,7 +1569,13 @@ impl App {
         }
         match self.screen {
             Screen::Start => match i {
-                Input::A => self.screen = Screen::Main,
+                Input::A => {
+                    self.screen = Screen::Main;
+                    // The press, then Halo 2's start screen going on to
+                    // the main menu (sound 5, 0x22f28c).
+                    self.cue(Cue::Select);
+                    self.cue(Cue::Transport);
+                }
                 Input::B => self.popup = Some(Popup::Quit),
                 _ => {}
             },
@@ -1825,10 +1861,12 @@ impl App {
             (Input::A, Some(f)) if f.relation == Relation::AskedUs => {
                 self.log(&format!("lobby: accepting {}'s friend request", f.gamertag));
                 self.send(ToServer::FriendAccept(f.account));
+                self.cue(Cue::Select);
             }
             (Input::X, Some(f)) if f.relation == Relation::AskedUs => {
                 self.log(&format!("lobby: declining {}'s friend request", f.gamertag));
                 self.send(ToServer::FriendDecline(f.account));
+                self.cue(Cue::Select);
             }
             (Input::A, Some(f)) if f.relation == Relation::Friend => {
                 let who = f.account;
@@ -1850,6 +1888,7 @@ impl App {
                     f.gamertag
                 ));
                 self.send(ToServer::FriendRemove(f.account));
+                self.cue(Cue::Select);
             }
             _ => {}
         }
@@ -1900,6 +1939,7 @@ impl App {
             if i == Input::B {
                 if self.leader() {
                     self.send(ToServer::Cancel);
+                    self.cue(Cue::Back);
                 } else {
                     self.refuse("Only the party leader can stop the search.".into());
                 }
@@ -1979,6 +2019,7 @@ impl App {
             (Input::A, Some((who, false))) if leader => {
                 self.log(&format!("lobby: making {who:#x} party leader"));
                 self.send(ToServer::Promote(who));
+                self.cue(Cue::Select);
             }
             (Input::X, Some((who, false))) if leader => self.popup = Some(Popup::Kick(who)),
             (Input::Lb, Some((who, _))) => self.open_record(who),
@@ -1988,6 +2029,7 @@ impl App {
                     _ => Privacy::Open,
                 };
                 self.send(ToServer::Privacy(privacy));
+                self.cue(Cue::Select);
             }
             (Input::B, _) => self.screen = Screen::Live,
             _ => {}
@@ -2187,6 +2229,7 @@ impl App {
                 if let Some(p) = picked {
                     self.send(ToServer::Invite(p.account));
                     self.toast(format!("Invited {} to your party.", p.gamertag));
+                    self.cue(Cue::Select);
                 }
             }
             Input::X => {
@@ -5324,8 +5367,10 @@ mod tests {
         assert_eq!(a.take_cues(), [Cue::Back]);
         a.input(Input::Char('b'));
         assert_eq!(a.take_cues(), [Cue::Back]);
+        // A on the start screen: the press, and the start screen going
+        // on to the main menu.
         a.input(Input::A);
-        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Transport]);
         assert_eq!(a.label(), "main");
         // Down moves the focus; at the end it doesn't, and is silent.
         a.input(Input::Down);
@@ -5420,6 +5465,16 @@ mod tests {
         a.input(Input::A);
         assert_eq!(a.take_cues(), [Cue::Advance]);
         assert_eq!(sent(&mut server), [ToServer::Search(11)]);
+        // Searching: the leader's B stops it, as Back; a member's is
+        // refused.
+        view(&mut a).party.as_mut().unwrap().activity = Activity::Searching;
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        assert_eq!(sent(&mut server), [ToServer::Cancel]);
+        view(&mut a).party.as_mut().unwrap().leader = 2;
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Error]);
+        assert!(sent(&mut server).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5445,6 +5500,158 @@ mod tests {
         // The one under it was seen, but is shown again: it sounds again.
         a.tick(Instant::now());
         assert_eq!(a.take_cues(), [Cue::Notify]);
+        // Hidden by a popup, it is still the one seen: no sound when it
+        // shows again.
+        a.popup = Some(Popup::Quit);
+        a.tick(Instant::now());
+        a.popup = None;
+        a.tick(Instant::now());
+        assert!(a.take_cues().is_empty());
+        // Declined, then the same party invites again: it sounds.
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        a.tick(Instant::now());
+        assert!(a.take_cues().is_empty());
+        view(&mut a).invites.push((55, "BRAVO".into()));
+        a.tick(Instant::now());
+        assert_eq!(a.take_cues(), [Cue::Notify]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_friend_request_to_us_sounds_as_a_message() {
+        let dir = scratch("cue-asked");
+        let (mut a, _server) = live_app(&dir);
+        use h2net::live::{friend_notice, ACCEPTED, ALREADY_ASKED, ASKED_YOU, SLOW_DOWN};
+        a.on_event(LiveEvent::Notice(friend_notice(ASKED_YOU, "BRAVO")));
+        assert_eq!(a.take_cues(), [Cue::Notify]);
+        // Other notices are only shown.
+        for text in [
+            friend_notice(ACCEPTED, "BRAVO"),
+            friend_notice(ALREADY_ASKED, "BRAVO"),
+            SLOW_DOWN.to_string(),
+            "THAT PARTY IS INVITE ONLY".to_string(),
+            // The notice's words with no gamertag in them.
+            friend_notice(ASKED_YOU, ""),
+        ] {
+            a.on_event(LiveEvent::Notice(text.clone()));
+            assert!(a.take_cues().is_empty(), "{text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn presses_that_only_ask_the_server_still_sound() {
+        let dir = scratch("cue-asks");
+        let (mut a, mut server) = live_app(&dir);
+        // The party's leader makes BRAVO leader, and changes its privacy.
+        let mut pt = party(7, Activity::Lobby);
+        pt.members.push(PartyMember {
+            account: 2,
+            gamertag: "BRAVO".into(),
+            look: Default::default(),
+            best: 1,
+            level: 1,
+            guests: 0,
+        });
+        view(&mut a).party = Some(pt);
+        a.screen = Screen::Party;
+        assert!(a.pick("bravo"));
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(sent(&mut server), [ToServer::Promote(2)]);
+        a.input(Input::Y);
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(sent(&mut server), [ToServer::Privacy(Privacy::InviteOnly)]);
+        // Friend requests answered or taken back.
+        view(&mut a).friends = vec![
+            friend(12, "YAN", Relation::AskedUs, Online::Offline),
+            friend(10, "ZED", Relation::WeAsked, Online::Offline),
+        ];
+        a.screen = Screen::Friends;
+        a.tick(Instant::now());
+        a.take_cues();
+        for (tag, press, asked) in [
+            ("yan", Input::A, ToServer::FriendAccept(12)),
+            ("yan", Input::X, ToServer::FriendDecline(12)),
+            ("zed", Input::X, ToServer::FriendRemove(10)),
+        ] {
+            assert!(a.pick(tag));
+            a.input(press);
+            assert_eq!(a.take_cues(), [Cue::Select], "{tag} {press:?}");
+            assert_eq!(sent(&mut server), [asked]);
+        }
+        // An invitation sent, and a friend request.
+        view(&mut a).online = vec![OnlinePlayer {
+            account: 21,
+            gamertag: "CHARLIE".into(),
+            look: Default::default(),
+            best: 1,
+            activity: Activity::Lobby,
+            party: 21,
+            open: true,
+            size: 1,
+            openings: 3,
+        }];
+        a.screen = Screen::Players;
+        a.tick(Instant::now());
+        a.take_cues();
+        assert!(a.pick("charlie"));
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(sent(&mut server), [ToServer::Invite(21)]);
+        a.input(Input::Y);
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(
+            sent(&mut server),
+            [ToServer::FriendRequest("CHARLIE".into())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn y_on_someone_who_cant_be_asked_says_why_with_the_error_sound() {
+        let dir = scratch("cue-cant-ask");
+        let (mut a, mut server) = live_app(&dir);
+        use h2net::live::{friend_notice, ALREADY_ASKED, ALREADY_FRIENDS, ASKED_YOU};
+        let player = |account: u64, tag: &str| OnlinePlayer {
+            account,
+            gamertag: tag.into(),
+            look: Default::default(),
+            best: 1,
+            activity: Activity::Lobby,
+            party: account,
+            open: true,
+            size: 1,
+            openings: 3,
+        };
+        view(&mut a).online = vec![
+            player(1, "ALPHA"),
+            player(2, "BRAVO"),
+            player(3, "CHARLIE"),
+            player(4, "DAN"),
+        ];
+        view(&mut a).friends = vec![
+            friend(2, "BRAVO", Relation::Friend, Online::Launcher),
+            friend(3, "CHARLIE", Relation::WeAsked, Online::Launcher),
+            friend(4, "DAN", Relation::AskedUs, Online::Launcher),
+        ];
+        a.screen = Screen::Players;
+        a.tick(Instant::now());
+        a.take_cues();
+        sent(&mut server);
+        for (tag, why) in [
+            ("BRAVO", ALREADY_FRIENDS),
+            ("CHARLIE", ALREADY_ASKED),
+            ("DAN", ASKED_YOU),
+        ] {
+            assert!(a.pick(tag));
+            a.input(Input::Y);
+            assert_eq!(a.take_cues(), [Cue::Error], "{tag}");
+            let said = a.toasts.back().map(|(t, _)| t.clone());
+            assert_eq!(said, Some(friend_notice(why, tag)));
+            assert!(sent(&mut server).is_empty(), "{tag}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5566,12 +5773,16 @@ mod tests {
             .map(|r| r.relay_id)
             .collect();
         assert_eq!(rows, [0x22, 0x11]);
-        // Y on ourselves does nothing; on BRAVO it's a friend request.
+        // Y on ourselves only sounds the error (no notice, nothing sent);
+        // on BRAVO it's a friend request.
         a.input(Input::Y);
+        assert_eq!(a.take_cues(), [Cue::Error]);
+        assert!(a.toasts.is_empty());
         assert!(sent(&mut server).is_empty());
         assert!(a.pick("bravo"));
         assert_eq!(a.csel, 0);
         a.input(Input::Y);
+        assert_eq!(a.take_cues(), [Cue::Select]);
         assert_eq!(sent(&mut server), [ToServer::FriendRequest("BRAVO".into())]);
         a.input(Input::Lb);
         assert_eq!(a.label(), "record");

@@ -267,15 +267,41 @@ pub struct LoopingSound {
 /// One track of a looping sound: a start, the loop, and an end.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Track {
+    /// `TRACK_FADE_OUT_AT_STOP` and others.
+    pub flags: u32,
     /// Decibels.
     pub gain: f32,
+    /// Seconds it takes to come in when it starts, and to go when it
+    /// stops.
+    pub fade_in: f32,
+    pub fade_out: f32,
     pub start: Option<DatumIndex>,
     pub repeat: Option<DatumIndex>,
     pub end: Option<DatumIndex>,
 }
 
+/// A track's flag: stopped, it fades out over its `fade_out` (rather than
+/// playing its end).
+pub const TRACK_FADE_OUT_AT_STOP: u32 = 2;
+
 const LSND_TRACKS: usize = 0x1C;
 const TRACK_SIZE: usize = 0x58;
+
+/// One track of a looping sound from its `TRACK_SIZE` bytes: the flags at
+/// 0x4, the gain at 0x8, the fades in and out at 0xC and 0x10, then the
+/// start, loop and end sounds' references at 0x14, 0x1C and 0x24.
+fn track(t: &[u8]) -> Track {
+    let sound = |at: usize| Some(DatumIndex(u32_at(t, at + 4))).filter(|d| *d != DatumIndex::NONE);
+    Track {
+        flags: u32_at(t, 0x4),
+        gain: f32_at(t, 0x8),
+        fade_in: f32_at(t, 0xC),
+        fade_out: f32_at(t, 0x10),
+        start: sound(0x14),
+        repeat: sound(0x1C),
+        end: sound(0x24),
+    }
+}
 
 pub fn looping_sound(set: &mut MapSet, lsnd: DatumIndex) -> Result<LoopingSound> {
     let (src, tag, d) = set.tag_data(lsnd)?;
@@ -285,21 +311,13 @@ pub fn looping_sound(set: &mut MapSet, lsnd: DatumIndex) -> Result<LoopingSound>
     let file = set.get(src);
     let region = file.meta_region();
     let tracks = file.read_block(region, &d, LSND_TRACKS, TRACK_SIZE)?;
-    let sound = |t: &[u8], at: usize| {
-        Some(DatumIndex(u32_at(t, at + 4))).filter(|d| *d != DatumIndex::NONE)
-    };
     Ok(LoopingSound {
         once: u32_at(&d, 0) & 2 != 0,
         tracks: tracks
             .as_chunks::<TRACK_SIZE>()
             .0
             .iter()
-            .map(|t| Track {
-                gain: f32_at(t, 0x8),
-                start: sound(t, 0x14),
-                repeat: sound(t, 0x1C),
-                end: sound(t, 0x24),
-            })
+            .map(|t| track(t))
             .collect(),
     })
 }
@@ -433,6 +451,30 @@ pub fn decode_xbox_adpcm(data: &[u8], channels: usize) -> Vec<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tracks_fades_flags_and_sounds_are_read() {
+        let mut t = [0u8; TRACK_SIZE];
+        t[0x4..0x8].copy_from_slice(&TRACK_FADE_OUT_AT_STOP.to_le_bytes());
+        t[0x8..0xC].copy_from_slice(&(-6.0f32).to_le_bytes());
+        t[0xC..0x10].copy_from_slice(&0.25f32.to_le_bytes());
+        t[0x10..0x14].copy_from_slice(&5.0f32.to_le_bytes());
+        t[0x18..0x1C].copy_from_slice(&0x1234_0001u32.to_le_bytes());
+        t[0x20..0x24].copy_from_slice(&0x1234_0002u32.to_le_bytes());
+        t[0x28..0x2C].copy_from_slice(&DatumIndex::NONE.0.to_le_bytes());
+        assert_eq!(
+            track(&t),
+            Track {
+                flags: TRACK_FADE_OUT_AT_STOP,
+                gain: -6.0,
+                fade_in: 0.25,
+                fade_out: 5.0,
+                start: Some(DatumIndex(0x1234_0001)),
+                repeat: Some(DatumIndex(0x1234_0002)),
+                end: None,
+            }
+        );
+    }
 
     #[test]
     fn adpcm_blocks_decode_to_65_samples_per_channel() {

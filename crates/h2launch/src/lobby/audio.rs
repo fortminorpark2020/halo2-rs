@@ -267,14 +267,6 @@ impl Audio {
         }
     }
 
-    /// Fade a voice to `gain` over `seconds`; one fading out comes back
-    /// and plays on. False if the voice has ended (start it again).
-    pub fn fade_to(&mut self, id: u64, gain: f32, seconds: f32) -> bool {
-        self.mixer
-            .lock()
-            .is_ok_and(|mut m| m.fade(id, gain, seconds, false))
-    }
-
     /// A voice's gain now, if it still plays.
     pub fn gain(&self, id: u64) -> Option<f32> {
         let m = self.mixer.lock().ok()?;
@@ -301,6 +293,12 @@ impl Audio {
     /// Voices playing.
     pub fn voices(&self) -> usize {
         self.mixer.lock().map_or(0, |m| m.voices.len())
+    }
+
+    /// The mixer is paused (silent, every voice held).
+    #[cfg(test)]
+    pub fn is_paused(&self) -> bool {
+        self.mixer.lock().is_ok_and(|m| m.paused)
     }
 }
 
@@ -345,8 +343,9 @@ fn record(
     let mut file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
     file.write_all(&wav_header(0)).map_err(|e| e.to_string())?;
     mixer.lock().map_err(|e| e.to_string())?.rate = WAV_RATE;
+    // The recording's time starts now, however late the thread starts.
+    let start = Instant::now();
     Ok(std::thread::spawn(move || {
-        let start = Instant::now();
         let mut written = 0u64;
         let mut out = Vec::new();
         let mut bytes = Vec::new();
@@ -614,7 +613,6 @@ mod tests {
         assert_ne!(one, two);
         assert_eq!(a.voices(), 0);
         assert_eq!(a.gain(two), None);
-        assert!(!a.fade_to(two, 0.5, 1.0));
         a.fade_out(two, 1.0);
         assert!(a.pause(true).is_ok() && a.pause(false).is_ok());
     }
@@ -634,10 +632,16 @@ mod tests {
         assert_eq!(&bytes[8..16], b"WAVEfmt ");
         let data = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
         assert_eq!(bytes.len(), 44 + data);
-        // At least 0.1 s, and not silent.
-        assert!(data >= 4 * 4410, "{data}");
-        let first = i16::from_le_bytes([bytes[44], bytes[45]]);
-        assert!(first > 0, "{first}");
+        // At least the 0.12 s slept, and not silent: the voice was in
+        // the mixer before the sleep, so blocks mixed after it hold it,
+        // however the recorder's first block fell.
+        assert!(data >= 4 * 5292, "{data}");
+        let loud = bytes[44..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|b| i16::from_le_bytes(*b) > 0);
+        assert!(loud);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

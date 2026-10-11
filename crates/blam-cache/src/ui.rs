@@ -45,7 +45,7 @@ const WIGL_HEADER_FONTS: usize = 0x160;
 const WIGL_TEXT_COLOR: usize = 0x168;
 const WIGL_BOUNDS: usize = 0x178;
 const WIGL_MUSIC: usize = 0x1B8;
-const WIGL_MUSIC_FADE: usize = 0x1C0;
+const WIGL_MUSIC_SILENCE: usize = 0x1C0;
 const WIGL_SIZE: usize = 0x1C4;
 const KEYFRAME_SIZE: usize = 0x14;
 
@@ -266,9 +266,10 @@ pub struct Sounds {
 /// cursor, by its place), 7 `virtual_keyboard_click`, 8 `receive_message`,
 /// 9 `forward1` again (a tab of a tabbed screen, by its place), 10
 /// `sound\game_sfx\multiplayer\countdown_for_respawn`, 11 none and 12
-/// `pickup_health`. Which one is the sign-in sound is our inference from
-/// the order: the first after the five.
-const SOUND_LOGIN: usize = 5;
+/// `pickup_health`. 5 is the sound the press-start screen plays as it goes
+/// on to the main menu (the decompilation's 0x22f28c, the only place that
+/// plays sound 5).
+const SOUND_TRANSPORT: usize = 5;
 const SOUND_KEYBOARD_CLICK: usize = 7;
 const SOUND_RECEIVE_MESSAGE: usize = 8;
 const SOUND_TAB: usize = 9;
@@ -294,9 +295,10 @@ impl Sounds {
         self.at(SOUND_KEYBOARD_CLICK)
     }
 
-    /// Signing in (inferred; see `SOUND_LOGIN`).
-    pub fn login(&self) -> Option<&str> {
-        self.at(SOUND_LOGIN)
+    /// The start screen going on to the main menu (see
+    /// `SOUND_TRANSPORT`).
+    pub fn transport(&self) -> Option<&str> {
+        self.at(SOUND_TRANSPORT)
     }
 
     /// Changing tabs on a tabbed screen.
@@ -334,7 +336,10 @@ pub struct Globals {
     /// Text with no colour of its own.
     pub text_color: [f32; 3],
     pub music: Option<String>,
-    pub music_fade_ms: i32,
+    /// How long before the idle attract movie the music is stopped (the
+    /// decompilation's "silence time", 0x223976 and 0x235ca9). Not a fade:
+    /// the music fades over its looping sound's track's own fade-out.
+    pub music_silence_ms: i32,
 }
 
 /// mainmenu.map's menus.
@@ -979,7 +984,7 @@ pub fn parse_globals(
             f32_at(d, WIGL_TEXT_COLOR + 12),
         ],
         music: tag_ref(r, d, WIGL_MUSIC).map(|t| t.name),
-        music_fade_ms: u32_at(d, WIGL_MUSIC_FADE) as i32,
+        music_silence_ms: u32_at(d, WIGL_MUSIC_SILENCE) as i32,
     })
 }
 
@@ -1696,7 +1701,7 @@ mod tests {
             .f32(WIGL_OVERLAY_ALPHA_MOD, 0.1)
             .f32(WIGL_OVERLAY_COLOR, 0.85)
             .f32(WIGL_OVERLAY_COLOR + 12, 0.17)
-            .u32(WIGL_MUSIC_FADE, 5500)
+            .u32(WIGL_MUSIC_SILENCE, 5500)
             .block(WIGL_ANIMATIONS, vec![fade])
             .block(
                 WIGL_SKINS,
@@ -1810,7 +1815,7 @@ mod tests {
         for (k, named) in five.iter().enumerate() {
             assert_eq!(named.as_deref(), Some(sound_name(k).as_str()));
         }
-        assert_eq!(s.login(), Some(sound_name(5).as_str()));
+        assert_eq!(s.transport(), Some(sound_name(5).as_str()));
         assert_eq!(s.keyboard_click(), Some(sound_name(7).as_str()));
         assert_eq!(s.receive_message(), Some(sound_name(8).as_str()));
         assert_eq!(s.tab(), Some(sound_name(9).as_str()));
@@ -1818,7 +1823,7 @@ mod tests {
         assert_eq!(s.at(11), None);
         assert_eq!(Sounds::default().receive_message(), None);
         assert_eq!(g.music, None);
-        assert_eq!(g.music_fade_ms, 5500);
+        assert_eq!(g.music_silence_ms, 5500);
         assert_eq!(g.header_fonts[0], Font::Title);
         assert_eq!(g.header_bounds[0].left, -730);
         assert_eq!(g.overlay_color, [0.0, 0.0, 0.17, 0.85]);

@@ -24,20 +24,21 @@ use std::time::{Duration, Instant};
 pub const ENV: &str = "H2LOBBY_SOUND";
 /// A file to record the menus' sound into (a WAV) instead of playing it.
 pub const WAV_ENV: &str = "H2LOBBY_AUDIO_WAV";
-/// Menu sounds over the music: the from-scratch game's gain for them
-/// (`origin/menu-preview`'s soundscape), an estimate.
-const UI_GAIN: f32 = 1.6;
-/// The music's gain: the from-scratch game's (`origin/menu-preview`), an
-/// estimate. As there, it is the music's whole gain: its looping sound's
-/// track gain (-6 dB in Halo 2 Vista's) and its sounds' own aren't
-/// applied on top.
+/// The music's track gain when its looping sound isn't read (the music
+/// found by name): -6 dB, its track's in Halo 2 Vista's mainmenu.map. Read
+/// from the track otherwise. Menu sounds play at their tags' gains, as
+/// Halo 2 plays them (0x236299, at a scale of 1).
 const MUSIC_GAIN: f32 = 0.5;
+/// How long the music fades out when it stops, when its looping sound
+/// isn't read: 5.0 s, its track's fade-out in Halo 2 Vista's mainmenu.map.
+/// Read from the track otherwise.
+const MUSIC_FADE: Duration = Duration::from_secs(5);
+/// Halo 2 starts or stops the menu music at most once every 6 s
+/// (0x235b9c); the first start is at once.
+const MUSIC_HOLD: Duration = Duration::from_secs(6);
 /// How long the music takes to fade when a match's engine starts, before
 /// the audio stream pauses: an estimate.
 const ENGINE_FADE: Duration = Duration::from_millis(500);
-/// The music's fade when the globals give none: theirs in Halo 2 Vista's
-/// mainmenu.map.
-const MUSIC_FADE_MS: i32 = 5500;
 /// The music's two tracks by name, where the globals' looping sound
 /// doesn't give them.
 const MUSIC_IN: &str = r"sound\ui\main_menu_music\menu_music\in";
@@ -56,16 +57,18 @@ pub enum Cue {
     Error,
     /// A search started, or a custom game was asked for.
     Advance,
-    /// An invitation arrived.
+    /// An invitation or a friend request arrived.
     Notify,
     /// A second of a countdown (for later).
     Countdown,
     /// A key of the on-screen keyboard (for later).
     KeyClick,
+    /// The start screen went on to the main menu.
+    Transport,
 }
 
 impl Cue {
-    pub const ALL: [Cue; 8] = [
+    pub const ALL: [Cue; 9] = [
         Cue::Cursor,
         Cue::Select,
         Cue::Back,
@@ -74,6 +77,7 @@ impl Cue {
         Cue::Notify,
         Cue::Countdown,
         Cue::KeyClick,
+        Cue::Transport,
     ];
 
     fn index(self) -> usize {
@@ -90,6 +94,7 @@ impl Cue {
             Cue::Notify => "message",
             Cue::Countdown => "countdown",
             Cue::KeyClick => "key click",
+            Cue::Transport => "transport",
         }
     }
 
@@ -104,6 +109,7 @@ impl Cue {
             Cue::Notify => s.receive_message(),
             Cue::Countdown => s.countdown(),
             Cue::KeyClick => s.keyboard_click(),
+            Cue::Transport => s.transport(),
         }
     }
 }
@@ -115,18 +121,20 @@ pub struct Effect {
 }
 
 /// The main menu's music: its start, then its loops one after another
-/// (picked at random where there are several).
+/// (picked at random where there are several), its gain, and how long it
+/// fades out when it stops.
 pub struct Music {
     pub intro: Arc<Clip>,
     pub loops: Vec<Arc<Clip>>,
+    pub gain: f32,
+    pub fade: Duration,
 }
 
-/// The menus' sounds by `Cue`, the music, and how long it fades.
+/// The menus' sounds by `Cue`, and the music.
 #[derive(Default)]
 pub struct MenuSounds {
-    pub cues: [Option<Effect>; 8],
+    pub cues: [Option<Effect>; 9],
     pub music: Option<Music>,
-    pub fade: Duration,
 }
 
 impl MenuSounds {
@@ -198,14 +206,15 @@ fn describe(mainmenu: &Path, s: &MenuSounds, missing: &[String], ms: u128) -> St
                 .map(|l| format!("{:.1} s", l.duration()))
                 .collect();
             format!(
-                "music {:.1} s then loops of {} (fade {:.1} s)",
+                "music {:.1} s then loops of {} (gain {:.2}, fade {:.1} s)",
                 m.intro.duration(),
                 if loops.is_empty() {
                     "none".to_string()
                 } else {
                     loops.join(", ")
                 },
-                s.fade.as_secs_f32()
+                m.gain,
+                m.fade.as_secs_f32()
             )
         }
         None => "no music".into(),
@@ -266,13 +275,7 @@ fn read(mainmenu: &Path) -> Result<(MenuSounds, Vec<String>), String> {
     let globals = menus.ui.map_err(|e| e.to_string())?.globals;
     let mut set = MapSet::open(mainmenu).map_err(|e| e.to_string())?;
     let mut reader = SoundReader::new();
-    let mut out = MenuSounds {
-        fade: Duration::from_millis(match globals.music_fade_ms {
-            ms if ms > 0 => ms as u64,
-            _ => MUSIC_FADE_MS as u64,
-        }),
-        ..MenuSounds::default()
-    };
+    let mut out = MenuSounds::default();
     let mut missing = Vec::new();
     for c in Cue::ALL {
         let Some(name) = c.sound(&globals.sounds) else {
@@ -311,12 +314,14 @@ fn read(mainmenu: &Path) -> Result<(MenuSounds, Vec<String>), String> {
 }
 
 /// The music of looping sound `lsnd`: its first track's start, then its
-/// loop's variations.
+/// loop's variations, at the track's gain times its start's, fading out
+/// over the track's fade-out (`fade_of`). The track's fade-in (none in
+/// Halo 2 Vista's) isn't applied.
 fn music_of(set: &mut MapSet, reader: &mut SoundReader, lsnd: DatumIndex) -> Result<Music, String> {
     let l = sound::looping_sound(set, lsnd).map_err(|e| e.to_string())?;
     let track = *l.tracks.first().ok_or("no tracks")?;
     let start = track.start.ok_or("no start")?;
-    let (intro, _) = clips(set, reader, start)?;
+    let (intro, own) = clips(set, reader, start)?;
     let loops = match track.repeat {
         Some(r) => clips(set, reader, r)?.0,
         None => Vec::new(),
@@ -324,13 +329,26 @@ fn music_of(set: &mut MapSet, reader: &mut SoundReader, lsnd: DatumIndex) -> Res
     Ok(Music {
         intro: intro[0].clone(),
         loops,
+        gain: gain(track.gain) * own,
+        fade: fade_of(&track),
     })
 }
 
-/// The music by its tracks' names.
+/// How long a track fades out when it stops: its own fade-out when it
+/// fades at a stop (its flag, or no end sound to play instead), else
+/// `MUSIC_FADE` (we don't play end sounds).
+fn fade_of(track: &sound::Track) -> Duration {
+    let fades = track.flags & sound::TRACK_FADE_OUT_AT_STOP != 0 || track.end.is_none();
+    match track.fade_out {
+        s if fades && s > 0.0 && s.is_finite() => Duration::from_secs_f32(s.min(60.0)),
+        _ => MUSIC_FADE,
+    }
+}
+
+/// The music by its tracks' names, at `MUSIC_GAIN` and `MUSIC_FADE`.
 fn music_by_name(set: &mut MapSet, reader: &mut SoundReader) -> Result<Music, String> {
     let start = find(set, "snd!", MUSIC_IN).ok_or("no start by name")?;
-    let (intro, _) = clips(set, reader, start)?;
+    let (intro, own) = clips(set, reader, start)?;
     let loops = match find(set, "snd!", MUSIC_LOOP) {
         Some(r) => clips(set, reader, r)?.0,
         None => Vec::new(),
@@ -338,6 +356,8 @@ fn music_by_name(set: &mut MapSet, reader: &mut SoundReader) -> Result<Music, St
     Ok(Music {
         intro: intro[0].clone(),
         loops,
+        gain: MUSIC_GAIN * own,
+        fade: MUSIC_FADE,
     })
 }
 
@@ -373,10 +393,13 @@ pub struct MenuSound {
     sounds: MenuSounds,
     output: Output,
     audio: Option<Audio>,
-    /// The music's voice, and whether it is wanted (playing, or coming
-    /// back) rather than fading out.
+    /// The music's voice while it plays (not once it fades out), and
+    /// whether it was last started rather than stopped (Halo 2's
+    /// `playing`; `App::music_on` is what is wanted).
     music: Option<u64>,
-    music_wanted: bool,
+    music_playing: bool,
+    /// When the music last started or stopped (`MUSIC_HOLD`).
+    music_changed: Option<Instant>,
     /// An engine runs: the music fades, cues are dropped, and the stream
     /// pauses at `pause_at`.
     engine: bool,
@@ -393,7 +416,8 @@ impl MenuSound {
             output: Output::Null,
             audio: None,
             music: None,
-            music_wanted: false,
+            music_playing: false,
+            music_changed: None,
             engine: false,
             pause_at: None,
         }
@@ -458,23 +482,27 @@ impl MenuSound {
         }
     }
 
-    /// Each tick: play `cues`, start or fade the music as `music_on` says,
-    /// and while `engine_running` fade it, drop the cues and pause the
-    /// stream (it plays again after).
+    /// Each tick: play `cues`, start or fade the music as `music_on` says
+    /// (`set_music`), and while `engine_running` fade it at once, drop the
+    /// cues and pause the stream (it plays again after).
     pub fn update(&mut self, cues: &[Cue], music_on: bool, engine_running: bool) {
+        self.update_at(Instant::now(), cues, music_on, engine_running);
+    }
+
+    fn update_at(&mut self, now: Instant, cues: &[Cue], music_on: bool, engine_running: bool) {
         self.poll();
         let Some(audio) = &mut self.audio else {
             return;
         };
-        let now = Instant::now();
         if engine_running {
             if !self.engine {
                 self.engine = true;
                 self.pause_at = Some(now + ENGINE_FADE);
                 if let Some(id) = self.music.take() {
                     audio.fade_out(id, ENGINE_FADE.as_secs_f32());
+                    self.music_changed = Some(now);
                 }
-                self.music_wanted = false;
+                self.music_playing = false;
             }
             if self.pause_at.is_some_and(|t| now >= t) {
                 self.pause_at = None;
@@ -493,40 +521,34 @@ impl MenuSound {
         }
         for &c in cues {
             if let Some(e) = self.sounds.cue(c) {
-                audio.play_ui(&e.clip, e.gain * UI_GAIN);
+                audio.play_ui(&e.clip, e.gain);
             }
         }
-        self.set_music(music_on);
+        self.set_music(music_on, now);
     }
 
-    /// Start the music, bring it back up while it fades, or fade it out.
-    fn set_music(&mut self, on: bool) {
+    /// Start the music or fade it out, as Halo 2 does (0x235b9c): at most
+    /// once every `MUSIC_HOLD` (a change asked for sooner waits, and one
+    /// taken back in time never happens), each start a new voice from the
+    /// music's start, each stop a fade over the music's own fade-out.
+    fn set_music(&mut self, on: bool, now: Instant) {
         let (Some(audio), Some(m)) = (&mut self.audio, &self.sounds.music) else {
             return;
         };
-        let fade = self.sounds.fade.as_secs_f32();
-        let target = MUSIC_GAIN;
-        match (on, self.music_wanted) {
-            (true, false) => {
-                // Back up at the speed it was fading, if it still plays.
-                let raised = self.music.is_some_and(|id| {
-                    let now = audio.gain(id).unwrap_or(0.0);
-                    let left = (1.0 - now / target.max(1e-6)).clamp(0.0, 1.0);
-                    audio.fade_to(id, target, fade * left)
-                });
-                if !raised {
-                    self.music = Some(audio.play_music(&m.intro, &m.loops, target));
-                }
-                self.music_wanted = true;
-            }
-            (false, true) => {
-                if let Some(id) = self.music {
-                    audio.fade_out(id, fade);
-                }
-                self.music_wanted = false;
-            }
-            _ => {}
+        if on == self.music_playing
+            || self
+                .music_changed
+                .is_some_and(|t| now.saturating_duration_since(t) <= MUSIC_HOLD)
+        {
+            return;
         }
+        if on {
+            self.music = Some(audio.play_music(&m.intro, &m.loops, m.gain));
+        } else if let Some(id) = self.music.take() {
+            audio.fade_out(id, m.fade.as_secs_f32());
+        }
+        self.music_playing = on;
+        self.music_changed = Some(now);
     }
 }
 
@@ -610,17 +632,18 @@ mod tests {
             })
         };
         let mut s = MenuSounds {
-            fade: Duration::from_millis(5500),
             music: Some(Music {
                 intro: clip(100_000),
                 loops: vec![clip(100_000)],
+                gain: 0.5,
+                fade: Duration::from_secs(5),
             }),
             ..MenuSounds::default()
         };
         for c in Cue::ALL {
             s.cues[c.index()] = Some(Effect {
                 clip: clip(1000),
-                gain: 1.0,
+                gain: 0.71,
             });
         }
         s
@@ -641,38 +664,83 @@ mod tests {
     }
 
     #[test]
-    fn music_starts_fades_comes_back_and_stops_for_a_match() {
+    fn music_starts_and_stops_at_most_every_six_seconds_and_stops_for_a_match() {
         let (mut s, dir) = playing("music");
-        s.update(&[], true, false);
-        let id = s.music.unwrap();
-        let a = s.audio.as_ref().unwrap();
-        assert_eq!(a.gain(id), Some(MUSIC_GAIN));
-        // Cues play over it.
-        s.update(&[Cue::Cursor, Cue::Select], true, false);
-        assert_eq!(s.audio.as_ref().unwrap().voices(), 3);
-        // Off: it fades (over 5.5 s), and on again it comes back up,
-        // the same voice.
-        s.update(&[], false, false);
-        assert!(s.audio.as_ref().unwrap().gain(id).is_some());
-        s.update(&[], true, false);
-        assert_eq!(s.music, Some(id));
-        assert!(s.music_wanted);
-        // A match: it fades, cues are dropped, and the stream pauses.
-        s.update(&[], true, true);
+        let t0 = Instant::now();
+        let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        let audio = |s: &MenuSound| -> (usize, bool) {
+            let a = s.audio.as_ref().unwrap();
+            (a.voices(), a.is_paused())
+        };
+        // The first start is at once, at the music's gain.
+        s.update_at(at(0.0), &[], true, false);
+        let first = s.music.unwrap();
+        assert_eq!(s.audio.as_ref().unwrap().gain(first), Some(0.5));
+        // Cues play over it, at their tags' gains.
+        s.update_at(at(0.1), &[Cue::Cursor, Cue::Select], true, false);
+        assert_eq!(audio(&s), (3, false));
+        assert_eq!(s.audio.as_ref().unwrap().gain(first + 1), Some(0.71));
+        // Off and on again within 6 s of the start: nothing changes.
+        s.update_at(at(1.0), &[], false, false);
+        s.update_at(at(2.0), &[], true, false);
+        assert_eq!(s.music, Some(first));
+        assert_eq!(s.audio.as_ref().unwrap().gain(first), Some(0.5));
+        // Off: held until more than 6 s after the start, then it fades.
+        s.update_at(at(3.0), &[], false, false);
+        s.update_at(at(6.0), &[], false, false);
+        assert_eq!(s.music, Some(first));
+        s.update_at(at(6.5), &[], false, false);
+        assert_eq!(s.music, None);
+        assert!(s.audio.as_ref().unwrap().gain(first).is_some());
+        // On again: held until more than 6 s after the stop, then a new
+        // voice from the music's start (not the old one brought back).
+        s.update_at(at(8.0), &[], true, false);
+        s.update_at(at(12.5), &[], true, false);
+        assert_eq!(s.music, None);
+        s.update_at(at(12.75), &[], true, false);
+        let second = s.music.unwrap();
+        assert_ne!(second, first);
+        // A match: the music fades at once (no hold), and the stream
+        // pauses once it has.
+        s.update_at(at(13.0), &[], true, true);
         assert!(s.music.is_none() && s.engine);
-        s.update(&[Cue::Back], false, true);
-        let voices = s.audio.as_ref().unwrap().voices();
-        s.pause_at = Some(Instant::now());
-        s.update(&[Cue::Back], false, true);
-        assert_eq!(s.audio.as_ref().unwrap().voices(), voices);
+        assert!(!audio(&s).1);
+        s.update_at(at(13.6), &[], false, true);
         assert!(s.pause_at.is_none());
-        // After it, the music starts again when it's wanted.
-        s.update(&[], false, false);
+        assert!(audio(&s).1);
+        // Cues are dropped while it runs.
+        let voices = audio(&s).0;
+        s.update_at(at(14.0), &[Cue::Back, Cue::Select], false, true);
+        assert_eq!(audio(&s), (voices, true));
+        // After it the stream plays again, and the music starts again
+        // when it's wanted.
+        s.update_at(at(60.0), &[], false, false);
         assert!(!s.engine && s.music.is_none());
-        s.update(&[], true, false);
-        assert!(s.music.is_some_and(|m| m != id));
+        assert!(!audio(&s).1);
+        s.update_at(at(61.0), &[], true, false);
+        assert!(s.music.is_some_and(|m| m != second));
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_music_fades_over_its_tracks_fade_out() {
+        let track = |flags, fade_out, end| sound::Track {
+            flags,
+            fade_out,
+            end,
+            ..sound::Track::default()
+        };
+        let end = Some(DatumIndex(7));
+        let fade = sound::TRACK_FADE_OUT_AT_STOP;
+        assert_eq!(fade_of(&track(fade, 5.0, None)), Duration::from_secs(5));
+        assert_eq!(fade_of(&track(fade, 2.5, end)), Duration::from_millis(2500));
+        // No end sound to play instead: it fades too.
+        assert_eq!(fade_of(&track(0, 3.0, None)), Duration::from_secs(3));
+        // An end sound (we don't play it), or no fade-out given: ours.
+        assert_eq!(fade_of(&track(0, 3.0, end)), MUSIC_FADE);
+        assert_eq!(fade_of(&track(fade, 0.0, None)), MUSIC_FADE);
+        assert_eq!(fade_of(&track(fade, f32::NAN, None)), MUSIC_FADE);
     }
 
     /// The real sounds, from the mainmenu.map in `H2_MAPS` (Halo 2
@@ -710,11 +778,14 @@ mod tests {
             );
         }
         assert!(s.cue(Cue::Notify).is_some());
+        assert!(s.cue(Cue::Transport).is_some());
         let m = s.music.as_ref().expect("music");
         let (ch, rate) = (m.intro.channels, m.intro.rate);
         println!("music: peak {}, {ch} ch at {rate}", peak(&m.intro));
         assert!(m.intro.duration() > 1.0);
         assert!(!m.loops.is_empty() && m.loops.iter().all(|l| l.duration() > 1.0));
-        assert_eq!(s.fade, Duration::from_millis(5500));
+        // Its track's -6 dB and 5 s fade-out.
+        assert!((m.gain - 0.5).abs() < 0.01, "{}", m.gain);
+        assert_eq!(m.fade, Duration::from_secs(5));
     }
 }

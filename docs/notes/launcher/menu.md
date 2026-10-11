@@ -450,9 +450,18 @@ What Halo 2 does (H):
 | message or invite arrives | `receive_message` |
 | lobby countdown, each of 3, 2, 1, 0 | `countdown_for_respawn` |
 | a key on the on-screen keyboard | `virtual_keyboard_click` |
+| the start screen goes on to the main menu | `transport` (0x22f28c) |
 
 **The music** is `sound\ui\main_menu_music\main_menu_music`: an `in` track,
-then a `loop`, with a 5.5 s fade.
+then a `loop`, at its track's gain (-6 dB in Vista's).
+
+- It starts or stops at most once every 6 s (0x235b9c); a change asked
+  for sooner waits. Each start is a new looping sound, from `in` again.
+- Stopped, it fades out over its track's own fade-out (5.0 s in Vista's,
+  the track's fade-at-stop flag set; no fade-in).
+- The globals' 5500 ms at 0x1C0 is not a fade: it is how long before the
+  idle attract movie the music is stopped (the decompilation's "silence
+  time", 0x223976).
 
 - It is switched on at the start screen and the main menu.
 - It is switched off on the XBOX LIVE screen, the System Link browser and
@@ -1003,15 +1012,18 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   `forward1` again, 10 `countdown_for_respawn` (under
   `sound\game_sfx\multiplayer`), 11 none and 12 `pickup_health`.
   Accessors: `receive_message()` (8), `countdown()` (10),
-  `keyboard_click()` (7), `tab()` (9) and `login()` (5; that it is the
-  sign-in sound is our inference from its place, L).
+  `keyboard_click()` (7), `tab()` (9) and `transport()` (5: the start
+  screen going on to the main menu, H, 0x22f28c; review round 1 renamed
+  it from a guessed `login()`). The globals' 0x1C0 is `music_silence_ms`
+  (was `music_fade_ms`; section 5), and `sound::Track` now reads its
+  flags, fade-in and fade-out (0x4, 0xC, 0x10).
 - **The mixer** (`lobby/audio.rs`), copied from `h2viewer/src/audio.rs`
   without the game's voices and placing: linear resampling, looping, a
   random next loop, per-voice fades, 16 voices at most and MASTER 0.55.
-  New: a fade towards a gain (`fade_to`), so music switched back on while
-  it fades comes back up instead of starting again; `pause`, which stops
-  the cpal stream; and `Output::{Device, Null, Wav}`. cpal (0.16, as
-  h2viewer) is new in h2launch.
+  New: `pause`, which stops the cpal stream, and `Output::{Device, Null,
+  Wav}`. (A fade back up, `fade_to`, went in review round 1: Halo 2
+  starts the music again from its beginning.) cpal (0.16, as h2viewer) is
+  new in h2launch.
 - **Loading** (`lobby/sound.rs`, `load`, on its own thread): the globals
   from `Menus::open`, then `MapSet::open` on the same map (with shared.map
   beside it) to decode each sound's first variation at its tag's gain.
@@ -1019,21 +1031,27 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   its loop's variations, picked at random one after another (by name if
   that fails). In the container's copy: cursor 0.36 s, select 0.20 s,
   back 0.77 s, error 0.51 s, advance 1.02 s, message 0.69 s, countdown
-  0.09 s, key click 0.17 s; the music's start 29.7 s, then loops of 56.5,
-  35.4, 75.5 and 150.0 s; the fade 5.5 s; about 1 to 1.6 s to decode.
+  0.09 s, key click 0.17 s, transport 1.39 s; the music's start 29.7 s,
+  then loops of 56.5, 35.4, 75.5 and 150.0 s, gain 0.50 and fade-out
+  5.0 s (its track's); about 1 to 1.6 s to decode.
   It never panics; failing, the menus are silent and the log says why.
-- **Gains** (estimates): menu sounds at their tag's gain times 1.6, the
-  music at 0.5 (both the from-scratch game's, `origin/menu-preview`; the
-  looping sound's -6 dB track gain isn't applied on top, as there). A
-  match's engine starting fades the music in 0.5 s (an estimate), then
-  the stream pauses.
+- **Gains**, from the tags: menu sounds at their tag's gain (-3 dB each
+  in Vista's), as Halo 2 plays them (0x236299, at a scale of 1); the
+  music at its track's gain times its start's own (-6 dB and 0 dB: 0.50).
+  Found by name, without its looping sound, the music takes 0.5 and a
+  5 s fade (estimates from Vista's track). Review round 1 dropped the
+  from-scratch game's 1.6 on the menu sounds, which put them 4 dB louder
+  against the music than the tags do. A match's engine starting fades
+  the music in 0.5 s (an estimate), then the stream pauses.
 - **`MenuSound`**, owned by the window and the headless loop: it starts
   the loader when Vista's files were found, `H2LOBBY_SOUND` isn't `off`
   and `lobby.txt`'s `menu_sound` (new in `MenuPrefs`) isn't `off`, and
   opens the output only once sounds have come: the device with a window,
   nowhere headless, a WAV with `H2LOBBY_AUDIO_WAV`. Each tick it plays
-  `App::take_cues()`, starts or fades the music by `App::music_on()`, and
-  while `App::engine_running()` drops the cues and pauses.
+  `App::take_cues()`, starts or fades the music by `App::music_on()` as
+  Halo 2 does (section 5: at most once every 6 s, each start a new voice
+  from the music's start, each stop its track's fade-out), and while
+  `App::engine_running()` fades it at once, drops the cues and pauses.
 - **App** stays free of cpal. `music_rule(screen, current)` is Halo 2's
   (section 5): on at Start and Main; off on Live (searching too), Party,
   Custom, Pregame and InGame, and whenever an engine runs; the rest keep
@@ -1049,9 +1067,26 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   own words: already a friend, already asked, asked you; ourselves only
   sounds), and no maps for a custom game. A search started and a custom
   game asked for push Advance themselves; a new invitation on show
-  pushes Notify once (`tick`). Countdown and KeyClick wait for the
-  countdown and the on-screen keyboard. The sign-in functions are
+  pushes Notify once (`tick`; one that has left the invitations list is
+  forgotten, so the same party inviting again sounds again), and so does
+  the server's notice of a friend request to us (Halo 2 sounds every
+  message, 0x2b740a). Presses that only send a request push their own
+  sound, as nothing on screen changes: the leader's B stopping a search
+  Back; make leader, party privacy, an invitation, a friend request,
+  accepting or declining one and taking ours back Select. A on the start
+  screen pushes Select then Transport. Countdown and KeyClick wait for
+  the countdown and the on-screen keyboard. The sign-in functions are
   unchanged.
+- **Select, not advance, on a screen opening.** Unlike section 5's
+  table, a screen or popup opening sounds `select` (`forward1`), not
+  `advance`. Halo 2 plays `forward1` for the A on a button and `advance`
+  as the next screen loads (0x147f6d), in the same press; whether both
+  are heard depends on 0x236299, which isn't decompiled. We follow
+  menu-preview and the plan: `select` for a new screen (with `transport`
+  too from the start screen), `advance` only for a search started or a
+  custom game asked for. Screens the server opens (the pregame lobby,
+  the carnage report) are silent here, where Halo 2 plays `advance`. To
+  be checked by ear on the owner's PC (P2).
 - **Checked in the container** (2026-10-11), headless with the uploaded
   Cartographer folder: the start screen, then the main menu, down and up
   gave a 23 s WAV with music from its first 0.05 s; a second run with no
@@ -1059,18 +1094,21 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   and two cursor sounds, each where its press was. Two lobbies through a
   custom game (ALPHA recording, the stand-in engine playing 4 s): music on
   the start screen and main menu (and the sign-in form), its fade over
-  5.5 s from the playlists, silence through the match, the select and
-  back sounds after it, and the music from its start again on the main
-  menu.
+  5.5 s from the playlists (5 s since review round 1), silence through
+  the match, the select and back sounds after it, and the music from its
+  start again on the main menu.
 
 **On the owner's PC (P2)**, with Cartographer's folder found:
 
 - `lobby.log` has `sound: from ...mainmenu.map: cursor ...; music ...;
   decoded in ... ms`, then `sound: playing to the audio device`;
 - the music plays on the start screen and the main menu, and fades over
-  about 5.5 s on the playlists;
+  about 5 s on the playlists (a change within 6 s of the last waits);
+  back on the main menu it starts again from its beginning;
 - the cursor, select and back sounds play with the pad and the keyboard
-  (and a click on a main menu row);
+  (and a click on a main menu row); A on the start screen sounds select
+  then transport; whether a screen opening should also sound `advance`;
+- a friend request to us sounds as a message;
 - silence through a match, and the music from its start again on the
   main menu after it;
 - with `H2LOBBY_VISTA=off`: silence, `sound: the menus are silent (no
@@ -1301,7 +1339,8 @@ Expected Vista values are in brackets.
   advance, back1].
 - 26 skins at 0x138, header fonts at 0x160 below 12, and the full header
   rectangle at 0x178 [567, -730, 520, 50].
-- The music at 0x1B8 [`main_menu_music`], and the fade at 0x1C0 [5500].
+- The music at 0x1B8 [`main_menu_music`], and at 0x1C0 how long before
+  the attract movie it is stopped [5500] (not a fade; section 5).
 
 **E. `wgit main_menu`.**
 

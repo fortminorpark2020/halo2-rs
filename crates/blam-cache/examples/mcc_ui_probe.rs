@@ -550,9 +550,9 @@ fn check_d(p: &mut Probe) -> Result<(), String> {
         &format!("{music:?} [main_menu_music]"),
     );
     p.check(
-        g.music_fade_ms == 5500,
-        "the music's fade at 0x1C0",
-        &format!("{} [5500]", g.music_fade_ms),
+        g.music_silence_ms == 5500,
+        "the music's silence time at 0x1C0",
+        &format!("{} [5500]", g.music_silence_ms),
     );
     Ok(())
 }
