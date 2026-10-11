@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 02:55 UTC. Any assistant that works on the project
+Last updated 2026-10-11 08:10 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -155,9 +155,18 @@ step, when the owner says so: one weapon.
   `crates/h2launch/src/gamemenu/` (plain Rust, Linux-tested; no Windows,
   wire or lobby changes yet), and its opaque panel with the players column
   in `crates/h2ui/src/gamemenu.rs` (`cargo run --release -p h2ui --example
-  gamemenu_png -- <out dir> [<h2_fonts dir>]` draws every page). Next:
-  stage 2 (the engine-side driver, the end_frame copy and the input gate in
-  `win/`, the lobby's events), then stage 3.
+  gamemenu_png -- <out dir> [<h2_fonts dir>]` draws every page). Stage 2
+  done (2026-10-11): the lobby and the engine's copy exchange the menu's
+  events (`H2EVENT left game|end`, `H2EVENT controls` with the eight
+  `lobby.txt` pairs; `PROTOCOL` and `LIVE_PROTOCOL` unchanged); the lobby
+  saves the controls through `App::set_control`, lands a player who left
+  on ONLINE (a custom game's leader on Custom) with the lobby in front,
+  and passes `--game-kind`; the stand-in engine runs the real menu from
+  `H2LOBBY_FAKE_MENU` (`crates/h2launch/tests/game_menu.rs`). New engine
+  flags `--no-game-menu`, `--reload-message`, `--end-game-message` are
+  parsed but do nothing until stage 3. Next: stage 3 (the engine-side
+  driver, the end_frame copy and the input gate in `win/`), then the PC
+  checks.
 - Milestone 1 is done (2026-10-10 02:50 UTC): `h2launch` started MCC's
   halo2.dll on the owner's PC and played offline Slayer on Lockout (HUD,
   60 fps, mouse and controller). Code is on `h2launch-m1`, then

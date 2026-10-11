@@ -15,6 +15,8 @@
 //! player's team, standing, score, kills, assists, deaths, betrayals and
 //! suicides from them), and LEFT_MATCH if the launcher closes before that.
 
+use crate::controls::{Controls, KEYS};
+use crate::gamemenu::Leave;
 use crate::session::{Player, Session};
 use h2live::client::{LiveClient, LiveEvent, Profile};
 use h2net::live::{LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer};
@@ -350,11 +352,21 @@ pub enum Engine {
     Ended(Vec<LauncherPlayerResult>),
     /// The launcher is closing.
     Closing,
+    /// The player left the game from the in-game GAME MENU (Leave Game),
+    /// or its host ended it (End Game); the engine closes next.
+    Left(Leave),
+    /// The player changed their controls in the GAME MENU: every control
+    /// as `(lobby.txt's name, value)`, in `KEYS` order, for the lobby to
+    /// save. Text, not `Controls`, as `Engine` is `Eq` and the mouse
+    /// sensitivity is an f32.
+    Controls(Vec<(String, String)>),
 }
 
 /// How an engine event is written on the standard output with
 /// `--events`, for the lobby that started this launcher: `H2EVENT running`,
-/// `maploaded`, `closing`, or `ended` and then each player as
+/// `maploaded`, `closing`, `left game`, `left end`; `controls` and then
+/// the eight controls as `key=value` in `KEYS` order (`lobby.txt`'s names
+/// and values); or `ended` and then each player as
 /// `<relay id>,<team>,<place>,<score>,<kills>,<assists>,<deaths>,<betrayals>,<suicides>,<left>`
 /// (LAUNCHER_RESULT's order).
 pub fn event_line(e: &Engine) -> String {
@@ -362,6 +374,15 @@ pub fn event_line(e: &Engine) -> String {
         Engine::Running => format!("{EVENT} running"),
         Engine::MapLoaded => format!("{EVENT} maploaded"),
         Engine::Closing => format!("{EVENT} closing"),
+        Engine::Left(Leave::Game) => format!("{EVENT} left game"),
+        Engine::Left(Leave::End) => format!("{EVENT} left end"),
+        Engine::Controls(pairs) => {
+            let mut line = format!("{EVENT} controls");
+            for (k, v) in pairs {
+                line += &format!(" {k}={v}");
+            }
+            line
+        }
         Engine::Ended(players) => {
             let mut line = format!("{EVENT} ended");
             for p in players {
@@ -389,7 +410,9 @@ pub const EVENT: &str = "H2EVENT";
 
 /// Reads a line `event_line` wrote; `None` for any other line (the log
 /// goes to the same output). The lobby and the engine's copy are the same
-/// build, so only the 10-field form is read.
+/// build, so only the 10-field form of `ended` is read, and `controls`
+/// only with all eight controls in `KEYS` order, each with a value
+/// `Controls::set` takes.
 pub fn parse_event_line(line: &str) -> Option<Engine> {
     let mut words = line.split_whitespace();
     if words.next()? != EVENT {
@@ -399,6 +422,23 @@ pub fn parse_event_line(line: &str) -> Option<Engine> {
         "running" => Engine::Running,
         "maploaded" => Engine::MapLoaded,
         "closing" => Engine::Closing,
+        "left" => match words.next()? {
+            "game" => Engine::Left(Leave::Game),
+            "end" => Engine::Left(Leave::End),
+            _ => return None,
+        },
+        "controls" => {
+            let mut check = Controls::default();
+            let mut pairs = Vec::new();
+            for key in KEYS {
+                let (k, v) = words.next()?.split_once('=')?;
+                if k != key || check.set(k, v) != Ok(true) {
+                    return None;
+                }
+                pairs.push((k.to_string(), v.to_string()));
+            }
+            Engine::Controls(pairs)
+        }
         "ended" => {
             let mut players = Vec::new();
             for w in words.by_ref() {
@@ -578,6 +618,10 @@ impl Told {
                     host_lost: false,
                 });
             }
+            // Nothing new goes to the server: a player who leaves from the
+            // game menu is told as LEFT_MATCH when the engine closes, as
+            // before, and the controls are the lobby's to save.
+            Some(Engine::Left(_) | Engine::Controls(_)) => {}
             _ => {}
         }
         if host && self.asked_to_host && self.running && !self.hosting {
@@ -598,6 +642,9 @@ fn run(mut lobby: Lobby, id: u64, host: bool, rx: Receiver<Engine>, done: Sender
             log_event(&lobby.log, &e);
             out.extend(told.next(id, host, Some(&e), None));
         }
+        // The game menu's Left and Controls change nothing here: a
+        // player who leaves is told as LEFT_MATCH when the launcher
+        // closes, and the controls were saved by the engine's copy.
         while let Ok(what) = rx.try_recv() {
             closing |= what == Engine::Closing;
             out.extend(told.next(id, host, None, Some(what)));
@@ -814,11 +861,49 @@ mod tests {
             left,
         };
         let ended = Engine::Ended(vec![player(0xB5A9, -2, false), player(0x5977, 7, true)]);
-        for e in [Engine::Running, Engine::MapLoaded, Engine::Closing, ended] {
+        let changed = Controls {
+            buttons: crate::controls::ButtonLayout::BumperJumper,
+            sticks: crate::controls::StickLayout::LegacySouthpaw,
+            look_sensitivity: 10,
+            look_inverted: true,
+            auto_center: true,
+            vibration: false,
+            mouse_sensitivity: 0.1,
+            mouse_inverted: true,
+        };
+        for e in [
+            Engine::Running,
+            Engine::MapLoaded,
+            Engine::Closing,
+            ended,
+            Engine::Left(Leave::Game),
+            Engine::Left(Leave::End),
+            Engine::Controls(Controls::default().pairs()),
+            Engine::Controls(changed.pairs()),
+        ] {
             let line = event_line(&e);
             assert!(line.starts_with("H2EVENT "), "{line}");
             assert_eq!(parse_event_line(&line), Some(e), "{line}");
         }
+        assert_eq!(event_line(&Engine::Left(Leave::Game)), "H2EVENT left game");
+        assert_eq!(event_line(&Engine::Left(Leave::End)), "H2EVENT left end");
+        assert_eq!(
+            event_line(&Engine::Controls(changed.pairs())),
+            "H2EVENT controls button_layout=bumper_jumper thumbstick_layout=legacy_southpaw \
+             look_sensitivity=10 look_inversion=on auto_look_centering=on vibration=off \
+             mouse_sensitivity=0.1 mouse_inversion=on"
+        );
+        // The pairs read back as the same controls.
+        let Some(Engine::Controls(pairs)) =
+            parse_event_line(&event_line(&Engine::Controls(changed.pairs())))
+        else {
+            panic!("no controls");
+        };
+        let mut back = Controls::default();
+        for (k, v) in &pairs {
+            assert_eq!(back.set(k, v), Ok(true), "{k}={v}");
+        }
+        assert_eq!(back, changed);
         assert_eq!(
             event_line(&Engine::Ended(vec![player(0xB5A9, -2, false)])),
             "H2EVENT ended b5a9,1,2,-2,3,5,4,6,7,0"
@@ -839,8 +924,86 @@ mod tests {
             "H2EVENT ended b5a9,1,2,-2,3,5,4,6,7,0,1",
             "H2EVENT ended zz,1,2,3,4,5,6,7,8,0",
             "H2EVENT ended b5a9,1,2,-2,3,-5,4,6,7,0",
+            // The game menu's: one word after left, of two.
+            "H2EVENT left",
+            "H2EVENT left now",
+            "H2EVENT left game now",
+            "H2EVENT left Game",
         ] {
             assert_eq!(parse_event_line(other), None, "{other:?}");
+        }
+        // Controls: exactly the eight, in KEYS order, each a value
+        // Controls::set takes.
+        let good: Vec<String> = Controls::default()
+            .pairs()
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        let line = |words: &[String]| format!("H2EVENT controls {}", words.join(" "));
+        assert!(parse_event_line(&line(&good)).is_some());
+        let mut bad: Vec<Vec<String>> = Vec::new();
+        // Too few, too many, none.
+        bad.push(good[..7].to_vec());
+        bad.push([good.clone(), vec!["vibration=on".into()]].concat());
+        bad.push(Vec::new());
+        // Out of order.
+        let mut swapped = good.clone();
+        swapped.swap(0, 1);
+        bad.push(swapped);
+        // An unknown key, a short name set takes, a word with no '='.
+        for (i, w) in [
+            (5, "rumble=on"),
+            (0, "layout=default"),
+            (3, "look_inversion"),
+            (3, "look_inversion="),
+        ] {
+            let mut b = good.clone();
+            b[i] = w.into();
+            bad.push(b);
+        }
+        // Values set refuses.
+        for (i, w) in [
+            (0, "button_layout=claw"),
+            (1, "thumbstick_layout=inverted"),
+            (2, "look_sensitivity=11"),
+            (2, "look_sensitivity=0"),
+            (3, "look_inversion=maybe"),
+            (6, "mouse_sensitivity=0"),
+            (6, "mouse_sensitivity=fast"),
+            (6, "mouse_sensitivity=NaN"),
+        ] {
+            let mut b = good.clone();
+            b[i] = w.into();
+            bad.push(b);
+        }
+        for b in bad {
+            let l = line(&b);
+            assert_eq!(parse_event_line(&l), None, "{l:?}");
+        }
+    }
+
+    #[test]
+    fn the_game_menus_events_tell_the_server_nothing_new() {
+        for host in [false, true] {
+            let mut t = Told::default();
+            t.next(7, host, Some(&LiveEvent::HostMatch(7)), None);
+            t.next(7, host, None, Some(Engine::MapLoaded));
+            for e in [
+                Engine::Left(Leave::Game),
+                Engine::Left(Leave::End),
+                Engine::Controls(Controls::default().pairs()),
+            ] {
+                assert!(t.next(7, host, None, Some(e.clone())).is_empty(), "{e:?}");
+            }
+            assert!(!t.over());
+            // The engine closing after a leave is the LEFT_MATCH.
+            assert_eq!(
+                t.next(7, host, None, Some(Engine::Closing)),
+                vec![ToServer::LeftMatch {
+                    id: 7,
+                    host_lost: false
+                }]
+            );
         }
     }
 

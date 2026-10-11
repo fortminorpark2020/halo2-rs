@@ -302,6 +302,15 @@ that are the same on every PC, so the server counts them
 (`H2LOBBY_FAKE_QUIT=1` quits halfway instead). On Linux the lobby always
 uses it; `H2LOBBY_FAKE=1` makes it do so on Windows too.
 
+`H2LOBBY_FAKE_MENU` gives the stand-in keys for the in-game GAME MENU, as
+`<seconds> <key>` separated by `;` and counted from the map loading
+(`1.0 start;1.5 a;2.0 up;2.5 a` opens the menu and leaves the game; the
+keys are `start back a b y up down left right`). It runs the real menu
+(`gamemenu::GameMenu`) for the game `--game-kind` and the session say,
+and says what the real engine's copy would: `H2EVENT controls ...` when
+a setting changes (the lobby saves it), or `H2EVENT left game` (`left
+end` for End Game) and then closes without a result.
+
 `--fake-engine`'s results are the same on every PC and plausible: player
 `i` of `n` scores `n - i`, the last one killed themselves once, each one's
 kills are their score plus their suicides, and each one's kills are the
@@ -376,6 +385,15 @@ engine and showed the carnage report with "Unranked: levels don't change",
 and ALPHA was back on the custom game screen after it. The server's side
 is also covered by `a_launcher_party_plays_custom_games` in
 `crates/h2live/src/server/tests.rs`.
+
+Leaving from the game menu the same way (2026-10-11), with
+`H2LOBBY_FAKE_MENU='1.0 start;1.5 a;2.0 up;2.5 a'` set for BRAVO's lobby
+only: when BRAVO joined, its log said `the engine says H2EVENT left
+game`, then the engine closed, the notice was "You left the game." and
+the screen went to `live`; ALPHA's game ran on, ended and counted, and
+ALPHA saw the carnage report. When BRAVO hosted, leaving ended the game
+for both: ALPHA got "THE HOST LEFT. THE GAME DIDN'T COUNT." and BRAVO's
+counted as a loss (the server's existing rules).
 
 The party screen the same way (2026-10-10), with three lobbies: ALPHA
 invited BRAVO and CHARLIE, made the party invite only, removed BRAVO (who

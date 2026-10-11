@@ -3,12 +3,28 @@
 //! standard output says what the engine does. A line `quit` on its
 //! standard input closes the engine as closing its window would, and so
 //! does that input closing (the lobby is gone).
+//!
 //! `--fake-engine` stands in for it where there is no MCC (Linux, tests).
+//! Its environment variables, for tests:
+//!
+//! - `H2LOBBY_FAKE_SECONDS`: how long the game lasts after the map loads
+//!   (default 5).
+//! - `H2LOBBY_FAKE_QUIT=1`: quit halfway instead of finishing.
+//! - `H2LOBBY_FAKE_MENU`: keys for the in-game GAME MENU (the real
+//!   `gamemenu::GameMenu`, for the game `--game-kind` and the session
+//!   say), as `<seconds> <key>` separated by `;`, the seconds counted from
+//!   the map loading: `1.0 start;1.5 a;2.0 up;2.5 a` opens the menu and
+//!   leaves the game. The keys are `start back a b y up down left right`;
+//!   `start` opens a closed menu. A change of controls is said as the
+//!   real engine says it (`H2EVENT controls ...`), and leaving says
+//!   `H2EVENT left game` (or `left end`) and closes without `ended`.
 
 use crate::controls::Controls;
+use crate::gamemenu::{self, Effect, GameKind, GameMenu, Key, Leave, MenuContext};
 use crate::live::{self, Engine};
 use crate::session::Session;
-use h2net::live::LauncherPlayerResult;
+use h2net::live::{LauncherMatch, LauncherPlayerResult, CUSTOM_GAME};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -47,6 +63,20 @@ pub struct Match {
     pub instance: Option<String>,
     /// The player's controls (the lobby's Settings).
     pub controls: Controls,
+    /// What kind of game it is, for the engine's GAME MENU.
+    pub game_kind: GameKind,
+}
+
+/// The kind of game a match is, for the engine's GAME MENU: a ranked
+/// playlist's, a custom game, or else a social playlist's.
+pub fn game_kind(m: &LauncherMatch) -> GameKind {
+    if m.ranked {
+        GameKind::Ranked
+    } else if m.playlist == CUSTOM_GAME {
+        GameKind::Custom
+    } else {
+        GameKind::Social
+    }
 }
 
 impl Match {
@@ -69,6 +99,8 @@ impl Match {
             "--name".into(),
             self.gamertag.clone(),
             "--events".into(),
+            "--game-kind".into(),
+            self.game_kind.key().into(),
         ]);
         a.extend(self.controls.args());
         if let Some(i) = &self.instance {
@@ -308,9 +340,59 @@ pub fn fake_results(s: &Session) -> Vec<LauncherPlayerResult> {
         .collect()
 }
 
+/// The keys `H2LOBBY_FAKE_MENU` gives, in time order: `<seconds> <key>`
+/// separated by `;` (see the module's docs).
+pub fn fake_menu_keys(text: &str) -> Result<Vec<(f64, Key)>, String> {
+    let mut keys = Vec::new();
+    for part in text.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let bad = || format!("H2LOBBY_FAKE_MENU: {part:?} should look like '1.5 a'");
+        let (t, k) = part.split_once(char::is_whitespace).ok_or_else(bad)?;
+        let t: f64 = t.trim().parse().map_err(|_| bad())?;
+        if !t.is_finite() || t < 0.0 {
+            return Err(bad());
+        }
+        let key = match k.trim().to_ascii_lowercase().as_str() {
+            "start" => Key::Start,
+            "back" => Key::Back,
+            "a" => Key::A,
+            "b" => Key::B,
+            "y" => Key::Y,
+            "up" => Key::Up,
+            "down" => Key::Down,
+            "left" => Key::Left,
+            "right" => Key::Right,
+            _ => return Err(bad()),
+        };
+        keys.push((t, key));
+    }
+    keys.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Ok(keys)
+}
+
+/// Whether the session's game has teams, as far as it says: two players
+/// on one team. (A free-for-all session gives everyone a team of their
+/// own; a team game of one player a team looks the same, and its players
+/// column then has no team colours. The real engine reads the variant.)
+fn session_has_teams(s: &Session) -> bool {
+    s.players
+        .iter()
+        .enumerate()
+        .any(|(i, p)| s.players[..i].iter().any(|q| q.team == p.team))
+}
+
+/// How the stand-in's game ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Played {
+    /// It ran its length: the game ends with results.
+    Finished,
+    /// The lobby said `quit` (or went away), or `H2LOBBY_FAKE_QUIT`.
+    Quit,
+    /// The player left (or ended the game) from the GAME MENU.
+    Left(Leave),
+}
+
 /// `--fake-engine`: say what an engine playing the session would, without
-/// one. `H2LOBBY_FAKE_SECONDS` sets how long the game lasts (5 s), and
-/// `H2LOBBY_FAKE_QUIT=1` quits it halfway instead of finishing.
+/// one. See the module's docs for its environment variables.
 pub fn run_fake(raw: &[String]) -> i32 {
     let args = match crate::cli::parse(raw.iter().cloned()) {
         Ok(a) => a,
@@ -345,6 +427,27 @@ pub fn run_fake(raw: &[String]) -> i32 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5.0);
     let quit = std::env::var_os("H2LOBBY_FAKE_QUIT").is_some();
+    let mut keys: VecDeque<(f64, Key)> =
+        match fake_menu_keys(&std::env::var("H2LOBBY_FAKE_MENU").unwrap_or_default()) {
+            Ok(k) => k.into(),
+            Err(e) => {
+                eprintln!("h2launch --fake-engine: {e}");
+                return 2;
+            }
+        };
+    // The GAME MENU as the real engine's copy has it: the game's kind,
+    // whether this PC hosts, the controls it was started with (the
+    // lobby passes all of them; over the defaults here, as lobby.txt's
+    // would be in the real engine), and the players.
+    let ctx = MenuContext {
+        kind: args.game_kind,
+        host: session.is_host(me),
+        launch: args.controls.over(Controls::default()),
+        rereads_profile: false,
+        rereads_mapping: false,
+        players: gamemenu::roster(&session, me, session_has_teams(&session)),
+    };
+    let mut menu = GameMenu::new(ctx.launch);
     // The lobby's `quit` (the player left), or the lobby gone.
     let left = Arc::new(AtomicBool::new(false));
     let flag = left.clone();
@@ -374,33 +477,91 @@ pub fn run_fake(raw: &[String]) -> i32 {
         "fake engine: {} on {} as machine {me} ({})",
         args.variant.as_deref().unwrap_or("?"),
         args.map.as_deref().unwrap_or("?"),
-        if session.is_host(me) {
-            "hosting"
-        } else {
-            "joining"
-        }
+        if ctx.host { "hosting" } else { "joining" }
     );
-    let played = wait(0.5)
-        && {
-            live::tell(Engine::Running);
-            wait(0.5)
-        }
-        && {
-            live::tell(Engine::MapLoaded);
-            if quit {
-                wait(seconds / 2.0);
-                false
-            } else {
-                wait(seconds)
+    println!(
+        "fake engine: a {} game's GAME MENU, {} players, {} menu keys",
+        ctx.kind.key(),
+        ctx.players.len(),
+        keys.len()
+    );
+    let started = wait(0.5) && {
+        live::tell(Engine::Running);
+        wait(0.5)
+    };
+    if started {
+        live::tell(Engine::MapLoaded);
+        let loaded = Instant::now();
+        let length = if quit { seconds / 2.0 } else { seconds };
+        let played = loop {
+            if left.load(Ordering::SeqCst) {
+                menu.quitting();
+                break Played::Quit;
             }
+            let t = loaded.elapsed().as_secs_f64();
+            let mut leave = None;
+            while keys.front().is_some_and(|&(at, _)| at <= t) {
+                let Some((_, key)) = keys.pop_front() else {
+                    break;
+                };
+                let effects = if key == Key::Start && !menu.is_open() {
+                    menu.open()
+                } else {
+                    menu.press(key, false, &ctx)
+                };
+                for e in effects {
+                    leave = leave.or(fake_effect(e));
+                }
+                if leave.is_some() {
+                    break;
+                }
+            }
+            if let Some(k) = leave {
+                break Played::Left(k);
+            }
+            if t >= length {
+                break if quit { Played::Quit } else { Played::Finished };
+            }
+            std::thread::sleep(Duration::from_millis(20));
         };
-    if played {
-        live::tell(Engine::Ended(fake_results(&session)));
-        // The engine's postgame, before it closes.
-        wait(1.0);
+        if played == Played::Finished {
+            // The game's end closes the menu, as the real one does.
+            for e in menu.game_over() {
+                fake_effect(e);
+            }
+            live::tell(Engine::Ended(fake_results(&session)));
+            // The engine's postgame, before it closes.
+            wait(1.0);
+        }
     }
     live::close();
     0
+}
+
+/// What the stand-in does with a GAME MENU effect, as the real engine's
+/// copy would tell the lobby: the controls changed, or the player left
+/// (returned).
+fn fake_effect(e: Effect) -> Option<Leave> {
+    match e {
+        Effect::Opened => println!("fake engine: the game menu opened"),
+        Effect::Closed => println!("fake engine: the game menu closed"),
+        Effect::Controls(c) => {
+            println!("fake engine: controls: {}", c.describe());
+            live::tell(Engine::Controls(c.pairs()));
+        }
+        Effect::Leave(k) => {
+            println!(
+                "fake engine: {} from the game menu",
+                match k {
+                    Leave::Game => "left the game",
+                    Leave::End => "ended the game for everyone",
+                }
+            );
+            live::tell(Engine::Left(k));
+            return Some(k);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -516,6 +677,7 @@ mod tests {
                 mouse_sensitivity: 2.2,
                 mouse_inverted: true,
             },
+            game_kind: GameKind::Ranked,
         };
         let a = m.args(Path::new("s.txt"));
         let parsed = crate::cli::parse(a.iter().cloned()).unwrap();
@@ -527,6 +689,7 @@ mod tests {
         assert_eq!(parsed.instance.as_deref(), Some("la"));
         assert_eq!(parsed.mcc.as_deref(), Some(r"D:\MCC"));
         assert!(parsed.events && !parsed.fake_engine);
+        assert_eq!(parsed.game_kind, GameKind::Ranked);
         // The controls, whatever lobby.txt says where it starts.
         assert_eq!(parsed.controls.over(Controls::default()), m.controls);
         let all_on = Controls {
@@ -537,11 +700,77 @@ mod tests {
             ..Controls::default()
         };
         assert_eq!(parsed.controls.over(all_on), m.controls);
-        let fake = Match {
+        let mut fake = Match {
             kind: Kind::Fake,
             ..m
         };
         let parsed = crate::cli::parse(fake.args(Path::new("s.txt"))).unwrap();
         assert!(parsed.fake_engine && parsed.mcc.is_none());
+        // Every kind goes through.
+        for k in GameKind::ALL {
+            let m = Match {
+                game_kind: k,
+                ..fake
+            };
+            let parsed = crate::cli::parse(m.args(Path::new("s.txt"))).unwrap();
+            assert_eq!(parsed.game_kind, k);
+            fake = m;
+        }
+    }
+
+    #[test]
+    fn a_matchs_kind_for_the_game_menu() {
+        let m = |playlist: u8, ranked: bool| LauncherMatch {
+            id: 1,
+            playlist,
+            ranked,
+            teams: false,
+            map: "lockout".into(),
+            variant: "01_slayer".into(),
+            relay: h2net::live::RelaySeat {
+                port: 47050,
+                room: 1,
+                id: 1,
+                key: [0; 16],
+            },
+            host: 1,
+            countdown: 20,
+            players: Vec::new(),
+        };
+        assert_eq!(game_kind(&m(11, true)), GameKind::Ranked);
+        assert_eq!(game_kind(&m(12, false)), GameKind::Social);
+        assert_eq!(game_kind(&m(CUSTOM_GAME, false)), GameKind::Custom);
+    }
+
+    #[test]
+    fn the_fake_engines_menu_keys() {
+        let k = fake_menu_keys("1.0 start;1.5 a; 2.0 UP ;2.5 a;").unwrap();
+        assert_eq!(
+            k,
+            [
+                (1.0, Key::Start),
+                (1.5, Key::A),
+                (2.0, Key::Up),
+                (2.5, Key::A)
+            ]
+        );
+        // In time order, every key.
+        let k = fake_menu_keys("2 back;0.5 b;1 y;0 down;3 left;3 right").unwrap();
+        let keys: Vec<Key> = k.iter().map(|&(_, k)| k).collect();
+        assert_eq!(
+            keys,
+            [Key::Down, Key::B, Key::Y, Key::Back, Key::Left, Key::Right]
+        );
+        assert!(fake_menu_keys("").unwrap().is_empty());
+        for bad in ["start", "1.0", "x a", "-1 a", "1 x", "inf a", "1;a"] {
+            assert!(fake_menu_keys(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_fake_engine_finds_teams_in_the_session() {
+        assert!(!session_has_teams(&session(&[0, 1, 2])));
+        assert!(session_has_teams(&session(&[1, 0, 1, 0])));
+        assert!(!session_has_teams(&session(&[0])));
     }
 }

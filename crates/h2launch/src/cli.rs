@@ -1,6 +1,7 @@
 //! Command-line flags. Every flag takes `--flag value` or `--flag=value`.
 
 use crate::controls::{ButtonLayout, ControlFlags, PadMap, StickLayout};
+use crate::gamemenu::GameKind;
 use crate::net::{RecvPort, SelfSend, SendReturn};
 use crate::options::RawWrite;
 
@@ -87,6 +88,10 @@ Usage: h2launch [flags]
   --fake-engine           With --session: stand in for the engine and end
                           the game after a few seconds with made-up results
                           (for testing the lobby without MCC).
+  --game-kind <kind>      What kind of game this is, for the in-game GAME
+                          MENU: offline, ranked, social or custom (default
+                          offline, or social with --session). The lobby
+                          passes it.
   --live-wait <seconds>   How long to search before giving up (default 600).
   --relay-wait <seconds>  How long to wait for the relay to take us in before
                           the engine starts (default 15).
@@ -190,6 +195,17 @@ pub struct Args {
     pub events: bool,
     /// `--fake-engine`.
     pub fake_engine: bool,
+    /// `--game-kind`: what kind of game the GAME MENU is over (offline
+    /// without `--session`, social with one, unless given).
+    pub game_kind: GameKind,
+    /// `--no-game-menu` clears it: Start and Esc then reach the engine.
+    pub game_menu: bool,
+    /// `--reload-message N`: the engine message posted after the GAME
+    /// MENU changes a setting the engine reads at load (an experiment).
+    pub reload_message: Option<u32>,
+    /// `--end-game-message N`: the engine message End Game posts before
+    /// quitting (an experiment, offline only).
+    pub end_game_message: Option<u32>,
     pub relay_wait: f64,
     pub recv_port: RecvPort,
     pub send_return: SendReturn,
@@ -239,6 +255,10 @@ impl Default for Args {
             offline: false,
             events: false,
             fake_engine: false,
+            game_kind: GameKind::Offline,
+            game_menu: true,
+            reload_message: None,
+            end_game_message: None,
             relay_wait: 15.0,
             recv_port: RecvPort::Auto,
             send_return: SendReturn::Len,
@@ -281,6 +301,13 @@ fn slot_value(flag: &str, v: &str, slots: usize) -> Result<(usize, u64), String>
     Ok((n as usize, val))
 }
 
+/// An engine message id.
+fn message(flag: &str, v: &str) -> Result<u32, String> {
+    crate::util::parse_u64(v.trim())
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| format!("{flag}: {v:?} is not a message number"))
+}
+
 /// Parses the arguments after the program name.
 pub fn parse<I, S>(args: I) -> Result<Args, String>
 where
@@ -288,6 +315,7 @@ where
     S: AsRef<str>,
 {
     let mut a = Args::default();
+    let mut game_kind = None;
     let list: Vec<String> = args.into_iter().map(|s| s.as_ref().to_string()).collect();
     let mut i = 0;
     while i < list.len() {
@@ -324,6 +352,17 @@ where
             "--offline" => switch(&mut a, |a| a.offline = true)?,
             "--events" => switch(&mut a, |a| a.events = true)?,
             "--fake-engine" => switch(&mut a, |a| a.fake_engine = true)?,
+            "--no-game-menu" => switch(&mut a, |a| a.game_menu = false)?,
+            "--game-kind" => {
+                let v = value()?;
+                game_kind = Some(GameKind::from_key(&v).ok_or_else(|| {
+                    format!("--game-kind: {v:?} should be offline, ranked, social or custom")
+                })?);
+            }
+            "--reload-message" => a.reload_message = Some(message("--reload-message", &value()?)?),
+            "--end-game-message" => {
+                a.end_game_message = Some(message("--end-game-message", &value()?)?);
+            }
             "--groundhog" => switch(&mut a, |a| a.groundhog = true)?,
             "--attach-input" => switch(&mut a, |a| a.attach_input = true)?,
             "--no-attach-input" => switch(&mut a, |a| a.attach_input = false)?,
@@ -518,6 +557,11 @@ where
     if a.offline && (a.lobby || a.live.is_some() || a.session.is_some()) {
         return Err("--offline can't go with --lobby, --live or --session".into());
     }
+    a.game_kind = game_kind.unwrap_or(if a.session.is_some() {
+        GameKind::Social
+    } else {
+        GameKind::Offline
+    });
     Ok(a)
 }
 
@@ -581,6 +625,53 @@ mod tests {
         assert!(!a.name_set);
         assert_eq!(a.relay_wait, 15.0);
         assert_eq!(a.recv_port, RecvPort::Auto);
+        assert_eq!(a.game_kind, GameKind::Offline);
+        assert!(a.game_menu);
+        assert_eq!((a.reload_message, a.end_game_message), (None, None));
+    }
+
+    #[test]
+    fn game_menu_flags() {
+        // The kind: as given, else offline, or social with a session.
+        for k in GameKind::ALL {
+            let a = parse(["--game-kind", k.key()]).unwrap();
+            assert_eq!(a.game_kind, k);
+            let a = parse(["--session", "m.txt", &format!("--game-kind={}", k.key())]).unwrap();
+            assert_eq!(a.game_kind, k);
+        }
+        assert_eq!(parse(["--offline"]).unwrap().game_kind, GameKind::Offline);
+        assert_eq!(
+            parse(["--session", "m.txt"]).unwrap().game_kind,
+            GameKind::Social
+        );
+        assert_eq!(
+            parse(["--game-kind", "Custom", "--session", "m.txt"])
+                .unwrap()
+                .game_kind,
+            GameKind::Custom
+        );
+        let a = parse([
+            "--no-game-menu",
+            "--reload-message",
+            "5",
+            "--end-game-message=0x10",
+        ])
+        .unwrap();
+        assert!(!a.game_menu);
+        assert_eq!(a.reload_message, Some(5));
+        assert_eq!(a.end_game_message, Some(16));
+        for bad in [
+            vec!["--game-kind"],
+            vec!["--game-kind", "campaign"],
+            vec!["--game-kind", ""],
+            vec!["--no-game-menu=yes"],
+            vec!["--reload-message"],
+            vec!["--reload-message", "five"],
+            vec!["--reload-message", "-1"],
+            vec!["--end-game-message", "0x100000000"],
+        ] {
+            assert!(parse(&bad).is_err(), "{bad:?} should fail");
+        }
     }
 
     #[test]
