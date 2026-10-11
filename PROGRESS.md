@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 02:50 UTC. Any assistant that works on the project
+Last updated 2026-10-11 02:55 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -84,7 +84,7 @@ go/no-go; if it fails they are the fallback, and their state is exact:
 - Hold the Proxmox server's update to `PROTOCOL` 27 until the launcher's
   client protocol is settled.
 
-## Resume here (2026-10-11 02:50 UTC)
+## Resume here (2026-10-11 02:55 UTC)
 
 The owner's MVP (2026-10-10 21:56): matchmaking with the 1-50 levels,
 custom games, a main menu like the original Xbox Halo 2's, and a build
@@ -98,23 +98,28 @@ Proxmox server runs), `launcher-controls` (#6, the controller fix, head
 320dd85), `launcher-menu` (#7, the menus, with phase 1 since 2026-10-11 02:50).
 `launcher-menu-phase1-wip` is an older snapshot of phase 1 and can go.
 
+Done 2026-10-11: menu phase 1 (the lobby opens on the start screen, then a
+main menu with XBOX LIVE and SETTINGS; B goes back; no sign-in until XBOX
+LIVE is picked) and the lobby window's redraw fix (326a5bf: 30 frames a
+second instead of non-stop; on the owner's PC 99% of a core before, 10% on
+the menus and 4% during a game after, engine still 60 fps). Both are tested
+on the owner's PC through h2.mohnjorrow.com and are in the desktop build
+(`C:\Games\Halo 2 Live`, shortcut "Halo 2 Live", which stays on
+192.168.8.102) and the friends' zip (`C:\Games\H2-Live-friends.zip`,
+launcher only, defaults to h2.mohnjorrow.com). Test accounts FRIENDTEST and
+MENUTEST stay on the server. Not yet seen: the owner pressing the pad in the
+real window.
+
 Next, in order:
-1. Menu phase 1 is on `launcher-menu` (the lobby opens on the start screen,
-   then a main menu with XBOX LIVE and SETTINGS; B goes back; no sign-in
-   until XBOX LIVE is picked), reviewed and fixed. Plan:
-   `docs/notes/launcher/menu.md`, Phase 1.
-2. On the owner's PC: the new menus with MCC's art and the pad, then
-   refresh the desktop build (`C:\Games\Halo 2 Live`, shortcut "Halo 2
-   Live", which stays on 192.168.8.102) and the friends' zip
-   (`C:\Games\H2-Live-friends.zip`, launcher only, defaults to
-   h2.mohnjorrow.com; test account FRIENDTEST on the server).
-3. Friends: the owner sends their public IPs; add each to the allowlist
+1. Menu phase 2, the Xbox Live screens in Halo 2's style
+   (`docs/notes/launcher/menu.md`, Phase 2), on a branch stacked on
+   `launcher-menu`.
+2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.
-4. A real game with kills, to confirm the kills offsets and set
+3. A real game with kills, to confirm the kills offsets and set
    `COUNTS_SEEN` (`crates/h2launch/src/results.rs`).
-5. Menu phase 2 (the Xbox Live screens in Halo 2's style), then merge the
-   PR stack into `main`.
+4. Merge the PR stack into `main`.
 
 The server for friends: h2.mohnjorrow.com is an A record to the owner's
 public IP in Cloudflare, DNS only (the proxy would break UDP). The router
