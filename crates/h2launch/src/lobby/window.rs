@@ -39,6 +39,9 @@ struct Shell {
     focused: bool,
     mouse: (f32, f32),
     error: Option<String>,
+    /// When the next frame is drawn. A redraw wakes the loop again at once,
+    /// so asking for one on every wake would draw as fast as the CPU goes.
+    next_frame: Instant,
 }
 
 /// Open the window and run the lobby until it closes.
@@ -63,6 +66,7 @@ pub fn run(app: App, text: Text) -> Result<(), String> {
         focused: true,
         mouse: (0.0, 0.0),
         error: None,
+        next_frame: Instant::now(),
     };
     event_loop.run_app(&mut shell).map_err(|e| e.to_string())?;
     shell.app.shutdown();
@@ -175,6 +179,7 @@ impl ApplicationHandler for Shell {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                self.next_frame = Instant::now();
                 let i = match &event.logical_key {
                     Key::Named(NamedKey::Enter) => Some(Input::A),
                     Key::Named(NamedKey::Escape) => Some(Input::B),
@@ -207,7 +212,10 @@ impl ApplicationHandler for Shell {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.app.click(self.mouse.0, self.mouse.1),
+            } => {
+                self.next_frame = Instant::now();
+                self.app.click(self.mouse.0, self.mouse.1);
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let up = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y > 0.0,
@@ -221,19 +229,35 @@ impl ApplicationHandler for Shell {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.pads();
-        self.app.tick(Instant::now());
+        let now = Instant::now();
+        self.app.tick(now);
         if self.app.quitting() {
             el.exit();
             return;
         }
+        let (draw, next) = next_wake(now, self.next_frame);
+        self.next_frame = next;
         if let Some(w) = &self.window {
             if self.app.take_focus() {
                 w.focus_window();
                 w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
             }
-            w.request_redraw();
+            if draw {
+                w.request_redraw();
+            }
         }
-        el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME));
+        el.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+    }
+}
+
+/// Whether to draw at `now`, with the next frame due at `next`, and when
+/// the frame after is due: one frame each `FRAME`, and none in between
+/// however often the loop wakes (a redraw, the mouse moving, a pad).
+fn next_wake(now: Instant, next: Instant) -> (bool, Instant) {
+    if now >= next {
+        (true, now + FRAME)
+    } else {
+        (false, next)
     }
 }
 
@@ -261,6 +285,23 @@ fn stick_way(x: f32, y: f32) -> Option<Input> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frames_come_once_each_frame_however_often_the_loop_wakes() {
+        let t = Instant::now();
+        let (draw, next) = next_wake(t, t);
+        assert!(draw);
+        assert_eq!(next, t + FRAME);
+        // The redraw wakes the loop again straight away: no second frame.
+        for ms in [0, 1, 10, 32] {
+            assert_eq!(
+                next_wake(t + Duration::from_millis(ms), next),
+                (false, next)
+            );
+        }
+        let later = t + FRAME;
+        assert_eq!(next_wake(later, next), (true, later + FRAME));
+    }
 
     #[test]
     fn a_diagonal_push_moves_one_way() {
