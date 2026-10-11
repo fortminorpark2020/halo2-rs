@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 23:30 UTC. Any assistant that works on the project
+Last updated 2026-10-11 02:55 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -83,6 +83,69 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   `camera_field_of_view`, the one that falls back to 70 degrees).
 - Hold the Proxmox server's update to `PROTOCOL` 27 until the launcher's
   client protocol is settled.
+
+## Resume here (2026-10-11 02:55 UTC)
+
+The owner's MVP (2026-10-10 21:56): matchmaking with the 1-50 levels,
+custom games, a main menu like the original Xbox Halo 2's, and a build
+friends can install to matchmake together. No campaign. Controller only,
+Default and Bumper Jumper layouts only (keyboard, mouse and the other
+layouts after the MVP). Every task should serve the MVP.
+
+Branches, each a draft PR on the one before (all pushed, CI green):
+`launcher-lobby` (#4), `launcher-friends` (#5, live protocol 3, what the
+Proxmox server runs), `launcher-controls` (#6, the controller fix, head
+320dd85), `launcher-menu` (#7, the menus, with phase 1 since 2026-10-11 02:50).
+`launcher-menu-phase1-wip` is an older snapshot of phase 1 and can go.
+
+Done 2026-10-11: menu phase 1 (the lobby opens on the start screen, then a
+main menu with ONLINE and SETTINGS; B goes back; no sign-in until ONLINE
+is picked) and the lobby window's redraw fix (326a5bf: 30 frames a
+second instead of non-stop; on the owner's PC 99% of a core before, 10% on
+the menus and 4% during a game after, engine still 60 fps). Both are tested
+on the owner's PC through h2.mohnjorrow.com and are in the desktop build
+(`C:\Games\Halo 2 Live`, shortcut "Halo 2 Live", which stays on
+192.168.8.102) and the friends' zip (`C:\Games\H2-Live-friends.zip`,
+launcher only, defaults to h2.mohnjorrow.com). Test accounts FRIENDTEST and
+MENUTEST stay on the server. Not yet seen: the owner pressing the pad in the
+real window.
+
+Next, in order:
+1. Menu phase 2, the Xbox Live screens in Halo 2's style
+   (`docs/notes/launcher/menu.md`, Phase 2), on a branch stacked on
+   `launcher-menu`.
+2. Friends: the owner sends their public IPs; add each to the allowlist
+   (below) and play a two-PC match with a friend through
+   h2.mohnjorrow.com, the first test of the relay from outside.
+3. A real game with kills, to confirm the kills offsets and set
+   `COUNTS_SEEN` (`crates/h2launch/src/results.rs`).
+4. Merge the PR stack into `main`.
+
+The server for friends: h2.mohnjorrow.com is an A record to the owner's
+public IP in Cloudflare, DNS only (the proxy would break UDP). The router
+forwards TCP and UDP 47050 to 192.168.8.102. Container 102 drops port
+47050 except from an allowlist: nftables, `/etc/h2live-allow.nft`, table
+`inet h2live_allow`, set `allow_v4` (localhost, 192.168.8.0/24 and the
+owner's public IP), included from `/etc/nftables.conf` (backups end in
+`.pre-h2live-allow`). To add a friend, add the address to the set and run
+`nft -f /etc/h2live-allow.nft`; to undo it all, `nft delete table inet
+h2live_allow` and remove the include line. Server changes go through the
+owner's PC (Remote Control) and need the owner's go-ahead typed in the
+thread, naming the action.
+
+On the owner's PC only (it can't push): the parked kills and streaks test
+player is on `hunt-wip` (6822f71) in `C:\h2work\hunt`, notes in
+`HUNT-NOTES.md`; kills, deaths and streaks are confirmed there, betrayals,
+assists and the team offset aren't. The PC's own log of the day is
+`reports\2026-10-10_mcc-pivot_pc-work-log.md` in the Cartographer folder.
+
+After the MVP: clans, keyboard and mouse, the other layouts, and the
+owner's idea (2026-10-11) of Halo 2 Anniversary weapon and Spartan models
+in classic multiplayer. There's no switch for that: MCC's remastered look
+is campaign only and the Anniversary multiplayer is a Halo 4-based engine,
+so it means converting those models into classic tags on each player's PC
+(official mod tools), keeping the classic skeletons and collision. First
+step, when the owner says so: one weapon.
 
 ## In progress
 
@@ -198,6 +261,22 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   matches with Default and Bumper Jumper, the lobby's choice carries into
   a lobby match, and his desktop build has it. The owner scoped the MVP to
   the controller with those two layouts (keyboard and mouse later).
+- The original Xbox menus for the launcher are on `launcher-menu` (plan:
+  `docs/notes/launcher/menu.md`). Phase 0 is built there: `blam_cache::ui`
+  reads the UI tags of MCC's and Vista's `mainmenu.map` (`Menus::open`),
+  `blam_cache::mcc` reads the format-13 pieces they need
+  (`docs/notes/launcher/mcc-maps.md`), and the new `crates/h2ui` draws the
+  start screen and main menu as draw lists on the CPU. On the owner's PC
+  (2026-10-11) MCC's mainmenu.map read in full (every screen the same as
+  Vista's, all 16 pictures, the fonts from `halo2\h2_fonts`), and the
+  pictures came out right: 5.3 ms a frame for the main menu at 1080p on
+  the CPU, the background 20 ms once (results in menu.md 9.2). Phase 1 is
+  built there too (2026-10-11): the lobby opens on Halo 2's start screen,
+  then the main menu (ONLINE, SETTINGS), drawn by `h2ui` from MCC's
+  mainmenu.map, and signs in only when ONLINE is picked ("What Phase 1
+  built" in menu.md). Next: the owner runs it at 1080p and reads the
+  `menus:` frame-time lines in `lobby.log`; over 16 ms a frame moves the
+  D3D11 backend into phase 2.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.

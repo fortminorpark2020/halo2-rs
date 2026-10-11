@@ -131,11 +131,13 @@ fn icons(images: Vec<Image>, tag: &str) -> Result<Vec<Icon>, String> {
         .collect()
 }
 
-/// The maps to try, in order, or None when `H2LOBBY_RANKS` is `off`.
-/// With `env` set: only that (a folder means its mainmenu.map). Without:
-/// MCC's mainmenu.map (`mcc_maps`, its `halo2\h2_maps_win64_dx11`), each
-/// of MAP_DIRS' mainmenu.map, then `maps\mainmenu.map` beside the
-/// launcher (`exe_dir`). An empty `env` counts as unset.
+/// The maps to try, in order, or None when `env` (the variable the caller
+/// read: `H2LOBBY_RANKS` for the rank icons, `H2LOBBY_MENU` for the start
+/// screen and main menu) is `off`. With `env` set: only that (a folder
+/// means its mainmenu.map). Without: MCC's mainmenu.map (`mcc_maps`, its
+/// `halo2\h2_maps_win64_dx11`), each of MAP_DIRS' mainmenu.map, then
+/// `maps\mainmenu.map` beside the launcher (`exe_dir`). An empty `env`
+/// counts as unset.
 pub fn candidates(
     env: Option<&OsStr>,
     mcc_maps: Option<&Path>,

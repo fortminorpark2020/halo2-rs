@@ -1084,6 +1084,7 @@ dependencies = [
  "h2live",
  "h2net",
  "h2relay",
+ "h2ui",
  "png",
  "sha2",
  "softbuffer",
@@ -1148,6 +1149,14 @@ dependencies = [
  "blam-cache",
  "glam",
  "h2sim",
+ "png",
+]
+
+[[package]]
+name = "h2ui"
+version = "0.1.0"
+dependencies = [
+ "blam-cache",
  "png",
 ]
 

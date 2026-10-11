@@ -286,21 +286,25 @@ h2launch --live 127.0.0.1 --instance b --name Bravo --pad none
 
 ## The lobby (milestone 4, being built)
 
-`h2launch` with no flags (or `--lobby`) opens a window of its own: the
-sign-in screen the first time (a gamertag and the server, h2.mohnjorrow.com
-by default, kept in `lobby.txt`), then the playlists with your level in each
+`h2launch` with no flags (or `--lobby`) opens a window of its own on Halo
+2's start screen; A (or Start) opens the main menu, with ONLINE and
+SETTINGS. ONLINE shows the sign-in screen the first time (a gamertag
+and the server, h2.mohnjorrow.com by default, kept in `lobby.txt`) and
+signs in at once after that, then the playlists with your level in each
 and the party. A searches (party leader), X lists the players online to
-invite or join, B quits. When the server makes a match the pregame lobby
-shows the map, the game and the players for five seconds, then the engine
-starts in its own window (`h2launch --session <file> --events ...`, which
-tells the lobby on its standard output what the engine does). When the game
-ends the carnage report comes up with each player's place, score, deaths
-and level, and the level change once the server has counted the game.
+invite or join, B goes back to the main menu. When the server makes a
+match the pregame lobby shows the map, the game and the players for five
+seconds, then the engine starts in its own window (`h2launch --session
+<file> --events ...`, which tells the lobby on its standard output what
+the engine does). When the game ends the carnage report comes up with
+each player's place, score, deaths and level, and the level change once
+the server has counted the game.
 Custom Game, the row after the playlists, lets the party leader pick a game
 type and a map; the server makes an unranked match of it for the party,
 with the leader hosting (LAUNCHER_CUSTOM). Settings, the row after that
-(or X on the sign-in screen), holds the controller settings ("Controls"
-below), kept in `lobby.txt` and passed to every engine the lobby starts.
+(or SETTINGS on the main menu, or X on the sign-in screen), holds the
+controller settings ("Controls" below), kept in `lobby.txt` and passed to
+every engine the lobby starts.
 The details and how to test it without MCC are in `lobby.md`.
 
 ## Controls
