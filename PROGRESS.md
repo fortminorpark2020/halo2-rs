@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 23:30 UTC. Any assistant that works on the project
+Last updated 2026-10-11 00:35 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -83,6 +83,67 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   `camera_field_of_view`, the one that falls back to 70 degrees).
 - Hold the Proxmox server's update to `PROTOCOL` 27 until the launcher's
   client protocol is settled.
+
+## Resume here (2026-10-11 00:35 UTC, paused for the owner's usage limit)
+
+The owner's MVP (2026-10-10 21:56): matchmaking with the 1-50 levels,
+custom games, a main menu like the original Xbox Halo 2's, and a build
+friends can install to matchmake together. No campaign. Controller only,
+Default and Bumper Jumper layouts only (keyboard, mouse and the other
+layouts after the MVP). Every task should serve the MVP.
+
+Branches, each a draft PR on the one before (all pushed, CI green):
+`launcher-lobby` (#4), `launcher-friends` (#5, live protocol 3, what the
+Proxmox server runs), `launcher-controls` (#6, the controller fix, head
+320dd85), `launcher-menu` (#7, the menus, head e5255b3). Phase 1 of the
+menus is on `launcher-menu-phase1-wip` (9b215d0, on e9ab389): written and
+passing the gate, but its review, fixes and checks didn't finish.
+
+Next, in order:
+1. Menu phase 1: review `launcher-menu-phase1-wip` (the lobby opens on the
+   start screen, then a main menu with XBOX LIVE and SETTINGS; B goes back;
+   no sign-in until XBOX LIVE is picked), merge `launcher-menu` into it
+   (the Dockerfile fix), fix what the review finds, run headless shots
+   through the whole flow, and commit it to `launcher-menu`. Plan:
+   `docs/notes/launcher/menu.md`, Phase 1.
+2. On the owner's PC: the new menus with MCC's art and the pad, then
+   refresh the desktop build (`C:\Games\Halo 2 Live`, shortcut "Halo 2
+   Live", which stays on 192.168.8.102) and the friends' zip
+   (`C:\Games\H2-Live-friends.zip`, launcher only, defaults to
+   h2.mohnjorrow.com; test account FRIENDTEST on the server).
+3. Friends: the owner sends their public IPs; add each to the allowlist
+   (below) and play a two-PC match with a friend through
+   h2.mohnjorrow.com, the first test of the relay from outside.
+4. A real game with kills, to confirm the kills offsets and set
+   `COUNTS_SEEN` (`crates/h2launch/src/results.rs`).
+5. Menu phase 2 (the Xbox Live screens in Halo 2's style), then merge the
+   PR stack into `main`.
+
+The server for friends: h2.mohnjorrow.com is an A record to the owner's
+public IP in Cloudflare, DNS only (the proxy would break UDP). The router
+forwards TCP and UDP 47050 to 192.168.8.102. Container 102 drops port
+47050 except from an allowlist: nftables, `/etc/h2live-allow.nft`, table
+`inet h2live_allow`, set `allow_v4` (localhost, 192.168.8.0/24 and the
+owner's public IP), included from `/etc/nftables.conf` (backups end in
+`.pre-h2live-allow`). To add a friend, add the address to the set and run
+`nft -f /etc/h2live-allow.nft`; to undo it all, `nft delete table inet
+h2live_allow` and remove the include line. Server changes go through the
+owner's PC (Remote Control) and need the owner's go-ahead typed in the
+thread, naming the action.
+
+On the owner's PC only (it can't push): the parked kills and streaks test
+player is on `hunt-wip` (6822f71) in `C:\h2work\hunt`, notes in
+`HUNT-NOTES.md`; kills, deaths and streaks are confirmed there, betrayals,
+assists and the team offset aren't. The PC's own log of the day is
+`reports\2026-10-10_mcc-pivot_pc-work-log.md` in the Cartographer folder.
+
+After the MVP: clans, keyboard and mouse, the other layouts, and the
+owner's idea (2026-10-11) of Halo 2 Anniversary weapon and Spartan models
+in classic multiplayer. There's no switch for that: MCC's remastered look
+is campaign only and the Anniversary multiplayer is a Halo 4-based engine,
+so it means converting those models into classic tags on each player's PC
+(official mod tools), keeping the classic skeletons and collision. First
+step, when the owner says so: one weapon.
 
 ## In progress
 
@@ -203,9 +264,13 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   reads the UI tags of MCC's and Vista's `mainmenu.map` (`Menus::open`),
   `blam_cache::mcc` reads the format-13 pieces they need
   (`docs/notes/launcher/mcc-maps.md`), and the new `crates/h2ui` draws the
-  start screen and main menu as draw lists on the CPU. Not wired into the
-  lobby yet. Next: run `mcc_ui_probe` and `menu_png` on the owner's PC
-  (commands in menu.md, "What Phase 0 built").
+  start screen and main menu as draw lists on the CPU. On the owner's PC
+  (2026-10-11) MCC's mainmenu.map read in full (every screen the same as
+  Vista's, all 16 pictures, the fonts from `halo2\h2_fonts`), and the
+  pictures came out right: 5.3 ms a frame for the main menu at 1080p on
+  the CPU, the background 20 ms once (results in menu.md 9.2). Phase 1
+  (wiring both screens into the lobby) is on `launcher-menu-phase1-wip`;
+  see "Resume here".
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.
