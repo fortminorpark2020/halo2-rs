@@ -179,7 +179,7 @@ mod tests {
         (0, 0),
     ];
 
-    const ROWS: [&str; 3] = ["XBOX LIVE", "SPLIT SCREEN", "SETTINGS"];
+    const ROWS: [&str; 3] = ["ONLINE", "SPLIT SCREEN", "SETTINGS"];
 
     fn start_state(layout: &StartLayout) -> Start<'_> {
         Start {

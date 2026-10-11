@@ -287,8 +287,8 @@ h2launch --live 127.0.0.1 --instance b --name Bravo --pad none
 ## The lobby (milestone 4, being built)
 
 `h2launch` with no flags (or `--lobby`) opens a window of its own on Halo
-2's start screen; A (or Start) opens the main menu, with XBOX LIVE and
-SETTINGS. XBOX LIVE shows the sign-in screen the first time (a gamertag
+2's start screen; A (or Start) opens the main menu, with ONLINE and
+SETTINGS. ONLINE shows the sign-in screen the first time (a gamertag
 and the server, h2.mohnjorrow.com by default, kept in `lobby.txt`) and
 signs in at once after that, then the playlists with your level in each
 and the party. A searches (party leader), X lists the players online to

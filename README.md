@@ -51,9 +51,9 @@ install. No game files are included in this repository.
   own classic Halo 2 engine from your Master Chief Collection install,
   without running MCC. Double-click it and it opens on Halo 2's start
   screen, as on the Xbox: press A or Start (Enter or Space on a keyboard,
-  or click) for the main menu, which has XBOX LIVE and SETTINGS (up and
+  or click) for the main menu, which has ONLINE and SETTINGS (up and
   down to pick, A to choose, B to go back). Its pictures and fonts are
-  read from your MCC install; without them it is plain shapes. XBOX LIVE
+  read from your MCC install; without them it is plain shapes. ONLINE
   takes you to its lobby: pick a gamertag the first time (after that it
   signs you in by itself), form a party (the sign-in screen offers the
   project's server, h2.mohnjorrow.com, by default), search a playlist,

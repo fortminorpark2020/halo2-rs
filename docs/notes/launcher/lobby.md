@@ -21,7 +21,7 @@ the launcher doesn't do.
 
 - `h2launch` with no arguments (or `--lobby`) opens the lobby: a window of
   our own, on Halo 2's start screen. It signs in to h2live when the player
-  picks XBOX LIVE on the main menu, and stays signed in between matches
+  picks ONLINE on the main menu, and stays signed in between matches
   (and on the main menu).
 - For each match it starts a second copy of itself for the engine:
   `h2launch --session <file> --me <n> --map <m> --variant <v> --events`.
@@ -160,22 +160,22 @@ the launcher doesn't do.
 0. Start and main menu. The lobby opens on the start screen: the logo
    and the pulsing PRESS START. A (Enter, Space, the controller's A or
    Start) or a click anywhere opens the main menu; B asks before quitting
-   (Y there signs out, while signed in). The main menu has XBOX LIVE and
+   (Y there signs out, while signed in). The main menu has ONLINE and
    SETTINGS (the original Xbox wording; split screen and system link
    aren't offered), up and down (or the mouse wheel) move the focus,
    which fades as Halo 2's did, and a click focuses a row, or picks it if
    it had the focus (but not the second click of a double-click that
    opened the main menu: a double-click on PRESS START, which lies over
-   XBOX LIVE, stops on the main menu). The row picked last keeps the focus when the player
+   ONLINE, stops on the main menu). The row picked last keeps the focus when the player
    comes back. The gamertag signed in (else the one saved) is the small
-   print at the bottom right. XBOX LIVE goes to the playlists when signed
+   print at the bottom right. ONLINE goes to the playlists when signed
    in, to the signing-in screen while that goes on, else signs in with
    the gamertag and server last signed in with (not what was typed in the
    form and left with B), or opens the sign-in form when there is none.
    SETTINGS opens the controller settings. B goes back to the start
    screen. If the server is lost while the player is on either screen, or
    in the settings opened from the main menu, they stay there and the
-   reason is a notice; XBOX LIVE signs in again. An invitation pops up
+   reason is a notice; ONLINE signs in again. An invitation pops up
    over the main menu (A accepts and shows the playlists), and a match the
    party is put in opens the pregame lobby from either, as from any
    screen.
@@ -318,8 +318,8 @@ line (`--set-option 0x354=i32:60 --pad none`, say). A script line is
 ```
 0 wait start 5        # the lobby opens on the start screen
 0.3 a                 # PRESS START: the main menu
-0 see XBOX LIVE 5
-0.3 a                 # XBOX LIVE: the sign-in form (no gamertag saved yet)
+0 see ONLINE 5
+0.3 a                 # ONLINE: the sign-in form (no gamertag saved yet)
 0 wait signin 5
 0 type ALPHA          # typed into the focused field
 0.3 a                 # a key: up down left right a b x y lb rb tab back
@@ -342,7 +342,7 @@ menu's text counts once it has faded in), and fails the run as `wait`
 does; `pick` fails it when there is no such row, and `set` when the
 setting or its value is wrong.
 
-With a gamertag saved, XBOX LIVE signs in at once (`wait connecting`,
+With a gamertag saved, ONLINE signs in at once (`wait connecting`,
 then `wait live`), without the form.
 
 The screens are `start`, `main`, `signin`, `connecting`, `live`,

@@ -307,7 +307,7 @@ mod tests {
         // Drawn at 1080p over the scene, settled: the logo's quad is where
         // its tag puts it, twice its 4 pixels a side.
         let fonts = Fonts::fallback();
-        let rows = ["XBOX LIVE", "SETTINGS"];
+        let rows = ["ONLINE", "SETTINGS"];
         let m = MainMenu {
             layout: &shell.main,
             opened: 0.0,

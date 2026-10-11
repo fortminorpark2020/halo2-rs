@@ -417,11 +417,13 @@ So the plan is a `ui::Reader` implementation for `mcc::Map`, after which
   LIVE" and "SYSTEM LINK" against "LIVE" and "NETWORK". Check G in section 9
   dumps its main-menu and Live-menu strings to the console. We use the Xbox
   words either way; the check says whether they can come from the file.
-- **The words "Xbox Live".** The lobby already calls its first screen Xbox
-  Live, and Halo 2 used them.
+- **ONLINE, not XBOX LIVE.** The owner decided (2026-10-11 03:20) that
+  the launcher doesn't use Microsoft's Xbox Live service, so wherever
+  Halo 2 said XBOX LIVE the launcher says ONLINE, in the same font and
+  style: the main menu row, the screen headers and the sign-in wording.
   - `pivot/legal.md` asks that nothing suggest Microsoft made or backs the
-    launcher. So the sign-in screen says, in small print, that this is a
-    private server not run by Microsoft.
+    launcher; the sign-in screen also says, in small print, that this is a
+    private server.
   - The Xbox Live logo is never drawn. The `xbox_live_menu` pictures are
     used only if a PC check shows they don't carry it.
 

@@ -99,8 +99,8 @@ Proxmox server runs), `launcher-controls` (#6, the controller fix, head
 `launcher-menu-phase1-wip` is an older snapshot of phase 1 and can go.
 
 Done 2026-10-11: menu phase 1 (the lobby opens on the start screen, then a
-main menu with XBOX LIVE and SETTINGS; B goes back; no sign-in until XBOX
-LIVE is picked) and the lobby window's redraw fix (326a5bf: 30 frames a
+main menu with ONLINE and SETTINGS; B goes back; no sign-in until ONLINE
+is picked) and the lobby window's redraw fix (326a5bf: 30 frames a
 second instead of non-stop; on the owner's PC 99% of a core before, 10% on
 the menus and 4% during a game after, engine still 60 fps). Both are tested
 on the owner's PC through h2.mohnjorrow.com and are in the desktop build
@@ -272,8 +272,8 @@ step, when the owner says so: one weapon.
   pictures came out right: 5.3 ms a frame for the main menu at 1080p on
   the CPU, the background 20 ms once (results in menu.md 9.2). Phase 1 is
   built there too (2026-10-11): the lobby opens on Halo 2's start screen,
-  then the main menu (XBOX LIVE, SETTINGS), drawn by `h2ui` from MCC's
-  mainmenu.map, and signs in only when XBOX LIVE is picked ("What Phase 1
+  then the main menu (ONLINE, SETTINGS), drawn by `h2ui` from MCC's
+  mainmenu.map, and signs in only when ONLINE is picked ("What Phase 1
   built" in menu.md). Next: the owner runs it at 1080p and reads the
   `menus:` frame-time lines in `lobby.log`; over 16 ms a frame moves the
   D3D11 backend into phase 2.

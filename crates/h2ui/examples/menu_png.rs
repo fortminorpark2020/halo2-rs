@@ -156,7 +156,7 @@ fn main() {
             });
         }
     }
-    let rows = ["XBOX LIVE", "SPLIT SCREEN", "SETTINGS"];
+    let rows = ["ONLINE", "SPLIT SCREEN", "SETTINGS"];
     for (w, h) in [(1920u32, 1080u32), (1280, 720)] {
         let space = Space::new(w, h);
         for look in &looks {

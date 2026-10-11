@@ -84,7 +84,7 @@ const RECORD_WAIT: Duration = Duration::from_secs(5);
 const LIST_ROWS: usize = 9;
 /// The main menu's rows, in the original Xbox wording (MCC's own strings
 /// say LIVE). Split screen and system link aren't offered.
-const MAIN_ROWS: [&str; 2] = ["XBOX LIVE", "SETTINGS"];
+const MAIN_ROWS: [&str; 2] = ["ONLINE", "SETTINGS"];
 const LIVE_ROW: usize = 0;
 const MAIN_SETTINGS_ROW: usize = 1;
 /// Frames of a menu screen timed at each window size before the log says
@@ -162,7 +162,7 @@ pub enum Input {
 enum Screen {
     /// Halo 2's start screen ("PRESS START"), where the lobby opens.
     Start,
-    /// Halo 2's main menu: XBOX LIVE and SETTINGS.
+    /// Halo 2's main menu: ONLINE and SETTINGS.
     Main,
     SignIn,
     Connecting,
@@ -286,7 +286,7 @@ pub struct App {
     /// why the last try failed.
     fields: [String; 2],
     /// The gamertag and server last saved by a sign-in (or read from
-    /// `lobby.txt`): what XBOX LIVE signs in with and the main menu's
+    /// `lobby.txt`): what ONLINE signs in with and the main menu's
     /// small print shows, whatever the form or a refused sign-in left in
     /// `fields` and `settings`.
     saved: [String; 2],
@@ -383,7 +383,7 @@ struct MenuTimes {
 
 impl App {
     /// The lobby, on the start screen. It signs in when the player picks
-    /// XBOX LIVE on the main menu.
+    /// ONLINE on the main menu.
     pub fn new(cfg: Config) -> App {
         let mut settings = Settings::load(&cfg.folder.join("lobby.txt"));
         if let Some(s) = &cfg.server {
@@ -657,7 +657,7 @@ impl App {
 
     /// Show `why` on the failure screen, once any match being played ends.
     /// On the start screen or the main menu (or the settings opened from
-    /// it) the player stays there and `why` is a notice; XBOX LIVE then
+    /// it) the player stays there and `why` is a notice; ONLINE then
     /// signs in again.
     fn fail(&mut self, why: String) {
         self.log(&format!("lobby: {why}"));
@@ -1330,7 +1330,7 @@ impl App {
                     self.log(&format!("lobby: joining {from}'s party"));
                     self.send(ToServer::Accept(party));
                     // From the main menu, to the playlists, where the new
-                    // party shows (as if XBOX LIVE had been picked).
+                    // party shows (as if ONLINE had been picked).
                     if self.screen == Screen::Main {
                         self.main_focus = Focus::on(LIVE_ROW, self.menu_clock());
                         self.screen = Screen::Live;
@@ -1405,17 +1405,17 @@ impl App {
 
     fn pick_main(&mut self, row: usize) {
         match row {
-            LIVE_ROW => self.xbox_live(),
+            LIVE_ROW => self.online(),
             MAIN_SETTINGS_ROW => self.open_settings(),
             _ => {}
         }
     }
 
-    /// XBOX LIVE on the main menu: the playlists when signed in, the
+    /// ONLINE on the main menu: the playlists when signed in, the
     /// signing-in screen while that goes on, else sign in with the saved
     /// gamertag and server (the form is put back to them, whatever was
     /// typed there and abandoned), or the sign-in form when there is none.
-    fn xbox_live(&mut self) {
+    fn online(&mut self) {
         let welcomed = self
             .client
             .as_ref()
@@ -4067,8 +4067,8 @@ mod tests {
         assert_eq!(first_row(3, 2, 8), 0);
     }
 
-    /// From the start screen through the main menu's XBOX LIVE.
-    fn to_xbox_live(a: &mut App) {
+    /// From the start screen through the main menu's ONLINE.
+    fn to_online(a: &mut App) {
         assert_eq!(a.label(), "start");
         a.input(Input::A);
         assert_eq!(a.label(), "main");
@@ -4080,8 +4080,8 @@ mod tests {
     fn the_sign_in_form_takes_a_gamertag_and_a_server() {
         let dir = scratch("form");
         let mut a = app(&dir);
-        // With no gamertag saved, XBOX LIVE opens the form.
-        to_xbox_live(&mut a);
+        // With no gamertag saved, ONLINE opens the form.
+        to_online(&mut a);
         assert_eq!(a.label(), "signin");
         assert!(a.dialing.is_none() && a.client.is_none());
         assert_eq!(a.fields[1], settings::DEFAULT_SERVER);
@@ -4125,7 +4125,7 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_gamertag_signs_in_from_xbox_live() {
+    fn a_saved_gamertag_signs_in_from_online() {
         let dir = scratch("saved");
         Settings {
             // Nothing listens on port 9 here, so the dial fails quickly.
@@ -4140,8 +4140,8 @@ mod tests {
         a.tick(Instant::now());
         assert_eq!(a.label(), "start");
         assert!(a.dialing.is_none() && a.signing_in.is_none());
-        // XBOX LIVE signs in with it, without the form.
-        to_xbox_live(&mut a);
+        // ONLINE signs in with it, without the form.
+        to_online(&mut a);
         assert_eq!(a.label(), "connecting");
         assert!(a.dialing.is_some());
         let until = Instant::now() + Duration::from_secs(20);
@@ -4184,7 +4184,7 @@ mod tests {
         a.input(Input::Char(' '));
         assert_eq!(a.label(), "main");
         assert_eq!(a.main_focus.item, MAIN_SETTINGS_ROW);
-        // With no gamertag, XBOX LIVE is the form, whose B comes back.
+        // With no gamertag, ONLINE is the form, whose B comes back.
         a.input(Input::Up);
         a.input(Input::A);
         assert_eq!(a.label(), "signin");
@@ -4195,7 +4195,7 @@ mod tests {
     }
 
     #[test]
-    fn xbox_live_signs_in_with_the_gamertag_saved_not_one_abandoned() {
+    fn online_signs_in_with_the_gamertag_saved_not_one_abandoned() {
         let dir = scratch("abandoned");
         Settings {
             server: "192.0.2.1:47050".into(),
@@ -4220,7 +4220,7 @@ mod tests {
         a.input(Input::B);
         assert_eq!(a.label(), "main");
         assert_eq!(a.small_print(), "CHIEF");
-        // XBOX LIVE signs in as the gamertag saved, at the server saved.
+        // ONLINE signs in as the gamertag saved, at the server saved.
         a.input(Input::A);
         assert_eq!(a.label(), "connecting");
         assert_eq!(a.fields, ["CHIEF", "192.0.2.1:47050"]);
@@ -4256,7 +4256,7 @@ mod tests {
         .save(&dir.join("lobby.txt"))
         .unwrap();
         let mut a = app(&dir);
-        to_xbox_live(&mut a);
+        to_online(&mut a);
         assert_eq!(a.label(), "connecting");
         a.input(Input::B);
         assert_eq!(a.label(), "main");
@@ -4267,7 +4267,7 @@ mod tests {
         // Picked again, it signs in again.
         a.input(Input::A);
         assert_eq!(a.label(), "connecting");
-        // While it goes on, XBOX LIVE from the main menu is the same
+        // While it goes on, ONLINE from the main menu is the same
         // screen, not a second sign-in.
         a.screen = Screen::Main;
         let dial = a.signing_in;
@@ -4336,7 +4336,7 @@ mod tests {
         use crate::controls::{ButtonLayout, StickLayout};
         let dir = scratch("settings");
         let mut a = app(&dir);
-        to_xbox_live(&mut a);
+        to_online(&mut a);
         // From the sign-in screen: the controller's X (the letter is typed).
         a.input(Input::Char('x'));
         assert_eq!(a.label(), "signin");
@@ -4447,7 +4447,7 @@ mod tests {
         assert_eq!(a.label(), "live");
         assert_eq!(a.sel, 2);
         // Escape (or Backspace) goes back to the main menu, signed in
-        // and in the party; XBOX LIVE comes back to the playlists as they
+        // and in the party; ONLINE comes back to the playlists as they
         // were.
         view(&mut a).party = Some(party(7, Activity::Lobby));
         a.input(Input::Backspace);
@@ -4572,7 +4572,7 @@ mod tests {
         };
         let dir = scratch("draw");
         let mut a = app(&dir);
-        to_xbox_live(&mut a);
+        to_online(&mut a);
         let mut c = Canvas::new(640, 480);
         a.draw(&mut c, &mut text);
         assert!(c.px.contains(&0xFF_FFFF), "the title is drawn");
@@ -5506,7 +5506,7 @@ mod tests {
         view(&mut a).invites.clear();
         assert_eq!(a.label(), "main");
         // A accepts it, and shows the playlists, where the new party is;
-        // XBOX LIVE has the focus when the player comes back.
+        // ONLINE has the focus when the player comes back.
         a.input(Input::Down);
         view(&mut a).invites.push((9, "BRAVO".into()));
         a.input(Input::A);
@@ -5544,7 +5544,7 @@ mod tests {
         a.input(Input::B);
         a.fail("The server didn't answer.".into());
         assert_eq!(a.label(), "start");
-        // Then XBOX LIVE signs in again (the form, as none was saved).
+        // Then ONLINE signs in again (the form, as none was saved).
         a.input(Input::A);
         a.input(Input::A);
         assert_eq!(a.label(), "signin");
@@ -5557,7 +5557,7 @@ mod tests {
         let mut a = app(&dir);
         let mut c = Canvas::new(1280, 720);
         a.draw_menu(&mut c, &mut Vec::new());
-        // A double-click on PRESS START, which lies over XBOX LIVE: the
+        // A double-click on PRESS START, which lies over ONLINE: the
         // first click opens the main menu, and the second only focuses
         // the row under it.
         let space = Space::new(1280, 720);
@@ -5582,7 +5582,7 @@ mod tests {
         a.click(x, y);
         assert_eq!(a.label(), "settings");
         a.input(Input::B);
-        // XBOX LIVE, clicked twice.
+        // ONLINE, clicked twice.
         let [x, y] = space.at([0.0, -95.0]);
         a.click(x, y);
         assert_eq!(a.main_focus.item, LIVE_ROW);
@@ -5666,7 +5666,7 @@ mod tests {
         a.draw(&mut c, &mut text);
         a.menu_opened -= 5.0;
         a.draw(&mut c, &mut text);
-        assert!(a.drawn().iter().any(|d| d == "XBOX LIVE"));
+        assert!(a.drawn().iter().any(|d| d == "ONLINE"));
         assert!(a.drawn().iter().any(|d| d == "CHIEF"));
         let _ = std::fs::remove_dir_all(&dir);
     }
