@@ -808,6 +808,29 @@ pub fn enabled(on: bool) -> &'static str {
     }
 }
 
+/// "On" or "Off", as the game menu's value pages and mouse inversion row
+/// say it.
+pub fn on_off(on: bool) -> &'static str {
+    if on {
+        "On"
+    } else {
+        "Off"
+    }
+}
+
+// The value pages' choices, in the order of Halo 2's in-game controller
+// settings (screen 0xC8) and its value lists; the words are ours. The
+// lobby's settings screen can share them later.
+
+/// THUMBSTICK LAYOUT, as `StickLayout::ALL` (and its names).
+pub const THUMBSTICK_LABELS: [&str; 4] = ["Default", "Southpaw", "Legacy", "Legacy Southpaw"];
+/// LOOK INVERSION: inverted first, as Halo 2 lists it.
+pub const LOOK_INVERSION_LABELS: [(&str, bool); 2] = [("Inverted", true), ("Normal", false)];
+/// AUTO LOOK CENTERING: on first.
+pub const AUTO_CENTER_LABELS: [(&str, bool); 2] = [("On", true), ("Off", false)];
+/// CONTROLLER VIBRATION: off first.
+pub const VIBRATION_LABELS: [(&str, bool); 2] = [("Off", false), ("On", true)];
+
 /// The player's controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Controls {
@@ -912,6 +935,66 @@ impl Controls {
             6 => format!("{}", self.mouse_sensitivity),
             _ => sw(self.mouse_inverted),
         }
+    }
+
+    /// Each setting as `(KEYS[i], value)`, as `lobby.txt` writes them and
+    /// `set` reads them back (the game menu's `H2EVENT controls` line).
+    pub fn pairs(&self) -> Vec<(String, String)> {
+        KEYS.iter()
+            .enumerate()
+            .map(|(i, k)| (k.to_string(), self.value(i)))
+            .collect()
+    }
+
+    /// The controls in one word, so threads can share them through an
+    /// `AtomicU64`:
+    ///
+    /// - bits 0 to 31: the mouse sensitivity's f32 bits;
+    /// - bits 32 to 39: the button layout's index in `ButtonLayout::ALL`;
+    /// - bits 40 to 47: the thumbstick layout's index in `StickLayout::ALL`;
+    /// - bits 48 to 55: the look sensitivity;
+    /// - bits 56 to 59: look inversion, auto centering, vibration and
+    ///   mouse inversion, one bit each, in that order;
+    /// - bits 60 to 63: 0.
+    pub fn pack(&self) -> u64 {
+        let index = |i: Option<usize>| i.unwrap_or(0) as u64;
+        let buttons = index(ButtonLayout::ALL.iter().position(|&b| b == self.buttons));
+        let sticks = index(StickLayout::ALL.iter().position(|&s| s == self.sticks));
+        let flags = u64::from(self.look_inverted)
+            | u64::from(self.auto_center) << 1
+            | u64::from(self.vibration) << 2
+            | u64::from(self.mouse_inverted) << 3;
+        u64::from(self.mouse_sensitivity.to_bits())
+            | buttons << 32
+            | sticks << 40
+            | u64::from(self.look_sensitivity) << 48
+            | flags << 56
+    }
+
+    /// The controls `pack` gave, or None for a word it can't have given
+    /// (an index or a sensitivity out of range, a high bit set).
+    pub fn unpack(word: u64) -> Option<Controls> {
+        let byte = |at: u32| ((word >> at) & 0xFF) as usize;
+        let mouse = f32::from_bits(word as u32);
+        let look = byte(48) as u8;
+        let flags = byte(56);
+        if flags > 0xF
+            || !mouse.is_finite()
+            || !(MOUSE_SENSITIVITY_MIN..=MOUSE_SENSITIVITY_MAX).contains(&mouse)
+            || !(LOOK_SENSITIVITY_MIN..=LOOK_SENSITIVITY_MAX).contains(&look)
+        {
+            return None;
+        }
+        Some(Controls {
+            buttons: *ButtonLayout::ALL.get(byte(32))?,
+            sticks: *StickLayout::ALL.get(byte(40))?,
+            look_sensitivity: look,
+            look_inverted: flags & 1 != 0,
+            auto_center: flags & 2 != 0,
+            vibration: flags & 4 != 0,
+            mouse_sensitivity: mouse,
+            mouse_inverted: flags & 8 != 0,
+        })
     }
 
     /// `lobby.txt`'s lines for them.
@@ -1385,6 +1468,120 @@ mod tests {
         assert_eq!(c.buttons, ButtonLayout::Boxer);
         assert_eq!(c.look_sensitivity, 9);
         assert!(!c.vibration);
+    }
+
+    /// Controls with every field away from its default.
+    fn odd_controls(mouse: f32) -> Controls {
+        Controls {
+            buttons: ButtonLayout::Recon,
+            sticks: StickLayout::LegacySouthpaw,
+            look_sensitivity: 10,
+            look_inverted: true,
+            auto_center: true,
+            vibration: false,
+            mouse_sensitivity: mouse,
+            mouse_inverted: true,
+        }
+    }
+
+    #[test]
+    fn controls_pack_into_a_word_and_back() {
+        for mouse in [
+            MOUSE_SENSITIVITY_MIN,
+            MOUSE_SENSITIVITY_DEFAULT,
+            MOUSE_SENSITIVITY_MAX,
+            1.25,
+        ] {
+            let c = odd_controls(mouse);
+            assert_eq!(Controls::unpack(c.pack()), Some(c), "{mouse}");
+            let d = Controls {
+                mouse_sensitivity: mouse,
+                ..Controls::default()
+            };
+            assert_eq!(Controls::unpack(d.pack()), Some(d), "{mouse}");
+        }
+        // Every layout and look sensitivity, each flag alone.
+        for buttons in ButtonLayout::ALL {
+            for sticks in StickLayout::ALL {
+                for look in LOOK_SENSITIVITY_MIN..=LOOK_SENSITIVITY_MAX {
+                    let c = Controls {
+                        buttons,
+                        sticks,
+                        look_sensitivity: look,
+                        ..Controls::default()
+                    };
+                    assert_eq!(Controls::unpack(c.pack()), Some(c));
+                }
+            }
+        }
+        for flag in 0..4 {
+            let c = Controls {
+                look_inverted: flag == 0,
+                auto_center: flag == 1,
+                vibration: flag == 2,
+                mouse_inverted: flag == 3,
+                ..Controls::default()
+            };
+            assert_eq!(Controls::unpack(c.pack()), Some(c));
+        }
+        // The documented places.
+        let w = Controls::default().pack();
+        assert_eq!(w as u32, 1.6f32.to_bits());
+        assert_eq!((w >> 48) & 0xFF, 3);
+        assert_eq!((w >> 56) & 0xF, 0b0100, "only vibration on");
+        // Words pack can't give are refused.
+        let good = odd_controls(2.0).pack();
+        for bad in [
+            0,
+            good | 1 << 63,
+            good | 0xFF << 32,
+            good | 0xFF << 40,
+            (good & !(0xFF << 48)) | 11 << 48,
+            good & !(0xFF << 48),
+            (good & !0xFFFF_FFFF) | u64::from(f32::NAN.to_bits()),
+            (good & !0xFFFF_FFFF) | u64::from(20.0f32.to_bits()),
+        ] {
+            assert_eq!(Controls::unpack(bad), None, "{bad:#x}");
+        }
+    }
+
+    #[test]
+    fn pairs_read_back_through_set() {
+        for c in [
+            Controls::default(),
+            odd_controls(MOUSE_SENSITIVITY_MIN),
+            odd_controls(7.3),
+        ] {
+            let pairs = c.pairs();
+            assert_eq!(pairs.len(), KEYS.len());
+            let mut back = Controls {
+                buttons: ButtonLayout::Boxer,
+                look_sensitivity: 5,
+                ..Controls::default()
+            };
+            for (k, v) in &pairs {
+                assert!(!v.contains(' '), "{k} = {v:?} is one word");
+                assert_eq!(back.set(k, v), Ok(true), "{k} = {v}");
+            }
+            assert_eq!(back, c);
+            // In lobby.txt's order and form.
+            let lines: Vec<String> = pairs.iter().map(|(k, v)| format!("{k} = {v}\n")).collect();
+            assert_eq!(lines.concat(), c.lines());
+        }
+    }
+
+    #[test]
+    fn value_labels_in_halo_2s_order() {
+        for (s, label) in StickLayout::ALL.iter().zip(THUMBSTICK_LABELS) {
+            assert_eq!(s.name(), label);
+        }
+        assert_eq!(LOOK_INVERSION_LABELS[0], ("Inverted", true));
+        assert_eq!(AUTO_CENTER_LABELS[0], ("On", true));
+        assert_eq!(VIBRATION_LABELS[0], ("Off", false));
+        for list in [LOOK_INVERSION_LABELS, AUTO_CENTER_LABELS, VIBRATION_LABELS] {
+            assert_ne!(list[0].1, list[1].1);
+        }
+        assert_eq!((on_off(true), on_off(false)), ("On", "Off"));
     }
 
     #[test]

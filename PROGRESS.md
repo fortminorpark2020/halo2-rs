@@ -149,6 +149,15 @@ step, when the owner says so: one weapon.
 
 ## In progress
 
+- In-game GAME MENU (Start or Esc in a match, as Halo 2's screen 0xC3), on
+  `launcher-gamemenu` off `launcher-menu` f0b718b. Stage 1 done
+  (2026-10-11): the menu's logic, pad edges and input gate in
+  `crates/h2launch/src/gamemenu/` (plain Rust, Linux-tested; no Windows,
+  wire or lobby changes yet), and its opaque panel with the players column
+  in `crates/h2ui/src/gamemenu.rs` (`cargo run --release -p h2ui --example
+  gamemenu_png -- <out dir> [<h2_fonts dir>]` draws every page). Next:
+  stage 2 (the engine-side driver, the end_frame copy and the input gate in
+  `win/`, the lobby's events), then stage 3.
 - Milestone 1 is done (2026-10-10 02:50 UTC): `h2launch` started MCC's
   halo2.dll on the owner's PC and played offline Slayer on Lockout (HUD,
   60 fps, mouse and controller). Code is on `h2launch-m1`, then
