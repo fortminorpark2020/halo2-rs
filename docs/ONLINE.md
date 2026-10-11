@@ -74,8 +74,10 @@ internet address.
      levels, and kills, assists, deaths, betrayals and suicides in each
      ranked playlist) it holds `friends.txt` (launcher players' friends and
      friend requests), `games.log` (every match played), `logins.txt`
-     (password hashes and the PCs each account signs in from; private, only
-     h2live's own user may read it) and `secret.txt` (the key that signs
+     (password hashes and the PCs each account signs in from; private: on
+     Linux only h2live's own user may read it, and on Windows it's only as
+     private as its folder, so keep that inside your own user folder) and
+     `secret.txt` (the key that signs
      players' stat cards; launchers also check the server by a key made
      from it, so a new one makes every launcher say SERVER KEY CHANGED).
      Neither of the last two can be made again from anything else. A
@@ -145,7 +147,8 @@ it from your PC.
   backup folder back over `/var/lib/h2live` first. A server from before
   accounts (live protocol 3) ignores `logins.txt` and `signup=`, so it is
   open sign-up again, and accounts made by hand can't sign in to it until
-  the newer one is back.
+  the newer one is back. It has no command line either: until then,
+  `h2live user ...` says so and does nothing.
 - `journalctl -u h2live` shows its log, with the `relay on UDP port 47050`
   line and the READY, FORWARD or CGNAT line described in option B. FORWARD
   means the router needs port forwards for TCP 47050 and UDP 47050 to the
@@ -183,15 +186,19 @@ h2live user list                       every account, its PCs, admin or not
 h2live user add <GAMERTAG> [--admin]   a new account; its made-up password is shown once
 h2live user passwd <GAMERTAG>          a new password (its PCs stay signed in)
 h2live user revoke <GAMERTAG>          sign it out of all PCs
-h2live user remove <GAMERTAG> --yes    remove it for good
+h2live user remove <GAMERTAG> --yes    remove it (for good while sign-up is closed)
 h2live user admin <GAMERTAG> on|off    make it an admin, or not
 h2live user rename <GAMERTAG> <NEW>    give it another gamertag
 h2live user key                        the server's key, for H2LAUNCH_SERVER_KEY
 ```
 
 They find the data folder as the server does (or `--data <folder>`), work
-while it runs and while it's stopped, and never take a password as an
-argument (`--password-stdin` reads one instead of making one up). Accounts
+while it's stopped and, on Linux (the Proxmox container), while it runs
+too (on Windows, close h2live first), and never take a password as an
+argument (`--password-stdin` reads one instead of making one up). A
+gamertag starting with `-` goes after `--` (`h2live user admin -- -KAT-
+on`). With sign-up open, a removed account that a PC made by signing in
+comes back when that PC signs in again, its levels too. Accounts
 from before (live protocol 3) keep signing in from the PC that made them,
 with no password until the owner gives them one. The whole design is in
 `docs/notes/launcher/accounts.md`.

@@ -8,9 +8,9 @@ use crate::admin::{self, Request};
 use crate::client::{Access, AccountAsk, SERVER_UNPROVEN};
 use crate::password::{self, Cost, Secret};
 use crate::server::accounts::{
-    AN_ADMINS, CANT_SAVE, HASHES_PER_MINUTE, LAST_ADMIN, NOT_A_HASH, NOT_SAVED, NO_PASSWORD_YET,
-    NO_SUCH_ACCOUNT, ONLY_THE_COMMAND_LINE, PASSWORD_CHANGED, RENAMES, TOO_MANY_CHANGES,
-    WRONG_OLD_PASSWORD, YOUR_OWN,
+    AN_ADMINS, CANT_SAVE, CHECKS_PER_ACCOUNT, HASHES_PER_MINUTE, LAST_ADMIN, NOT_A_HASH, NOT_SAVED,
+    NO_PASSWORD_YET, NO_SUCH_ACCOUNT, ONLY_THE_COMMAND_LINE, PASSWORD_CHANGED, RENAMES,
+    TOO_MANY_CHANGES, WRONG_OLD_PASSWORD, YOUR_OWN,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use h2net::live::{AccountOp, Accounts, Relation, Sealed, ROW_ADMIN, ROW_ONLINE, ROW_PASSWORD};
@@ -352,12 +352,55 @@ fn five_wrong_passwords_lock_new_pcs_out_but_remembered_pcs_still_sign_in() {
     // Locked: even the right password, from a new PC.
     let why = launcher_refused(&mut w, 7, "Kat", Some(PASSWORD));
     assert_eq!(why, live::TOO_MANY_TRIES);
-    // The PC it knows needs none.
+    // The PC it knows needs none, and one typed there isn't checked (so
+    // the lock doesn't stop it either).
     let i = launcher_in(&mut w, 1, "Kat", None);
+    assert_eq!(w.welcome(i).account, kat);
+    let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
     assert_eq!(w.welcome(i).account, kat);
     // Ten minutes later, it's open again.
     w.run(600.0);
     let i = launcher_in(&mut w, 7, "Kat", Some(PASSWORD));
+    assert_eq!(w.welcome(i).account, kat);
+}
+
+#[test]
+fn right_passwords_count_too_so_knowing_one_cannot_keep_the_server_busy() {
+    let mut w = closed("checks-counted");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    for n in 1..=5 {
+        launcher_in(&mut w, n, "Kat", Some(PASSWORD));
+    }
+    // A PC the account knows, with the password typed again: it isn't
+    // checked, so it costs no hash and isn't counted.
+    let hashes = w.server.hashes.len();
+    let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    assert_eq!(w.welcome(i).account, kat);
+    assert_eq!(w.server.hashes.len(), hashes);
+    // A sixth PC with the right password costs a hash each time...
+    for _ in 6..=CHECKS_PER_ACCOUNT {
+        let why = launcher_refused(&mut w, 6, "Kat", Some(PASSWORD));
+        assert_eq!(why, live::TOO_MANY_PCS);
+    }
+    // ...until ten were checked for the account in 10 minutes: then none
+    // is, from anywhere.
+    let hashes = w.server.hashes.len();
+    let why = launcher_refused(&mut w, 7, "Kat", Some(PASSWORD));
+    assert_eq!(why, live::TOO_MANY_TRIES);
+    assert_eq!(w.server.hashes.len(), hashes);
+    // The PCs it knows still sign in, and other accounts' passwords are
+    // still checked.
+    let i = launcher_in(&mut w, 2, "Kat", Some(PASSWORD));
+    assert_eq!(w.welcome(i).account, kat);
+    let jun = make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    let i = launcher_in(&mut w, 8, "Jun", Some(OTHER_PASSWORD));
+    assert_eq!(w.welcome(i).account, jun);
+    // Ten minutes later it may again.
+    w.run(600.0);
+    w.server
+        .command(Actor::Console, Command::SignOut { account: kat }, w.now)
+        .unwrap();
+    let i = launcher_in(&mut w, 6, "Kat", Some(PASSWORD));
     assert_eq!(w.welcome(i).account, kat);
 }
 
@@ -978,6 +1021,65 @@ fn removing_drops_the_pc_purges_friends_frees_the_gamertag_and_its_card_is_ignor
 }
 
 #[test]
+fn with_sign_up_open_a_removed_accounts_pc_signs_up_again_and_its_card_brings_it_back() {
+    // An account named by its PC's key (an older server's, or one open
+    // sign-up made) is removed for good only while sign-up is closed.
+    let mut w = World::with_secret("remove-open", Some(SECRET));
+    let veteran = veteran(&mut w);
+    assert!(!w.server.sign_up_closed());
+    let a = w.sign_in(1, "Veteran");
+    assert_eq!(w.welcome(a).best, 13);
+    let remove = Command::Remove {
+        account: veteran.id,
+    };
+    let done = w.server.command(Actor::Console, remove.clone(), w.now);
+    assert_eq!(done.as_deref(), Ok("REMOVED VETERAN"));
+    assert_eq!(refusal(&mut w, a), live::ACCOUNT_REMOVED);
+    assert_eq!(w.server.account(veteran.id), None);
+    // Open: its PC signs up again, under the same id, and its card brings
+    // back its levels.
+    let a = w.sign_in(1, "Veteran");
+    assert_eq!(w.welcome(a).account, veteran.id);
+    assert_eq!(w.welcome(a).gamertag, "VETERAN");
+    assert_eq!(w.welcome(a).levels, [(DOUBLE_TEAM, 13, 40)]);
+    // Closed: it's gone, and its PC and card bring nothing back.
+    w.server.set_sign_up(SignUp::Closed);
+    w.server.command(Actor::Console, remove, w.now).unwrap();
+    assert_eq!(refusal(&mut w, a), live::ACCOUNT_REMOVED);
+    let b = w.connect(1, "Veteran");
+    assert_eq!(refusal(&mut w, b), live::NO_ACCOUNT);
+    assert_eq!(w.server.account(veteran.id), None);
+}
+
+#[test]
+fn a_rename_to_a_name_taken_or_against_the_rules_is_refused() {
+    let mut w = closed("rename-refused");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    let jun = make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    let before = w.accounts_txt();
+    let rename = |account, gamertag: &str| Command::Rename {
+        account,
+        gamertag: gamertag.into(),
+    };
+    let done = w.server.command(Actor::Console, rename(jun, "kat"), w.now);
+    assert_eq!(done, Err(live::GAMERTAG_TAKEN.to_string()));
+    for bad in ["1KAT", "A  B", "NAME(1)"] {
+        let done = w.server.command(Actor::Console, rename(jun, bad), w.now);
+        assert_eq!(done, Err(password::GAMERTAG_RULES.to_string()), "{bad}");
+    }
+    // Nothing changed, in memory or in accounts.txt.
+    assert_eq!(w.server.find("JUN"), Some(jun));
+    assert_eq!(w.server.find("KAT"), Some(kat));
+    assert_eq!(w.accounts_txt(), before);
+    // An account's own gamertag in another case is no rename.
+    let seq = w.server.account(kat).unwrap().seq;
+    let done = w.server.command(Actor::Console, rename(kat, "kat"), w.now);
+    assert_eq!(done.as_deref(), Ok("KAT IS KAT NOW"));
+    assert_eq!(w.server.account(kat).unwrap().seq, seq);
+    assert_eq!(w.accounts_txt(), before);
+}
+
+#[test]
 fn the_last_admin_cannot_be_demoted_or_removed() {
     let mut w = closed("last-admin");
     let kat = make_account(&mut w, "Kat", PASSWORD, true);
@@ -1168,6 +1270,14 @@ fn logins_and_profiles_never_rename_when_closed_or_for_password_accounts() {
     w.server.set_sign_up(SignUp::Closed);
     let a = w.sign_in(1, "New Name");
     assert_eq!(w.welcome(a).gamertag, "VETERAN");
+    // The game is told why (it has no PROFILE to be told on).
+    w.until(|w| !w.notices(a).is_empty());
+    assert_eq!(w.notices(a), [live::ASK_TO_RENAME]);
+    // Under its own gamertag, in any case, it's told nothing.
+    let b = w.sign_in(1, "veteran");
+    assert_eq!(w.welcome(b).gamertag, "VETERAN");
+    w.run(1.0);
+    assert!(w.notices(b).is_empty());
 }
 
 #[test]

@@ -172,7 +172,9 @@ step with the owner's go-ahead:
    learns the key the first time it signs in (on his own network).
 3. The owner makes his friends' accounts from his launcher's Accounts row.
 Rollback: `install -m755 /opt/h2live/h2live.prev /opt/h2live/h2live &&
-systemctl restart h2live`, and the old zip.
+systemctl restart h2live`, and the old zip. (The program from before
+accounts has no command line: `h2live user ...` says so until the newer
+one is back.)
 
 After the MVP: clans, keyboard and mouse, the other layouts, and the
 owner's idea (2026-10-11) of Halo 2 Anniversary weapon and Spartan models

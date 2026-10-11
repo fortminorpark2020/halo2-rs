@@ -35,30 +35,46 @@ pub struct Pins {
     built_in: Option<[u8; 32]>,
     /// The built-in key wasn't 64 hex digits, so it's ignored.
     bad_built_in: bool,
+    /// Lines of the file that didn't read, skipped.
+    skipped: usize,
 }
 
 impl Pins {
     /// The keys in `folder`'s `live-servers.txt` (none if there isn't one)
-    /// and the built-in one.
-    pub fn load(folder: &Path) -> Pins {
-        let text = std::fs::read_to_string(path(folder)).unwrap_or_default();
-        Pins::parse(&text, BUILT_IN)
+    /// and the built-in one. A file that's there but can't be read is an
+    /// error: taken as no file, the keys learned would be unpinned, and the
+    /// next one pinned would write over them all.
+    pub fn load(folder: &Path) -> io::Result<Pins> {
+        let text = match std::fs::read_to_string(path(folder)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        Ok(Pins::parse(&text, BUILT_IN))
     }
 
     /// The keys in `text` (lines that don't read are skipped), with
     /// `built_in` (64 hex digits) for the owner's server.
     pub fn parse(text: &str, built_in: Option<&str>) -> Pins {
         let mut learned = BTreeMap::new();
+        let mut skipped = 0;
+        // (Notepad's "UTF-8 with BOM" starts the file with one.)
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         for line in text.lines().map(str::trim) {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let Some((server, key)) = line.rsplit_once(char::is_whitespace) else {
-                continue;
-            };
-            let server = clean(server);
-            if let (false, Some(key)) = (server.is_empty(), unhex(key.trim())) {
-                learned.insert(server, key);
+            let read = line
+                .rsplit_once(char::is_whitespace)
+                .and_then(|(server, key)| {
+                    let server = clean(server);
+                    Some((server, unhex(key.trim())?)).filter(|(s, _)| !s.is_empty())
+                });
+            match read {
+                Some((server, key)) => {
+                    learned.insert(server, key);
+                }
+                None => skipped += 1,
             }
         }
         let built_in = built_in.map(str::trim).filter(|k| !k.is_empty());
@@ -66,16 +82,31 @@ impl Pins {
             learned,
             built_in: built_in.and_then(unhex),
             bad_built_in: built_in.is_some_and(|k| unhex(k).is_none()),
+            skipped,
         }
     }
 
-    /// What the log should say about the built-in key, if anything is
-    /// wrong with it.
-    pub fn note(&self) -> Option<String> {
-        self.bad_built_in.then(|| {
-            "pins: the built-in server key (H2LAUNCH_SERVER_KEY) isn't 64 hex digits: ignored"
-                .to_string()
-        })
+    /// What the log should say about the keys, if anything is wrong: the
+    /// built-in one, or lines of the file that didn't read.
+    pub fn notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.bad_built_in {
+            notes.push(
+                "pins: the built-in server key (H2LAUNCH_SERVER_KEY) isn't 64 hex digits: ignored"
+                    .to_string(),
+            );
+        }
+        if self.skipped > 0 {
+            notes.push(format!(
+                "pins: {} of {FILE} didn't read (an address, a space, 64 hex digits): skipped",
+                if self.skipped == 1 {
+                    "1 line".to_string()
+                } else {
+                    format!("{} lines", self.skipped)
+                }
+            ));
+        }
+        notes
     }
 
     /// The key pinned for `server` (an address as typed): the one learned,
@@ -156,7 +187,7 @@ mod tests {
     #[test]
     fn pins_read_back_and_bad_lines_are_skipped() {
         let dir = scratch("round-trip");
-        let mut pins = Pins::load(&dir);
+        let mut pins = Pins::load(&dir).unwrap();
         assert_eq!(pins.get("192.168.8.102:47050"), None);
         pins.set("  192.168.8.102:47050 ", KEY);
         pins.set("Example.ORG", OTHER);
@@ -181,6 +212,17 @@ mod tests {
         let odd = Pins::parse(&odd, None);
         assert_eq!(odd.learned.len(), 1);
         assert_eq!(odd.get("good.example"), Some(KEY));
+        // The log is told how many were skipped.
+        assert_eq!(
+            odd.notes(),
+            [format!(
+                "pins: 4 lines of {FILE} didn't read (an address, a space, 64 hex digits): skipped"
+            )]
+        );
+        assert!(back.notes().is_empty());
+        // A file Notepad saved with a byte-order mark reads the same.
+        let marked = Pins::parse(&format!("\u{feff}{text}"), None);
+        assert_eq!(marked.learned, pins.learned);
         // Set again: the newer key.
         pins.set("example.org", KEY);
         assert_eq!(pins.get("example.org"), Some(KEY));
@@ -195,7 +237,7 @@ mod tests {
         assert_eq!(pins.get(&DEFAULT_SERVER.to_uppercase()), Some(KEY));
         assert_eq!(pins.get("192.168.8.102"), None);
         assert_eq!(pins.get("example.org"), None);
-        assert_eq!(pins.note(), None);
+        assert!(pins.notes().is_empty());
         // A key learned for the owner's server wins over the built-in one.
         let text = format!("{DEFAULT_SERVER} {}\n", hex(&OTHER));
         let pins = Pins::parse(&text, Some(&built));
@@ -207,7 +249,23 @@ mod tests {
         // A bad built-in key is ignored, and the log is told.
         let pins = Pins::parse("", Some("not hex"));
         assert_eq!(pins.get(DEFAULT_SERVER), None);
-        assert!(pins.note().unwrap().contains("H2LAUNCH_SERVER_KEY"));
-        assert_eq!(Pins::parse("", Some("")).note(), None);
+        assert!(pins.notes()[0].contains("H2LAUNCH_SERVER_KEY"));
+        assert!(Pins::parse("", Some("")).notes().is_empty());
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_an_error_not_an_empty_one() {
+        let dir = scratch("unreadable");
+        // No file: no keys learned yet.
+        assert_eq!(Pins::load(&dir).unwrap().learned.len(), 0);
+        // One that isn't UTF-8 (saved as UTF-16, say) isn't taken as none.
+        std::fs::write(path(&dir), [0xFF, 0xFE, b'h', 0, b'2', 0]).unwrap();
+        let e = Pins::load(&dir).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        // Nor is one that's there but can't be opened (a folder, here).
+        std::fs::remove_file(path(&dir)).unwrap();
+        std::fs::create_dir(path(&dir)).unwrap();
+        assert!(Pins::load(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

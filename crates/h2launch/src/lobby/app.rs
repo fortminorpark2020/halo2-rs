@@ -434,6 +434,9 @@ pub struct App {
     asked_other: bool,
     /// The servers' identity keys, as last seen (`crate::pins`).
     pins: Pins,
+    /// live-servers.txt is there but couldn't be read: no sign-in (which
+    /// would trust any key, and write over the file) until it can be.
+    pins_unread: bool,
     /// While the KEY CHANGED popup is up: the server, the key pinned for
     /// it, and the key it answered with.
     key_changed: Option<(String, [u8; 32], [u8; 32])>,
@@ -542,8 +545,15 @@ impl App {
             settings.server = s.clone();
         }
         let now = Instant::now();
-        let pins = Pins::load(&cfg.folder);
-        if let Some(note) = pins.note() {
+        let (pins, pins_unread) = match Pins::load(&cfg.folder) {
+            Ok(pins) => (pins, false),
+            Err(e) => {
+                let path = crate::pins::path(&cfg.folder);
+                (cfg.log)(&format!("lobby: can't read {}: {e}", path.display()));
+                (Pins::default(), true)
+            }
+        };
+        for note in pins.notes() {
             (cfg.log)(&note);
         }
         App {
@@ -558,6 +568,7 @@ impl App {
             with_password: false,
             asked_other: false,
             pins,
+            pins_unread,
             key_changed: None,
             key_changed_at: Instant::now(),
             form_after_match: false,
@@ -744,6 +755,22 @@ impl App {
     }
 
     fn start_client(&mut self, conn: Connection) {
+        if self.pins_unread {
+            // Again: whatever held it may have let go of it.
+            match Pins::load(&self.cfg.folder) {
+                Ok(pins) => {
+                    for note in pins.notes() {
+                        self.log(&note);
+                    }
+                    self.pins = pins;
+                    self.pins_unread = false;
+                }
+                Err(e) => {
+                    let path = crate::pins::path(&self.cfg.folder);
+                    return self.fail(format!("The server keys at {}: {e}", path.display()));
+                }
+            }
+        }
         let key_path = self.cfg.folder.join("live-key.bin");
         let key = match h2live::client::identity(&key_path) {
             Ok(k) => k,

@@ -201,8 +201,26 @@ fn h2live(data: &Path, args: &[&str], stdin: &str) -> Ran {
     }
 }
 
-/// A password, as tests type it.
+/// A password, as tests type it, and a wrong one.
 const PASSWORD: &str = "K7MP-4QR9-XW2T";
+const WRONG: &str = "Q9W8-E7R6-T5Y4";
+
+/// The program never said a hash, nor any of `passwords`, as typed or as
+/// sealed (`password::normalize`).
+fn said_nothing_secret(program: &Program, passwords: &[&str]) {
+    for line in &program.said {
+        assert!(!line.contains("argon2"), "{line}");
+        for p in passwords {
+            let sealed = h2live::password::normalize(p);
+            assert!(!line.contains(p) && !line.contains(&sealed), "{line}");
+        }
+    }
+}
+
+/// Bytes as lowercase hex.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// PCs signed in to the program, polled as games poll them (every frame),
 /// on a clock of their own.
@@ -495,7 +513,7 @@ fn accounts_are_made_from_the_command_line_while_the_program_runs() {
         ran.err
     );
     assert!(ran.err.contains("hashing took "), "{}", ran.err);
-    // The program made it (and said so); nothing secret was said.
+    // The program made it (and said so).
     program.wait_for("live: command line: made the account KAT");
     let mut pcs = Pcs::new();
     let a = pcs.connect_launcher(program.port, 1, "Kat", Some(PASSWORD));
@@ -508,16 +526,42 @@ fn accounts_are_made_from_the_command_line_while_the_program_runs() {
     // Another does.
     let c = pcs.connect_launcher(program.port, 2, "Kat", None);
     assert_eq!(pcs.answer(c), Err(live::PASSWORD_NEEDED.into()));
+    // A wrong password, and a password for a gamertag no one has.
+    let d = pcs.connect_launcher(program.port, 3, "Kat", Some(WRONG));
+    assert_eq!(pcs.answer(d), Err(live::WRONG_PASSWORD.into()));
+    let e = pcs.connect_launcher(program.port, 4, "Nobody", Some(PASSWORD));
+    assert_eq!(pcs.answer(e), Err(live::WRONG_PASSWORD.into()));
     let ran = h2live(&data.0, &["user", "list"], "");
     assert_eq!(ran.code, 0, "{}", ran.err);
     let row = ran.out.lines().find(|l| l.starts_with("KAT ")).unwrap();
     assert!(row.contains(" 1/5 "), "{}", ran.out);
     assert!(ran.out.contains("PC \"PC 1\""), "{}", ran.out);
     assert!(ran.out.ends_with("1 account\n"), "{}", ran.out);
+    // The key a launcher checks the server by, as the owner builds it in.
+    let key = pcs.pcs[a].view.server_key.unwrap();
+    let shown = format!(
+        "identity key: {}\nshort code:   {}\n",
+        hex(&key),
+        h2live::seal::short_code(&key)
+    );
     let ran = h2live(&data.0, &["user", "key"], "");
-    assert!(ran.out.starts_with("identity key: "), "{}", ran.out);
+    assert_eq!(
+        (ran.code, ran.out.as_str()),
+        (0, shown.as_str()),
+        "{}",
+        ran.err
+    );
     program.stop();
-    assert!(!program.said.iter().any(|l| l.contains("argon2")));
+    // Nothing secret was said.
+    said_nothing_secret(&program, &[PASSWORD, WRONG]);
+    // The same key with the program stopped (the folder opened here).
+    let ran = h2live(&data.0, &["user", "key"], "");
+    assert_eq!(
+        (ran.code, ran.out.as_str()),
+        (0, shown.as_str()),
+        "{}",
+        ran.err
+    );
     // The socket goes with the program.
     assert!(!data.0.join("admin.sock").exists());
 }
@@ -589,6 +633,11 @@ fn the_command_line_removes_makes_admins_and_gives_new_passwords() {
         );
         assert_eq!(ran.code, 0, "{}", ran.err);
     }
+    // A gamertag someone has: refused, and no password is shown.
+    let ran = h2live(&data.0, &["user", "add", "jun"], "");
+    assert_eq!(ran.code, 1, "{}", ran.err);
+    assert!(ran.err.contains(live::GAMERTAG_TAKEN), "{}", ran.err);
+    assert_eq!(ran.out, "");
     let listed = |gamertag: &str| {
         let ran = h2live(&data.0, &["user", "list"], "");
         assert_eq!(ran.code, 0, "{}", ran.err);
@@ -645,7 +694,64 @@ fn the_command_line_removes_makes_admins_and_gives_new_passwords() {
     assert_eq!(pcs.answer(a), Ok(()));
     let b = pcs.connect_launcher(program.port, 2, "jun", Some(PASSWORD));
     assert_eq!(pcs.answer(b), Err(live::WRONG_PASSWORD.into()));
+
+    // Renamed (to a name that keeps the rules), while the program runs.
+    let ran = h2live(&data.0, &["user", "rename", "jun", "1bad"], "");
+    assert_eq!(ran.code, 2, "{}", ran.err);
+    let ran = h2live(&data.0, &["user", "rename", "jun", "Jun Two"], "");
+    let renamed = (ran.code, ran.out.as_str());
+    assert_eq!(renamed, (0, "JUN IS JUN TWO NOW\n"), "{}", ran.err);
+    assert!(listed("JUN TWO").is_some());
+
+    // Signed out of all PCs: the one it was on needs the password again.
+    let ran = h2live(&data.0, &["user", "revoke", "jun two"], "");
+    let revoked = (ran.code, ran.out.as_str());
+    assert_eq!(
+        revoked,
+        (0, "JUN TWO IS SIGNED OUT OF ALL PCS.\n"),
+        "{}",
+        ran.err
+    );
+    let c = pcs.connect_launcher(program.port, 1, "Jun Two", None);
+    assert_eq!(pcs.answer(c), Err(live::PASSWORD_NEEDED.into()));
     program.stop();
+    said_nothing_secret(&program, &[PASSWORD, &password]);
+}
+
+#[test]
+fn a_gamertag_starting_with_a_dash_goes_after_double_dash() {
+    let data = TempDir::new("cli-dash");
+    // An account a PC made by signing in (as on an older server) may start
+    // with a dash.
+    let mut program = Program::start(&data.0);
+    program.wait_for("sign-up: open");
+    let mut pcs = Pcs::new();
+    let a = pcs.connect(program.port, 1, "-Kat-");
+    assert_eq!(pcs.answer(a), Ok(()));
+    assert_eq!(pcs.pcs[a].view.welcome.as_ref().unwrap().gamertag, "-KAT-");
+    // Without "--", it's taken for a flag; after it, it's the gamertag.
+    let ran = h2live(&data.0, &["user", "admin", "-KAT-", "on"], "");
+    assert_eq!(ran.code, 2, "{}", ran.err);
+    assert!(ran.err.contains("what's -KAT-?"), "{}", ran.err);
+    let ran = h2live(&data.0, &["user", "admin", "--", "-kat-", "on"], "");
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    assert!(ran.out.starts_with("-KAT- IS AN ADMIN NOW."), "{}", ran.out);
+    let ran = h2live(
+        &data.0,
+        &["user", "passwd", "--password-stdin", "--", "-KAT-"],
+        &format!("{PASSWORD}\n"),
+    );
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    assert!(
+        ran.out.starts_with("-KAT- HAS A NEW PASSWORD."),
+        "{}",
+        ran.out
+    );
+    program.stop();
+    let ran = h2live(&data.0, &["user", "list"], "");
+    let row = ran.out.lines().find(|l| l.starts_with("-KAT- ")).unwrap();
+    let columns: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!(columns[1..4], ["yes", "yes", "1/5"], "{}", ran.out);
 }
 
 #[test]

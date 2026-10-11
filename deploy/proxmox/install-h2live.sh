@@ -28,7 +28,9 @@
 # To go back to the program before: as root,
 #   install -m755 /opt/h2live/h2live.prev /opt/h2live/h2live && systemctl restart h2live
 # For the exact data from before an update too, stop h2live and copy that
-# update's backup folder back over /var/lib/h2live first.
+# update's backup folder back over /var/lib/h2live first. A program from
+# before accounts has no command line: until the newer one is back,
+# "h2live user ..." says so and does nothing.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 [ "$(id -u)" = 0 ] || { echo "run this as root"; exit 1; }
@@ -121,6 +123,14 @@ if [ "$#" -eq 0 ]; then
     echo "usage: h2live user list|add|passwd|revoke|remove|admin|rename|key ... (h2live help)" >&2
     echo "The server itself runs as the h2live service (systemctl status h2live)." >&2
     exit 2
+fi
+# A program from before accounts (put back to go back to it) has no command
+# line: it would start a second server whatever it was asked. (Its usage's
+# first line is how a program with one is told.)
+if ! grep -qaF 'usage: h2live user list' /opt/h2live/h2live; then
+    echo "This h2live is from before accounts and has no command line." >&2
+    echo "The server runs as the h2live service (systemctl status h2live)." >&2
+    exit 1
 fi
 exec runuser -u h2live -- /opt/h2live/h2live "$@"
 WRAPPER

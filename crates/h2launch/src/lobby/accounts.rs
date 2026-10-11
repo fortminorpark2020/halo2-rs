@@ -16,6 +16,7 @@ use super::*;
 use h2live::client::AccountAsk;
 use h2live::logins::MAX_PCS;
 use h2live::password;
+use h2live::server::WRONG_OLD_PASSWORD;
 use h2net::live::{AccountRow, Accounts, ROW_ADMIN, ROW_ONLINE, ROW_PASSWORD};
 
 /// How long an account request may go unanswered before the lobby says so
@@ -581,6 +582,25 @@ impl App {
             return;
         };
         if !ok {
+            // The field at fault gets the cursor, as with the lobby's own
+            // checks: a wrong current password is rubbed out, and a
+            // gamertag the server won't take is there to change.
+            match p.asked {
+                Asked::ChangePassword
+                    if self.popup == Some(Popup::ChangePassword)
+                        && (text == WRONG_OLD_PASSWORD || text == TOO_MANY_TRIES) =>
+                {
+                    self.acc.change[0].clear();
+                    self.acc.row = 0;
+                }
+                Asked::Create { .. }
+                    if self.popup == Some(Popup::NewAccount)
+                        && (text == GAMERTAG_TAKEN || text == password::GAMERTAG_RULES) =>
+                {
+                    self.acc.row = NEW_GAMERTAG;
+                }
+                _ => {}
+            }
             return self.account_error(text);
         }
         match p.asked {
@@ -1423,7 +1443,7 @@ mod tests {
         a.tick(Instant::now());
         assert_eq!(a.label(), "live");
         assert!(a.password.is_empty());
-        assert_eq!(Pins::load(&dir).get(SERVER), Some(server.key()));
+        assert_eq!(Pins::load(&dir).unwrap().get(SERVER), Some(server.key()));
         // No log line and no file the lobby keeps has it.
         assert!(log_has(&said, "(with a password)"));
         let log = said.lock().unwrap().join("\n");
@@ -1459,7 +1479,7 @@ mod tests {
         // kept for next time; the PC is one of the account's.
         assert_eq!(Settings::load(&dir.join("lobby.txt")).gamertag, "ALPHA");
         let key = live.server.identity_key();
-        assert_eq!(Pins::load(&dir).get(SERVER), Some(key));
+        assert_eq!(Pins::load(&dir).unwrap().get(SERVER), Some(key));
         assert!(log_has(&said, "lobby: pinned 127.0.0.1:9's key "));
         assert_eq!(live.server.devices_of(alpha).len(), 1);
         // A player's own account comes after the welcome.
@@ -1823,7 +1843,7 @@ mod tests {
         a.input(Input::B);
         assert_eq!(a.label(), "main");
         assert!(a.key_changed.is_none() && a.password.is_empty());
-        assert_eq!(Pins::load(&dir).get(SERVER), Some(was));
+        assert_eq!(Pins::load(&dir).unwrap().get(SERVER), Some(was));
         // Again, and A this time: the new key is pinned, and the lobby
         // signs in again with the password it kept. (Not by a press that
         // comes as the popup opens: Enter held, or pressed twice.)
@@ -1834,13 +1854,13 @@ mod tests {
         a.input(Input::A);
         a.key_repeated(Input::A);
         assert_eq!(a.label(), "keychanged");
-        assert_eq!(Pins::load(&dir).get(SERVER), Some(was));
+        assert_eq!(Pins::load(&dir).unwrap().get(SERVER), Some(was));
         a.tick(Instant::now() + TRUST_WAIT);
         a.key_repeated(Input::A);
         assert_eq!(a.label(), "keychanged");
         a.input(Input::A);
         assert_eq!(a.label(), "connecting");
-        assert_eq!(Pins::load(&dir).get(SERVER), Some(now));
+        assert_eq!(Pins::load(&dir).unwrap().get(SERVER), Some(now));
         assert_eq!(a.pins.get(SERVER), Some(now));
         assert!(log_has(&said, "lobby: trusting 127.0.0.1:9's new key"));
         let mut server = ByHand::answer(&mut a, 3);
@@ -1856,6 +1876,41 @@ mod tests {
         a.tick(Instant::now());
         assert_eq!(a.label(), "live");
         assert!(a.password.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn server_keys_that_cannot_be_read_stop_the_sign_in_and_are_kept() {
+        let dir = scratch("pins-unreadable");
+        // Saved as UTF-16 (by an editor, say): it doesn't read.
+        let file = crate::pins::path(&dir);
+        let unreadable = [0xFF, 0xFE, b'h', 0, b'2', 0];
+        std::fs::write(&file, unreadable).unwrap();
+        let (mut a, said) = lobby(&dir, "");
+        to_online(&mut a);
+        fill_form(&mut a, "alpha", PASSWORD);
+        // Nothing goes to the server (no key could be checked), it says
+        // why, and the file is left as it was.
+        let mut server = ByHand::answer(&mut a, 3);
+        assert!(server.heard().is_empty());
+        assert_eq!(a.label(), "failed");
+        assert!(a.failed.starts_with("The server keys at "), "{}", a.failed);
+        assert!(log_has(&said, "The server keys at "));
+        assert!(a.client.is_none() && a.password.is_empty());
+        assert_eq!(std::fs::read(&file).unwrap(), unreadable);
+        // Once it reads, A signs in, and the key is pinned.
+        std::fs::remove_file(&file).unwrap();
+        a.input(Input::A);
+        assert_eq!(a.label(), "connecting");
+        let mut server = ByHand::answer(&mut a, 3);
+        let heard = server.heard();
+        assert!(matches!(heard[..], [(ToServer::Login(_), _)]), "{heard:?}");
+        server.challenge();
+        a.tick(Instant::now());
+        server.welcome("ALPHA");
+        a.tick(Instant::now());
+        assert_eq!(a.label(), "live");
+        assert_eq!(Pins::load(&dir).unwrap().get(SERVER), Some(server.key()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1971,11 +2026,11 @@ mod tests {
         a.input(Input::A);
         live.until(&mut [&mut a], |_, a| a[0].acc.pending.is_none());
         assert_eq!(a.label(), "newaccount");
-        assert!(a.acc.error.is_some());
-        // A gamertag that breaks the rules isn't sent.
-        a.input(Input::Up);
-        a.input(Input::Up);
+        assert_eq!(a.acc.error.as_deref(), Some(GAMERTAG_TAKEN));
+        // The cursor is back on the gamertag, to change it.
+        assert_eq!(a.acc.row, NEW_GAMERTAG);
         assert!(a.typing());
+        // A gamertag that breaks the rules isn't sent.
         for _ in 0..4 {
             a.input(Input::Backspace);
         }
@@ -2457,9 +2512,12 @@ mod tests {
         assert!(log_has(&said, "lobby: asked to change our password"));
         live.until(&mut [&mut a], |_, a| a[0].acc.pending.is_none());
         assert_eq!(a.label(), "changepassword");
-        assert!(a.acc.error.is_some());
+        assert_eq!(a.acc.error.as_deref(), Some(WRONG_OLD_PASSWORD));
+        // The wrong one is rubbed out, the cursor on it; the new ones stay.
+        assert_eq!(a.acc.row, 0);
+        assert!(a.acc.change[0].is_empty());
+        assert!(!a.acc.change[1].is_empty() && !a.acc.change[2].is_empty());
         // The right one: changed, the popup closed.
-        rub(&mut a, 0);
         type_in(&mut a, &PASSWORD.to_lowercase());
         a.input(Input::A);
         live.until(&mut [&mut a], |_, a| a[0].acc.pending.is_none());

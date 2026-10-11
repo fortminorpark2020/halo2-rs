@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zeroize::Zeroizing;
 
+/// (The install script's `h2live` wrapper looks for its first line,
+/// "usage: h2live user list", to tell a program with this command line
+/// from an older one: keep it.)
 const USAGE: &str = "\
 usage: h2live user list
        h2live user add GAMERTAG [--admin] [--password-stdin]
@@ -32,7 +35,8 @@ usage: h2live user list
        h2live user rename GAMERTAG NEW
        h2live user key
 Any of them takes --data DIR, the server's data folder (else H2LIVE_DATA,
-h2live.txt's data=, or h2live-data). A gamertag with a space goes in quotes.
+h2live.txt's data=, or h2live-data). A gamertag with a space goes in quotes;
+one starting with - goes after --, which ends the flags.
 
   list      every account, with its PCs
   add       a new account; its password is made up and shown once (or read
@@ -43,8 +47,8 @@ h2live.txt's data=, or h2live-data). A gamertag with a space goes in quotes.
             the PCs it's on stay signed in
   revoke    sign an account out of every PC (it signs in again with its
             password)
-  remove    remove an account for good (without --yes, says what would be
-            lost)
+  remove    remove an account (without --yes, says what would be lost); for
+            good while sign-up is closed
   admin     make an account an admin, or not
   rename    give an account another gamertag
   key       the server's identity key, which launchers check";
@@ -110,6 +114,12 @@ fn parse(args: Vec<String>) -> Result<Args, Failure> {
             "--admin" => parsed.admin = true,
             "--password-stdin" => parsed.stdin = true,
             "--yes" => parsed.yes = true,
+            // The rest are words, even those starting with a dash (an older
+            // server's gamertag may).
+            "--" => {
+                parsed.words.extend(args.by_ref());
+                break;
+            }
             _ if arg.starts_with("--data=") => parsed.data = Some(arg[7..].into()),
             _ if arg.starts_with('-') => return Err(usage(&format!("what's {arg}?"))),
             _ => parsed.words.push(arg),
@@ -398,6 +408,13 @@ fn would_lose(folder: &Folder, gamertag: &str) -> Result<(), Failure> {
          and the PCs it's on ({pcs}).",
         r.gamertag, r.level
     );
+    // (An account a PC's key named, by signing up or on an older server, is
+    // that key's again while sign-up is open: see `Server::prove`.)
+    println!(
+        "(While sign-up is open, an account a PC made by signing in, here or on an \
+         older server, comes back when that PC signs in again, its stat card bringing \
+         back its levels.)"
+    );
     if r.online {
         println!("{} is online now, and would be signed out.", r.gamertag);
     }
@@ -493,4 +510,54 @@ fn online(folder: &Path, request: Request) -> Result<Vec<String>, String> {
 #[cfg(not(unix))]
 fn online(_: &Path, _: Request) -> Result<Vec<String>, String> {
     Err("h2live is running; stop it and try again".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `parse`'s words, or why it refused.
+    fn words(args: &[&str]) -> Result<Vec<String>, String> {
+        match parse(args.iter().map(|a| a.to_string()).collect()) {
+            Ok(parsed) => Ok(parsed.words),
+            Err(Failure::Usage(why) | Failure::Error(why)) => Err(why),
+        }
+    }
+
+    #[test]
+    fn a_gamertag_starting_with_a_dash_goes_after_double_dash() {
+        // Taken for a flag it doesn't know...
+        assert_eq!(
+            words(&["user", "admin", "-KAT-", "on"]),
+            Err("what's -KAT-?".to_string())
+        );
+        // ...but after "--", every argument is a word.
+        assert_eq!(
+            words(&["user", "admin", "--", "-KAT-", "on"]).unwrap(),
+            ["user", "admin", "-KAT-", "on"]
+        );
+        // Flags before it still count.
+        let args = ["user", "passwd", "--password-stdin", "--", "--NINJA--"];
+        let parsed = parse(args.iter().map(|a| a.to_string()).collect())
+            .ok()
+            .unwrap();
+        assert!(parsed.stdin);
+        assert_eq!(parsed.words, ["user", "passwd", "--NINJA--"]);
+        // One after it is a word, so it's never taken as a flag (and a
+        // password as a word is still refused).
+        assert_eq!(
+            words(&["user", "add", "--", "KAT", "--admin"]).unwrap(),
+            ["user", "add", "KAT", "--admin"]
+        );
+        assert!(matches!(
+            run(vec![
+                "user".into(),
+                "add".into(),
+                "--".into(),
+                "KAT".into(),
+                "--admin".into()
+            ]),
+            Err(Failure::Usage(_))
+        ));
+    }
 }

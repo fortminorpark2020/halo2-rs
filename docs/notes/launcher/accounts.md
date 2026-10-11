@@ -170,6 +170,11 @@ as typed, in lower case, and the key in 64 hex digits).
   start. A key it learns later wins over the built-in one.
 - Otherwise it remembers the key the first time it signs in (after the
   server's WELCOME; the log says `lobby: pinned <server>'s key <code>`).
+- A `live-servers.txt` that is there but can't be read (another program
+  holding it, or saved as UTF-16) stops the sign-in ("The server keys at
+  ...: ..."), rather than trusting any key and writing over the file; it's
+  read again at the next try. Lines that don't read are skipped, and the
+  log says how many.
 - On every sign-in it checks SEAL_KEY before sending anything after its
   LOGIN: it must come before CHALLENGE and its signature must check, or
   the launcher hangs up ("THE SERVER DIDN'T PROVE WHO IT IS"). If the key
@@ -249,7 +254,8 @@ server with no admin.
 - **`--live`** (the test mode without the lobby) checks the pin, never
   sends a password, and on a PC the account doesn't know stops with "this
   PC isn't signed in to that account: sign in once from the lobby (same
-  --instance) with your password".
+  --instance) with your password". Told UPDATE YOUR LAUNCHER, it says, as
+  the lobby does, that the server runs a different version.
 
 ## Files on the server (in the data folder)
 
@@ -307,13 +313,19 @@ and a signature by its key over the challenge, its key, the gamertag its
 LOGIN named, its PC name and the sealed password, so no one in between can
 send their own account's password with this PC's proof and make the PC
 theirs; else "BAD SIGNATURE")**, checked in this order:
+- **The key is already one of the account's PCs:** it signs in as PROVE
+  would, and the password isn't checked (no hash, no count, and no lock
+  stops it).
 - **More than 30 password checks in the last minute on the whole server:**
   "THE SERVER IS BUSY".
 - **10 wrong tries from one address in 10 minutes:** "TOO MANY WRONG
   PASSWORDS" for that address.
-- **5 wrong tries for the account in 10 minutes:** the same, with no hash
-  and no new count (so the lock isn't made longer). Its remembered PCs
-  still sign in, so guessing can't lock a friend out of play.
+- **5 wrong tries for the account in 10 minutes, or 10 passwords checked
+  for it (right or wrong, each costing a hash):** the same, with no hash
+  and no new count (so the lock isn't made longer). The second limit is so
+  whoever knows one account's password can't keep the server's hashes
+  busy for everyone by signing in to it again and again. Its remembered
+  PCs still sign in, so guessing can't lock a friend out of play.
 - **Wrong password or unknown gamertag:** the same answer, "WRONG GAMERTAG
   OR PASSWORD", counted for the account (if there is one) and the address,
   and logged with the gamertag and address.
@@ -328,7 +340,9 @@ applies, and every try is a new connection.
 - Only the owner names accounts.
 - On a closed server, or for an account with a password, the gamertag a PC
   asks for never renames it (a PROFILE asking for another name is told
-  "ASK THE SERVER'S OWNER TO CHANGE YOUR GAMERTAG.").
+  "ASK THE SERVER'S OWNER TO CHANGE YOUR GAMERTAG.", and so is the game
+  when it signs in under another name; the launcher's lobby says it
+  itself).
 - Gamertags the owner makes are 1 to 15 capital letters, digits and single
   spaces, starting with a letter. That's stricter than what players could
   pick before, so one never looks like a splitscreen guest's "NAME(1)".
@@ -347,8 +361,13 @@ applies, and every try is a new connection.
   lists);
 - frees the gamertag.
 
-The account can't come back: its id is random and never reused, and a
-closed server ignores its card. games.log keeps its history.
+On a closed server the account can't come back: an account the owner
+made has a random id that is never reused, an account a PC's key made
+(open sign-up, or a server from before accounts) is refused that key
+because sign-up is closed, and its card is ignored. With sign-up open, an
+account a PC's key made comes back when that PC signs in again, under the
+same id, its stat card bringing back its gamertag (if free) and levels;
+only its friends and PCs are lost. games.log keeps its history.
 
 **The last admin** can't be removed or unmade.
 
@@ -402,7 +421,8 @@ h2live user key                        (the identity key and its short code)
 ```
 
 Any of them takes `--data <folder>`; a gamertag with a space goes in
-quotes. Exit codes: 0 done, 1 refused or failed, 2 not understood (with the
+quotes, and one starting with `-` (an account from before, say) after
+`--`, which ends the flags (`h2live user admin -- -KAT- on`). Exit codes: 0 done, 1 refused or failed, 2 not understood (with the
 usage).
 
 - **The data folder** is found as the server finds it: `--data`, else
@@ -461,6 +481,8 @@ server has none. Open set by hand while there are admins logs a warning.
 
 - 5 PCs per account.
 - 5 wrong passwords per account, and 10 per address, within 10 minutes.
+- 10 passwords checked per account (right or wrong) within 10 minutes, to
+  sign in from PCs it doesn't know yet.
 - 30 password checks or hashes a minute per server. A player's own
   password change needs two (the old one checked, the new one made), so
   it's refused as busy unless both are free.
@@ -496,9 +518,11 @@ To roll back, `install -m755 /opt/h2live/h2live.prev /opt/h2live/h2live &&
 systemctl restart h2live`, and friends go back to the old zip. The version
 3 server reads the folder and ignores the new files and the `signup=`
 line, but it is open sign-up again. Accounts the owner made can't sign in
-under it, though they are kept for later. Rolling forward again adopts any
-accounts it made meanwhile, so check `h2live user list`. For an exact
-earlier state, restore the dated copy.
+under it, though they are kept for later. It has no command line either:
+the wrapper says so (`h2live user ...` does nothing) until the newer
+program is back. Rolling forward again adopts any accounts it made
+meanwhile, so check `h2live user list`. For an exact earlier state,
+restore the dated copy.
 
 ## What it doesn't protect
 

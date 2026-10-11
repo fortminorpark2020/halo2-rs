@@ -473,7 +473,8 @@ on each PC, and that PC is remembered (up to 5 per account). `signup=open`,
 wins): open gives every new PC an account of its own, as before; closed
 leaves it to the owner; auto, the default, is open until some account is
 an admin, then closed. Password hashes and each account's PCs are kept in
-`logins.txt` in the data folder (private: back it up with the rest). With
+`logins.txt` in the data folder (private on Linux; on Windows keep the
+folder inside your own user folder; back it up with the rest). With
 arguments h2live is its own command line: `h2live user list`, `h2live user
 add <gamertag>` (`--admin` makes an admin, whose launcher can make
 accounts; the made-up password is shown once), `h2live user passwd
@@ -482,9 +483,9 @@ accounts; the made-up password is shown once), `h2live user passwd
 <new>`, and `h2live user key`, the server's key that launchers check (for
 building them with `H2LAUNCH_SERVER_KEY`). A password is never typed as
 an argument: it's made up, or read with `--password-stdin`. The commands
-work while the server runs (on Linux, through a private socket in the
-data folder) and while it's stopped, and only one h2live runs on a data
-folder at a time. See `docs/notes/launcher/accounts.md`. `h2relay.exe` runs a relay on its
+work while the server is stopped and, on Linux only, while it runs
+(through a private socket in the data folder; on Windows close h2live
+first), and only one h2live runs on a data folder at a time. See `docs/notes/launcher/accounts.md`. `h2relay.exe` runs a relay on its
 own for tests on one PC or a home network (`h2relay [port]`); it lets
 anyone in, so don't forward its port.
 

@@ -21,10 +21,13 @@
 //! key becomes a device of the account (taken from any other account that
 //! had it). A wrong password and a gamertag no account has get the same
 //! answer. Each password checked costs a hash on the server's own thread,
-//! so there are limits: 30 hashes a minute for the whole server, and 5
-//! wrong passwords for an account or 10 from an address in 10 minutes
-//! (then TOO_MANY_TRIES until they're older). PCs an account knows need no
-//! password, so no one can lock a player out of playing by guessing.
+//! so there are limits: 30 hashes a minute for the whole server, 5 wrong
+//! passwords for an account or 10 from an address in 10 minutes, and 10
+//! passwords checked for an account in 10 minutes, right or wrong, so
+//! knowing one password can't keep the server busy (then TOO_MANY_TRIES
+//! until they're older). PCs an account knows need no password, and a
+//! password sent from one isn't checked, so no one can lock a player out of
+//! playing by guessing.
 //!
 //! Sign-up is open, closed, or auto (the default): closed once any account
 //! is an admin. While it's closed, or for an account with a password, no
@@ -70,6 +73,11 @@ pub const HASHES_PER_MINUTE: usize = 30;
 /// Wrong passwords an account, or an address, may have in 10 minutes.
 pub const WRONG_PER_ACCOUNT: usize = 5;
 pub const WRONG_PER_IP: usize = 10;
+/// Passwords checked to sign in to an account in 10 minutes, right or
+/// wrong: each costs a hash, so whoever knows one account's password can't
+/// keep the server busy for everyone else by signing in again and again.
+/// (Ten is room for a player adding all five of their PCs, and some typos.)
+pub const CHECKS_PER_ACCOUNT: usize = 10;
 /// Passwords a player may change in 10 minutes: each costs two hashes, so
 /// no one signed in can keep the server busy for everyone else.
 pub const CHANGES_PER_ACCOUNT: usize = 3;
@@ -405,6 +413,12 @@ impl Server {
         times.map_or(0, |t| recent(t, now, WRONG_WINDOW))
     }
 
+    /// Passwords checked to sign in to account `id` in the last 10 minutes.
+    fn checks_for(&self, id: u64, now: f64) -> usize {
+        let times = self.checks_by_account.get(&id);
+        times.map_or(0, |t| recent(t, now, WRONG_WINDOW))
+    }
+
     /// A wrong password, for `account` if it's one, from `ip`.
     fn wrong_password(&mut self, account: Option<u64>, ip: IpAddr, now: f64) {
         if let Some(id) = account {
@@ -424,11 +438,15 @@ impl Server {
         for times in self.wrong_by_ip.values_mut() {
             times.retain(|&t| now - t < WRONG_WINDOW);
         }
+        for times in self.checks_by_account.values_mut() {
+            times.retain(|&t| now - t < WRONG_WINDOW);
+        }
         for times in self.changes_by_account.values_mut() {
             times.retain(|&t| now - t < WRONG_WINDOW);
         }
         self.wrong_by_account.retain(|_, times| !times.is_empty());
         self.wrong_by_ip.retain(|_, times| !times.is_empty());
+        self.checks_by_account.retain(|_, times| !times.is_empty());
         self.changes_by_account.retain(|_, times| !times.is_empty());
     }
 
@@ -461,24 +479,34 @@ impl Server {
         now: f64,
     ) {
         let ip = self.pcs[k].ip;
+        let wanted = clean_name(&login.gamertag);
+        let found = self.find(&wanted);
+        // A PC the account knows signs in as PROVE signs it in: its
+        // password isn't checked, so it costs no hash and no lock stops it.
+        if let Some(a) = found.filter(|&a| self.logins.owner_of(&login.key) == Some(a)) {
+            return self.sign_in(k, a, login, false, now);
+        }
         if self.hashes_recent(now) >= HASHES_PER_MINUTE {
             return self.refuse(k, live::SERVER_BUSY);
         }
         if self.wrong_from(ip, now) >= WRONG_PER_IP {
             return self.refuse(k, live::TOO_MANY_TRIES);
         }
-        let wanted = clean_name(&login.gamertag);
-        let found = self.find(&wanted);
-        // Locked: no hash, and it isn't counted (so the lock isn't made
-        // longer).
-        if found.is_some_and(|a| self.wrong_for_account(a, now) >= WRONG_PER_ACCOUNT) {
+        // Locked, or checked too often: no hash, and it isn't counted (so
+        // the lock isn't made longer).
+        if found.is_some_and(|a| {
+            self.wrong_for_account(a, now) >= WRONG_PER_ACCOUNT
+                || self.checks_for(a, now) >= CHECKS_PER_ACCOUNT
+        }) {
             return self.refuse(k, live::TOO_MANY_TRIES);
         }
         let typed = self.open_box(k, seal::SIGN_IN, login.gamertag.as_bytes(), sealed, 1);
         let phc = found.and_then(|a| self.logins.get(a)?.password.clone());
-        let right = match (&phc, &typed) {
-            (Some(phc), Some(typed)) => {
+        let right = match (found, &phc, &typed) {
+            (Some(a), Some(phc), Some(typed)) => {
+                // Right or wrong, it counts for the account.
                 self.hashes.push_back(now);
+                self.checks_by_account.entry(a).or_default().push(now);
                 password::verify(phc, typed[0].as_str())
             }
             _ => false,
@@ -771,6 +799,7 @@ impl Server {
                 }
                 self.logins.set_password(account, phc);
                 self.wrong_by_account.remove(&account);
+                self.checks_by_account.remove(&account);
                 saved = self.save_logins();
                 let name = self.gamertag(account);
                 log(format_args!("live: {who} gave {name} a new password"));
@@ -831,6 +860,7 @@ impl Server {
                 }
                 self.logins.remove(account);
                 self.wrong_by_account.remove(&account);
+                self.checks_by_account.remove(&account);
                 // (Unsaved, its sign-ins are dropped at the next start all
                 // the same: accounts.txt hasn't the account.)
                 self.save_logins();

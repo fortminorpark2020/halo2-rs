@@ -62,7 +62,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-pub use accounts::{Actor, Command, SignUp};
+pub use accounts::{Actor, Command, SignUp, WRONG_OLD_PASSWORD};
 
 mod accounts;
 mod matches;
@@ -220,11 +220,13 @@ pub struct Server {
     cost: Cost,
     /// When the passwords checked or hashed in the last minute were, and
     /// the wrong passwords of the last 10 minutes, by account and by
-    /// address, and the passwords players changed in the last 10 minutes.
-    /// Each drops what is older than its window as it goes.
+    /// address, the passwords checked to sign in to each account (right or
+    /// wrong) and those players changed, in the last 10 minutes. Each
+    /// drops what is older than its window as it goes.
     hashes: VecDeque<f64>,
     wrong_by_account: HashMap<u64, Vec<f64>>,
     wrong_by_ip: HashMap<IpAddr, Vec<f64>>,
+    checks_by_account: HashMap<u64, Vec<f64>>,
     changes_by_account: HashMap<u64, Vec<f64>>,
     /// Sent with every challenge.
     motd: String,
@@ -325,6 +327,7 @@ impl Server {
             hashes: VecDeque::new(),
             wrong_by_account: HashMap::new(),
             wrong_by_ip: HashMap::new(),
+            checks_by_account: HashMap::new(),
             changes_by_account: HashMap::new(),
             motd: motd.trim().to_string(),
             pcs: Vec::new(),
@@ -732,9 +735,11 @@ impl Server {
         };
         // The gamertag asked for if it may be renamed and the name is free;
         // otherwise the one it had.
+        let asked = clean_name(&login.gamertag);
+        let may_rename = self.may_rename(id);
         let mut names = Vec::new();
-        if self.may_rename(id) {
-            names.push(clean_name(&login.gamertag));
+        if may_rename {
+            names.push(asked.clone());
         }
         names.push(account.gamertag.clone());
         names.push(existing.map_or(String::new(), |a| a.gamertag.clone()));
@@ -765,10 +770,21 @@ impl Server {
             "live: {} signed in from {}{program}",
             self.accounts[&id].gamertag, pc.ip
         ));
+        let game = pc.client == ClientKind::Viewer;
         if pc.client == ClientKind::Launcher {
             self.friends_changed(id);
         }
         self.welcome(id);
+        // The game asked for another gamertag it can't have here: it's told
+        // why. (A launcher's is the name it signs in with, and its lobby
+        // says so itself.)
+        if game
+            && !may_rename
+            && !asked.is_empty()
+            && !asked.eq_ignore_ascii_case(&self.accounts[&id].gamertag)
+        {
+            self.tell(id, &ToPc::Notice(live::ASK_TO_RENAME.into()));
+        }
         let playlists = ToPc::Playlists(self.playlists_for(id, &self.playlist_counts()));
         self.tell(id, &playlists);
         self.new_party(id);

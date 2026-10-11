@@ -22,8 +22,8 @@ use crate::pins::Pins;
 use crate::session::{Player, Session};
 use h2live::client::{Access, LiveClient, LiveEvent, Profile};
 use h2net::live::{
-    AccountOp, LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer, PASSWORD_NEEDED,
-    SIGNED_OUT,
+    AccountOp, LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer, LIVE_PROTOCOL,
+    PASSWORD_NEEDED, SIGNED_OUT, UPDATE_YOUR_LAUNCHER,
 };
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
@@ -167,8 +167,11 @@ impl Lobby {
         let key_path = folder.join("live-key.bin");
         let key = h2live::client::identity(&key_path)
             .map_err(|e| format!("the key at {}: {e}", key_path.display()))?;
-        let mut pins = Pins::load(folder);
-        if let Some(note) = pins.note() {
+        let mut pins = Pins::load(folder).map_err(|e| {
+            let path = crate::pins::path(folder);
+            format!("the server keys at {}: {e}", path.display())
+        })?;
+        for note in pins.notes() {
             log(&note);
         }
         let url = server_url(server);
@@ -359,12 +362,19 @@ pub fn prepare(
 
 /// What `--live` says when the server turns it away for `why`: a PC the
 /// account doesn't know (or no longer knows) must sign in once from the
-/// lobby with the password, since `--live` sends none.
+/// lobby with the password, since `--live` sends none. A server at another
+/// live protocol says to update the launcher, though it may be the server
+/// that's older: said as the lobby says it.
 fn refusal(why: &str) -> String {
     if why == PASSWORD_NEEDED || why == SIGNED_OUT {
         "this PC isn't signed in to that account: sign in once from the lobby (same --instance) \
          with your password"
             .into()
+    } else if why == UPDATE_YOUR_LAUNCHER {
+        format!(
+            "the server runs a different version from this launcher (live protocol \
+             {LIVE_PROTOCOL}); ask its owner for the right one"
+        )
     } else {
         format!("the server turned us away: {why}")
     }
@@ -785,6 +795,43 @@ mod tests {
             refusal(h2net::live::SERVER_FULL),
             "the server turned us away: SERVER FULL"
         );
+    }
+
+    #[test]
+    fn a_server_at_another_version_is_said_to_be_one() {
+        // An older server tells a newer launcher to update: not said so.
+        let said = refusal(UPDATE_YOUR_LAUNCHER);
+        assert_eq!(
+            said,
+            format!(
+                "the server runs a different version from this launcher (live protocol \
+                 {LIVE_PROTOCOL}); ask its owner for the right one"
+            )
+        );
+        assert!(!said.contains("UPDATE"));
+    }
+
+    #[test]
+    fn server_keys_that_cannot_be_read_stop_live_before_it_dials() {
+        let dir = std::env::temp_dir().join(format!("h2launch-live-pins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Saved as UTF-16, say.
+        std::fs::write(crate::pins::path(&dir), [0xFF, 0xFE, b'h', 0, b'2', 0]).unwrap();
+        let profile = Profile {
+            gamertag: "Alpha".into(),
+            look: Default::default(),
+            maps: Vec::new(),
+            guests: 0,
+        };
+        let log: Log = Arc::new(|_: &str| {});
+        // (Port 9 is never dialled: it gives up first.)
+        let wait = Duration::from_millis(200);
+        let Err(e) = Lobby::sign_in("127.0.0.1:9", &dir, &profile, log, wait) else {
+            panic!("signed in");
+        };
+        assert!(e.starts_with("the server keys at "), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
