@@ -90,7 +90,8 @@ install. No game files are included in this repository.
   twice; your PCs stay signed in). If the launcher ever says SERVER KEY
   CHANGED, the server answered with another key than the one this PC
   knows it by: choose Trust the new key only if the server's owner told
-  you it changed, otherwise Cancel (nothing was sent). See
+  you it changed, otherwise Cancel (only the sign-in request with your
+  gamertag went out, never your password). See
   `docs/notes/launcher/accounts.md`.
   Its text is in Halo 2's own fonts, read from your MCC install.
   Settings (SETTINGS on the main menu, the row after Custom Game, or X on

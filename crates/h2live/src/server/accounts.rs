@@ -70,6 +70,9 @@ pub const HASHES_PER_MINUTE: usize = 30;
 /// Wrong passwords an account, or an address, may have in 10 minutes.
 pub const WRONG_PER_ACCOUNT: usize = 5;
 pub const WRONG_PER_IP: usize = 10;
+/// Passwords a player may change in 10 minutes: each costs two hashes, so
+/// no one signed in can keep the server busy for everyone else.
+pub const CHANGES_PER_ACCOUNT: usize = 3;
 /// How long wrong passwords count (seconds).
 const WRONG_WINDOW: f64 = 600.0;
 /// Longest name a PC is listed under.
@@ -87,7 +90,13 @@ pub const LAST_ADMIN: &str = "MAKE SOMEONE ELSE AN ADMIN FIRST.";
 pub const NO_PASSWORD_YET: &str = "ASK THE SERVER'S OWNER FOR A PASSWORD FIRST.";
 pub const WRONG_OLD_PASSWORD: &str = "WRONG PASSWORD";
 pub const PASSWORD_CHANGED: &str = "PASSWORD CHANGED";
-const CANT_SAVE: &str = "THE SERVER COULDN'T SAVE ITS FILES";
+pub const TOO_MANY_CHANGES: &str = "YOU CHANGED YOUR PASSWORD TOO OFTEN. TRY AGAIN IN 10 MINUTES.";
+pub const CANT_SAVE: &str = "THE SERVER COULDN'T SAVE ITS FILES";
+/// Added to what a command did when it takes access away but logins.txt
+/// couldn't be saved: it holds in memory (undoing it would let back in
+/// whoever it shut out), and is asked for again.
+pub const NOT_SAVED: &str =
+    "BUT THE SERVER COULDN'T SAVE ITS FILES, SO IT'S UNDONE WHEN THE SERVER NEXT STARTS. TRY AGAIN.";
 
 /// Whether PCs the server doesn't know get accounts of their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -309,13 +318,16 @@ impl Server {
     }
 
     /// Give account `id` sign-ins if it has none (a new account, sign-up
-    /// open): its key as its device.
-    pub(super) fn adopt(&mut self, id: u64) {
-        if let Some(a) = self.accounts.get(&id) {
-            if self.logins.adopt(a) {
-                self.save_logins();
-            }
+    /// open): its key as its device. True if it had none.
+    pub(super) fn adopt(&mut self, id: u64) -> bool {
+        let Some(a) = self.accounts.get(&id) else {
+            return false;
+        };
+        let adopted = self.logins.adopt(a);
+        if adopted {
+            self.save_logins();
         }
+        adopted
     }
 
     /// Save logins.txt. False (and logged) if it couldn't be.
@@ -334,7 +346,7 @@ impl Server {
     pub(super) fn prove(&mut self, k: usize, login: Login, now: f64) {
         let launcher = login.client.kind() == ClientKind::Launcher;
         if let Some(id) = self.logins.owner_of(&login.key) {
-            return self.sign_in(k, id, login, now);
+            return self.sign_in(k, id, login, false, now);
         }
         let id = store::account_id(&login.key);
         if self.accounts.contains_key(&id) {
@@ -354,7 +366,7 @@ impl Server {
             };
             return self.refuse(k, why);
         }
-        self.sign_in(k, id, login, now);
+        self.sign_in(k, id, login, false, now);
     }
 
     /// Passwords checked or hashed in the last minute.
@@ -400,8 +412,12 @@ impl Server {
         for times in self.wrong_by_ip.values_mut() {
             times.retain(|&t| now - t < WRONG_WINDOW);
         }
+        for times in self.changes_by_account.values_mut() {
+            times.retain(|&t| now - t < WRONG_WINDOW);
+        }
         self.wrong_by_account.retain(|_, times| !times.is_empty());
         self.wrong_by_ip.retain(|_, times| !times.is_empty());
+        self.changes_by_account.retain(|_, times| !times.is_empty());
     }
 
     /// The passwords in `sealed` from PC `k`, if it opens (sealed for
@@ -472,7 +488,8 @@ impl Server {
             return self.refuse(k, live::WRONG_PASSWORD);
         };
         self.wrong_by_account.remove(&a);
-        if self.logins.owner_of(&login.key) != Some(a) {
+        let new_pc = self.logins.owner_of(&login.key) != Some(a);
+        if new_pc {
             let pcs = self.logins.get(a).map_or(0, |l| l.devices.len());
             if pcs >= MAX_PCS {
                 return self.refuse(k, live::TOO_MANY_PCS);
@@ -505,7 +522,7 @@ impl Server {
                 pcs + 1
             ));
         }
-        self.sign_in(k, a, login, now);
+        self.sign_in(k, a, login, new_pc, now);
     }
 
     /// A launcher's account request (signed in as `me`, on PC `k`). False
@@ -620,6 +637,9 @@ impl Server {
     }
 
     /// A launcher player changes their own password: `old` must be right.
+    /// Wrong ones count as wrong passwords do (for the account and the
+    /// address), and right ones `CHANGES_PER_ACCOUNT` at most in 10
+    /// minutes.
     fn change_password(
         &mut self,
         k: usize,
@@ -631,14 +651,20 @@ impl Server {
         let Some(phc) = self.logins.get(me).and_then(|l| l.password.clone()) else {
             return Err(NO_PASSWORD_YET.into());
         };
-        if self.wrong_for_account(me, now) >= WRONG_PER_ACCOUNT {
+        let ip = self.pcs[k].ip;
+        if self.wrong_for_account(me, now) >= WRONG_PER_ACCOUNT
+            || self.wrong_from(ip, now) >= WRONG_PER_IP
+        {
             return Err(live::TOO_MANY_TRIES.into());
+        }
+        let changes = self.changes_by_account.get(&me);
+        if changes.map_or(0, |t| recent(t, now, WRONG_WINDOW)) >= CHANGES_PER_ACCOUNT {
+            return Err(TOO_MANY_CHANGES.into());
         }
         password::check(new.as_str()).map_err(String::from)?;
         if !self.take_hash(now) {
             return Err(live::SERVER_BUSY.into());
         }
-        let ip = self.pcs[k].ip;
         let gamertag = self.gamertag(me);
         if !password::verify(&phc, old.as_str()) {
             self.wrong_password(Some(me), ip, now);
@@ -649,6 +675,7 @@ impl Server {
             return Err(WRONG_OLD_PASSWORD.into());
         }
         self.wrong_by_account.remove(&me);
+        self.changes_by_account.entry(me).or_default().push(now);
         let phc = self.launcher_hash(new.as_str(), now)?;
         self.logins.set_password(me, phc);
         if !self.save_logins() {
@@ -668,8 +695,14 @@ impl Server {
 
     /// Make, change or remove an account, as the launcher's ACCOUNTS screen
     /// and the command line ask. What to show, or why it was refused.
+    ///
+    /// A change logins.txt can't be saved with is undone and refused
+    /// (CANT_SAVE) if it would let anyone in or keep an account; one that
+    /// shuts someone out holds until the server next starts, and is
+    /// refused with what it did and NOT_SAVED, so it's asked for again.
     pub fn command(&mut self, by: Actor, cmd: Command, now: f64) -> Result<String, String> {
         let who = self.who(by);
+        let mut saved = true;
         let done = match cmd {
             Command::Add {
                 gamertag,
@@ -706,7 +739,7 @@ impl Server {
                 }
                 self.logins.set_password(account, phc);
                 self.wrong_by_account.remove(&account);
-                self.save_logins();
+                saved = self.save_logins();
                 let name = self.gamertag(account);
                 log(format_args!("live: {who} gave {name} a new password"));
                 format!("{name} HAS A NEW PASSWORD. THEIR PCS STAY SIGNED IN.")
@@ -714,7 +747,7 @@ impl Server {
             Command::SignOut { account } => {
                 self.guard(by, account)?;
                 let pcs = self.logins.sign_out(account);
-                self.save_logins();
+                saved = self.save_logins();
                 if let Some(j) = self.pc_of(account) {
                     self.refuse(j, live::SIGNED_OUT);
                 }
@@ -739,17 +772,21 @@ impl Server {
                     return Err(LAST_ADMIN.into());
                 }
                 let name = self.gamertag(account);
-                // Out of its party, the matchmaker and its matches first.
+                // accounts.txt without it before anything else: an account
+                // left there without sign-ins would be adopted at the next
+                // start, its name key signing in again. Unsaved, nothing
+                // changes.
+                let path = self.dir.join("accounts.txt");
+                let kept = self.accounts.values().filter(|a| a.id != account);
+                if let Err(e) = store::save(&path, kept) {
+                    log(format_args!("live: can't save {}: {e}", path.display()));
+                    return Err(CANT_SAVE.into());
+                }
+                // Out of its party, the matchmaker and its matches.
                 if let Some(j) = self.pc_of(account) {
                     self.refuse(j, live::ACCOUNT_REMOVED);
                 }
-                // accounts.txt before logins.txt: an account without
-                // sign-ins would be adopted, its name key signing in again.
                 self.accounts.remove(&account);
-                let path = self.dir.join("accounts.txt");
-                if let Err(e) = store::save(&path, self.accounts.values()) {
-                    log(format_args!("live: can't save {}: {e}", path.display()));
-                }
                 let friends = self.friends.forget(account);
                 if !friends.is_empty() {
                     let path = self.dir.join("friends.txt");
@@ -762,6 +799,8 @@ impl Server {
                 }
                 self.logins.remove(account);
                 self.wrong_by_account.remove(&account);
+                // (Unsaved, its sign-ins are dropped at the next start all
+                // the same: accounts.txt hasn't the account.)
                 self.save_logins();
                 log(format_args!("live: {who} removed {name}"));
                 format!("REMOVED {name}")
@@ -777,7 +816,12 @@ impl Server {
                 }
                 let closed = self.sign_up_closed();
                 self.logins.set_admin(account, admin);
-                self.save_logins();
+                saved = self.save_logins();
+                if !saved && admin {
+                    // Unsaved, a new admin is no admin.
+                    self.logins.set_admin(account, was);
+                    return Err(CANT_SAVE.into());
+                }
                 let name = self.gamertag(account);
                 let mut text = if admin {
                     format!("{name} IS AN ADMIN NOW.")
@@ -825,11 +869,15 @@ impl Server {
             }
         };
         self.accounts_changed();
-        Ok(done)
+        if saved {
+            Ok(done)
+        } else {
+            Err(format!("{done} {NOT_SAVED}"))
+        }
     }
 
     /// Every launcher signed in is sent the accounts as it sees them now.
-    fn accounts_changed(&mut self) {
+    pub(super) fn accounts_changed(&mut self) {
         let online: Vec<u64> = self
             .pcs
             .iter()
@@ -848,7 +896,7 @@ impl Server {
             return;
         }
         let admin = self.logins.is_admin(me);
-        let rows = if admin {
+        let mut rows = if admin {
             let mut rows = self.account_rows();
             rows.truncate(MAX_ACCOUNT_ROWS);
             rows
@@ -859,6 +907,13 @@ impl Server {
                 .into_iter()
                 .collect()
         };
+        // Levels as launchers see them everywhere else (the command line's
+        // list keeps every playlist's).
+        for row in &mut rows {
+            if let Some(a) = self.accounts.get(&row.account) {
+                row.best = self.best_for(a, ClientKind::Launcher);
+            }
+        }
         let accounts = Accounts {
             admin,
             password: self.logins.get(me).is_some_and(|l| l.password.is_some()),

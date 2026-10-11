@@ -573,6 +573,76 @@ fn the_command_line_works_on_its_own_while_the_program_is_stopped() {
 }
 
 #[test]
+fn the_command_line_removes_makes_admins_and_gives_new_passwords() {
+    let data = TempDir::new("cli-owner");
+    for gamertag in ["Jun", "Kat"] {
+        let ran = h2live(
+            &data.0,
+            &["user", "add", gamertag, "--password-stdin"],
+            &format!("{PASSWORD}\n"),
+        );
+        assert_eq!(ran.code, 0, "{}", ran.err);
+    }
+    let listed = |gamertag: &str| {
+        let ran = h2live(&data.0, &["user", "list"], "");
+        assert_eq!(ran.code, 0, "{}", ran.err);
+        let row = ran
+            .out
+            .lines()
+            .find(|l| l.starts_with(&format!("{gamertag} ")));
+        row.map(|r| r.split_whitespace().nth(1) == Some("yes"))
+    };
+
+    // Without --yes, a removal only says what it would lose.
+    let ran = h2live(&data.0, &["user", "remove", "kat"], "");
+    assert_eq!(ran.code, 1, "{}", ran.err);
+    assert!(
+        ran.out.contains("Removing KAT loses it for good"),
+        "{}",
+        ran.out
+    );
+    assert!(
+        ran.err.contains("not removed: run it again with --yes"),
+        "{}",
+        ran.err
+    );
+    assert_eq!(listed("KAT"), Some(false));
+    let ran = h2live(&data.0, &["user", "remove", "kat", "--yes"], "");
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    assert!(ran.out.contains("REMOVED KAT"), "{}", ran.out);
+    assert_eq!(listed("KAT"), None);
+
+    // An admin.
+    let ran = h2live(&data.0, &["user", "admin", "jun", "on"], "");
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    assert!(ran.out.contains("JUN IS AN ADMIN NOW."), "{}", ran.out);
+    assert_eq!(listed("JUN"), Some(true));
+
+    // A new password, made up and shown once.
+    let ran = h2live(&data.0, &["user", "passwd", "jun"], "");
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    let password = ran
+        .out
+        .lines()
+        .find_map(|l| l.strip_prefix("Password: "))
+        .and_then(|rest| rest.strip_suffix(" (shown once; it isn't kept anywhere)"))
+        .unwrap()
+        .to_string();
+    assert_eq!(password.len(), 14);
+    let kept = std::fs::read_to_string(data.0.join("logins.txt")).unwrap();
+    assert!(!kept.contains(&password));
+
+    // It signs in from a new PC; the old one doesn't.
+    let mut program = Program::start(&data.0);
+    let mut pcs = Pcs::new();
+    let a = pcs.connect_launcher(program.port, 1, "jun", Some(&password));
+    assert_eq!(pcs.answer(a), Ok(()));
+    let b = pcs.connect_launcher(program.port, 2, "jun", Some(PASSWORD));
+    assert_eq!(pcs.answer(b), Err(live::WRONG_PASSWORD.into()));
+    program.stop();
+}
+
+#[test]
 fn a_password_argument_is_a_usage_error() {
     let data = TempDir::new("cli-usage");
     for args in [

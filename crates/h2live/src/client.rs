@@ -200,12 +200,19 @@ pub enum LiveEvent {
     /// A player's service record, as asked for (`ToServer::Record`). The
     /// view doesn't keep them.
     ServiceRecord(ServiceRecord),
-    /// A launcher's accounts came (they're in `View::accounts`), maybe
-    /// answering an `ask_account` (`Accounts::answers`).
-    Accounts,
+    /// A launcher's accounts came (they're in `View::accounts`, as last
+    /// sent), maybe answering an `ask_account`: `answers` its number (0
+    /// for none), whether it was done, and what to show. (Each message's
+    /// own, so an answer isn't lost under a list that came after it in
+    /// the same poll.)
+    Accounts {
+        answers: u32,
+        ok: bool,
+        text: String,
+    },
     /// The server's identity key isn't the one pinned (`Access::pin`), so
-    /// the launcher gave up before sending anything: a new server, or
-    /// someone in between.
+    /// the launcher gave up before sending anything after its LOGIN (no
+    /// password, no proof of its key): a new server, or someone in between.
     KeyChanged {
         was: [u8; 32],
         now: [u8; 32],
@@ -561,8 +568,12 @@ impl LiveClient {
                 }
             }
             ToPc::Accounts(accounts) => {
+                events.push(LiveEvent::Accounts {
+                    answers: accounts.answers,
+                    ok: accounts.ok,
+                    text: accounts.text.clone(),
+                });
                 view.accounts = Some(accounts);
-                events.push(LiveEvent::Accounts);
             }
             ToPc::Welcome(welcome) => {
                 self.keep_card(&welcome.card);
@@ -686,7 +697,7 @@ impl LiveClient {
 
     /// Ask the server to change the accounts (or list them again), sealing
     /// any passwords to this connection's key. The answer comes as
-    /// `LiveEvent::Accounts`, its `answers` the number returned. None if
+    /// `LiveEvent::Accounts` whose `answers` is the number returned. None if
     /// we're not signed in on a launcher, or a password is too long to be
     /// anyone's.
     pub fn ask_account(&mut self, ask: AccountAsk) -> Option<u32> {

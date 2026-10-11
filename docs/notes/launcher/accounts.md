@@ -60,7 +60,10 @@ can't (the row is greyed: "Ask the server's owner for a password first.").
 If the launcher says SERVER KEY CHANGED, the server answered with a key
 other than the one this PC saw before. Only go on if the owner said the
 server changed (A, "Trust the new key"). Otherwise someone may be
-pretending to be it: B cancels, and nothing was sent.
+pretending to be it: B cancels. Only the sign-in request went to it (the
+gamertag and this PC's public key), never the password. (A does nothing
+for a second after the popup opens, so a key held down, or pressed twice,
+can't trust the new key by mistake.)
 
 ## How it works
 
@@ -167,12 +170,13 @@ as typed, in lower case, and the key in 64 hex digits).
   start. A key it learns later wins over the built-in one.
 - Otherwise it remembers the key the first time it signs in (after the
   server's WELCOME; the log says `lobby: pinned <server>'s key <code>`).
-- On every sign-in it checks SEAL_KEY before sending anything: it must come
-  before CHALLENGE and its signature must check, or the launcher hangs up
-  ("THE SERVER DIDN'T PROVE WHO IT IS"). If the key differs from the one
-  pinned, it hangs up and shows SERVER KEY CHANGED with both short codes,
-  and sends nothing until the player says to trust the new one. A then
-  pins the new key and signs in again; B goes back to the main menu.
+- On every sign-in it checks SEAL_KEY before sending anything after its
+  LOGIN: it must come before CHALLENGE and its signature must check, or
+  the launcher hangs up ("THE SERVER DIDN'T PROVE WHO IT IS"). If the key
+  differs from the one pinned, it hangs up and shows SERVER KEY CHANGED
+  with both short codes, and sends nothing until the player says to trust
+  the new one. A (taken once the popup has been up a second) then pins the
+  new key and signs in again; B goes back to the main menu.
 - A short code is the key's first 8 bytes as `AB12-CD34-EF56-7890`, easy to
   read out. `h2live user key` prints both.
 

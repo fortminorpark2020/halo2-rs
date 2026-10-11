@@ -21,6 +21,9 @@ use h2net::live::{AccountRow, Accounts, ROW_ADMIN, ROW_ONLINE, ROW_PASSWORD};
 /// How long an account request may go unanswered before the lobby says so
 /// (and asks for the list again).
 const ASK_WAIT: Duration = Duration::from_secs(10);
+/// How long KEY CHANGED is up before A trusts the new key: a press meant
+/// for the screen before it (a second Enter, a mashed A) doesn't.
+pub(super) const TRUST_WAIT: Duration = Duration::from_secs(1);
 /// NEW ACCOUNT's rows: the gamertag typed, the password made up, CREATE.
 const NEW_GAMERTAG: usize = 0;
 const NEW_PASSWORD: usize = 1;
@@ -500,8 +503,12 @@ impl App {
 
     fn key_changed_input(&mut self, i: Input) {
         match i {
-            // Trust it: pin it, and sign in again.
+            // Trust it (once the popup has been up a moment): pin it, and
+            // sign in again.
             Input::A => {
+                if self.now.saturating_duration_since(self.key_changed_at) < TRUST_WAIT {
+                    return;
+                }
                 self.popup = None;
                 let Some((server, _, now)) = self.key_changed.take() else {
                     return;
@@ -561,14 +568,11 @@ impl App {
         }
     }
 
-    /// New accounts came (`View::accounts`): if they answer the request in
-    /// flight, act on the answer. (The screen draws from the view, and the
+    /// New accounts came (`View::accounts`, the newest): if that message
+    /// answered the request in flight (`answers`, with `ok` and `text`),
+    /// act on the answer. (The screen draws from the view, and the
     /// selection follows its account at the end of the tick.)
-    pub(super) fn on_accounts(&mut self) {
-        let Some(a) = self.accounts() else {
-            return;
-        };
-        let (answers, ok, text) = (a.answers, a.ok, a.text.clone());
+    pub(super) fn on_accounts(&mut self, answers: u32, ok: bool, text: String) {
         let answered = |p: &Pending| answers != 0 && p.seq == answers;
         if !self.acc.pending.as_ref().is_some_and(answered) {
             return;
@@ -1061,7 +1065,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{app, live_app, scratch, to_online, view};
+    use super::super::tests::{app, live_app, live_app_on, scratch, to_online, view};
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use h2live::password::Cost;
@@ -1626,6 +1630,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_long_refusal_shows_whole_on_the_form() {
+        let dir = scratch("long-refusal");
+        let (mut a, _said) = lobby(&dir, "ALPHA");
+        a.input(Input::A);
+        a.input(Input::A);
+        assert_eq!(a.label(), "connecting");
+        a.dialing = None;
+        a.on_event(LiveEvent::Refused(TOO_MANY_PCS.into()));
+        assert_eq!(a.label(), "signin");
+        if drew(&mut a) {
+            // On two lines (wider than the form, it was cut), what to do
+            // next too.
+            let text = a.form_error.clone().unwrap();
+            let d = a.drawn();
+            let one = d.contains(&text);
+            let two = d.windows(2).any(|w| format!("{} {}", w[0], w[1]) == text);
+            assert!(one || two, "{d:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An engine playing a match for `a`: a script that sleeps until it's
     /// stopped, whatever it's asked.
     #[cfg(unix)]
@@ -1725,7 +1751,7 @@ mod tests {
         let now = server.key();
         assert_eq!(a.key_changed, Some((SERVER.to_string(), was, now)));
         assert!(log_has(&said, "instead of"));
-        assert!(log_has(&said, "nothing was sent"));
+        assert!(log_has(&said, "only the sign-in request was sent"));
         if drew(&mut a) {
             assert!(drawn(&a, "SERVER KEY CHANGED"));
             assert!(drawn(&a, &seal::short_code(&now)));
@@ -1738,11 +1764,19 @@ mod tests {
         assert!(a.key_changed.is_none() && a.password.is_empty());
         assert_eq!(Pins::load(&dir).get(SERVER), Some(was));
         // Again, and A this time: the new key is pinned, and the lobby
-        // signs in again with the password it kept.
+        // signs in again with the password it kept. (Not by a press that
+        // comes as the popup opens: Enter held, or pressed twice.)
         a.input(Input::A);
         assert_eq!(a.label(), "signin");
         changed(&mut a);
         assert!(!a.password.is_empty());
+        a.input(Input::A);
+        a.key_repeated(Input::A);
+        assert_eq!(a.label(), "keychanged");
+        assert_eq!(Pins::load(&dir).get(SERVER), Some(was));
+        a.tick(Instant::now() + TRUST_WAIT);
+        a.key_repeated(Input::A);
+        assert_eq!(a.label(), "keychanged");
         a.input(Input::A);
         assert_eq!(a.label(), "connecting");
         assert_eq!(Pins::load(&dir).get(SERVER), Some(now));
@@ -2039,6 +2073,157 @@ mod tests {
                 row(3, "ZETA", ROW_ADMIN | ROW_PASSWORD),
             ],
         }
+    }
+
+    /// A match for ALPHA (account 1, this PC) and BRAVO.
+    fn a_match() -> LauncherMatch {
+        let player = |relay_id: u64, account: u64, tag: &str| h2net::live::LauncherPlayer {
+            relay_id,
+            account,
+            gamertag: tag.into(),
+            team: 0,
+            level: 4,
+            party: account,
+        };
+        LauncherMatch {
+            id: 0x78,
+            playlist: 11,
+            ranked: true,
+            teams: false,
+            map: "lockout".into(),
+            variant: "H2_FFA_HeadtoHead_b".into(),
+            relay: h2net::live::RelaySeat {
+                port: 47050,
+                room: 0x78,
+                id: 0x11,
+                key: [0; 16],
+            },
+            host: 0x11,
+            countdown: 20,
+            players: vec![player(0x11, 1, "ALPHA"), player(0x22, 2, "BRAVO")],
+        }
+    }
+
+    /// NEW PASSWORD up on `a`, showing BRAVO's.
+    fn showing_a_password(a: &mut App) {
+        a.screen = Screen::Accounts;
+        a.acc.shown = Some(Shown {
+            gamertag: "BRAVO".into(),
+            password: Secret::new(PASSWORD),
+            reset: true,
+        });
+        a.popup = Some(Popup::NewPassword);
+    }
+
+    #[test]
+    fn a_new_password_stays_up_until_the_player_closes_it() {
+        let dir = scratch("password-stays");
+        // Over a real connection on this PC: a match needs the server's
+        // address.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let pc = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let ours = Connection::tcp(pc).unwrap();
+        let theirs = Connection::tcp(server).unwrap();
+        let (mut a, _theirs) = live_app_on(&dir, ours, theirs);
+        // A match starts: the pregame, under the password.
+        showing_a_password(&mut a);
+        a.on_event(LiveEvent::LauncherMatch(a_match()));
+        assert_eq!(a.screen, Screen::Pregame);
+        assert_eq!(a.popup, Some(Popup::NewPassword));
+        assert!(a.acc.shown.is_some());
+        a.input(Input::A);
+        assert!(a.popup.is_none() && a.acc.shown.is_none());
+        assert_eq!(a.screen, Screen::Pregame);
+        // The server is lost: the failure screen, under the password.
+        let (mut a, _server) = live_app(&dir);
+        showing_a_password(&mut a);
+        a.on_event(LiveEvent::Lost("gone".into()));
+        a.tick(Instant::now());
+        assert_eq!(a.screen, Screen::Failed);
+        assert_eq!(a.popup, Some(Popup::NewPassword));
+        // Signed out: the form, under the password.
+        let (mut a, _server) = live_app(&dir);
+        showing_a_password(&mut a);
+        a.on_event(LiveEvent::Refused(SIGNED_OUT.into()));
+        a.tick(Instant::now());
+        assert_eq!(a.screen, Screen::SignIn);
+        assert_eq!(a.popup, Some(Popup::NewPassword));
+        a.input(Input::B);
+        assert!(a.popup.is_none() && a.acc.shown.is_none());
+        assert_eq!(a.label(), "signin");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_answer_with_a_list_after_it_in_the_same_poll_is_not_lost() {
+        let mut live = Live::new("answer-then-list");
+        live.add("ROOT", ROOT_PASSWORD, true);
+        live.add("BRAVO", PASSWORD, false);
+        let (mut a, _, dir) = new_pc(&mut live, "answer-root", "root", ROOT_PASSWORD);
+        open_accounts_row(&mut a);
+        live.until(&mut [&mut a], |_, a| a[0].account_rows().len() == 4);
+        confirm(&mut a, "bravo", 0);
+        // The request goes; the server answers it and then, before the
+        // lobby looks, the command line makes an account: that list
+        // (answering nothing) comes after the answer, in the same poll.
+        a.tick(Instant::now());
+        live.now += 0.05;
+        live.server.poll(live.now);
+        live.add("CHARLIE", PASSWORD, false);
+        live.now += 0.05;
+        live.server.poll(live.now);
+        a.tick(Instant::now());
+        assert_eq!(a.accounts().map(|v| v.answers), Some(0));
+        assert!(a.acc.pending.is_none());
+        assert_eq!(a.popup, Some(Popup::NewPassword));
+        assert_eq!(a.acc.shown.as_ref().unwrap().gamertag, "BRAVO");
+        assert_eq!(a.account_rows().len(), 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_request_unanswered_for_ten_seconds_is_given_up_and_the_list_asked_for() {
+        let mut live = Live::new("unanswered");
+        live.add("ROOT", ROOT_PASSWORD, true);
+        let bravo = live.add("BRAVO", PASSWORD, false);
+        let (mut a, said, dir) = new_pc(&mut live, "unanswered-root", "root", ROOT_PASSWORD);
+        open_accounts_row(&mut a);
+        live.until(&mut [&mut a], |_, a| a[0].account_rows().len() == 4);
+        let lines = |said: &Said, start: &str| {
+            let said = said.lock().unwrap();
+            said.iter().filter(|l| l.starts_with(start)).count()
+        };
+        // (The list the screen asked for as it opened is in.)
+        for _ in 0..5 {
+            live.step(&mut [&mut a]);
+        }
+        let lists = lines(&said, "lobby: asked for the accounts");
+        let answers = lines(&said, "live: accounts (answering ")
+            - lines(&said, "live: accounts (answering 0");
+        // Sign BRAVO out, and the server doesn't answer for ten seconds.
+        confirm(&mut a, "bravo", 1);
+        a.tick(Instant::now() + ASK_WAIT + Duration::from_secs(1));
+        assert!(a.acc.pending.is_none());
+        assert!(toasted(&a, "No answer from the server. Check the list."));
+        assert_eq!(lines(&said, "lobby: asked for the accounts"), lists + 1);
+        // The late answers (to it, and to the list) change nothing.
+        for _ in 0..5 {
+            live.step(&mut [&mut a]);
+        }
+        let now = lines(&said, "live: accounts (answering ")
+            - lines(&said, "live: accounts (answering 0");
+        assert_eq!(now, answers + 2);
+        assert!(!a.toasts.iter().any(|t| t.0.contains("SIGNED OUT")));
+        // The confirmation is still up, and may be sent again.
+        assert_eq!(a.label(), "confirmaccount");
+        a.input(Input::A);
+        assert!(a.acc.pending.is_some());
+        live.until(&mut [&mut a], |_, a| a[0].acc.pending.is_none());
+        assert!(a.popup.is_none());
+        assert!(toasted(&a, "BRAVO IS SIGNED OUT OF ALL PCS."));
+        assert!(live.server.devices_of(bravo).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

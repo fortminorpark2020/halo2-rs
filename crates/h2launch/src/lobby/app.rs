@@ -431,6 +431,8 @@ pub struct App {
     /// While the KEY CHANGED popup is up: the server, the key pinned for
     /// it, and the key it answered with.
     key_changed: Option<(String, [u8; 32], [u8; 32])>,
+    /// When the KEY CHANGED popup opened (A does nothing for `TRUST_WAIT`).
+    key_changed_at: Instant,
     /// The server signed this PC out during a match: the sign-in form,
     /// not the offline screen, once the match ends.
     form_after_match: bool,
@@ -550,6 +552,7 @@ impl App {
             with_password: false,
             pins,
             key_changed: None,
+            key_changed_at: Instant::now(),
             form_after_match: false,
             acc: AccountScreen::default(),
             dialing: None,
@@ -800,7 +803,7 @@ impl App {
                 self.fail(format!("Lost the server: {why}"));
             }
             LiveEvent::KeyChanged { was, now } => self.key_changed(was, now),
-            LiveEvent::Accounts => self.on_accounts(),
+            LiveEvent::Accounts { answers, ok, text } => self.on_accounts(answers, ok, text),
             LiveEvent::Notice(text) => {
                 // A friend notice isn't the answer to the custom game asked
                 // for.
@@ -923,24 +926,27 @@ impl App {
         if self.away_from_live() {
             self.toast(error.into());
         } else {
-            self.popup = None;
+            self.close_popup();
             self.screen = Screen::SignIn;
         }
     }
 
     /// The server answered with key `now`, not `was`, the key pinned for it:
-    /// the launcher gave up before sending anything, and asks the player.
+    /// the launcher gave up before sending anything after its LOGIN (no
+    /// password, and no proof of this PC's key), and asks the player.
     fn key_changed(&mut self, was: [u8; 32], now: [u8; 32]) {
         self.client = None;
         self.dialing = None;
         self.signing_in = None;
         let server = self.settings.server.clone();
         self.log(&format!(
-            "lobby: {server} answered with key {} instead of {}: nothing was sent",
+            "lobby: {server} answered with key {} instead of {}: only the sign-in request was \
+             sent (no password, no proof of this PC's key)",
             h2live::seal::short_code(&now),
             h2live::seal::short_code(&was)
         ));
         self.key_changed = Some((server, was, now));
+        self.key_changed_at = self.now;
         // The password typed, if any, waits for the player's answer.
         self.screen = Screen::SignIn;
         self.popup = Some(Popup::KeyChanged);
@@ -965,8 +971,17 @@ impl App {
         if self.away_from_live() {
             self.toast(why);
         } else {
-            self.popup = None;
+            self.close_popup();
             self.screen = Screen::Failed;
+        }
+    }
+
+    /// Close the popup that's up, unless it's NEW PASSWORD: the password
+    /// just given out is shown once, so only the player closes it (it stays
+    /// over whatever screen comes next).
+    fn close_popup(&mut self) {
+        if self.popup != Some(Popup::NewPassword) {
+            self.popup = None;
         }
     }
 
@@ -1295,7 +1310,7 @@ impl App {
             ended_at: None,
             over: None,
         });
-        self.popup = None;
+        self.close_popup();
         self.asked = None;
         self.screen = Screen::Pregame;
     }
@@ -1463,7 +1478,7 @@ impl App {
             let stay = [Screen::SignIn, Screen::Connecting];
             let form = std::mem::take(&mut self.form_after_match);
             if !stay.contains(&self.screen) && !self.away_from_live() {
-                self.popup = None;
+                self.close_popup();
                 self.screen = if form { Screen::SignIn } else { Screen::Failed };
             }
         }
@@ -1595,6 +1610,22 @@ impl App {
             return;
         }
         self.input(i)
+    }
+
+    /// A key the window repeats while it's held down: arrows and typing
+    /// repeat, but not a press that would be A or B (Enter, Esc, or a
+    /// letter that's a button), so a key held past a popup opening (KEY
+    /// CHANGED, say) never answers it.
+    pub fn key_repeated(&mut self, i: Input) {
+        let typing = self.typing();
+        let button = match i {
+            Input::A | Input::B => true,
+            Input::Backspace | Input::Char(_) => !typing,
+            _ => false,
+        };
+        if !button {
+            self.key(i);
+        }
     }
 
     /// A key that belongs to the game rather than the lobby: on the
@@ -2883,12 +2914,21 @@ impl App {
             p.area(380.0, y + 18.0, 520.0, 46.0, Hit::Field(f));
         }
         if let Some(e) = &self.form_error {
-            let e = p.fit(20.0, 580.0, e);
-            p.text(640.0, 512.0, 20.0, ERROR, Align::Center, &e);
+            // On two lines if need be (the second cut to fit if there's
+            // more), so what to do next isn't lost.
+            let mut lines = p.wrap(20.0, 580.0, e);
+            if lines.len() > 2 {
+                let rest = lines.split_off(1).join(" ");
+                lines.push(p.fit(20.0, 580.0, &rest));
+            }
+            for (k, line) in lines.iter().enumerate() {
+                let y = 500.0 + k as f32 * 24.0;
+                p.text(640.0, y, 20.0, ERROR, Align::Center, line);
+            }
         }
         p.text(
             640.0,
-            548.0,
+            558.0,
             16.0,
             DIM,
             Align::Center,
@@ -4923,6 +4963,44 @@ mod tests {
     }
 
     #[test]
+    fn a_key_held_down_repeats_arrows_and_typing_but_never_a_or_b() {
+        let dir = scratch("held-key");
+        let mut a = app(&dir);
+        a.input(Input::A);
+        assert_eq!(a.label(), "main");
+        let row = a.main_focus.item;
+        a.key_repeated(Input::Down);
+        assert_eq!(a.main_focus.item, row + 1);
+        a.key_repeated(Input::Up);
+        // Enter, Esc, Space and the letters that are buttons don't repeat.
+        for i in [
+            Input::A,
+            Input::B,
+            Input::Backspace,
+            Input::Char(' '),
+            Input::Char('a'),
+            Input::Char('b'),
+        ] {
+            a.key_repeated(i);
+            assert_eq!(a.label(), "main", "{i:?}");
+            assert_eq!(a.main_focus.item, row, "{i:?}");
+        }
+        // Where a name is typed, letters and Backspace do.
+        a.input(Input::A);
+        assert_eq!(a.label(), "signin");
+        a.field = GAMERTAG_FIELD;
+        for c in "kab".chars() {
+            a.key_repeated(Input::Char(c));
+        }
+        assert_eq!(a.fields[GAMERTAG_FIELD], "KAB");
+        a.key_repeated(Input::Backspace);
+        assert_eq!(a.fields[GAMERTAG_FIELD], "KA");
+        a.key_repeated(Input::A);
+        assert_eq!(a.label(), "signin");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_game_gets_the_pad_and_the_keys_while_the_engine_plays() {
         let dir = scratch("ingame");
         let mut a = app(&dir);
@@ -5174,8 +5252,17 @@ mod tests {
     /// A lobby signed in as ALPHA (account 1) over one end of a pair, on
     /// the playlists, and the server's end, to read what the lobby sends.
     pub(super) fn live_app(dir: &std::path::Path) -> (App, Connection) {
+        let (ours, theirs) = Connection::pair();
+        live_app_on(dir, ours, theirs)
+    }
+
+    /// `live_app`, over `ours` (the server at the other end, `theirs`).
+    pub(super) fn live_app_on(
+        dir: &std::path::Path,
+        ours: Connection,
+        mut theirs: Connection,
+    ) -> (App, Connection) {
         let mut a = app(dir);
-        let (ours, mut theirs) = Connection::pair();
         let key = h2live::client::identity(&dir.join("key.bin")).unwrap();
         let profile = Profile {
             gamertag: "ALPHA".into(),

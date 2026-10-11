@@ -497,9 +497,18 @@ mod tests {
 
     #[test]
     fn an_older_server_reads_accounts_the_owner_makes() {
-        let taken = |id| id == 7;
+        // A taken id is drawn again: here the first three are "taken".
+        let seen = std::cell::RefCell::new(Vec::new());
+        let taken = |id| {
+            seen.borrow_mut().push(id);
+            seen.borrow().len() <= 3
+        };
         let a = Account::named("KAT".into(), 1_700_000_000, taken);
-        assert!(![0, 1, 7, u64::MAX - 1, u64::MAX].contains(&a.id));
+        let seen = seen.into_inner();
+        assert_eq!(seen.len(), 4);
+        assert_eq!(a.id, seen[3]);
+        assert!(!seen[..3].contains(&a.id));
+        assert!(!store::RESERVED_IDS.contains(&a.id));
         assert_eq!(a.id, store::account_id(&a.key));
         let read = store::parse(&a.lines()).unwrap();
         assert_eq!(read, std::slice::from_ref(&a));

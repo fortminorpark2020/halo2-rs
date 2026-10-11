@@ -130,6 +130,12 @@ pub fn account_id(key: &[u8; 32]) -> u64 {
     u64::from_le_bytes(hash[..8].try_into().expect("a SHA-512 is 64 bytes"))
 }
 
+/// Ids an account the server's owner makes never has: 0 and u64::MAX, which
+/// the relay keeps for itself (u64::MAX is h2relay's BROADCAST) and
+/// `relay_id` gives other ids in their place, and the ids it gives them
+/// (1 and u64::MAX - 1), so such an account's relay id is its own.
+pub const RESERVED_IDS: [u64; 4] = [0, 1, u64::MAX - 1, u64::MAX];
+
 impl Account {
     /// A new account for `key`, made at `created`, with no gamertag yet and
     /// nothing played.
@@ -155,11 +161,7 @@ impl Account {
             let mut key = [0; 32];
             getrandom::fill(&mut key).expect("random numbers");
             let mut account = Account::new(key, created);
-            // Not 0 or u64::MAX, which `relay_id` gives other ids in their
-            // place (u64::MAX is h2relay's BROADCAST), nor the ids it gives
-            // them, so an account's relay id is its own.
-            let reserved = [0, 1, u64::MAX - 1, u64::MAX];
-            if reserved.contains(&account.id) || taken(account.id) {
+            if RESERVED_IDS.contains(&account.id) || taken(account.id) {
                 continue;
             }
             account.gamertag = gamertag;
@@ -322,7 +324,11 @@ pub(crate) fn replace_private(path: &Path, text: &str) -> std::io::Result<()> {
 fn write_whole(path: &Path, text: &str, secret: bool) -> std::io::Result<()> {
     let mut temp = path.as_os_str().to_owned();
     temp.push(".tmp");
-    let mut file = std::fs::File::create(&temp)?;
+    let mut file = if secret {
+        create_private(Path::new(&temp))?
+    } else {
+        std::fs::File::create(&temp)?
+    };
     if secret {
         owner_only(&file)?;
     }
@@ -330,6 +336,30 @@ fn write_whole(path: &Path, text: &str, secret: bool) -> std::io::Result<()> {
     file.sync_all()?;
     drop(file);
     std::fs::rename(&temp, path)
+}
+
+/// A new file at `path` that only its owner may read from the start (so no
+/// one can open it before it's made private and read what's written to
+/// it). One left there, by a crash say, is removed first rather than
+/// written into: someone may have it open already.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(e);
+        }
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::create(path)
 }
 
 /// Let only `file`'s owner read it. (Elsewhere than Unix, the folders
@@ -660,6 +690,32 @@ mod tests {
         std::fs::write(&path, "not a key").unwrap();
         assert!(signing_key(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "not a key");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_is_never_written_into_a_file_someone_else_has_open() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        let name = format!("h2live-private-{}", std::process::id());
+        let dir = std::env::temp_dir().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("logins.txt");
+        let temp = dir.join("logins.txt.tmp");
+        // A temporary file left behind, anyone's to read, and held open.
+        std::fs::write(&temp, "").unwrap();
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut held = std::fs::File::open(&temp).unwrap();
+        replace_private(&path, "u 0000000000001111 1 -\n").unwrap();
+        let mut seen = String::new();
+        held.read_to_string(&mut seen).unwrap();
+        assert_eq!(seen, "");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "u 0000000000001111 1 -\n");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(!temp.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

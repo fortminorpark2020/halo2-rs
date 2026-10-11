@@ -8,8 +8,9 @@ use crate::admin::{self, Request};
 use crate::client::{Access, AccountAsk, SERVER_UNPROVEN};
 use crate::password::{self, Cost, Secret};
 use crate::server::accounts::{
-    AN_ADMINS, LAST_ADMIN, NOT_A_HASH, NO_PASSWORD_YET, NO_SUCH_ACCOUNT, ONLY_THE_COMMAND_LINE,
-    PASSWORD_CHANGED, RENAMES, WRONG_OLD_PASSWORD, YOUR_OWN,
+    AN_ADMINS, CANT_SAVE, LAST_ADMIN, NOT_A_HASH, NOT_SAVED, NO_PASSWORD_YET, NO_SUCH_ACCOUNT,
+    ONLY_THE_COMMAND_LINE, PASSWORD_CHANGED, RENAMES, TOO_MANY_CHANGES, WRONG_OLD_PASSWORD,
+    YOUR_OWN,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use h2net::live::{AccountOp, Accounts, Relation, Sealed, ROW_ADMIN, ROW_ONLINE, ROW_PASSWORD};
@@ -443,7 +444,7 @@ fn the_game_never_hears_of_accounts() {
     let came = |w: &World| {
         w.events[a]
             .iter()
-            .filter(|e| **e == LiveEvent::Accounts)
+            .filter(|e| matches!(e, LiveEvent::Accounts { .. }))
             .count()
     };
     let before = came(&w);
@@ -459,6 +460,10 @@ fn the_game_never_hears_of_accounts() {
             "kind {kind}"
         );
     }
+    // Nor when it signs in again, to the account it has now (what follows
+    // its WELCOME is checked in `sign_in_by_hand`).
+    drop(game);
+    sign_in_by_hand(&mut w, 1, "Gamer");
 }
 
 #[test]
@@ -1020,7 +1025,9 @@ fn every_launcher_hears_accounts_after_welcome_with_rows_only_for_admins() {
     let b = launcher_in(&mut w, 2, "Jun", Some(OTHER_PASSWORD));
     for i in [a, b] {
         let welcomed = w.events[i].iter().position(|e| *e == LiveEvent::Welcomed);
-        let listed = w.events[i].iter().position(|e| *e == LiveEvent::Accounts);
+        let listed = w.events[i]
+            .iter()
+            .position(|e| matches!(e, LiveEvent::Accounts { .. }));
         assert!(welcomed.unwrap() < listed.unwrap());
     }
     w.run(1.0);
@@ -1044,7 +1051,8 @@ fn every_launcher_hears_accounts_after_welcome_with_rows_only_for_admins() {
     assert_eq!(accounts(&w, a).rows.len(), 3);
     assert_eq!(accounts(&w, b).rows.len(), 1);
     // A launcher that doesn't know the server's key is told it changed
-    // and gives up before sending anything; one that knows it signs in.
+    // and gives up before sending anything after its LOGIN; one that knows
+    // it signs in.
     let i = connect_launcher(&mut w, 1, "Kat", None);
     w.pcs[i].set_access(Access {
         pin: Some([1; 32]),
@@ -1226,4 +1234,312 @@ fn admin_requests_parse_and_answer() {
         answer(&mut w, Request::List).last().unwrap(),
         "ok\t1 ACCOUNT"
     );
+}
+
+/// Make `file` in the server's folder impossible to save (until `fixed`):
+/// a folder where its temporary file would go.
+fn unsaveable(w: &World, file: &str) -> PathBuf {
+    let blocked = w.data.0.join(format!("{file}.tmp"));
+    std::fs::create_dir(&blocked).unwrap();
+    blocked
+}
+
+fn fixed(blocked: PathBuf) {
+    std::fs::remove_dir(blocked).unwrap();
+}
+
+#[test]
+fn a_removal_the_server_cannot_save_changes_nothing() {
+    let mut w = closed("remove-unsaved");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let blocked = unsaveable(&w, "accounts.txt");
+    let remove = || Command::Remove { account: kat };
+    let done = w.server.command(Actor::Console, remove(), w.now);
+    assert_eq!(done, Err(CANT_SAVE.into()));
+    // Still there, signed in, and in every file.
+    w.run(1.0);
+    assert!(w.pcs[i].signed_in());
+    assert!(w.server.account(kat).is_some());
+    assert_eq!(w.server.devices_of(kat).len(), 1);
+    let id = format!("{kat:016x}");
+    for file in ["accounts.txt", "logins.txt"] {
+        let text = std::fs::read_to_string(w.data.0.join(file)).unwrap();
+        assert!(text.contains(&id), "{file}: {text}");
+    }
+    // So its PC signs in after a restart as it did, and needs nothing
+    // that was taken away.
+    restart_closed(&mut w);
+    let i = launcher_in(&mut w, 1, "Kat", None);
+    assert_eq!(w.welcome(i).account, kat);
+    // Once it can be saved, it's removed.
+    fixed(blocked);
+    let done = w.server.command(Actor::Console, remove(), w.now);
+    assert_eq!(done.as_deref(), Ok("REMOVED KAT"));
+    restart_closed(&mut w);
+    assert_eq!(w.server.account(kat), None);
+    let why = launcher_refused(&mut w, 1, "Kat", None);
+    assert_eq!(why, live::PASSWORD_NEEDED);
+}
+
+#[test]
+fn a_sign_out_or_new_password_the_server_cannot_save_holds_until_it_restarts() {
+    let mut w = closed("revoke-unsaved");
+    make_account(&mut w, "Root", PASSWORD, true);
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let blocked = unsaveable(&w, "logins.txt");
+    let console = Actor::Console;
+    // Signed out: it holds (the PC is turned away now), and says it isn't
+    // saved.
+    let sign_out = || Command::SignOut { account: kat };
+    let done = w.server.command(console, sign_out(), w.now);
+    assert_eq!(
+        done,
+        Err(format!("KAT IS SIGNED OUT OF ALL PCS. {NOT_SAVED}"))
+    );
+    assert_eq!(refusal(&mut w, i), live::SIGNED_OUT);
+    assert!(w.server.devices_of(kat).is_empty());
+    let why = launcher_refused(&mut w, 1, "Kat", None);
+    assert_eq!(why, live::PASSWORD_NEEDED);
+    // A new password too: the old one no longer signs in.
+    let phc = password::hash(OTHER_PASSWORD, Cost::Cheap).unwrap();
+    let set = Command::SetPassword { account: kat, phc };
+    let done = w.server.command(console, set, w.now);
+    assert_eq!(
+        done,
+        Err(format!(
+            "KAT HAS A NEW PASSWORD. THEIR PCS STAY SIGNED IN. {NOT_SAVED}"
+        ))
+    );
+    let why = launcher_refused(&mut w, 2, "Kat", Some(PASSWORD));
+    assert_eq!(why, live::WRONG_PASSWORD);
+    // Asked again once it can be saved, both hold after a restart.
+    fixed(blocked);
+    let done = w.server.command(console, sign_out(), w.now);
+    assert_eq!(done.as_deref(), Ok("KAT IS SIGNED OUT OF ALL PCS."));
+    let phc = password::hash(OTHER_PASSWORD, Cost::Cheap).unwrap();
+    let set = Command::SetPassword { account: kat, phc };
+    assert!(w.server.command(console, set, w.now).is_ok());
+    restart_closed(&mut w);
+    let why = launcher_refused(&mut w, 1, "Kat", None);
+    assert_eq!(why, live::PASSWORD_NEEDED);
+    let why = launcher_refused(&mut w, 3, "Kat", Some(PASSWORD));
+    assert_eq!(why, live::WRONG_PASSWORD);
+    let i = launcher_in(&mut w, 4, "Kat", Some(OTHER_PASSWORD));
+    assert_eq!(w.welcome(i).account, kat);
+}
+
+#[test]
+fn an_admin_change_the_server_cannot_save_never_makes_an_admin() {
+    let mut w = closed("admin-unsaved");
+    let kat = make_account(&mut w, "Kat", PASSWORD, true);
+    let jun = make_account(&mut w, "Jun", PASSWORD, true);
+    let noble = make_account(&mut w, "Noble", PASSWORD, false);
+    let blocked = unsaveable(&w, "logins.txt");
+    let console = Actor::Console;
+    let admin = |account, admin| Command::SetAdmin { account, admin };
+    // Made an admin: undone.
+    let done = w.server.command(console, admin(noble, true), w.now);
+    assert_eq!(done, Err(CANT_SAVE.into()));
+    assert!(!w.server.logins.is_admin(noble));
+    // No longer one: it holds until the server restarts.
+    let done = w.server.command(console, admin(jun, false), w.now);
+    assert_eq!(done, Err(format!("JUN ISN'T AN ADMIN NOW. {NOT_SAVED}")));
+    assert!(!w.server.logins.is_admin(jun));
+    assert!(w.server.logins.is_admin(kat));
+    fixed(blocked);
+    let done = w.server.command(console, admin(jun, false), w.now);
+    assert_eq!(done.as_deref(), Ok("JUN ISN'T AN ADMIN NOW."));
+    restart_closed(&mut w);
+    assert!(!w.server.logins.is_admin(jun) && !w.server.logins.is_admin(noble));
+    assert!(w.server.logins.is_admin(kat));
+}
+
+#[test]
+fn a_player_changes_their_password_three_times_in_ten_minutes_at_most() {
+    let mut w = closed("change-often");
+    make_account(&mut w, "Kat", PASSWORD, false);
+    let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let change = |old: &str, new: &str| AccountAsk::ChangePassword {
+        old: secret(old),
+        new: secret(new),
+    };
+    for (old, new) in [
+        (PASSWORD, OTHER_PASSWORD),
+        (OTHER_PASSWORD, PASSWORD),
+        (PASSWORD, OTHER_PASSWORD),
+    ] {
+        let answer = ask(&mut w, i, change(old, new));
+        assert_eq!((answer.ok, answer.text.as_str()), (true, PASSWORD_CHANGED));
+    }
+    // A fourth costs the server nothing, right or not.
+    let hashes = w.server.hashes.len();
+    let answer = ask(&mut w, i, change(OTHER_PASSWORD, PASSWORD));
+    assert_eq!((answer.ok, answer.text.as_str()), (false, TOO_MANY_CHANGES));
+    assert_eq!(w.server.hashes.len(), hashes);
+    // Ten minutes later it may again.
+    w.run(600.0);
+    let answer = ask(&mut w, i, change(OTHER_PASSWORD, PASSWORD));
+    assert_eq!((answer.ok, answer.text.as_str()), (true, PASSWORD_CHANGED));
+}
+
+#[test]
+fn accounts_rows_show_launchers_their_launcher_level() {
+    let mut w = World::with_secret("rows-level", Some(SECRET));
+    let veteran = veteran(&mut w);
+    w.server.set_sign_up(SignUp::Closed);
+    // Level 13 in the game's Double Team, and no ranked launcher games.
+    assert_eq!(w.server.account(veteran.id).unwrap().best_level(), 13);
+    let i = launcher_in(&mut w, 1, "Veteran", None);
+    assert_eq!(w.welcome(i).best, 1);
+    let rows = &accounts(&w, i).rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].account, rows[0].best), (veteran.id, 1));
+    // The command line's list shows every playlist's.
+    let row = w.server.account_rows();
+    assert_eq!(row[0].best, 13);
+}
+
+#[test]
+fn a_new_pc_or_a_new_account_is_sent_to_every_launcher() {
+    let mut w = closed("accounts-pushed");
+    make_account(&mut w, "Root", PASSWORD, true);
+    let kat = make_account(&mut w, "Kat", OTHER_PASSWORD, false);
+    let jun = make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    let admin = launcher_in(&mut w, 1, "Root", Some(PASSWORD));
+    let j = launcher_in(&mut w, 2, "Jun", Some(OTHER_PASSWORD));
+    let row = |w: &World, id| {
+        let rows = &accounts(w, admin).rows;
+        rows.iter().find(|r| r.account == id).cloned().unwrap()
+    };
+    assert_eq!(row(&w, kat).pcs, 0);
+    assert_eq!(row(&w, jun).pcs, 1);
+    // Jun's PC signs in to Kat with her password: the admin's list shows
+    // Kat on it and online, and Jun on none, without asking.
+    let k = launcher_in(&mut w, 2, "Kat", Some(OTHER_PASSWORD));
+    assert_eq!(refusal(&mut w, j), live::SIGNED_OUT);
+    w.run(1.0);
+    assert_eq!(w.welcome(k).account, kat);
+    let kat_row = row(&w, kat);
+    assert_eq!((kat_row.pcs, kat_row.flags & ROW_ONLINE), (1, ROW_ONLINE));
+    assert_eq!(row(&w, jun).pcs, 0);
+    assert_eq!(accounts(&w, k).answers, 0);
+    // A new account from an open server's new PC too.
+    w.server.set_sign_up(SignUp::Open);
+    let g = w.sign_in(3, "Carter");
+    let carter = w.welcome(g).account;
+    w.run(1.0);
+    assert_eq!(accounts(&w, admin).total, 4);
+    assert_eq!(row(&w, carter).pcs, 1);
+}
+
+#[test]
+fn ids_owner_made_accounts_never_get_are_those_the_relay_keeps() {
+    use super::super::matches::relay_id;
+    use crate::store::RESERVED_IDS;
+    // The ids the relay gives others in their place, and those it gives,
+    // are never an owner-made account's...
+    for id in [0, u64::MAX] {
+        assert_ne!(relay_id(id), id);
+        assert!(RESERVED_IDS.contains(&id) && RESERVED_IDS.contains(&relay_id(id)));
+    }
+    for id in RESERVED_IDS {
+        assert!(RESERVED_IDS.contains(&relay_id(id)), "{id:x}");
+    }
+    // ...so every other account's relay id is its own.
+    for id in [2, 7, 0x1234_5678_9abc_def0, u64::MAX - 2] {
+        assert_eq!(relay_id(id), id);
+    }
+}
+
+#[test]
+fn a_password_never_signs_in_to_an_account_that_has_none() {
+    let mut w = World::with_secret("no-password-yet", Some(SECRET));
+    let veteran = veteran(&mut w);
+    w.server.set_sign_up(SignUp::Closed);
+    w.server.set_password_cost(Cost::Cheap);
+    // An older server's account: its own PC only, and no password at all.
+    let why = launcher_refused(&mut w, 2, "Veteran", Some("ANYTHING-AT-ALL"));
+    assert_eq!(why, live::WRONG_PASSWORD);
+    let why = launcher_refused(&mut w, 3, "Veteran", Some(PASSWORD));
+    assert_eq!(why, live::WRONG_PASSWORD);
+    let devices = w.server.devices_of(veteran.id);
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].key, key(1).verifying_key().to_bytes());
+    assert_eq!(devices[0].name, crate::logins::OLD_PC);
+    // Its own PC still signs in as it did.
+    let i = launcher_in(&mut w, 1, "Veteran", None);
+    assert_eq!(w.welcome(i).account, veteran.id);
+}
+
+#[test]
+fn a_pc_name_is_kept_printable_and_short_so_logins_txt_reads_back() {
+    let mut w = closed("pc-names");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    // A name made to add a line to logins.txt, and a long one.
+    let named = |w: &mut World, n: u8, computer: &str| {
+        let (mut conn, nonce, seal_key) = launcher_by_hand(w, n, "KAT");
+        let prove = ToServer::ProvePassword {
+            signature: signature(n, &nonce),
+            computer: computer.into(),
+            password: sealed_sign_in(n, &nonce, &seal_key, "KAT"),
+        };
+        prove.send(&mut conn);
+        conn.flush().unwrap();
+        w.step();
+        assert!(matches!(heard(&mut conn)[0], ToPc::Welcome(_)));
+    };
+    let forged = format!("PC\nu {kat:016x} 1 -\td");
+    named(&mut w, 1, &forged);
+    named(&mut w, 2, &"LONG NAME ".repeat(6));
+    named(&mut w, 3, " \t\r\n ");
+    let names: Vec<String> = w
+        .server
+        .devices_of(kat)
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert_eq!(
+        names,
+        [
+            format!("PC?u {kat:016x} 1 -?d"),
+            "LONG NAME LONG NAME LONG NAME LO".to_string(),
+            "PC".to_string(),
+        ]
+    );
+    // logins.txt holds one line for the account and one for each PC, and
+    // reads back as it was.
+    let text = std::fs::read_to_string(w.data.0.join("logins.txt")).unwrap();
+    let id = format!("{kat:016x}");
+    let lines: Vec<&str> = text.lines().filter(|l| l.contains(&id)).collect();
+    assert_eq!(lines.len(), 4, "{text}");
+    assert!(!w.server.logins.is_admin(kat));
+    restart_closed(&mut w);
+    assert!(!w.server.logins.is_admin(kat));
+    assert_eq!(w.server.devices_of(kat).len(), 3);
+    let i = launcher_in(&mut w, 1, "Kat", None);
+    assert_eq!(w.welcome(i).account, kat);
+}
+
+#[test]
+fn tries_while_locked_never_make_the_lock_longer() {
+    let mut w = closed("lock-not-longer");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    for n in 2..=6 {
+        let why = launcher_refused(&mut w, n, "Kat", Some(OTHER_PASSWORD));
+        assert_eq!(why, live::WRONG_PASSWORD);
+    }
+    // Late in the lock, five more tries (enough to lock it again, if they
+    // counted)...
+    w.run(580.0);
+    for n in 7..=11 {
+        let why = launcher_refused(&mut w, n, "Kat", Some(PASSWORD));
+        assert_eq!(why, live::TOO_MANY_TRIES);
+    }
+    // ...and once the first five are ten minutes old, the right password
+    // signs in.
+    w.run(30.0);
+    let i = launcher_in(&mut w, 12, "Kat", Some(PASSWORD));
+    assert_eq!(w.welcome(i).account, kat);
 }

@@ -113,12 +113,13 @@ impl Cost {
 }
 
 /// A password as it's checked: without spaces or dashes, ASCII in capitals.
+/// (Made with room for all of it, so it never moves and leaves a copy
+/// behind as it grows; callers wipe it.)
 pub fn normalize(typed: &str) -> String {
-    typed
-        .chars()
-        .filter(|&c| c != ' ' && c != '-')
-        .map(|c| c.to_ascii_uppercase())
-        .collect()
+    let mut normal = String::with_capacity(typed.len());
+    let kept = typed.chars().filter(|&c| c != ' ' && c != '-');
+    normal.extend(kept.map(|c| c.to_ascii_uppercase()));
+    normal
 }
 
 /// `typed` keeps the rules: 8 to 64 printable ASCII characters, once
@@ -274,6 +275,17 @@ mod tests {
         assert_eq!(check("abcdefg\t"), Err(RULES));
         assert_eq!(check("!#$%&()*"), Ok(()));
         assert_eq!(hash("short", Cost::Cheap), Err(RULES));
+    }
+
+    #[test]
+    fn a_normalized_password_is_made_where_it_stays() {
+        // Grown a character at a time, it would move (at 8, 16 and 32
+        // bytes), leaving its start behind each time: it's made with room
+        // for all of it instead.
+        for typed in ["correct horse battery staple-and-more", "", "\u{e9}-x y"] {
+            let normal = normalize(typed);
+            assert_eq!(normal.capacity(), typed.len(), "{typed}");
+        }
     }
 
     #[test]

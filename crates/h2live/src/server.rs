@@ -220,10 +220,12 @@ pub struct Server {
     cost: Cost,
     /// When the passwords checked or hashed in the last minute were, and
     /// the wrong passwords of the last 10 minutes, by account and by
-    /// address. Each drops what is older than its window as it goes.
+    /// address, and the passwords players changed in the last 10 minutes.
+    /// Each drops what is older than its window as it goes.
     hashes: VecDeque<f64>,
     wrong_by_account: HashMap<u64, Vec<f64>>,
     wrong_by_ip: HashMap<IpAddr, Vec<f64>>,
+    changes_by_account: HashMap<u64, Vec<f64>>,
     /// Sent with every challenge.
     motd: String,
     pcs: Vec<Pc>,
@@ -323,6 +325,7 @@ impl Server {
             hashes: VecDeque::new(),
             wrong_by_account: HashMap::new(),
             wrong_by_ip: HashMap::new(),
+            changes_by_account: HashMap::new(),
             motd: motd.trim().to_string(),
             pcs: Vec::new(),
             legs: Vec::new(),
@@ -693,8 +696,9 @@ impl Server {
 
     /// Sign PC `k` in as account `id`, now that it proved it may (see
     /// `prove` and `prove_password`). With sign-up open, `id` may be a new
-    /// account, named by `login.key`.
-    fn sign_in(&mut self, k: usize, id: u64, login: Login, now: f64) {
+    /// account, named by `login.key`. `new_pc` if the account's PCs just
+    /// changed (its password let this one in).
+    fn sign_in(&mut self, k: usize, id: u64, login: Login, new_pc: bool, now: f64) {
         let closed = self.sign_up_closed();
         let existing = self.accounts.get(&id);
         // A card newer than what's here brings back what this server lost:
@@ -736,7 +740,7 @@ impl Server {
         account.look = login.look;
         self.update(account);
         // A new account (sign-up open) signs in from this PC from now on.
-        self.adopt(id);
+        let adopted = self.adopt(id);
         // One PC per account: the newest.
         if let Some(j) = self.pc_of(id) {
             self.refuse(j, live::SIGNED_IN_ELSEWHERE);
@@ -763,7 +767,13 @@ impl Server {
         let playlists = ToPc::Playlists(self.playlists_for(id, &self.playlist_counts()));
         self.tell(id, &playlists);
         self.new_party(id);
-        self.send_accounts(id, 0, true, String::new());
+        if new_pc || adopted {
+            // The accounts changed: every launcher signed in hears (this
+            // one too), the PC already counted and online.
+            self.accounts_changed();
+        } else {
+            self.send_accounts(id, 0, true, String::new());
+        }
     }
 
     /// Take on the gamertags and looks PCs asked for, each PC's at most

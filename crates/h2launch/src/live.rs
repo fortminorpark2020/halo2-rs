@@ -730,7 +730,9 @@ pub fn log_event(log: &Log, e: &LiveEvent) {
             h2live::seal::short_code(now),
             h2live::seal::short_code(was)
         ),
-        LiveEvent::Accounts => "live: accounts".to_string(),
+        LiveEvent::Accounts { answers, ok, .. } => {
+            format!("live: accounts (answering {answers}, ok {ok})")
+        }
         other => format!("live: {other:?}"),
     };
     log(&line);

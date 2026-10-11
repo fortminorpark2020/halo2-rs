@@ -200,10 +200,11 @@ the launcher doesn't do.
    your password." (also while signed in, after any match that's
    playing). A server of another version gives the offline screen with
    "The server runs a different version from this launcher. Ask its owner
-   for the right one." Before anything is sent, the server must prove its
-   key: if it isn't the one pinned for that address, SERVER KEY CHANGED
-   shows both short codes; A ("Trust the new key") pins the new one and
-   signs in again, B goes back to the main menu. B goes back to the main
+   for the right one." Before the password or this PC's proof is sent, the
+   server must prove its key: if it isn't the one pinned for that address,
+   SERVER KEY CHANGED shows both short codes; A ("Trust the new key", taken
+   once the popup has been up a second) pins the new one and signs in
+   again, B goes back to the main menu. B goes back to the main
    menu, and so does B while signing in (which calls it off).
 2. Xbox Live: the playlists (name, your level in it, people searching and
    playing) and the party (members and their levels in the playlist

@@ -260,15 +260,20 @@ fn log_in_by_hand(w: &mut World, n: u8, gamertag: &str) -> (Connection, [u8; 32]
     (conn, nonce)
 }
 
-/// Sign PC `n` in by hand, to hear what the server says over the
-/// connection returned.
+/// Sign PC `n` in by hand (as the game), to hear what the server says over
+/// the connection returned.
 fn sign_in_by_hand(w: &mut World, n: u8, gamertag: &str) -> Connection {
     let (mut conn, nonce) = log_in_by_hand(w, n, gamertag);
     let proof = live::proof(&nonce, key(n).verifying_key().as_bytes());
     ToServer::Prove(key(n).sign(&proof).to_bytes()).send(&mut conn);
     conn.flush().unwrap();
     w.step();
-    assert!(matches!(heard(&mut conn)[0], ToPc::Welcome(_)));
+    let heard = heard(&mut conn);
+    assert!(matches!(heard[0], ToPc::Welcome(_)));
+    // The game is never sent what only launchers read (an older game
+    // would hang up).
+    let launchers = |m: &ToPc| matches!(m, ToPc::Accounts(_) | ToPc::SealKey { .. });
+    assert!(!heard.iter().any(launchers), "{heard:?}");
     conn
 }
 

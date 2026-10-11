@@ -1057,7 +1057,7 @@ impl App {
                 | LiveEvent::LauncherMatch(_)
                 | LiveEvent::Friends
                 | LiveEvent::ServiceRecord(_)
-                | LiveEvent::Accounts
+                | LiveEvent::Accounts { .. }
                 | LiveEvent::KeyChanged { .. } => {}
                 LiveEvent::Refused(why) | LiveEvent::Lost(why) => {
                     println!("live: {}", why.to_lowercase());
