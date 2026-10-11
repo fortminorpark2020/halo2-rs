@@ -944,8 +944,8 @@ Expected Vista values are in brackets.
 **B. Tag counts.**
 
 - Count `wgtz`, `wigl`, `wgit`, `skin`, `unic`, `bitm`, `snd!`, `lsnd`,
-  `ugh!`, `matg`, `goof` and `scnr` [1 wgtz, 1 wigl, about 131 wgit, 26
-  skin].
+  `ugh!`, `matg`, `goof` and `scnr` [1 wgtz, 1 wigl, 131 wgit, 38 skin;
+  the wigl lists 26].
 - List the `wgit` names found in only one of the two maps.
 
 **C. `wgtz ui\main_menu`.**
@@ -996,6 +996,45 @@ the button pictures.
 **One diff covers C to F.** Run `ui.rs` on both maps and diff the text. It
 should match except for datums, string-id numbers and addresses, which the
 parse turns into names.
+
+**Results** (owner's PC, 2026-10-11, `launcher-menu` 24ed025, MCC build
+2025.08.16; no engine run, the PNGs stayed on the PC):
+
+- The probe passed 31 of 32 checks. The one failure was the check that
+  every nested block lies inside its tag's meta: 285 don't (the first in
+  `squad_lobby_player_list`'s skin). Since every screen and skin still
+  matches Vista's, format 13 seems to share blocks between tags; the probe
+  now prints this as a note.
+- A: the string-id table is where predicted (0x30 count 7,907, 0x34 data,
+  0x38 size, 0x3C index); the English strings are found through the
+  globals at +0x190 (0x2E4 is -1). `main_menu` and `game_shell_background`
+  have no header id; `settings_screen_header` resolves.
+- B: 1 wgtz, 1 wigl, 131 wgit (the same names as Vista's), 38 skin tags
+  (the wigl lists 26), 512 bitmaps. MCC's shared.map didn't open (its
+  first tag name points past the names); the menus don't need it.
+- C to F: every value above is as expected, and the parsed globals, skins
+  and all 133 screens are the same as Vista's.
+- G: 4,403 English strings. MCC renames two main menu rows: "LIVE" for
+  XBOX LIVE and "NETWORK" for SYSTEM LINK, and adds SIGN OUT, QUIT and
+  GUIDE. The Live menu keeps "XBOX LIVE" as its header, with Quickmatch,
+  Optimatch, Create Party, Content Download, Gamer Details, Clan Details
+  and Message of the Day. The launcher keeps the Xbox wording.
+- H: all 56 images of the 33 pictures decode, every one A8R8G8B8 and the
+  same pixels as Vista's. The start screen's logo is 1024x128, in two
+  streams.
+- `menu_png` found all 16 pictures it wants in both maps and Halo 2's fonts
+  in `halo2\h2_fonts`. Described by the PC session: the main menu shows the
+  navy background with the blue framing at the top left and bottom right,
+  the faint scrolling tracks, the silver-to-blue HALO 2 logo, and the rows
+  in Handel Gothic with the focused one brighter over its glow bar; the
+  start screen shows PRESS START under the logo. No stripes, swapped
+  colours or flips; Vista's look the same.
+- CPU time a frame at 1920x1080 with MCC's art: start screen 3.5 ms, main
+  menu 5.3 ms, plus the background drawn once (about 20 ms) when the window
+  size changes. At 1280x720: 2.1 ms and 3.2 ms, background 13 ms. Well
+  under 16 ms, so the CPU backend stays for phase 1.
+- The ignored real-file tests pass (`mainmenu` in blam-cache, `real_` in
+  h2ui).
 
 ### 9.3 Sounds and movies
 

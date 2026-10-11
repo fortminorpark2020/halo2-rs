@@ -59,15 +59,15 @@ Header fields read:
 | 0x24 | where the names buffer starts |
 | 0x28 | the names buffer's size |
 | 0x2C | where the name table starts (a u32 per tag: its name's place in the buffer) |
-| 0x30 | how many string ids (predicted) |
-| 0x34 | where the string ids' text starts (predicted) |
-| 0x38 | the string ids' text's size (predicted) |
-| 0x3C | where the string-id table starts, a u32 per string: its text's place (predicted) |
+| 0x30 | how many string ids (confirmed 2026-10-11: 7,907 in mainmenu.map) |
+| 0x34 | where the string ids' text starts (confirmed) |
+| 0x38 | the string ids' text's size (confirmed) |
+| 0x3C | where the string-id table starts, a u32 per string: its text's place (confirmed) |
 | 0xB0 | the map's name (a C string; its room assumed to run to 0xD0) |
 | 0xD0 | the scenario's path (a C string; its room assumed to be 0x100 bytes) |
 | 0x2D4 | where the meta starts, counted from the index's start |
 | 0x2D8 | the meta's size |
-| 0x2E4, 0x2E8 | thought to place the "locale globals" (the string tables); 0xFFFFFFFF when unused (unverified) |
+| 0x2E4, 0x2E8 | thought to place the "locale globals" (the string tables); 0xFFFFFFFF when unused (unverified; -1 and 0 in mainmenu.map, whose English strings are found through matg +0x190) |
 | 0x308 | the chunk size (0x40000) |
 | 0x310 | where the chunk table is, in the file as stored |
 | 0x314 | how many chunks |
@@ -90,11 +90,13 @@ start instead of being memory addresses.
 
 - A block nested in a tag's meta is 8 bytes, as in Vista: the count, then
   the address, counted from the tag index's start as tags' addresses are.
-  Seen for bitm's bitmaps block; predicted for every other block. A block
-  must lie inside the index and meta (header 0x14), and holds at most
-  1,048,576 elements. Vista keeps a tag's blocks inside its meta; the probe
-  counts any that aren't.
-- A tag reference is 8 bytes: the group, then the datum (predicted). A
+  Confirmed for every block the menus read (2026-10-11: all 133 screens
+  and the skins parse the same as Vista's). A block must lie inside the
+  index and meta (header 0x14), and holds at most 1,048,576 elements.
+  Vista keeps a tag's blocks inside its meta; MCC's mainmenu.map has 285
+  blocks outside their tag's meta that still read the same as Vista's, so
+  format 13 seems to share blocks between tags. The probe prints the count.
+- A tag reference is 8 bytes: the group, then the datum (confirmed). A
   datum is looked up at its index in the tag table when the salt matches,
   else by search.
 - The string ids are predicted to be laid out as the tag names are, at
@@ -219,3 +221,10 @@ cargo test -p h2launch --release reads_real_icons_from_mcc_maps -- --ignored
 
 (in cmd, `set H2_MCC_MAPS=<MCC>\halo2\h2_maps_win64_dx11` first), and the
 Vista one the same way with `H2_MAPS`.
+
+## MCC's shared.map
+
+The reader doesn't open MCC's `shared.map` yet: the name of its first tag
+points past the names buffer (seen 2026-10-11), so its header is laid out
+differently from the other maps'. The menus don't need it: every tag the
+start screen and main menu use has its meta in mainmenu.map.

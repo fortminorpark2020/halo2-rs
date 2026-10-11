@@ -453,8 +453,10 @@ pub struct Problems {
     /// Blocks that didn't read, and why the first one didn't.
     pub bad_blocks: usize,
     pub first_bad_block: Option<String>,
-    /// Blocks that read but lie outside the meta of the tag they're in
-    /// (Vista keeps a tag's blocks inside its meta).
+    /// Blocks that read but lie outside the meta of the tag they're in.
+    /// Vista keeps a tag's blocks inside its meta; MCC's mainmenu.map has
+    /// 285 that aren't, and they read the same as Vista's, so format 13
+    /// seems to share blocks between tags.
     pub outside: usize,
     pub first_outside: Option<String>,
     /// Why the string-id table, or the English strings, didn't read.
