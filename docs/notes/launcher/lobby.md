@@ -171,8 +171,19 @@ the launcher doesn't do.
   `H2LOBBY_SOUND=off`, or with `menu_sound = off` in `lobby.txt`.
   `H2LOBBY_AUDIO_WAV=<file>` records the sound into a 44.1 kHz WAV
   instead of playing it (with a window or headless; headless without it
-  plays nowhere). The decoded music (about 5.5 minutes in all) takes
-  about 60 MB of memory.
+  plays nowhere). While a match's engine runs the recording goes on with
+  silence (zeros) rather than stopping, so its time stays the lobby's.
+  The decoded music (about 5.5 minutes in all) takes
+  about 60 MB of memory. The log names the audio device
+  (`sound: playing to Speakers (...) (the default audio device)`) and
+  each change once: `sound: music started from its beginning (gain
+  0.32)`, `sound: music fading out over 5.0 s`, `sound: engine running:
+  every sound fading over 0.5 s`, `sound: engine running: music faded,
+  stream paused` and `sound: engine closed: stream resumed`.
+  Every sound plays at the gain its tags give it (menu.md "After P2"):
+  its own, its sound class's, and the music's track's, in decibels
+  (the menu sounds -7 dB, the music -10 dB, in Halo 2 Vista's map), with
+  nothing taken off the mix after that.
 - Every screen's CPU time is logged once per window size, averaged over
   its first 30 frames there (menu.md's CPU budget): the menus as `menus:
   1920x1080, start screen 3.4 ms a frame on the CPU (background 20 ms
@@ -369,7 +380,8 @@ kills are their score plus their suicides, and each one's kills are the
 next one's deaths (alone, no one is killed).
 
 `H2LOBBY_HEADLESS=1` runs the lobby without a window, driven by
-`H2LOBBY_SCRIPT`, and `H2LOBBY_SHOTS=<folder>` saves a PNG each time the
+`H2LOBBY_SCRIPT` (read only then: with a window it is ignored, and the
+log says so), and `H2LOBBY_SHOTS=<folder>` saves a PNG each time the
 screen changes (on the start screen and main menu once they have faded
 in, about 1.5 s and 0.3 s, with the script held until then).
 `H2LOBBY_ENGINE_ARGS` adds flags to the engine's command

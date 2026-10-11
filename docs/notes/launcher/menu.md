@@ -1048,7 +1048,9 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   5 s fade (estimates from Vista's track). Review round 1 dropped the
   from-scratch game's 1.6 on the menu sounds, which put them 4 dB louder
   against the music than the tags do. A match's engine starting fades
-  the music in 0.5 s (an estimate), then the stream pauses.
+  the music in 0.5 s (an estimate), then the stream pauses. (After P2
+  each also takes its sound class's gain, -4 dB in Vista's, and the mix
+  is no longer scaled by 0.55: "After P2" below.)
 - **`MenuSound`**, owned by the window and the headless loop: it starts
   the loader when Vista's files were found, `H2LOBBY_SOUND` isn't `off`
   and `lobby.txt`'s `menu_sound` (new in `MenuPrefs`) isn't `off`, and
@@ -1152,7 +1154,9 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
 **On the owner's PC (P2)**, with Cartographer's folder found:
 
 - `lobby.log` has `sound: from ...mainmenu.map: cursor ...; music ...;
-  decoded in ... ms`, then `sound: playing to the audio device`;
+  decoded in ... ms`, then `sound: playing to <the device's name> (the
+  default audio device)` (since the follow-ups below; until then just
+  "the audio device");
 - the music plays on the start screen and the main menu, and fades over
   about 5 s on the playlists (a change within 6 s of the last waits);
   back on the main menu it starts again from its beginning;
@@ -1170,6 +1174,41 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   the music from its start again on the main menu after it;
 - with `H2LOBBY_VISTA=off`: silence, `sound: the menus are silent (no
   Halo 2 Vista files)` and no error.
+
+**After P2 (the PC check's follow-ups, 2026-10-11).**
+
+- **The music's level.** P2's recording had the music on the start
+  screen and main menu at about -41 dB RMS (peaks 0.03 to 0.10 of full
+  scale), which sounded too quiet. The chain, checked against the tags
+  and the decompilation: Halo 2 plays a sound at its playback
+  parameters' base gain (0x10 of its gestalt playback entry), plus its
+  sound class's gain at the scale it plays at (the sound classes tag,
+  `sncl`: 0x5C bytes a class, the bounds at 0x20 for a scale of 0 and
+  0x24 for 1, interpolated in amplitude by 0x1251e0), plus a looping
+  sound's track gain and the permutation's own (0 for all of these),
+  added in decibels and capped at 0 dB (0x2197f0). Menu sounds play at a
+  scale of 1 (0x236299 through 0x1896c0), and so does the music
+  (0x235b5d starts its looping sound with 1.0, which 0x18a7b0 takes as
+  its scale). In Halo 2 Vista's mainmenu.map the menu sounds and the
+  music are class 50, whose bounds are 0 and -4 dB, so the menu sounds
+  are -3 - 4 = -7 dB (0.45) and the music 0 - 4 - 6 = -10 dB (0.32).
+  2.2 played them at -3 and -6 dB, then took the from-scratch game's
+  `MASTER` 0.55 (-5.2 dB, headroom for a battle's sounds, not in any
+  tag) off the whole mix: 1.2 dB under the tags. Now the class's gain is
+  read (`blam_cache::sound::class_gains`, the bounds at a scale of 1)
+  and `MASTER` is 1, so both play at the tags' level. No mix-up between
+  decibels and amplitude, and no halving by resampling or by channels,
+  was found. The quiet start is the music's own:
+  its start's first 5 s are -28 dB RMS in the file, the next -25 dB,
+  the whole start -18.6 dB and the loops -15.5 to -19 dB. Recorded again
+  in the container (start screen, then the main menu at 25 s): -38, -35,
+  -30, then -25 dB RMS a 5 s stretch, peaks up to 0.29. Louder than that
+  is the PC's own volume, as on the Xbox it was the TV's.
+- `sound: playing to` names the device (cpal's name), and the music and
+  the engine's changes are logged once each (lobby.md).
+- `H2LOBBY_AUDIO_WAV` keeps recording silence while the engine runs, and
+  `H2LOBBY_SCRIPT` is for headless lobbies only (the windowed lobby logs
+  that it ignores it); both said in lobby.md.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 

@@ -24,11 +24,11 @@ use std::time::{Duration, Instant};
 pub const ENV: &str = "H2LOBBY_SOUND";
 /// A file to record the menus' sound into (a WAV) instead of playing it.
 pub const WAV_ENV: &str = "H2LOBBY_AUDIO_WAV";
-/// The music's track gain when its looping sound isn't read (the music
-/// found by name): -6 dB, its track's in Halo 2 Vista's mainmenu.map. Read
-/// from the track otherwise. Menu sounds play at their tags' gains, as
-/// Halo 2 plays them (0x236299, at a scale of 1).
-const MUSIC_GAIN: f32 = 0.5;
+/// The music's track gain in decibels when its looping sound isn't read
+/// (the music found by name): its track's in Halo 2 Vista's mainmenu.map.
+/// Read from the track otherwise. Every sound also takes its own gain and
+/// its class's at a scale of 1 (`tag_gain`).
+const MUSIC_TRACK_DB: f32 = -6.0;
 /// How long the music fades out when it stops, when its looping sound
 /// isn't read: 5.0 s, its track's fade-out in Halo 2 Vista's mainmenu.map.
 /// Read from the track otherwise.
@@ -148,9 +148,47 @@ impl MenuSounds {
     }
 }
 
-/// Decibels to a gain.
+/// Decibels to a gain (in amplitude, as Halo 2's 0x2195f0).
 fn gain(db: f32) -> f32 {
     10f32.powf(db / 20.0)
+}
+
+/// A sound's gain as Halo 2 plays a menu sound or the menu music (both at
+/// a scale of 1; 0x236299 and 0x235b5d): its own gain (its playback
+/// parameters' base), its class's gain at a scale of 1 (the sound classes
+/// tag, 0x1251e0) and, for the music, its track's, all in decibels, added,
+/// then made a gain. Halo 2 caps the sum at 0 dB (0x2197f0). In Halo 2
+/// Vista's mainmenu.map the menu sounds are -3 dB and their class -4 dB
+/// (0.45), and the music 0 dB, its class -4 dB and its track -6 dB (0.32).
+fn tag_gain(own_db: f32, class_db: f32, track_db: f32) -> f32 {
+    let db = own_db + class_db + track_db;
+    if db.is_finite() {
+        gain(db.min(0.0))
+    } else {
+        1.0
+    }
+}
+
+/// Each sound class's gain at a scale of 1, in decibels, by class.
+struct Classes(Vec<f32>);
+
+impl Classes {
+    fn read(set: &mut MapSet) -> Result<Classes, String> {
+        let bounds = sound::class_gains(set).map_err(|e| e.to_string())?;
+        Ok(Classes(
+            bounds.into_iter().map(|(_, at_one)| at_one).collect(),
+        ))
+    }
+
+    /// Class `class`'s gain in decibels; 0 when there is no such class (or
+    /// no table).
+    fn db(&self, class: u8) -> f32 {
+        self.0
+            .get(class as usize)
+            .copied()
+            .filter(|d| d.is_finite())
+            .unwrap_or(0.0)
+    }
 }
 
 /// Read the menus' sounds and music from `mainmenu` (Halo 2 Vista's, with
@@ -242,10 +280,12 @@ fn find(set: &MapSet, group: &str, name: &str) -> Option<DatumIndex> {
         .map(|t| t.datum)
 }
 
-/// A sound's variations decoded, and its gain.
+/// A sound's variations decoded, and its own gain and its class's at a
+/// scale of 1 (decibels, added).
 fn clips(
     set: &mut MapSet,
     reader: &mut SoundReader,
+    classes: &Classes,
     datum: DatumIndex,
 ) -> Result<(Vec<Arc<Clip>>, f32), String> {
     let s = reader.read(set, datum).map_err(|e| e.to_string())?;
@@ -253,6 +293,7 @@ fn clips(
         return Err(format!("{} didn't decode", s.name));
     }
     let (channels, rate) = (s.channels, s.sample_rate);
+    let db = s.gain_db + classes.db(s.class);
     let clips = s
         .permutations
         .into_iter()
@@ -264,7 +305,7 @@ fn clips(
             })
         })
         .collect();
-    Ok((clips, gain(s.gain_db)))
+    Ok((clips, db))
 }
 
 /// Everything `load` reads, and what didn't read (a word or two each).
@@ -278,31 +319,37 @@ fn read(mainmenu: &Path) -> Result<(MenuSounds, Vec<String>), String> {
     let mut reader = SoundReader::new();
     let mut out = MenuSounds::default();
     let mut missing = Vec::new();
+    let classes = Classes::read(&mut set).unwrap_or_else(|e| {
+        missing.push(format!("the sound classes' gains ({e})"));
+        Classes(Vec::new())
+    });
+    let (set, reader, classes) = (&mut set, &mut reader, &classes);
     for c in Cue::ALL {
         let Some(name) = c.sound(&globals.sounds) else {
             missing.push(format!("{} (none named)", c.name()));
             continue;
         };
-        let Some(datum) = find(&set, "snd!", name) else {
+        let Some(datum) = find(set, "snd!", name) else {
             missing.push(format!("{} (no such sound)", c.name()));
             continue;
         };
-        match clips(&mut set, &mut reader, datum) {
-            Ok((clips, gain)) => {
+        match clips(set, reader, classes, datum) {
+            Ok((clips, db)) => {
                 let clip = clips.into_iter().next().expect("not empty");
+                let gain = tag_gain(db, 0.0, 0.0);
                 out.cues[c.index()] = Some(Effect { clip, gain });
             }
             Err(e) => missing.push(format!("{} ({e})", c.name())),
         }
     }
-    let lsnd = globals.music.as_deref().and_then(|n| find(&set, "lsnd", n));
-    out.music = match lsnd.map(|d| music_of(&mut set, &mut reader, d)) {
+    let lsnd = globals.music.as_deref().and_then(|n| find(set, "lsnd", n));
+    out.music = match lsnd.map(|d| music_of(set, reader, classes, d)) {
         Some(Ok(m)) => Some(m),
         other => {
             if let Some(Err(e)) = other {
                 missing.push(format!("the music's looping sound ({e})"));
             }
-            match music_by_name(&mut set, &mut reader) {
+            match music_by_name(set, reader, classes) {
                 Ok(m) => Some(m),
                 Err(e) => {
                     missing.push(format!("music ({e})"));
@@ -315,22 +362,27 @@ fn read(mainmenu: &Path) -> Result<(MenuSounds, Vec<String>), String> {
 }
 
 /// The music of looping sound `lsnd`: its first track's start, then its
-/// loop's variations, at the track's gain times its start's, fading out
-/// over the track's fade-out (`fade_of`). The track's fade-in (none in
-/// Halo 2 Vista's) isn't applied.
-fn music_of(set: &mut MapSet, reader: &mut SoundReader, lsnd: DatumIndex) -> Result<Music, String> {
+/// loop's variations, at the track's gain with its start's own and class's
+/// (`tag_gain`), fading out over the track's fade-out (`fade_of`). The
+/// track's fade-in (none in Halo 2 Vista's) isn't applied.
+fn music_of(
+    set: &mut MapSet,
+    reader: &mut SoundReader,
+    classes: &Classes,
+    lsnd: DatumIndex,
+) -> Result<Music, String> {
     let l = sound::looping_sound(set, lsnd).map_err(|e| e.to_string())?;
     let track = *l.tracks.first().ok_or("no tracks")?;
     let start = track.start.ok_or("no start")?;
-    let (intro, own) = clips(set, reader, start)?;
+    let (intro, own) = clips(set, reader, classes, start)?;
     let loops = match track.repeat {
-        Some(r) => clips(set, reader, r)?.0,
+        Some(r) => clips(set, reader, classes, r)?.0,
         None => Vec::new(),
     };
     Ok(Music {
         intro: intro[0].clone(),
         loops,
-        gain: gain(track.gain) * own,
+        gain: tag_gain(own, 0.0, track.gain),
         fade: fade_of(&track),
     })
 }
@@ -346,18 +398,23 @@ fn fade_of(track: &sound::Track) -> Duration {
     }
 }
 
-/// The music by its tracks' names, at `MUSIC_GAIN` and `MUSIC_FADE`.
-fn music_by_name(set: &mut MapSet, reader: &mut SoundReader) -> Result<Music, String> {
+/// The music by its tracks' names, with `MUSIC_TRACK_DB` for its track's
+/// gain, fading over `MUSIC_FADE`.
+fn music_by_name(
+    set: &mut MapSet,
+    reader: &mut SoundReader,
+    classes: &Classes,
+) -> Result<Music, String> {
     let start = find(set, "snd!", MUSIC_IN).ok_or("no start by name")?;
-    let (intro, own) = clips(set, reader, start)?;
+    let (intro, own) = clips(set, reader, classes, start)?;
     let loops = match find(set, "snd!", MUSIC_LOOP) {
-        Some(r) => clips(set, reader, r)?.0,
+        Some(r) => clips(set, reader, classes, r)?.0,
         None => Vec::new(),
     };
     Ok(Music {
         intro: intro[0].clone(),
         loops,
-        gain: MUSIC_GAIN * own,
+        gain: tag_gain(own, 0.0, MUSIC_TRACK_DB),
         fade: MUSIC_FADE,
     })
 }
@@ -470,10 +527,11 @@ impl MenuSound {
         }
         match Audio::open(&self.output) {
             Ok(a) => {
-                let to = match &self.output {
-                    Output::Device => "the audio device".to_string(),
-                    Output::Null => "nowhere (no window)".to_string(),
-                    Output::Wav(p) => p.display().to_string(),
+                let to = match (&self.output, a.device_name()) {
+                    (Output::Device, Some(name)) => format!("{name} (the default audio device)"),
+                    (Output::Device, None) => "the default audio device (no name given)".into(),
+                    (Output::Null, _) => "nowhere (no window)".to_string(),
+                    (Output::Wav(p), _) => p.display().to_string(),
                 };
                 (self.log)(&format!("sound: playing to {to}"));
                 self.audio = Some(a);
@@ -507,13 +565,18 @@ impl MenuSound {
                     self.music_changed = Some(now);
                 }
                 self.music_playing = false;
+                (self.log)(&format!(
+                    "sound: engine running: every sound fading over {:.1} s",
+                    ENGINE_FADE.as_secs_f32()
+                ));
             }
             if self.pause_at.is_some_and(|t| now >= t) {
                 self.pause_at = None;
                 // Nothing from before the match plays on after it.
                 audio.stop_all();
-                if let Err(e) = audio.pause(true) {
-                    (self.log)(&format!("sound: the stream didn't pause ({e})"));
+                match audio.pause(true) {
+                    Ok(()) => (self.log)("sound: engine running: music faded, stream paused"),
+                    Err(e) => (self.log)(&format!("sound: the stream didn't pause ({e})")),
                 }
             }
             return;
@@ -521,8 +584,9 @@ impl MenuSound {
         if self.engine {
             self.engine = false;
             self.pause_at = None;
-            if let Err(e) = audio.pause(false) {
-                (self.log)(&format!("sound: the stream didn't play again ({e})"));
+            match audio.pause(false) {
+                Ok(()) => (self.log)("sound: engine closed: stream resumed"),
+                Err(e) => (self.log)(&format!("sound: the stream didn't play again ({e})")),
             }
         }
         for &c in cues {
@@ -550,8 +614,16 @@ impl MenuSound {
         }
         if on {
             self.music = Some(audio.play_music(&m.intro, &m.loops, m.gain));
+            (self.log)(&format!(
+                "sound: music started from its beginning (gain {:.2})",
+                m.gain
+            ));
         } else if let Some(id) = self.music.take() {
             audio.fade_out(id, m.fade.as_secs_f32());
+            (self.log)(&format!(
+                "sound: music fading out over {:.1} s",
+                m.fade.as_secs_f32()
+            ));
         }
         self.music_playing = on;
         self.music_changed = Some(now);
@@ -790,6 +862,62 @@ mod tests {
     }
 
     #[test]
+    fn gains_add_in_decibels_then_become_amplitudes() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        // Decibels to amplitude: -6 dB is half, -20 dB a tenth.
+        assert!(near(gain(0.0), 1.0));
+        assert!(near(gain(-6.0), 0.501));
+        assert!(near(gain(-20.0), 0.1));
+        // A menu sound: its own -3 dB and its class's -4 dB.
+        assert!(near(tag_gain(-3.0, -4.0, 0.0), 0.447));
+        // The music: its own 0 dB, its class's -4 dB and its track's -6 dB
+        // (not 0.5 times anything: the decibels add).
+        assert!(near(tag_gain(0.0, -4.0, -6.0), 0.316));
+        // Capped at 0 dB, as Halo 2 does; nonsense plays at full.
+        assert_eq!(tag_gain(3.0, 2.0, 0.0), 1.0);
+        assert_eq!(tag_gain(f32::NAN, 0.0, 0.0), 1.0);
+        // A class past the table, or a table not read, adds nothing.
+        let classes = Classes(vec![0.0, -4.0]);
+        assert_eq!(classes.db(1), -4.0);
+        assert_eq!(classes.db(50), 0.0);
+        assert_eq!(Classes(vec![f32::NAN]).db(0), 0.0);
+    }
+
+    #[test]
+    fn music_and_engine_changes_are_logged_once_each() {
+        let (mut s, dir) = playing("logged");
+        let (log, lines) = logged();
+        s.log = log;
+        let t0 = Instant::now();
+        let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        s.update_at(at(0.0), &[], true, false);
+        s.update_at(at(0.5), &[], true, false);
+        s.update_at(at(7.0), &[], false, false);
+        s.update_at(at(7.5), &[], false, false);
+        s.update_at(at(8.0), &[], false, true);
+        s.update_at(at(8.2), &[], false, true);
+        s.update_at(at(8.6), &[], false, true);
+        s.update_at(at(9.0), &[], false, true);
+        s.update_at(at(20.0), &[], false, false);
+        s.update_at(at(21.0), &[], false, false);
+        let lines = lines.lock().unwrap().clone();
+        assert_eq!(
+            lines[1..],
+            [
+                "sound: music started from its beginning (gain 0.50)",
+                "sound: music fading out over 5.0 s",
+                "sound: engine running: every sound fading over 0.5 s",
+                "sound: engine running: music faded, stream paused",
+                "sound: engine closed: stream resumed",
+            ],
+            "{lines:?}"
+        );
+        assert!(lines[0].starts_with("sound: playing to "), "{lines:?}");
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_music_fades_over_its_tracks_fade_out() {
         let track = |flags, fade_out, end| sound::Track {
             flags,
@@ -845,13 +973,20 @@ mod tests {
         }
         assert!(s.cue(Cue::Notify).is_some());
         assert!(s.cue(Cue::Transport).is_some());
+        // The menu sounds' -3 dB and their class's -4 dB (the countdown,
+        // a game sound, has its own).
+        for c in [Cue::Cursor, Cue::Select, Cue::Back, Cue::Advance] {
+            let e = s.cue(c).unwrap_or_else(|| panic!("{c:?}"));
+            assert!((e.gain - gain(-7.0)).abs() < 0.01, "{c:?}: {}", e.gain);
+        }
         let m = s.music.as_ref().expect("music");
         let (ch, rate) = (m.intro.channels, m.intro.rate);
         println!("music: peak {}, {ch} ch at {rate}", peak(&m.intro));
         assert!(m.intro.duration() > 1.0);
         assert!(!m.loops.is_empty() && m.loops.iter().all(|l| l.duration() > 1.0));
-        // Its track's -6 dB and 5 s fade-out.
-        assert!((m.gain - 0.5).abs() < 0.01, "{}", m.gain);
+        // Its own 0 dB, its class's -4 dB and its track's -6 dB, and the
+        // track's 5 s fade-out.
+        assert!((m.gain - gain(-10.0)).abs() < 0.01, "{}", m.gain);
         assert_eq!(m.fade, Duration::from_secs(5));
     }
 }

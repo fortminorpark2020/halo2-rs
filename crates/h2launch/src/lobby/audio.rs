@@ -16,9 +16,13 @@ use std::time::{Duration, Instant};
 /// dropped, never the music. The menus play a few at most (the music and
 /// a cue or two), more only with a key held down (each repeat a press).
 const MAX_VOICES: usize = 16;
-/// Overall volume, leaving headroom for several sounds at once (the
-/// from-scratch game's).
-const MASTER: f32 = 0.55;
+/// Overall volume. The tags' own gains leave the headroom (the menu
+/// music at -10 dB peaks at about a third of full scale, and a menu sound
+/// at -7 dB at a twentieth), so nothing is taken off them. (Until the
+/// owner's PC check after 2.2 this was the from-scratch game's 0.55, for
+/// a battle's many sounds, which made the menus 5 dB quieter than the
+/// tags ask.)
+const MASTER: f32 = 1.0;
 /// The sample rate a WAV recording is mixed at.
 const WAV_RATE: u32 = 44100;
 /// How often a WAV recording mixes what is due.
@@ -200,6 +204,8 @@ pub struct Audio {
     sink: Sink,
     next_id: u64,
     paused: bool,
+    /// The audio device's name, when it plays to one that gave it.
+    device_name: Option<String>,
 }
 
 impl Audio {
@@ -210,6 +216,7 @@ impl Audio {
             sink: Sink::Null,
             next_id: 1,
             paused: false,
+            device_name: None,
         }
     }
 
@@ -219,7 +226,11 @@ impl Audio {
         let mut a = Audio::null();
         a.sink = match output {
             Output::Null => Sink::Null,
-            Output::Device => Sink::Device(device(a.mixer.clone())?),
+            Output::Device => {
+                let (stream, name) = device(a.mixer.clone())?;
+                a.device_name = name;
+                Sink::Device(stream)
+            }
             Output::Wav(path) => {
                 let stop = Arc::new(AtomicBool::new(false));
                 let thread = record(a.mixer.clone(), path, stop.clone())?;
@@ -230,6 +241,12 @@ impl Audio {
             }
         };
         Ok(a)
+    }
+
+    /// The audio device's name (cpal's), when it plays to one that gave
+    /// it.
+    pub fn device_name(&self) -> Option<&str> {
+        self.device_name.as_deref()
     }
 
     fn id(&mut self) -> u64 {
@@ -394,11 +411,13 @@ fn record(
     }))
 }
 
-/// The default audio device's stream, mixing as it asks for samples.
-fn device(mixer: Arc<Mutex<Mixer>>) -> Result<cpal::Stream, String> {
+/// The default audio device's stream, mixing as it asks for samples, and
+/// the device's name if it gives one.
+fn device(mixer: Arc<Mutex<Mixer>>) -> Result<(cpal::Stream, Option<String>), String> {
     let device = cpal::default_host()
         .default_output_device()
         .ok_or("no audio output device")?;
+    let name = device.name().ok().filter(|n| !n.trim().is_empty());
     let config = device.default_output_config().map_err(|e| e.to_string())?;
     let format = config.sample_format();
     let config: cpal::StreamConfig = config.into();
@@ -449,7 +468,7 @@ fn device(mixer: Arc<Mutex<Mixer>>) -> Result<cpal::Stream, String> {
     }
     .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok(stream)
+    Ok((stream, name))
 }
 
 #[cfg(test)]

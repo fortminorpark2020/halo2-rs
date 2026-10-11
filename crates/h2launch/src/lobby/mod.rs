@@ -157,6 +157,10 @@ pub fn run(args: &Args) -> i32 {
     if no_window {
         return headless(app, text, sound, &log);
     }
+    // Scripts drive the lobby without a window only (tests and checks).
+    if std::env::var_os("H2LOBBY_SCRIPT").is_some() {
+        log("lobby: H2LOBBY_SCRIPT runs only with H2LOBBY_HEADLESS=1; ignored with a window");
+    }
     hide_own_console(&log);
     match window::run(app, text, sound) {
         Ok(()) => 0,

@@ -155,7 +155,12 @@ Next, in order:
    or later), so the zip's READ ME must name it and the zip must carry
    `crates/wma/LICENSE` and the crate's source or a written offer of it
    (and of h2launch's for relinking); menu.md "What Phase 2.2 built",
-   LGPL. Next: 2.3, the intro movie.
+   LGPL. P2 passed on the owner's PC; its follow-ups (menu.md "After
+   P2"): the log names the audio device and each music and engine change,
+   and the menu sounds and music now take their sound class's gain (-4 dB)
+   with the mix no longer scaled by 0.55 (1.2 dB louder: the tags' level;
+   the music's first seconds are quiet in the file itself). Next: 2.3,
+   the intro movie.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

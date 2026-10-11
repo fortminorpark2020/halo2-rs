@@ -322,6 +322,49 @@ pub fn looping_sound(set: &mut MapSet, lsnd: DatumIndex) -> Result<LoopingSound>
     })
 }
 
+/// The sound classes tag (`sncl`): one element of `CLASS_SIZE` bytes per
+/// class (54 in Halo 2), indexed by a sound's `class`.
+const CLASS_SIZE: usize = 0x5C;
+/// A class's gain bounds in decibels: at a scale of 0, then at a scale
+/// of 1. Halo 2 plays a sound between them by the scale it is played at
+/// (0x1251e0, in amplitude, then back to decibels); menu sounds and the
+/// menu music play at a scale of 1.
+const CLASS_GAIN_BOUNDS: usize = 0x20;
+
+/// Each sound class's gain bounds in decibels (at a scale of 0, at a scale
+/// of 1), from the sound classes block's bytes.
+pub fn class_gains_from(block: &[u8]) -> Vec<(f32, f32)> {
+    block
+        .as_chunks::<CLASS_SIZE>()
+        .0
+        .iter()
+        .map(|c| {
+            (
+                f32_at(c, CLASS_GAIN_BOUNDS),
+                f32_at(c, CLASS_GAIN_BOUNDS + 4),
+            )
+        })
+        .collect()
+}
+
+/// Each sound class's gain bounds in decibels (at a scale of 0, at a scale
+/// of 1), from the map's sound classes tag (`sncl`; the first there is).
+pub fn class_gains(set: &mut MapSet) -> Result<Vec<(f32, f32)>> {
+    let sncl = GroupTag::parse("sncl").expect("valid group");
+    let datum = set
+        .map
+        .tags
+        .iter()
+        .find(|t| t.group == sncl && t.has_data())
+        .map(|t| t.datum)
+        .ok_or_else(|| Error::Corrupt("no sound classes tag".into()))?;
+    let (src, _, d) = set.tag_data(datum)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let block = file.read_block(region, &d, 0, CLASS_SIZE)?;
+    Ok(class_gains_from(&block))
+}
+
 /// DirectShow's MEDIATYPE_Audio and FORMAT_WaveFormatEx.
 const MEDIATYPE_AUDIO: [u8; 16] = *b"auds\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71";
 const FORMAT_WAVE_FORMAT_EX: [u8; 16] = [
@@ -474,6 +517,24 @@ mod tests {
                 end: None,
             }
         );
+    }
+
+    #[test]
+    fn sound_classes_gain_bounds_are_read() {
+        // Three made-up classes: the bounds at 0x20 and 0x24 of each.
+        let mut block = vec![0u8; 3 * CLASS_SIZE];
+        let bounds = [(0.0f32, -4.0f32), (-20.0, -4.0), (-1.5, 2.0)];
+        for (i, (lo, hi)) in bounds.iter().enumerate() {
+            let at = i * CLASS_SIZE + CLASS_GAIN_BOUNDS;
+            block[at..at + 4].copy_from_slice(&lo.to_le_bytes());
+            block[at + 4..at + 8].copy_from_slice(&hi.to_le_bytes());
+            // The distances before them are another field.
+            block[at - 4..at].copy_from_slice(&20.0f32.to_le_bytes());
+        }
+        assert_eq!(class_gains_from(&block), bounds);
+        // A short last element is left out.
+        assert_eq!(class_gains_from(&block[..2 * CLASS_SIZE + 8]).len(), 2);
+        assert!(class_gains_from(&[]).is_empty());
     }
 
     #[test]

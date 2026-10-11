@@ -61,7 +61,9 @@ install. No game files are included in this repository.
   `vista = <folder>` (the Cartographer folder or its `maps` folder) to
   `%LOCALAPPDATA%\h2launch\lobby.txt`, or set `H2LOBBY_VISTA` to it. With
   Cartographer's files the menus also have Halo 2's sound: its main menu
-  music on the start screen and the main menu (as on the Xbox it fades
+  music on the start screen and the main menu, as loud as Halo 2's own
+  sound settings in the map make it (its first seconds are quiet: the
+  music itself starts softly), (as on the Xbox it fades
   out over about 5 seconds on the playlists, and starts again from the
   beginning back on the main menu; it never starts or stops more often
   than once every 6 seconds), and its menu sounds when you leave the
