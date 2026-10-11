@@ -1210,6 +1210,96 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   `H2LOBBY_SCRIPT` is for headless lobbies only (the windowed lobby logs
   that it ignores it); both said in lobby.md.
 
+#### What Phase 2.3 built (2026-10-11)
+
+Halo 2's intro movie before the start screen, from Cartographer's
+`movie` folder, decoded by Media Foundation (section 5's table).
+
+- **`lobby/intro.rs`.** A `MovieSource` decodes a movie on a thread of
+  its own and sends, down a `sync_channel` of `AHEAD` (4), the whole
+  soundtrack first (`Decoded::Sound`, a `Clip`), then each picture in
+  order (`Decoded::Picture`: its time, size and pixels), or why it
+  failed (`Decoded::Failed`, its last word). `MfSource` (Windows only)
+  is a close port of `menu-preview`'s `h2viewer/src/intro.rs` Media
+  Foundation code (not its ffmpeg path): COM and `MFStartup` on the
+  thread, a source reader per stream from `MFCreateSourceReaderFromURL`
+  with `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING`, the sound read whole
+  as 16-bit PCM, the pictures as RGB32 through `IMF2DBuffer::Lock2D`
+  row by row at its pitch, then `MFShutdown`. Its blue, green, red,
+  unset bytes become opaque RGBA on that thread, so drawing needn't
+  swap them. `FakeSource` (tests) makes solid pictures and a short
+  sound, and can hold the channel open (a stall) or fail. Off Windows
+  there is no movie player (`intro::opener` is `None`).
+- **`Intro`** starts its clock at the decoder's first word, shows the
+  latest picture whose time has come and passes over earlier ones also
+  due (counted as late), ends when the decoder has finished and both
+  the last picture (held 1/30 s, an estimate) and the soundtrack have
+  played out, and gives up after `STALL` (5 s) without a word, as
+  `menu-preview`'s did. A decoder that ends with no pictures fails.
+- **Which file.** `Plan::find` takes Vista's `movies()` folder when it
+  holds `intro_60.wmv` or `intro_low_60.wmv`. The file is chosen at the
+  first draw: the low one in a window under 720 pixels tall, else the
+  full one, and the other when that one is missing. A file that is
+  there but can't be decoded isn't retried with the other (it ends the
+  intro, below).
+- **When it plays.** `mod.rs`'s `intro_plan`: a window (not headless),
+  `H2LOBBY_INTRO` not `off`, `lobby.txt`'s new `intro` line (`on` or
+  `off`, `MenuPrefs`, written after `menu_sound`) not `off`, a Halo 2
+  Vista folder, a movie player (Windows) and a movie. Otherwise the
+  lobby opens on the start screen as before, and the log says why
+  (`intro: none (<why>); the lobby opens on the start screen`). It
+  plays at every start (the plan's default).
+- **`Screen::Intro`** (label `intro`, timer name `intro`, music off,
+  focus 0, no strings in `drawn`; `menu_settled` is true on it, and
+  `pad_is_the_lobbys`, `keys_are_the_games` and `invite()` need nothing,
+  since no engine runs and nobody is signed in yet). Decoding starts at
+  its first draw, when the window's height is known. Each draw is black,
+  then the picture showing, as large as fits in the middle
+  (`intro::letterbox`), as one h2ui quad drawn by `h2ui::cpu` from a
+  small `Textures` (`MovieFrame`), through a `Kept` that draws again only
+  for a new picture or size.
+- **Skipping.** Any button: A, B, X, Y, LB, RB (the pad's Start and Back
+  are A and B), Enter, Esc, Backspace, Space, a letter, or a click
+  anywhere. A direction (stick, d-pad, arrows) and Tab don't, as in
+  Halo 2. Leaving it sounds nothing (`cue_for`: the press is no list
+  item's or button's, and the start screen's load plays no `advance`).
+  The second click of a double-click doesn't go on from the start
+  screen (the existing guard).
+- **The end.** At its end, on a skip, on a stall, or when it fails
+  (`intro: <why>; skipped`; Windows N without the Media Feature Pack
+  lands here), the start screen comes in: its intro animations start at
+  its first draw, and its music starts (music rule on).
+- **Sound.** `App::take_cues` became `take_sound() -> Vec<SoundOut>`:
+  `Movie(clip)` when the soundtrack comes, `StopMovie` when the intro is
+  left, then the cues as `Cue(c)`. `MenuSound` opens the output when
+  the soundtrack comes (even before the menu sounds have loaded), plays
+  it once as music (never dropped for room) at the music's gain (-10 dB
+  from the tags; -10 dB too when the music didn't load), and on
+  `StopMovie` fades it out in 50 ms (our choice, to avoid a click).
+- **Frames.** `App::frame_interval()`: 16 ms while the intro plays (its
+  pictures come 60 a second), else 33 ms; `window.rs`'s `next_wake`
+  takes it.
+- **Tests (no game files).** `intro.rs`: pictures by their time and late
+  ones passed over; the end after the last picture and the sound; a
+  silent, stalled (on its thread) or failing decoder; the letterbox of
+  a 16:9 movie in 4:3, 16:9 and 21:9 windows; the file by window height;
+  why it is skipped; a player only on Windows. `app.rs` with
+  `FakeSource`: it plays before the start screen and goes on at its end
+  (black first, pictures letterboxed, the soundtrack then `StopMovie`,
+  no cue, the music after); every button and a click skip it and a
+  direction doesn't; a stall and a failure reach the start screen.
+  `mod.rs`: only with a window, a player and a movie. `sound.rs`: the
+  soundtrack once at the music's gain until skipped. `settings.rs`: the
+  `intro` line.
+- **Measured** in the container (release): one picture of 1280x720
+  drawn into the window takes about 12 ms at 1280x720, 25 ms at
+  1920x1080 and 32 ms at 2560x1440 on the CPU. The owner's PC is
+  faster; the timer's `lobby: 1920x1080, intro <n> ms a frame on the
+  CPU` and the end line's late count say how it does there. Pictures
+  that come due while one is drawn are passed over, so the movie keeps
+  time with its sound either way.
+- Not here: the attract movie after idling, the credits, the scene.
+
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 
 **1. MATCHMAKING (0xD2).**

@@ -265,6 +265,12 @@ impl Audio {
         self.play(first, then, gain, true)
     }
 
+    /// A movie's soundtrack, once at `gain`, kept as the music is (never
+    /// dropped to make room); returns its voice id.
+    pub fn play_movie(&mut self, clip: &Arc<Clip>, gain: f32) -> u64 {
+        self.play(clip, &[], gain, true)
+    }
+
     fn play(&mut self, first: &Arc<Clip>, then: &[Arc<Clip>], gain: f32, music: bool) -> u64 {
         let id = self.id();
         if matches!(self.sink, Sink::Null) || gain < 0.002 {

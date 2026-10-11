@@ -17,8 +17,6 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-/// How often the lobby wakes to poll the server and the engine and redraw.
-const FRAME: Duration = Duration::from_millis(33);
 /// How far a stick goes before it counts as a press.
 const STICK: f32 = 0.6;
 
@@ -235,14 +233,14 @@ impl ApplicationHandler for Shell {
         self.pads();
         let now = Instant::now();
         self.app.tick(now);
-        let cues = self.app.take_cues();
+        let sound = self.app.take_sound();
         let music = self.app.music_on();
-        self.sound.update(&cues, music, self.app.engine_running());
+        self.sound.update(&sound, music, self.app.engine_running());
         if self.app.quitting() {
             el.exit();
             return;
         }
-        let (draw, next) = next_wake(now, self.next_frame);
+        let (draw, next) = next_wake(now, self.next_frame, self.app.frame_interval());
         self.next_frame = next;
         if let Some(w) = &self.window {
             if self.app.take_focus() {
@@ -258,11 +256,13 @@ impl ApplicationHandler for Shell {
 }
 
 /// Whether to draw at `now`, with the next frame due at `next`, and when
-/// the frame after is due: one frame each `FRAME`, and none in between
-/// however often the loop wakes (a redraw, the mouse moving, a pad).
-fn next_wake(now: Instant, next: Instant) -> (bool, Instant) {
+/// the frame after is due: one frame each `interval` (the app's,
+/// `App::frame_interval`: shorter while the intro movie plays), and none
+/// in between however often the loop wakes (a redraw, the mouse moving, a
+/// pad). The lobby polls the server and the engine as often.
+fn next_wake(now: Instant, next: Instant, interval: Duration) -> (bool, Instant) {
     if now >= next {
-        (true, now + FRAME)
+        (true, now + interval)
     } else {
         (false, next)
     }
@@ -295,19 +295,23 @@ mod tests {
 
     #[test]
     fn frames_come_once_each_frame_however_often_the_loop_wakes() {
+        const FRAME: Duration = Duration::from_millis(33);
         let t = Instant::now();
-        let (draw, next) = next_wake(t, t);
+        let (draw, next) = next_wake(t, t, FRAME);
         assert!(draw);
         assert_eq!(next, t + FRAME);
         // The redraw wakes the loop again straight away: no second frame.
         for ms in [0, 1, 10, 32] {
             assert_eq!(
-                next_wake(t + Duration::from_millis(ms), next),
+                next_wake(t + Duration::from_millis(ms), next, FRAME),
                 (false, next)
             );
         }
         let later = t + FRAME;
-        assert_eq!(next_wake(later, next), (true, later + FRAME));
+        assert_eq!(next_wake(later, next, FRAME), (true, later + FRAME));
+        // The intro's shorter frames.
+        let movie = Duration::from_millis(16);
+        assert_eq!(next_wake(later, later, movie), (true, later + movie));
     }
 
     #[test]

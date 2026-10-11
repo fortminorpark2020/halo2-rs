@@ -1,17 +1,19 @@
-//! The lobby's screens and what happens on them: Halo 2's start screen
-//! and main menu (drawn by `h2ui`), signing in, the party and the
-//! playlists, searching, custom games, the pregame lobby, the match (its
-//! engine runs in a second copy of the launcher, see `child`), the carnage
-//! report, the friends list and players' service records.
+//! The lobby's screens and what happens on them: Halo 2's intro movie
+//! (`intro`), its start screen and main menu (drawn by `h2ui`), signing
+//! in, the party and the playlists, searching, custom games, the pregame
+//! lobby, the match (its engine runs in a second copy of the launcher, see
+//! `child`), the carnage report, the friends list and players' service
+//! records.
 //! Nothing here opens a window: `window`, or the headless loop in
 //! `mod.rs`, gives it input and time and shows what it draws.
 
 use super::canvas::{Align, Canvas, Color, Style, Text};
 use super::child::{Kind, Match, Running, Said};
+use super::intro::{self, End, Intro, Plan};
 use super::names;
 use super::ranks::{RankIcons, Size};
 use super::settings::{self, Settings, GAMERTAG_LEN};
-use super::sound::Cue;
+use super::sound::{Cue, SoundOut};
 use super::sources::Vista;
 use crate::controls::{self, button, Controls};
 use crate::live::{self, Engine, Log, Told};
@@ -24,9 +26,10 @@ use h2net::live::{
 };
 use h2net::Connection;
 use h2ui::anim::{Animation, Focus};
+use h2ui::art::ImageRef;
 use h2ui::cpu::Kept;
 use h2ui::layout::{BitmapWidget, Space};
-use h2ui::paint::Resources;
+use h2ui::paint::{Blend, DrawList, Quad, Resources, Texture, Textures};
 use h2ui::screens::{self, Backdrop, MainMenu, Start};
 use h2ui::shell::Shell;
 use h2ui::text::Fonts;
@@ -97,9 +100,14 @@ const MENU_FRAMES: u32 = 30;
 /// doesn't go on, and on the main menu it only focuses a row. Windows'
 /// default double-click time is 0.5 s; 0.4 s is our own choice.
 const DOUBLE_CLICK: f64 = 0.4;
-/// Cues kept for the sound to take (`App::take_cues`); older ones are
+/// Cues kept for the sound to take (`App::take_sound`); older ones are
 /// dropped when nothing takes them (no sound, and the tests).
 const CUES_KEPT: usize = 16;
+/// How often the window draws a frame: about 60 a second while the intro
+/// movie plays (its pictures come 60 a second, going by its name), else
+/// about 30 (the menus' animations and the lobby's screens).
+const FRAME_MOVIE: Duration = Duration::from_millis(16);
+const FRAME: Duration = Duration::from_millis(33);
 
 /// The start screen's and main menu's layouts, pictures and fonts
 /// (`h2ui`), read once when the lobby opens.
@@ -143,6 +151,9 @@ pub struct Config {
     /// found them: the menus, fonts and rank icons above came from there
     /// first.
     pub vista: Option<Vista>,
+    /// The intro movie to play before the start screen (`mod.rs`'s
+    /// `intro_plan`: a window, Windows, Vista's movie, not switched off).
+    pub intro: Option<Plan>,
 }
 
 /// A key, button or typed character.
@@ -169,7 +180,11 @@ pub enum Input {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
-    /// Halo 2's start screen ("PRESS START"), where the lobby opens.
+    /// Halo 2's intro movie, where the lobby opens when there is one to
+    /// play (`Config::intro`); any button but a direction skips it.
+    Intro,
+    /// Halo 2's start screen ("PRESS START"), where the lobby opens
+    /// without the intro, and after it.
     Start,
     /// Halo 2's main menu: ONLINE and SETTINGS.
     Main,
@@ -373,8 +388,16 @@ pub struct App {
     /// The last click: when (on the menus' clock), the screen it was on,
     /// and whether a popup took it (`DOUBLE_CLICK`).
     last_click: Option<(f64, Screen, bool)>,
-    /// The sounds asked for since the sound last took them (`take_cues`).
+    /// The sounds asked for since the sound last took them (`take_sound`),
+    /// and the intro's soundtrack starting or stopping.
     cues: Vec<Cue>,
+    movie_sound: Vec<SoundOut>,
+    /// The intro movie playing (from the first draw on its screen), the
+    /// picture drawn last (its serial number), and that picture drawn into
+    /// the window's size once.
+    intro: Option<Intro>,
+    intro_serial: u64,
+    intro_kept: Kept<u32>,
     /// The menu music is wanted (`music_rule`).
     music_on: bool,
     /// The press `input_inner` acted on last, after letters and Backspace
@@ -416,6 +439,12 @@ struct CueState {
 /// and when a popup only closes; Cursor if only the focus or a value
 /// changed.
 fn cue_for(before: &CueState, after: &CueState, pressed: Option<Input>) -> &'static [Cue] {
+    // Leaving the intro sounds nothing: the press isn't a list item's or a
+    // button's, and the start screen's load plays no `advance`
+    // (0x147f6d).
+    if before.screen == Screen::Intro {
+        return &[];
+    }
     if after.refused {
         return &[Cue::Error];
     }
@@ -453,13 +482,20 @@ fn is_asked_you(text: &str) -> bool {
 
 /// Whether the menu music is wanted on `screen`, it being `current` (Halo
 /// 2's rule, menu.md section 5): on at the start screen and the main
-/// menu; off on the ONLINE screens (searching too), the party, the custom
-/// game and the match's screens; elsewhere as it was, so the settings keep
-/// it and the carnage report stays silent after a game.
+/// menu; off during the intro movie (it has its own sound; the music
+/// starts with the start screen), on the ONLINE screens (searching too),
+/// the party, the custom game and the match's screens; elsewhere as it
+/// was, so the settings keep it and the carnage report stays silent after
+/// a game.
 fn music_rule(screen: Screen, current: bool) -> bool {
     match screen {
         Screen::Start | Screen::Main => true,
-        Screen::Live | Screen::Party | Screen::Custom | Screen::Pregame | Screen::InGame => false,
+        Screen::Intro
+        | Screen::Live
+        | Screen::Party
+        | Screen::Custom
+        | Screen::Pregame
+        | Screen::InGame => false,
         Screen::SignIn
         | Screen::Connecting
         | Screen::Players
@@ -491,20 +527,25 @@ struct MenuTimes {
 }
 
 impl App {
-    /// The lobby, on the start screen. It signs in when the player picks
-    /// ONLINE on the main menu.
+    /// The lobby, on the intro movie if there is one to play
+    /// (`Config::intro`), else on the start screen. It signs in when the
+    /// player picks ONLINE on the main menu.
     pub fn new(cfg: Config) -> App {
         let mut settings = Settings::load(&cfg.folder.join("lobby.txt"));
         if let Some(s) = &cfg.server {
             settings.server = s.clone();
         }
         let now = Instant::now();
+        let screen = match cfg.intro {
+            Some(_) => Screen::Intro,
+            None => Screen::Start,
+        };
         App {
             fields: [settings.gamertag.clone(), settings.server.clone()],
             saved: [settings.gamertag.clone(), settings.server.clone()],
             settings,
             cfg,
-            screen: Screen::Start,
+            screen,
             field: 0,
             form_error: None,
             dialing: None,
@@ -550,7 +591,11 @@ impl App {
             menu_times: MenuTimes::default(),
             last_click: None,
             cues: Vec::new(),
-            music_on: true,
+            movie_sound: Vec::new(),
+            intro: None,
+            intro_serial: 0,
+            intro_kept: Kept::default(),
+            music_on: screen != Screen::Intro,
             pressed: None,
             refused: false,
             invite_seen: None,
@@ -589,6 +634,7 @@ impl App {
         }
         let waiting = self.game.as_ref().is_some_and(|g| g.over.is_none());
         match self.screen {
+            Screen::Intro => "intro",
             Screen::Start => "start",
             Screen::Main => "main",
             Screen::SignIn => "signin",
@@ -615,9 +661,27 @@ impl App {
         &self.drawn
     }
 
-    /// The sounds asked for since the last call, oldest first.
+    /// What the sound should play since the last call: the intro's
+    /// soundtrack starting or stopping, then the cues, oldest first.
+    pub fn take_sound(&mut self) -> Vec<SoundOut> {
+        let mut out = std::mem::take(&mut self.movie_sound);
+        out.extend(self.cues.drain(..).map(SoundOut::Cue));
+        out
+    }
+
+    /// The cues alone (`take_sound`'s), for the tests.
+    #[cfg(test)]
     pub fn take_cues(&mut self) -> Vec<Cue> {
         std::mem::take(&mut self.cues)
+    }
+
+    /// How long the window waits between frames: shorter while the intro
+    /// movie plays.
+    pub fn frame_interval(&self) -> Duration {
+        match self.screen {
+            Screen::Intro => FRAME_MOVIE,
+            _ => FRAME,
+        }
     }
 
     /// The menu music is wanted (`music_rule`, kept by `tick`).
@@ -649,7 +713,8 @@ impl App {
             (None, Screen::SignIn) => self.field,
             (
                 None,
-                Screen::Start
+                Screen::Intro
+                | Screen::Start
                 | Screen::Connecting
                 | Screen::Pregame
                 | Screen::InGame
@@ -1411,11 +1476,112 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------- intro
+
+    /// Play the intro on to `now` (it starts at its first draw,
+    /// `draw_intro`): its soundtrack goes to the sound when it comes, and
+    /// at its end, or when it stalls or fails, the start screen comes in.
+    fn play_intro(&mut self, now: Instant) {
+        let Some(intro) = &mut self.intro else {
+            return;
+        };
+        let u = intro.update(now);
+        if let Some(clip) = u.sound {
+            self.movie_sound.push(SoundOut::Movie(clip));
+        }
+        if let Some(end) = u.end {
+            self.leave_intro(Some(end));
+        }
+    }
+
+    /// Leave the intro for the start screen, whose intro animations start
+    /// at its first draw: skipped (`None`), played out, or given up. Its
+    /// soundtrack stops (a skip cuts it off, as in Halo 2).
+    fn leave_intro(&mut self, end: Option<End>) {
+        if self.screen != Screen::Intro {
+            return;
+        }
+        let at = self.intro.as_ref().map_or(0.0, |i| i.clock(self.now));
+        let (pictures, late) = self.intro.as_ref().map_or((0, 0), Intro::counts);
+        let line = match end {
+            None => format!("intro: skipped at {at:.1} s"),
+            Some(End::Played) => format!(
+                "intro: played to the end ({at:.1} s, {pictures} pictures, {late} late ones passed over)"
+            ),
+            Some(End::Stalled) => format!(
+                "intro: the decoder sent nothing for {} s; skipped",
+                intro::STALL.as_secs()
+            ),
+            Some(End::Failed(e)) => format!("intro: {e}; skipped"),
+        };
+        self.log(&line);
+        self.intro = None;
+        self.intro_kept = Kept::default();
+        self.movie_sound.push(SoundOut::StopMovie);
+        self.screen = Screen::Start;
+    }
+
+    /// Draw the intro: black, then the picture showing, as large as fits
+    /// (`intro::letterbox`). Its first draw starts it, with the file for
+    /// the window's height (`Plan::file`). False when it couldn't start
+    /// (the start screen is drawn instead).
+    fn draw_intro(&mut self, c: &mut Canvas) -> bool {
+        if self.intro.is_none() {
+            let Some(plan) = self.cfg.intro.clone() else {
+                self.leave_intro(Some(End::Failed("no movie".into())));
+                return false;
+            };
+            let Some(path) = plan.file(c.h) else {
+                self.leave_intro(Some(End::Failed("no movie file".into())));
+                return false;
+            };
+            let name = path.file_name().unwrap_or(path.as_os_str());
+            self.log(&format!(
+                "intro: playing {} ({}x{} window)",
+                name.to_string_lossy(),
+                c.w,
+                c.h
+            ));
+            let source = (plan.open)(path);
+            match Intro::start(source, self.now) {
+                Ok(i) => self.intro = Some(i),
+                Err(e) => {
+                    self.leave_intro(Some(End::Failed(e)));
+                    return false;
+                }
+            }
+        }
+        let (w, h) = (c.w, c.h);
+        let shown = self.intro.as_ref().and_then(Intro::showing);
+        let Some((p, serial)) = shown else {
+            c.px.fill(0);
+            return true;
+        };
+        if serial != self.intro_serial {
+            self.intro_serial = serial;
+            self.intro_kept.forget();
+        }
+        let list = DrawList {
+            size: [w as u32, h as u32],
+            quads: vec![Quad {
+                texture: Texture::Art(0),
+                rect: intro::letterbox(p.w, p.h, w as f32, h as f32),
+                uv: [0.0, 0.0, 1.0, 1.0],
+                color: [[1.0; 4]; 2],
+                blend: Blend::Plain,
+                wrap: [false; 2],
+            }],
+        };
+        self.intro_kept.draw(&list, &mut c.px, w, h, &MovieFrame(p));
+        true
+    }
+
     // -------------------------------------------------------------- time
 
     /// Take on what the server and the engine said, and start what is due.
     pub fn tick(&mut self, now: Instant) {
         self.now = now;
+        self.play_intro(now);
         self.poll_dial();
         self.poll_server();
         self.poll_game();
@@ -1568,6 +1734,15 @@ impl App {
     }
 
     fn input_inner(&mut self, i: Input) {
+        // The intro: any button skips it (the pad's, a key, a letter), but
+        // not a direction (the d-pad, the stick, the arrows), as in Halo 2.
+        if self.screen == Screen::Intro {
+            let direction = matches!(i, Input::Up | Input::Down | Input::Left | Input::Right);
+            if !direction && i != Input::Tab {
+                self.leave_intro(None);
+            }
+            return;
+        }
         // Letters are buttons, except where a name is typed; Backspace is
         // B where it doesn't rub a letter out.
         let typing = (self.screen == Screen::SignIn && self.popup.is_none())
@@ -1635,7 +1810,8 @@ impl App {
             Screen::Players => self.players_input(i),
             Screen::Party => self.party_input(i),
             Screen::Custom => self.custom_input(i),
-            Screen::Pregame => {}
+            // Taken above.
+            Screen::Intro | Screen::Pregame => {}
             Screen::InGame => {
                 let ended = self.game.as_ref().is_some_and(|g| g.results.is_some());
                 if i == Input::B && !ended {
@@ -2309,6 +2485,11 @@ impl App {
         let second = before.is_some_and(|(t, screen, over)| {
             clock - t < DOUBLE_CLICK && (over || screen != self.screen)
         });
+        // A click anywhere skips the intro (and its double-click's second
+        // half doesn't go on from the start screen: above).
+        if self.screen == Screen::Intro {
+            return self.leave_intro(None);
+        }
         // The start screen goes on with a click anywhere, and a main menu
         // row is focused, or picked if it had the focus. A popup over
         // them takes the click as on any screen.
@@ -2476,6 +2657,14 @@ impl App {
     /// here, the start screen's and main menu's in `draw_menu`.
     pub fn draw(&mut self, c: &mut Canvas, t: &mut Text) {
         let started = Instant::now();
+        if self.screen == Screen::Intro && self.draw_intro(c) {
+            self.areas.clear();
+            self.drawn.clear();
+            self.drawn_screen = Some(Screen::Intro);
+            let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
+            self.time_frame((c.w, c.h), frame_ms, true);
+            return;
+        }
         let (w, h) = (c.w as f32, c.h as f32);
         let s = (w / 1280.0).min(h / 720.0).max(0.01);
         let (ox, oy) = ((w - 1280.0 * s) / 2.0, (h - 720.0 * s) / 2.0);
@@ -2632,6 +2821,7 @@ impl App {
     /// The screen's name in the per-screen timer and the log.
     fn timer_name(&self) -> &'static str {
         match self.screen {
+            Screen::Intro => "intro",
             Screen::Start => "start screen",
             Screen::Main => "main menu",
             Screen::SignIn => "sign-in",
@@ -2701,7 +2891,7 @@ impl App {
     fn draw_screen(&self, p: &mut Pen) {
         let title = match self.screen {
             // Halo 2's own screens have no title or header.
-            Screen::Start | Screen::Main => "",
+            Screen::Intro | Screen::Start | Screen::Main => "",
             Screen::SignIn => "SIGN IN",
             Screen::Connecting => "SIGNING IN",
             Screen::Live if self.searching() => "MATCHMAKING",
@@ -2723,8 +2913,8 @@ impl App {
             self.draw_header(p);
         }
         match self.screen {
-            // Drawn already (`draw_menu`).
-            Screen::Start | Screen::Main => {}
+            // Drawn already (`draw_intro`, `draw_menu`).
+            Screen::Intro | Screen::Start | Screen::Main => {}
             Screen::SignIn => self.draw_sign_in(p),
             Screen::Connecting => self.draw_connecting(p),
             Screen::Live => self.draw_live(p),
@@ -4033,6 +4223,22 @@ const TOAST_H: f32 = 40.0;
 /// newest ends at y 652, above the button hints (from about 656), and the
 /// third starts at y 524, below the lowest popup's box (the friend options
 /// popup ends at 520).
+/// The intro's picture showing, as the only texture of its draw list
+/// (`App::draw_intro`).
+struct MovieFrame<'a>(&'a intro::Picture);
+
+impl Textures for MovieFrame<'_> {
+    fn image(&self, texture: Texture) -> Option<ImageRef<'_>> {
+        let p = self.0;
+        let image = ImageRef {
+            width: p.w as usize,
+            height: p.h as usize,
+            rgba: &p.rgba,
+        };
+        (texture == Texture::Art(0) && image.is_whole()).then_some(image)
+    }
+}
+
 fn toast_top(k: usize) -> f32 {
     612.0 - k as f32 * 44.0
 }
@@ -4394,6 +4600,7 @@ mod tests {
             ranks: None,
             menus: Arc::new(Menus::flat()),
             vista: None,
+            intro: None,
         })
     }
 
@@ -5882,6 +6089,7 @@ mod tests {
     #[test]
     fn the_music_follows_halo_2s_rule_and_stops_for_the_engine() {
         let all = [
+            Screen::Intro,
             Screen::Start,
             Screen::Main,
             Screen::SignIn,
@@ -5900,6 +6108,7 @@ mod tests {
         ];
         let on = [Screen::Start, Screen::Main];
         let off = [
+            Screen::Intro,
             Screen::Live,
             Screen::Party,
             Screen::Custom,
@@ -6642,6 +6851,7 @@ mod tests {
         );
         // Every screen has a name of its own.
         let screens = [
+            Screen::Intro,
             Screen::Start,
             Screen::Main,
             Screen::SignIn,
@@ -6688,6 +6898,232 @@ mod tests {
                 && line.ends_with(" ms a frame on the CPU"),
             "{line}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lobby opening on the intro, played from the made-up `source`,
+    /// with its log.
+    fn intro_app(
+        dir: &std::path::Path,
+        source: intro::FakeSource,
+    ) -> (App, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let slot = Mutex::new(Some(source));
+        let open: intro::Opener = Arc::new(move |_: &std::path::Path| {
+            let source = slot.lock().unwrap().take().expect("opened once");
+            Box::new(source) as Box<dyn intro::MovieSource>
+        });
+        let a = App::new(Config {
+            log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
+            intro: Some(Plan {
+                full: Some(PathBuf::from("intro_60.wmv")),
+                low: None,
+                open,
+            }),
+            ..app(dir).cfg
+        });
+        (a, lines)
+    }
+
+    /// Tick `a` at `t` until `done`, giving the decoder's thread time to
+    /// send (the lobby's clock stays at `t`).
+    fn tick_until(a: &mut App, t: Instant, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            a.tick(t);
+            if done(a) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "still waiting on {}", a.label());
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// The red of the intro's picture showing, if one is.
+    fn intro_red(a: &App) -> Option<u8> {
+        let shown = a.intro.as_ref().and_then(Intro::showing);
+        shown.map(|(p, _)| p.rgba[0])
+    }
+
+    #[test]
+    fn the_intro_plays_before_the_start_screen_and_goes_on_at_its_end() {
+        let dir = scratch("intro-end");
+        let (mut a, lines) = intro_app(&dir, intro::FakeSource::second());
+        let mut text = Text::none();
+        assert_eq!(a.label(), "intro");
+        assert_eq!(a.frame_interval(), FRAME_MOVIE);
+        let t0 = Instant::now();
+        a.tick(t0);
+        assert!(!a.music_on());
+        // Nothing is decoded before the first draw, which starts it, on
+        // black.
+        assert!(a.intro.is_none());
+        let mut c = Canvas::new(64, 36);
+        c.px.fill(0xFF_FFFF);
+        a.draw(&mut c, &mut text);
+        assert!(c.px.iter().all(|&p| p == 0));
+        assert!(a.intro.is_some());
+        assert_eq!(
+            lines.lock().unwrap()[0],
+            "intro: playing intro_60.wmv (64x36 window)"
+        );
+        // Its soundtrack comes first, for the sound to play, and the
+        // movie's clock starts.
+        tick_until(&mut a, t0, |a| intro_red(a).is_some());
+        let sound = a.take_sound();
+        assert!(
+            matches!(sound.as_slice(), [SoundOut::Movie(_)]),
+            "{sound:?}"
+        );
+        // Pictures by their time (red is the picture's number), as large
+        // as fits: a 4:3 picture in a 16:9 window has bars at its sides.
+        let red = |c: &Canvas, x: usize| (c.px[18 * c.w + x] >> 16) & 0xFF;
+        for (ms, k) in [(510, 15), (680, 20)] {
+            let t = t0 + Duration::from_millis(ms);
+            tick_until(&mut a, t, |a| intro_red(a) == Some(k));
+            a.draw(&mut c, &mut text);
+            assert!(red(&c, 32).abs_diff(u32::from(k)) <= 1, "{}", red(&c, 32));
+            assert_eq!(c.px[18 * 64 + 2], 0);
+            assert_eq!(c.px[18 * 64 + 61], 0);
+        }
+        assert_eq!(a.label(), "intro");
+        assert!(!a.music_on());
+        // The decoder finished, and the movie played out: the start
+        // screen, its music, and no cue.
+        tick_until(&mut a, t0 + Duration::from_secs(2), |a| {
+            a.screen == Screen::Start
+        });
+        assert_eq!(a.take_sound(), [SoundOut::StopMovie]);
+        let played = lines.lock().unwrap().last().cloned().unwrap();
+        assert!(
+            played.starts_with("intro: played to the end (") && played.contains(" 30 pictures, "),
+            "{played}"
+        );
+        assert!(a.music_on());
+        assert_eq!(a.frame_interval(), FRAME);
+        // The start screen opens at its first draw (its intro animations
+        // start then).
+        a.draw(&mut c, &mut text);
+        assert_eq!(a.drawn_screen, Some(Screen::Start));
+        assert!(a.intro.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn any_button_or_a_click_skips_the_intro_but_a_direction_doesnt() {
+        let dir = scratch("intro-skip");
+        let skips = [
+            Input::A,
+            Input::B,
+            Input::X,
+            Input::Y,
+            Input::Lb,
+            Input::Rb,
+            Input::Backspace,
+            Input::Char(' '),
+            Input::Char('z'),
+        ];
+        for i in skips {
+            let (mut a, lines) = intro_app(&dir, intro::FakeSource::second());
+            let t0 = Instant::now();
+            a.tick(t0);
+            a.draw(&mut Canvas::new(64, 36), &mut Text::none());
+            tick_until(&mut a, t0, |a| intro_red(a).is_some());
+            for d in [
+                Input::Up,
+                Input::Down,
+                Input::Left,
+                Input::Right,
+                Input::Tab,
+            ] {
+                a.input(d);
+                assert_eq!(a.label(), "intro", "{d:?}");
+            }
+            a.input(i);
+            assert_eq!(a.label(), "start", "{i:?}");
+            // The soundtrack stops, and leaving sounds nothing.
+            let sound = a.take_sound();
+            assert_eq!(sound.last(), Some(&SoundOut::StopMovie), "{i:?}");
+            assert!(
+                !sound.iter().any(|s| matches!(s, SoundOut::Cue(_))),
+                "{i:?}"
+            );
+            let skipped = lines.lock().unwrap().last().cloned().unwrap();
+            assert!(skipped.starts_with("intro: skipped at "), "{skipped}");
+            assert!(a.intro.is_none());
+            a.tick(t0);
+            assert!(a.music_on());
+            // The start screen takes the next press as ever.
+            if i == Input::A {
+                a.input(Input::A);
+                assert_eq!(a.label(), "main");
+            }
+        }
+        // A click anywhere, and the second half of a double-click doesn't
+        // go on from the start screen.
+        let (mut a, _) = intro_app(&dir, intro::FakeSource::second());
+        a.tick(Instant::now());
+        a.draw(&mut Canvas::new(64, 36), &mut Text::none());
+        a.click(10.0, 10.0);
+        assert_eq!(a.label(), "start");
+        assert_eq!(a.take_sound(), [SoundOut::StopMovie]);
+        a.click(10.0, 10.0);
+        assert_eq!(a.label(), "start");
+        // Without an intro (no movie, headless, switched off) the lobby
+        // opens on the start screen, with its music.
+        let a = app(&dir);
+        assert_eq!(a.label(), "start");
+        assert!(a.music_on());
+        assert_eq!(a.frame_interval(), FRAME);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stalled_or_failing_intro_goes_on_to_the_start_screen() {
+        let dir = scratch("intro-stall");
+        // Two pictures, then the decoder says nothing (it holds on).
+        let (keep, hold) = std::sync::mpsc::channel();
+        let source = intro::FakeSource {
+            pictures: 2,
+            hold: Some(hold),
+            ..intro::FakeSource::second()
+        };
+        let (mut a, lines) = intro_app(&dir, source);
+        let t0 = Instant::now();
+        a.tick(t0);
+        a.draw(&mut Canvas::new(64, 36), &mut Text::none());
+        // Its clock starts at its first word (t0).
+        tick_until(&mut a, t0, |a| intro_red(a) == Some(0));
+        let t1 = t0 + Duration::from_millis(50);
+        tick_until(&mut a, t1, |a| intro_red(a) == Some(1));
+        a.tick(t1 + intro::STALL - Duration::from_millis(100));
+        assert_eq!(a.label(), "intro");
+        a.tick(t1 + intro::STALL + Duration::from_millis(100));
+        assert_eq!(a.label(), "start");
+        assert_eq!(
+            lines.lock().unwrap().last().unwrap(),
+            "intro: the decoder sent nothing for 5 s; skipped"
+        );
+        assert_eq!(a.take_sound().last(), Some(&SoundOut::StopMovie));
+        drop(keep);
+        // One that can't be played says why.
+        let source = intro::FakeSource {
+            pictures: 0,
+            sound_seconds: 0.0,
+            fail: Some("Media Foundation: no decoder".into()),
+            ..intro::FakeSource::second()
+        };
+        let (mut a, lines) = intro_app(&dir, source);
+        let t0 = Instant::now();
+        a.tick(t0);
+        a.draw(&mut Canvas::new(64, 36), &mut Text::none());
+        tick_until(&mut a, t0, |a| a.screen == Screen::Start);
+        assert_eq!(
+            lines.lock().unwrap().last().unwrap(),
+            "intro: Media Foundation: no decoder; skipped"
+        );
+        assert!(a.music_on());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

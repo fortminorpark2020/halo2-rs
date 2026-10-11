@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 (menu 2.2, review round 3). Any assistant that
+Last updated 2026-10-11 (menu 2.3, the intro movie). Any assistant that
 works on the project should update this file before it stops, so the next
 one can pick up. Read AGENTS.md first for the rules.
 
@@ -159,8 +159,23 @@ Next, in order:
    P2"): the log names the audio device and each music and engine change,
    and the menu sounds and music now take their sound class's gain (-4 dB)
    with the mix no longer scaled by 0.55 (1.2 dB louder: the tags' level;
-   the music's first seconds are quiet in the file itself). Next: 2.3,
-   the intro movie.
+   the music's first seconds are quiet in the file itself). 2.3 is done
+   (2026-10-11; menu.md "What Phase 2.3 built"): with a window on
+   Windows the lobby opens on Halo 2's intro movie from Cartographer's
+   `movie` folder (`lobby/intro.rs`, Media Foundation, ported from
+   `menu-preview`), with its soundtrack at the music's gain; any button
+   or a click skips it (not a direction), and at its end, a skip, a 5 s
+   stall or a failure the start screen comes in with its music.
+   `H2LOBBY_INTRO=off` or `intro = off` in lobby.txt skips it; headless
+   and Linux never play it. `App::take_cues` became `take_sound`
+   (`SoundOut`: cues, the soundtrack and its stop), and the window draws
+   every 16 ms while it plays. On the owner's PC (check P3): the intro
+   with sound from `C:\Games\Halo 2 Project Cartographer\movie`; A skips
+   it; the start screen comes in and the music starts; with
+   `H2LOBBY_VISTA=off` or `H2LOBBY_INTRO=off` the lobby opens on the
+   start screen; `lobby.log`'s `lobby: 1920x1080, intro <n> ms a frame`
+   (25 ms in the container) and the end line's late count. Next: 2.4,
+   the menu scene as data.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

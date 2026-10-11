@@ -11,12 +11,14 @@
 //! `sources`, `H2LOBBY_VISTA`) first and MCC second: the fonts, the level
 //! icons (`ranks`, `H2LOBBY_RANKS`), and the start screen and main menu,
 //! drawn by `h2ui` from a mainmenu.map (`H2LOBBY_MENU`), and plain shapes
-//! without one.
+//! without one. With a window on Windows, Vista's intro movie plays first
+//! (`intro`, `H2LOBBY_INTRO`).
 
 pub mod app;
 pub mod audio;
 pub mod canvas;
 pub mod child;
+pub mod intro;
 pub mod names;
 pub mod ranks;
 pub mod settings;
@@ -141,6 +143,20 @@ pub fn run(args: &Args) -> i32 {
     let menus = Arc::new(menus(&found, fonts.as_deref(), &log));
     // Read on a thread of its own; silent without Vista's files.
     let sound = MenuSound::start(vista.as_ref(), &prefs, !no_window, &log);
+    let env = std::env::var_os(intro::ENV);
+    let intro = intro_plan(
+        vista.as_ref(),
+        intro::opener(),
+        &prefs,
+        no_window,
+        env.as_deref(),
+    );
+    match &intro {
+        Ok(_) => {}
+        Err(why) => log(&format!(
+            "intro: none ({why}); the lobby opens on the start screen"
+        )),
+    }
     let cfg = Config {
         folder,
         exe,
@@ -152,6 +168,7 @@ pub fn run(args: &Args) -> i32 {
         ranks,
         menus,
         vista,
+        intro: intro.ok(),
     };
     let app = App::new(cfg);
     if no_window {
@@ -204,6 +221,35 @@ fn find_vista(prefs: &settings::MenuPrefs, log: &Log) -> (Option<Vista>, bool) {
         }
     }
     (vista, off)
+}
+
+/// The intro movie to play as the lobby opens (`intro::Plan`), or why
+/// there is none: headless, switched off (`env`, `H2LOBBY_INTRO`, or
+/// `intro = off` in `prefs`), no Halo 2 Vista folder, no movie player
+/// (`open`: only Windows has one), or no movie in Vista's `movie` folder.
+fn intro_plan(
+    vista: Option<&Vista>,
+    open: Option<intro::Opener>,
+    prefs: &settings::MenuPrefs,
+    headless: bool,
+    env: Option<&OsStr>,
+) -> Result<intro::Plan, String> {
+    let player = open.is_some();
+    let plan = match (vista, open) {
+        (Some(v), Some(open)) => intro::Plan::find(&v.movies(), open),
+        _ => None,
+    };
+    let Some(why) = intro::skip_reason(headless, env, prefs.intro, plan.is_some()) else {
+        return plan.ok_or_else(|| "no intro movie".into());
+    };
+    // No movie: say why.
+    Err(match (plan.is_some(), vista, player) {
+        (true, _, _) => why.to_string(),
+        _ if why != "no intro movie" => why.to_string(),
+        (_, None, _) => format!("{why}: no Halo 2 Vista folder"),
+        (_, Some(_), false) => format!("{why}: no movie player (Windows only)"),
+        (_, Some(v), true) => format!("{why} in {}", v.movies().display()),
+    })
 }
 
 /// The variable that names the mainmenu.map the start screen and main
@@ -594,7 +640,7 @@ fn run_script(
     loop {
         let now = Instant::now();
         app.tick(now);
-        sound.update(&app.take_cues(), app.music_on(), app.engine_running());
+        sound.update(&app.take_sound(), app.music_on(), app.engine_running());
         app.draw(&mut canvas, &mut text);
         let label = app.label();
         if label != last {
@@ -787,6 +833,7 @@ mod tests {
             ranks: None,
             menus: Arc::new(Menus::flat()),
             vista: None,
+            intro: None,
         });
         let script = parse_script(script).unwrap();
         let sound = MenuSound::off(&log);
@@ -831,6 +878,62 @@ mod tests {
         assert_eq!(choose(Some(""), true, true), Some(vista.clone()));
         assert_eq!(choose(None, false, true), Some(mcc.clone()));
         assert_eq!(choose(None, false, false), None);
+    }
+
+    #[test]
+    fn the_intro_plays_only_with_a_window_a_player_and_a_movie() {
+        let dir = std::env::temp_dir().join(format!("h2intro-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("maps")).unwrap();
+        std::fs::write(dir.join("maps").join("mainmenu.map"), b"").unwrap();
+        let vista = Vista::at(&dir).unwrap();
+        let open: intro::Opener = Arc::new(|_: &Path| Box::new(intro::FakeSource::second()) as _);
+        let prefs = settings::MenuPrefs::default();
+        let plan = |vista: Option<&Vista>, open: Option<intro::Opener>, headless, env: &str| {
+            let env = (!env.is_empty()).then(|| OsStr::new(env));
+            intro_plan(vista, open, &prefs, headless, env)
+        };
+        // No movie in Vista's folder yet.
+        let why = plan(Some(&vista), Some(open.clone()), false, "")
+            .err()
+            .unwrap();
+        assert!(why.starts_with("no intro movie in "), "{why}");
+        std::fs::create_dir_all(vista.movies()).unwrap();
+        std::fs::write(vista.movies().join("intro_60.wmv"), b"").unwrap();
+        // With one, a window and a player: it plays.
+        let p = plan(Some(&vista), Some(open.clone()), false, "").unwrap();
+        assert_eq!(
+            p.file(1080),
+            Some(vista.movies().join("intro_60.wmv").as_path())
+        );
+        // Headless, switched off, without Vista or without a player (off
+        // Windows): the start screen.
+        let some = Some(open.clone());
+        assert_eq!(
+            plan(Some(&vista), some.clone(), true, "").err().unwrap(),
+            "headless"
+        );
+        assert_eq!(
+            plan(Some(&vista), some.clone(), false, "off")
+                .err()
+                .unwrap(),
+            "H2LOBBY_INTRO=off"
+        );
+        let off = settings::MenuPrefs {
+            intro: Some(false),
+            ..settings::MenuPrefs::default()
+        };
+        assert!(intro_plan(Some(&vista), some, &off, false, None).is_err());
+        let why = plan(None, Some(open), false, "").err().unwrap();
+        assert_eq!(why, "no intro movie: no Halo 2 Vista folder");
+        let why = plan(Some(&vista), None, false, "").err().unwrap();
+        assert!(why.starts_with("no intro movie"), "{why}");
+        // This PC's own player: Media Foundation on Windows, none here.
+        assert_eq!(
+            plan(Some(&vista), intro::opener(), false, "").is_ok(),
+            cfg!(windows)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

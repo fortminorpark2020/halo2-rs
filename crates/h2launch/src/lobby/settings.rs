@@ -91,12 +91,32 @@ impl Settings {
 /// phases add theirs here): `vista = <folder>`, the Halo 2 Vista
 /// (Project Cartographer) folder or its maps folder, or `off`
 /// (`sources::find`; `H2LOBBY_VISTA` wins over it, unless it names a
-/// folder without a mainmenu.map); and `menu_sound = on` or `off`, the
-/// menus' music and sounds (`sound::silent`; on unless it says off).
+/// folder without a mainmenu.map); `menu_sound = on` or `off`, the
+/// menus' music and sounds (`sound::silent`; on unless it says off); and
+/// `intro = on` or `off`, the intro movie as the lobby opens
+/// (`intro::skip_reason`; on unless it says off).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MenuPrefs {
     pub vista: Option<PathBuf>,
     pub sound: Option<bool>,
+    pub intro: Option<bool>,
+}
+
+/// `on` or `off` (any case); anything else is unsaid.
+fn on_off(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn on_off_word(on: bool) -> &'static str {
+    if on {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 impl MenuPrefs {
@@ -105,13 +125,8 @@ impl MenuPrefs {
     fn set(&mut self, key: &str, value: &str) -> bool {
         match key {
             "vista" => self.vista = (!value.is_empty()).then(|| PathBuf::from(value)),
-            "menu_sound" => {
-                self.sound = match value.to_ascii_lowercase().as_str() {
-                    "on" => Some(true),
-                    "off" => Some(false),
-                    _ => None,
-                }
-            }
+            "menu_sound" => self.sound = on_off(value),
+            "intro" => self.intro = on_off(value),
             _ => return false,
         }
         true
@@ -124,8 +139,10 @@ impl MenuPrefs {
             out.push_str(&format!("vista = {}\n", v.display()));
         }
         if let Some(on) = self.sound {
-            let word = if on { "on" } else { "off" };
-            out.push_str(&format!("menu_sound = {word}\n"));
+            out.push_str(&format!("menu_sound = {}\n", on_off_word(on)));
+        }
+        if let Some(on) = self.intro {
+            out.push_str(&format!("intro = {}\n", on_off_word(on)));
         }
         out
     }
@@ -241,6 +258,17 @@ mod tests {
             assert_eq!(Settings::parse(line).menu.sound, None, "{line:?}");
         }
         assert!(!Settings::default().to_text().contains("menu_sound"));
+        // The intro: the same, written after the sound.
+        let mut s = Settings::parse("intro = Off\nmenu_sound = on\n");
+        assert_eq!(s.menu.intro, Some(false));
+        assert!(s.to_text().ends_with("menu_sound = on\nintro = off\n"));
+        assert_eq!(Settings::parse(&s.to_text()), s);
+        s.menu.intro = Some(true);
+        assert_eq!(Settings::parse(&s.to_text()).menu.intro, Some(true));
+        for line in ["", "intro =\n", "intro = sometimes\n"] {
+            assert_eq!(Settings::parse(line).menu.intro, None, "{line:?}");
+        }
+        assert!(!Settings::default().to_text().contains("intro"));
     }
 
     #[test]

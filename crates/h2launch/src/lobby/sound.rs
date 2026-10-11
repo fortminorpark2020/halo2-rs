@@ -1,10 +1,11 @@
 //! Halo 2's menu music and sounds in the lobby (menu.md section 5, phase
 //! 2.2), read from Halo 2 Vista's mainmenu.map (Project Cartographer's) on
 //! a thread of their own and played through `audio` as `App` asks: the
-//! cues it gives (`App::take_cues`) and whether the music is wanted
-//! (`App::music_on`). Without Vista's files, with `H2LOBBY_SOUND=off` or
-//! with `menu_sound = off` in `lobby.txt`, the lobby is silent and never
-//! opens an audio device. Nothing plays while a match's engine runs.
+//! cues and the intro movie's soundtrack it gives (`App::take_sound`) and
+//! whether the music is wanted (`App::music_on`). Without Vista's files,
+//! with `H2LOBBY_SOUND=off` or with `menu_sound = off` in `lobby.txt`, the
+//! lobby is silent and never opens an audio device. Nothing plays while a
+//! match's engine runs.
 
 use super::audio::{Audio, Clip, Output};
 use super::settings::MenuPrefs;
@@ -39,6 +40,13 @@ const MUSIC_HOLD: Duration = Duration::from_secs(6);
 /// How long the music takes to fade when a match's engine starts, before
 /// the audio stream pauses: an estimate.
 const ENGINE_FADE: Duration = Duration::from_millis(500);
+/// The intro movie's soundtrack plays at the music's gain; this one when
+/// it comes before the music has been read: the music's in Halo 2 Vista's
+/// mainmenu.map (its own 0 dB, its class's -4 dB, its track's -6 dB).
+const MOVIE_DB: f32 = -10.0;
+/// How long the intro's soundtrack takes to stop when it is skipped (ours:
+/// short, so the cut doesn't click).
+const MOVIE_STOP: Duration = Duration::from_millis(50);
 /// The music's two tracks by name, where the globals' looping sound
 /// doesn't give them.
 const MUSIC_IN: &str = r"sound\ui\main_menu_music\menu_music\in";
@@ -111,6 +119,38 @@ impl Cue {
             Cue::Countdown => s.countdown(),
             Cue::KeyClick => s.keyboard_click(),
             Cue::Transport => s.transport(),
+        }
+    }
+}
+
+/// What the lobby gives the sound each tick (`App::take_sound`).
+#[derive(Clone)]
+pub enum SoundOut {
+    Cue(Cue),
+    /// The intro movie's soundtrack came: play it once, now, at the
+    /// music's gain.
+    Movie(Arc<Clip>),
+    /// The intro was skipped or given up: stop its soundtrack.
+    StopMovie,
+}
+
+impl std::fmt::Debug for SoundOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SoundOut::Cue(c) => write!(f, "Cue({c:?})"),
+            SoundOut::Movie(c) => write!(f, "Movie({:.2} s)", c.duration()),
+            SoundOut::StopMovie => write!(f, "StopMovie"),
+        }
+    }
+}
+
+impl PartialEq for SoundOut {
+    fn eq(&self, other: &SoundOut) -> bool {
+        match (self, other) {
+            (SoundOut::Cue(a), SoundOut::Cue(b)) => a == b,
+            (SoundOut::Movie(a), SoundOut::Movie(b)) => Arc::ptr_eq(a, b),
+            (SoundOut::StopMovie, SoundOut::StopMovie) => true,
+            _ => false,
         }
     }
 }
@@ -447,10 +487,15 @@ pub fn output(window: bool, wav: Option<&OsStr>) -> Output {
 /// opens only once they have come.
 pub struct MenuSound {
     log: Log,
+    /// Sound is wanted (not switched off, Vista's files found): the
+    /// output may open.
+    enabled: bool,
     loading: Option<Receiver<MenuSounds>>,
     sounds: MenuSounds,
     output: Output,
     audio: Option<Audio>,
+    /// The intro movie's soundtrack's voice, while it may play.
+    movie: Option<u64>,
     /// The music's voice while it plays (not once it fades out), and
     /// whether it was last started rather than stopped (Halo 2's
     /// `playing`; `App::music_on` is what is wanted).
@@ -469,10 +514,12 @@ impl MenuSound {
     pub fn off(log: &Log) -> MenuSound {
         MenuSound {
             log: log.clone(),
+            enabled: false,
             loading: None,
             sounds: MenuSounds::default(),
             output: Output::Null,
             audio: None,
+            movie: None,
             music: None,
             music_playing: false,
             music_changed: None,
@@ -496,6 +543,7 @@ impl MenuSound {
             return s;
         };
         s.output = output(window, std::env::var_os(WAV_ENV).as_deref());
+        s.enabled = true;
         let map = vista.mainmenu();
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_log = log.clone();
@@ -525,6 +573,21 @@ impl MenuSound {
         if sounds.is_empty() {
             return;
         }
+        if self.open() {
+            self.sounds = sounds;
+        }
+    }
+
+    /// Open the output, if sound is wanted and it isn't open yet (the
+    /// sounds came, or the intro's soundtrack came before them). False if
+    /// it isn't open.
+    fn open(&mut self) -> bool {
+        if self.audio.is_some() {
+            return true;
+        }
+        if !self.enabled {
+            return false;
+        }
         match Audio::open(&self.output) {
             Ok(a) => {
                 let to = match (&self.output, a.device_name()) {
@@ -535,22 +598,31 @@ impl MenuSound {
                 };
                 (self.log)(&format!("sound: playing to {to}"));
                 self.audio = Some(a);
-                self.sounds = sounds;
+                true
             }
-            Err(e) => (self.log)(&format!("sound: no sound ({e})")),
+            Err(e) => {
+                (self.log)(&format!("sound: no sound ({e})"));
+                self.enabled = false;
+                false
+            }
         }
     }
 
-    /// Each tick: play `cues`, start or fade the music as `music_on` says
-    /// (`set_music`), and while `engine_running` fade every voice at once,
-    /// drop the cues, then stop them all and pause the stream (it plays
-    /// again after, with nothing from before).
-    pub fn update(&mut self, cues: &[Cue], music_on: bool, engine_running: bool) {
-        self.update_at(Instant::now(), cues, music_on, engine_running);
+    /// Each tick: play `out` (the cues, and the intro's soundtrack), start
+    /// or fade the music as `music_on` says (`set_music`), and while
+    /// `engine_running` fade every voice at once, drop what `out` asks,
+    /// then stop them all and pause the stream (it plays again after, with
+    /// nothing from before).
+    pub fn update(&mut self, out: &[SoundOut], music_on: bool, engine_running: bool) {
+        self.update_at(Instant::now(), out, music_on, engine_running);
     }
 
-    fn update_at(&mut self, now: Instant, cues: &[Cue], music_on: bool, engine_running: bool) {
+    fn update_at(&mut self, now: Instant, out: &[SoundOut], music_on: bool, engine_running: bool) {
         self.poll();
+        // The intro's soundtrack may come before the menus' sounds have.
+        if !engine_running && out.iter().any(|o| matches!(o, SoundOut::Movie(_))) {
+            self.open();
+        }
         let Some(audio) = &mut self.audio else {
             return;
         };
@@ -589,9 +661,27 @@ impl MenuSound {
                 Err(e) => (self.log)(&format!("sound: the stream didn't play again ({e})")),
             }
         }
-        for &c in cues {
-            if let Some(e) = self.sounds.cue(c) {
-                audio.play_ui(&e.clip, e.gain);
+        for o in out {
+            match o {
+                SoundOut::Cue(c) => {
+                    if let Some(e) = self.sounds.cue(*c) {
+                        audio.play_ui(&e.clip, e.gain);
+                    }
+                }
+                SoundOut::Movie(clip) => {
+                    let music = self.sounds.music.as_ref();
+                    let g = music.map_or(gain(MOVIE_DB), |m| m.gain);
+                    self.movie = Some(audio.play_movie(clip, g));
+                    (self.log)(&format!(
+                        "sound: the intro's soundtrack, {:.1} s (gain {g:.2})",
+                        clip.duration()
+                    ));
+                }
+                SoundOut::StopMovie => {
+                    if let Some(id) = self.movie.take() {
+                        audio.fade_out(id, MOVIE_STOP.as_secs_f32());
+                    }
+                }
             }
         }
         self.set_music(music_on, now);
@@ -634,6 +724,11 @@ impl MenuSound {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// Cues as the lobby gives them.
+    fn c(cues: &[Cue]) -> Vec<SoundOut> {
+        cues.iter().map(|&c| SoundOut::Cue(c)).collect()
+    }
 
     fn logged() -> (Log, Arc<Mutex<Vec<String>>>) {
         let lines = Arc::new(Mutex::new(Vec::new()));
@@ -682,7 +777,7 @@ mod tests {
         let (log, lines) = logged();
         let mut s = MenuSound::start(None, &on, true, &log);
         assert!(s.loading.is_none());
-        s.update(&[Cue::Select], true, false);
+        s.update(&c(&[Cue::Select]), true, false);
         assert!(s.audio.is_none());
         assert_eq!(
             *lines.lock().unwrap(),
@@ -735,10 +830,62 @@ mod tests {
         let (log, _) = logged();
         let mut s = MenuSound::off(&log);
         s.output = Output::Wav(dir.join("out.wav"));
+        s.enabled = true;
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(sounds()).unwrap();
         s.loading = Some(rx);
         (s, dir)
+    }
+
+    #[test]
+    fn the_intros_soundtrack_plays_once_at_the_music_gain_until_skipped() {
+        let (mut s, dir) = playing("movie");
+        let t0 = Instant::now();
+        let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        let clip = Arc::new(Clip {
+            samples: vec![8192; 100_000],
+            channels: 1,
+            rate: 100,
+        });
+        // The intro: no music, the soundtrack at the music's gain.
+        s.update_at(at(0.0), &[SoundOut::Movie(clip.clone())], false, false);
+        let movie = s.movie.unwrap();
+        let a = s.audio.as_ref().unwrap();
+        assert_eq!(a.gain(movie), Some(0.5));
+        assert_eq!(a.voices(), 1);
+        // Skipped: it stops (in a moment), and the music starts.
+        s.update_at(at(0.5), &[SoundOut::StopMovie], true, false);
+        assert!(s.movie.is_none() && s.music.is_some());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while s.audio.as_ref().unwrap().gain(movie).is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(s.audio.as_ref().unwrap().gain(movie), None);
+        assert_eq!(s.audio.as_ref().unwrap().voices(), 1);
+        // A stop with no soundtrack does nothing.
+        s.update_at(at(0.6), &[SoundOut::StopMovie], true, false);
+        drop(s);
+
+        // Before the menus' sounds have come: the output opens for it,
+        // at the music's gain in Vista's map.
+        let (log, lines) = logged();
+        let mut early = MenuSound::off(&log);
+        early.enabled = true;
+        early.output = Output::Wav(dir.join("early.wav"));
+        let (_still_loading, rx) = std::sync::mpsc::channel();
+        early.loading = Some(rx);
+        early.update_at(at(0.0), &[SoundOut::Movie(clip.clone())], false, false);
+        let movie = early.movie.unwrap();
+        let g = early.audio.as_ref().unwrap().gain(movie).unwrap();
+        assert!((g - gain(MOVIE_DB)).abs() < 1e-6, "{g}");
+        assert!(lines.lock().unwrap()[1].starts_with("sound: the intro's soundtrack, 1000.0 s"));
+        drop(early);
+
+        // Silent menus stay silent.
+        let mut off = MenuSound::off(&log);
+        off.update(&[SoundOut::Movie(clip)], false, false);
+        assert!(off.audio.is_none() && off.movie.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -755,7 +902,7 @@ mod tests {
         let first = s.music.unwrap();
         assert_eq!(s.audio.as_ref().unwrap().gain(first), Some(0.5));
         // Cues play over it, at their tags' gains.
-        s.update_at(at(0.1), &[Cue::Cursor, Cue::Select], true, false);
+        s.update_at(at(0.1), &c(&[Cue::Cursor, Cue::Select]), true, false);
         assert_eq!(audio(&s), (3, false));
         assert_eq!(s.audio.as_ref().unwrap().gain(first + 1), Some(0.71));
         // Off and on again within 6 s of the start: nothing changes.
@@ -788,7 +935,7 @@ mod tests {
         // Paused with every voice stopped (the first's fade too).
         assert_eq!(audio(&s), (0, true));
         // Cues are dropped while it runs.
-        s.update_at(at(14.0), &[Cue::Back, Cue::Select], false, true);
+        s.update_at(at(14.0), &c(&[Cue::Back, Cue::Select]), false, true);
         assert_eq!(audio(&s), (0, true));
         // After it the stream plays again, and the music starts again
         // when it's wanted.
@@ -820,7 +967,7 @@ mod tests {
         assert_eq!(s.music, None);
         assert!(s.audio.as_ref().unwrap().gain(music).is_some());
         // The engine starts 7 s in, a menu sound just before it.
-        s.update_at(at(6.9), &[Cue::Select], false, false);
+        s.update_at(at(6.9), &c(&[Cue::Select]), false, false);
         assert_eq!(audio(&s), (2, false));
         s.update_at(at(7.0), &[], false, true);
         s.update_at(at(7.6), &[], false, true);
@@ -841,7 +988,7 @@ mod tests {
         let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
         // The music and a menu sound, both far longer than the test.
         s.update_at(at(0.0), &[], true, false);
-        s.update_at(at(0.1), &[Cue::Select], true, false);
+        s.update_at(at(0.1), &c(&[Cue::Select]), true, false);
         assert_eq!(s.audio.as_ref().unwrap().voices(), 2);
         // The engine starts: nothing stops at once (the recording has
         // mixed far less than the 0.5 s fade since it opened)...

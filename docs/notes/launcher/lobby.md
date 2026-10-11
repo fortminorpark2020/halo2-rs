@@ -184,11 +184,32 @@ the launcher doesn't do.
   its own, its sound class's, and the music's track's, in decibels
   (the menu sounds -7 dB, the music -10 dB, in Halo 2 Vista's map), with
   nothing taken off the mix after that.
+- The intro movie (menu.md "What Phase 2.3 built"; `lobby/intro.rs`):
+  with a window, on Windows, the lobby opens on Halo 2's intro from
+  Vista's `movie` folder (`intro_60.wmv`, or `intro_low_60.wmv` in a
+  window under 720 pixels tall, either one when the other is missing),
+  decoded by Media Foundation on a thread of its own from the first
+  draw, with its soundtrack at the music's gain. Any button skips it (A,
+  B, X, Y, LB, RB, the pad's Start and Back, Enter, Esc, Backspace, Space
+  or a letter) and so does a click; a direction (the stick, the d-pad,
+  the arrows) and Tab don't. Leaving it sounds nothing. At its end, on a
+  skip, when the decoder sends nothing for 5 s, or when it can't be
+  played (Windows N without the Media Feature Pack), the start screen
+  comes in with its intro animations and its music. It isn't played
+  headless, with `H2LOBBY_INTRO=off` or `intro = off` in `lobby.txt`,
+  off Windows, or without the movie: then the lobby opens on the start
+  screen as before. While it plays the window draws every 16 ms (else
+  33 ms). The log says `intro: none (<why>); the lobby opens on the
+  start screen` at start when it won't play, else `intro: playing
+  intro_60.wmv (1920x1080 window)`, `sound: the intro's soundtrack, <n>
+  s (gain 0.32)`, and one of `intro: skipped at <t> s`, `intro: played
+  to the end (<t> s, <n> pictures, <k> late ones passed over)`, `intro:
+  the decoder sent nothing for 5 s; skipped` or `intro: <why>; skipped`.
 - Every screen's CPU time is logged once per window size, averaged over
   its first 30 frames there (menu.md's CPU budget): the menus as `menus:
   1920x1080, start screen 3.4 ms a frame on the CPU (background 20 ms
   once)`, the others as `lobby: 1920x1080, playlists 2.7 ms a frame on
-  the CPU`. The names are start screen, main menu, sign-in, signing in,
+  the CPU`. The names are intro, start screen, main menu, sign-in, signing in,
   playlists, searching, players, party, custom game, pregame lobby, in
   game, carnage report, offline, service record, friends and settings (a
   popup counts as the screen under it).
@@ -211,7 +232,7 @@ the launcher doesn't do.
   controller settings: `button_layout`, `thumbstick_layout`,
   `look_sensitivity`, `look_inversion`, `auto_look_centering`, `vibration`,
   `mouse_sensitivity` and `mouse_inversion`; then the menus' own lines,
-  `vista` and `menu_sound` (`on` or `off`) so far; a file from before them reads with Halo 2's defaults,
+  `vista`, then `menu_sound` and `intro` (`on` or `off`), so far; a file from before them reads with Halo 2's defaults,
   and unknown lines are skipped), `lobby.log` (the lobby's log, with the
   engine's lines as `engine:`), `live-key.bin` and `live-card.txt` (the same
   account as `--live`), `match-session.txt` (the last match's session),
@@ -229,7 +250,8 @@ the launcher doesn't do.
 
 ## Screens
 
-0. Start and main menu. The lobby opens on the start screen: the logo
+0. Start and main menu. The lobby opens on the intro movie when it
+   plays (above), then the start screen: the logo
    and the pulsing PRESS START. A (Enter, Space, the controller's A or
    Start) or a click anywhere opens the main menu; B asks before quitting
    (Y there signs out, while signed in). The main menu has ONLINE and
@@ -420,7 +442,8 @@ setting or its value is wrong.
 With a gamertag saved, ONLINE signs in at once (`wait connecting`,
 then `wait live`), without the form.
 
-The screens are `start`, `main`, `signin`, `connecting`, `live`,
+The screens are `intro` (with a window only: a headless lobby opens on
+`start`), `start`, `main`, `signin`, `connecting`, `live`,
 `searching`, `players`, `party`, `custom`, `pregame`, `ingame`,
 `carnage-waiting`, `carnage`, `failed`, `friends`, `record` and
 `settings`, and the popups `invite`, `quit`, `leave`, `remove` (a party
