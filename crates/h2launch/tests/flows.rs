@@ -315,7 +315,6 @@ fn party_admin() {
 /// the friends list, ALPHA opens BRAVO's options and then BRAVO's service
 /// record.
 #[test]
-#[ignore]
 fn friends() {
     let flow = Flow::new("friends");
     flow.stage(&[
@@ -327,7 +326,6 @@ fn friends() {
 /// (e) A setting is kept: one run sets the button layout and quits, the
 /// next sees it on the settings screen.
 #[test]
-#[ignore]
 fn a_setting_is_kept() {
     let flow = Flow::new("setting");
     flow.stage(&[("alpha", "setting-set.txt")]);
@@ -337,7 +335,6 @@ fn a_setting_is_kept() {
 /// (f) A gamertag someone else has is turned away and another is taken;
 /// then B back to the start screen and its quit popup.
 #[test]
-#[ignore]
 fn a_taken_gamertag_then_quit() {
     let flow = Flow::new("taken");
     flow.stage(&[("alpha", "taken-alpha.txt")]);

@@ -485,8 +485,9 @@ off (and `H2LOBBY_SOUND`, `H2LOBBY_INTRO` and `H2LOBBY_SCENE` off, for
 the phases that add them), each in its own folder under the test's
 (`XDG_DATA_HOME`). It is empty on Windows.
 
-In the gate (`cargo test --workspace --release` runs it; about 35 s in
-the container, most of it `party_matchmaking`'s countdown):
+All of them are in the gate (`cargo test --workspace --release` runs
+it; about 45 s in the container, the flows running side by side, the
+longest `party_matchmaking` with its countdown):
 
 - `matchmaking`: ALPHA and BRAVO sign in; ALPHA invites BRAVO from the
   players list and BRAVO accepts, then leaves again (no default launcher
@@ -506,9 +507,6 @@ the container, most of it `party_matchmaking`'s countdown):
   report; ALPHA, the leader, is back on `custom`.
 - `party_admin`, three lobbies: the party screen recipe above (invite
   two, invite only, remove one, make one leader, leave).
-
-Ignored (`-- --ignored`, slower or less central):
-
 - `friends`: a friend request from the players list, accepted on the
   friends list; the options popup; the friend's service record.
 - `a_setting_is_kept`: `set` the button layout, quit, start again, see
@@ -518,7 +516,6 @@ Ignored (`-- --ignored`, slower or less central):
 
 ```
 cargo test --release -p h2launch --test flows
-cargo test --release -p h2launch --test flows -- --include-ignored
 H2FLOWS_SHOTS=/tmp/flow-shots cargo test --release -p h2launch --test flows
 ```
 
@@ -539,7 +536,9 @@ in their folders. Lobbies wait for each other only through their
 scripts: `wait <label>`, `see <text> <seconds>` (with text only the
 moment you wait for draws: a party's "PARTY (2)", not a gamertag a
 notice also shows) and `pick`. Keep the gate's flows under about 90 s
-in the container; put slower ones behind `#[ignore]`.
+in the container; put a slower one behind `#[ignore]` and add its
+`--include-ignored` run to the gate's rule in menu.md, so it still runs
+before every commit.
 
 Every later menu sub-phase keeps these passing: when a screen's label
 or the way to it changes, its scripts (and the recipes above) change in
