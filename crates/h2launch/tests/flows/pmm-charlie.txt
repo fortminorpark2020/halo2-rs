@@ -1,0 +1,26 @@
+# (a2) A party searching together, CHARLIE's side: search Team Snipers
+# alone (two against one, so the match can start), play, and come back.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type CHARLIE
+0.2 a
+0 wait live 30
+# Down the playlists to Team Snipers, the seventh.
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0 see 2 to 8 players 5      # Team Snipers' line
+0.2 a                       # search alone
+0 wait searching 10
+0 wait pregame 90           # once ALPHA and BRAVO search, after a countdown
+0 wait ingame 30
+0 wait carnage 60
+0.5 a                       # back to the playlists
+0 wait live 10
+1 quit

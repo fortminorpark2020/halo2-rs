@@ -60,7 +60,8 @@ the launcher doesn't do.
   the two Microsoft Games ones) that holds a `mainmenu.map`. `off` in
   either place uses none, not even the usual folders: what friends
   without Cartographer get. A folder named there that holds no
-  mainmenu.map is passed over, and the log says so. The log then says
+  mainmenu.map is passed over (so `H2LOBBY_VISTA` naming one leaves
+  `lobby.txt`'s `off` in force), and the log says so. The log then says
   `lobby: Halo 2 Vista files (Project Cartographer) in <maps>`, or
   `lobby: no Halo 2 Vista folder; menus from MCC, no music, scene or
   intro`.
@@ -78,15 +79,15 @@ the launcher doesn't do.
   Each glyph's image goes its origin x right of the pen, and the next one
   its advance past that (from the pen, L's foot runs into a following I);
   kerning pairs are code points, in the file's pixels. Characters
-  they lack, and everything when MCC isn't found, come from a font
-  already on the PC (Bahnschrift, then Segoe UI or Arial on Windows;
-  DejaVu Sans or Liberation Sans on Linux) through `ab_glyph`; headless,
-  with no font at all, text isn't drawn (the script's `see` still reads
-  it).
+  they lack, and everything when neither Halo 2 Vista's nor MCC's fonts
+  are found, come from a font already on the PC (Bahnschrift, then
+  Segoe UI or Arial on Windows; DejaVu Sans or Liberation Sans on Linux)
+  through `ab_glyph`; headless, with no font at all, text isn't drawn
+  (the script's `see` still reads it).
   `H2LOBBY_H2FONTS` names another folder of them, or `off` for the system
   font alone. No font or art is shipped. A screen is cheap to draw, and
   the same code writes PNGs for tests without a GPU (with Halo 2's fonts
-  those PNGs hold MCC's glyphs: keep them on the owner's PC).
+  those PNGs hold Vista's or MCC's glyphs: keep them on the owner's PC).
 - Layout is in units of 1/720 of the window's height, so it scales.
 - Notices (the server's NOTICEs and the lobby's own) stay up 6 s, at most
   three at once, stacked above the button hints, newest lowest. They are
@@ -444,8 +445,8 @@ off (and `H2LOBBY_SOUND`, `H2LOBBY_INTRO` and `H2LOBBY_SCENE` off, for
 the phases that add them), each in its own folder under the test's
 (`XDG_DATA_HOME`). It is empty on Windows.
 
-In the gate (`cargo test --workspace --release` runs it; about 15 s in
-the container):
+In the gate (`cargo test --workspace --release` runs it; about 35 s in
+the container, most of it `party_matchmaking`'s countdown):
 
 - `matchmaking`: ALPHA and BRAVO sign in; ALPHA invites BRAVO from the
   players list and BRAVO accepts, then leaves again (no default launcher
@@ -453,6 +454,13 @@ the container):
   one, and Team Snipers wants a third player to even its teams); both
   search Head to Head, reach the pregame lobby, play, see the carnage
   report and are back on the playlists (`live`).
+- `party_matchmaking`, three lobbies: a party searching together. ALPHA
+  invites BRAVO and, once BRAVO has accepted (`PARTY (2)`), goes down to
+  Team Snipers and searches for the party; BRAVO's lobby follows into
+  `searching`. CHARLIE searches Team Snipers alone, which evens the
+  teams (two against one: unranked, so one apart is allowed). After the
+  20 s countdown all three reach the pregame lobby, play, see the
+  carnage report and are back on `live`.
 - `custom_game`: ALPHA invites BRAVO, goes down to the Custom Game row,
   picks Team Slayer on Lockout and starts it; both see the carnage
   report; ALPHA, the leader, is back on `custom`.

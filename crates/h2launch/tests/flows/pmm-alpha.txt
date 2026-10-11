@@ -1,0 +1,35 @@
+# (a2) A party searching together, ALPHA's side: invite BRAVO, then search
+# Team Snipers as a party of two; CHARLIE, searching alone, evens the
+# teams. Play, see the carnage report, and come back.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type ALPHA
+0.2 a
+0 wait live 30
+0.2 x                       # the players list
+0 wait players 5
+0 see BRAVO 30
+0 pick BRAVO
+0.2 a                       # invite
+0.2 b                       # back to the playlists
+0 wait live 5
+0 see PARTY (2) 30          # BRAVO accepted: search only as two
+# Down the playlists to Team Snipers, the seventh.
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0 see 2 to 8 players 5      # Team Snipers' line
+0.2 a                       # search, for the party
+0 wait searching 10
+0 wait pregame 60           # once CHARLIE has searched, after a countdown
+0 wait ingame 30
+0 wait carnage 60
+0.5 a                       # back to the playlists
+0 wait live 10
+1 quit

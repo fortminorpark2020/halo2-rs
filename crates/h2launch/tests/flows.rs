@@ -237,11 +237,28 @@ impl Drop for Flow {
 /// playlist starts with two players in one party: Head to Head takes
 /// parties of one, and Team Snipers wants a third to even its teams).
 /// Both search Head to Head, meet in the pregame lobby, play, see the
-/// carnage report, and are back on the playlists.
+/// carnage report, and are back on the playlists. A party searching
+/// together is `party_matchmaking`.
 #[test]
 fn matchmaking() {
     let flow = Flow::new("mm");
     flow.stage(&[("alpha", "mm-alpha.txt"), ("bravo", "mm-bravo.txt")]);
+}
+
+/// (a2) A party searching together: ALPHA invites BRAVO and, once BRAVO
+/// has accepted, searches Team Snipers for the party; BRAVO's lobby
+/// follows into the search. CHARLIE searches it alone, which makes even
+/// teams (two against one; Team Snipers is unranked, so one apart is
+/// even enough). After the countdown all three meet in the pregame
+/// lobby, play, see the carnage report, and are back on the playlists.
+#[test]
+fn party_matchmaking() {
+    let flow = Flow::new("pmm");
+    flow.stage(&[
+        ("alpha", "pmm-alpha.txt"),
+        ("bravo", "pmm-bravo.txt"),
+        ("charlie", "pmm-charlie.txt"),
+    ]);
 }
 
 /// (b) A custom game: ALPHA invites BRAVO, goes down to the Custom Game

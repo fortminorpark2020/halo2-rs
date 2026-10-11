@@ -1,0 +1,21 @@
+# (a2) A party searching together, BRAVO's side: accept ALPHA's invitation
+# and follow the leader into the search, the match and the carnage report.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type BRAVO
+0.2 a
+0 wait live 30
+0 wait invite 60
+0.2 a                       # accept
+0 wait live 5
+0 see PARTY (2) 30
+0 wait searching 60         # the leader searched for the party
+0 wait pregame 60
+0 wait ingame 30
+0 wait carnage 60
+0.5 a                       # back to the playlists
+0 wait live 10
+1 quit

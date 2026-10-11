@@ -524,11 +524,9 @@ fn parse_script(text: &str) -> Result<Vec<(f64, Step)>, String> {
     Ok(steps)
 }
 
-/// The lobby without a window, for tests: runs the script, saves a
-/// screenshot whenever the screen changes (on the start screen and main
-/// menu once their intros are over, with the script held until then), and
-/// returns 0 if every wait was met.
-fn headless(mut app: App, mut text: Text, log: &Log) -> i32 {
+/// The lobby without a window, for tests: runs `H2LOBBY_SCRIPT`
+/// (`run_script`), with screenshots in `H2LOBBY_SHOTS`.
+fn headless(app: App, text: Text, log: &Log) -> i32 {
     let script = match std::env::var("H2LOBBY_SCRIPT") {
         Ok(path) => match std::fs::read_to_string(&path)
             .map_err(|e| format!("{path}: {e}"))
@@ -543,6 +541,21 @@ fn headless(mut app: App, mut text: Text, log: &Log) -> i32 {
         Err(_) => Vec::new(),
     };
     let shots: Option<PathBuf> = std::env::var_os("H2LOBBY_SHOTS").map(PathBuf::from);
+    run_script(app, text, log, script, shots)
+}
+
+/// Runs a script on a lobby with no window, saves a screenshot in
+/// `shots` whenever the screen changes (on the start screen and main menu
+/// once their intros are over, with the script held until then), and
+/// returns 0 if every wait was met. A lobby that quits with steps still
+/// to come, or a wait unmet, fails.
+fn run_script(
+    mut app: App,
+    mut text: Text,
+    log: &Log,
+    script: Vec<(f64, Step)>,
+    shots: Option<PathBuf>,
+) -> i32 {
     if let Some(dir) = &shots {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -586,6 +599,12 @@ fn headless(mut app: App, mut text: Text, log: &Log) -> i32 {
             pending = false;
         }
         if app.quitting() {
+            if next.is_some() || waiting.is_some() {
+                log(&format!(
+                    "lobby: script: quit before the script ended (on {label})"
+                ));
+                code = 1;
+            }
             break;
         }
         if let Some((want, until)) = &waiting {
@@ -733,6 +752,49 @@ mod tests {
         assert!(parse_script("a\n").is_err());
         assert!(parse_script("1 jump\n").is_err());
         assert!(parse_script("1 wait\n").is_err());
+    }
+
+    /// Runs `script` on a lobby with no server: its exit code and log.
+    fn run(script: &str) -> (i32, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!("h2script-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let log: Log = Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string()));
+        let app = App::new(Config {
+            folder: dir.clone(),
+            exe: PathBuf::from("h2launch"),
+            kind: child::Kind::Fake,
+            maps: Vec::new(),
+            server: None,
+            instance: None,
+            log: log.clone(),
+            ranks: None,
+            menus: Arc::new(Menus::flat()),
+            vista: None,
+        });
+        let script = parse_script(script).unwrap();
+        let code = run_script(app, Text::none(), &log, script, None);
+        let _ = std::fs::remove_dir_all(&dir);
+        let lines = lines.lock().unwrap().clone();
+        (code, lines)
+    }
+
+    #[test]
+    fn quitting_before_the_script_ends_fails() {
+        // B on the start screen opens the quit popup, and A on it quits.
+        let quits = "0 wait start 5\n0 b\n0 wait quit 5\n0 a\n";
+        assert_eq!(run(quits).0, 0);
+        // With steps still to come (a wait, or a key) it fails.
+        for more in ["0 wait main 5\n", "1 down\n"] {
+            let (code, lines) = run(&format!("{quits}{more}"));
+            assert_eq!(code, 1, "{more:?}");
+            let said = "lobby: script: quit before the script ended";
+            assert!(lines.iter().any(|l| l.starts_with(said)), "{lines:?}");
+        }
+        // `quit` ends the run itself.
+        assert_eq!(run("0 wait start 5\n0.1 quit\n").0, 0);
     }
 
     #[test]

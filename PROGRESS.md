@@ -122,7 +122,9 @@ Next, in order:
    every later sub-phase keeps passing. On the owner's PC (check P1):
    `lobby.log` should name the Cartographer folder for menus, fonts and
    rank icons, MCC's with `H2LOBBY_VISTA=off`, and give a ms line for
-   each screen visited. Next: 2.2, menu music and UI sounds.
+   each screen kept on show for about a second (30 frames at that window
+   size; a short one such as signing in may have none). Next: 2.2, menu
+   music and UI sounds.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

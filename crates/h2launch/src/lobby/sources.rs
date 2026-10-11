@@ -98,14 +98,16 @@ impl<'a> Named<'a> {
 }
 
 /// Whether Halo 2 Vista's files are switched off: `H2LOBBY_VISTA=off`, or
-/// (with the variable unset) `vista = off` in `lobby.txt`. Then nothing
-/// from a Vista folder is used, not even where `ranks::MAP_DIRS` would
-/// find one.
+/// `vista = off` in `lobby.txt` with the variable unset or naming a
+/// folder without a mainmenu.map (passed over, as in `find`). Then
+/// nothing from a Vista folder is used, not even where `ranks::MAP_DIRS`
+/// would find one.
 pub fn off(env: Option<&OsStr>, saved: Option<&Path>) -> bool {
+    let saved_off = || Named::read(saved.map(Path::as_os_str)) == Named::Off;
     match Named::read(env) {
         Named::Off => true,
-        Named::Folder(_) => false,
-        Named::Unset => Named::read(saved.map(Path::as_os_str)) == Named::Off,
+        Named::Folder(dir) => Vista::at(dir).is_none() && saved_off(),
+        Named::Unset => saved_off(),
     }
 }
 
@@ -118,8 +120,8 @@ pub fn off(env: Option<&OsStr>, saved: Option<&Path>) -> bool {
 ///    mainmenu.map.
 ///
 /// A folder named in 1 or 2 that holds no mainmenu.map (nor its `maps`
-/// folder) is passed over for the next; `named_but_missing` says which,
-/// for the log.
+/// folder) is passed over for the next (so `off` in 2 still counts);
+/// `named_but_missing` says which, for the log.
 pub fn find(env: Option<&OsStr>, saved: Option<&Path>, dirs: &[&Path]) -> Option<Vista> {
     if off(env, saved) {
         return None;
@@ -142,7 +144,7 @@ pub fn named_but_missing<'a>(
     env: Option<&'a OsStr>,
     saved: Option<&'a Path>,
 ) -> Vec<(&'static str, &'a Path)> {
-    if off(env, saved) {
+    if Named::read(env) == Named::Off {
         return Vec::new();
     }
     let named = [
@@ -219,6 +221,16 @@ mod tests {
                 .unwrap()
                 .maps,
             maps
+        );
+        // Unless the folder holds no mainmenu.map: passed over, so
+        // lobby.txt's off counts, though the log still names the folder.
+        let gone = dir.join("gone");
+        let saved_off = Some(Path::new("off"));
+        assert_eq!(find(Some(gone.as_os_str()), saved_off, &dirs), None);
+        assert!(off(Some(gone.as_os_str()), saved_off));
+        assert_eq!(
+            named_but_missing(Some(gone.as_os_str()), saved_off),
+            [(ENV, gone.as_path())]
         );
         // Empty: as if unset, so the usual folders.
         assert_eq!(find(Some(OsStr::new("")), None, &dirs).unwrap().maps, maps);

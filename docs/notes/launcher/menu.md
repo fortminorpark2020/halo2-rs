@@ -982,7 +982,9 @@ No visible change; the log says more.
   from ...\maps\fonts`) and the rank icons (`lobby: rank icons from ...
   (Halo 2 Vista's)`);
 - with `H2LOBBY_VISTA=off` it names MCC's for all three;
-- each screen visited logs a ms line at his window size.
+- each screen on show for about a second or more at his window size
+  (30 frames, added up over visits; resizing starts the count again)
+  logs a ms line; a short one, such as signing in, may not.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 

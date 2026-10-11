@@ -90,7 +90,8 @@ impl Settings {
 /// The menus' own lines in `lobby.txt`, written after the controls (later
 /// phases add theirs here): `vista = <folder>`, the Halo 2 Vista
 /// (Project Cartographer) folder or its maps folder, or `off`
-/// (`sources::find`; `H2LOBBY_VISTA` wins over it).
+/// (`sources::find`; `H2LOBBY_VISTA` wins over it, unless it names a
+/// folder without a mainmenu.map).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MenuPrefs {
     pub vista: Option<PathBuf>,

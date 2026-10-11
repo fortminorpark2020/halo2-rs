@@ -5812,7 +5812,11 @@ mod tests {
                 a.timer_name()
             })
             .collect();
-        names.push("searching");
+        // The playlists while the party searches have their own.
+        let (mut b, _server) = live_app(&dir);
+        view(&mut b).party = Some(party(500, Activity::Searching));
+        assert_eq!(b.timer_name(), "searching");
+        names.push(b.timer_name());
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), screens.len() + 1);
