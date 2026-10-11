@@ -981,8 +981,11 @@ Game's result sent as a game cut short, and the leave notice.
   leaving once the game was over rather than HOST_LEFT, so the match ends
   with no reason and counts for no one (custom games are unranked), and
   the host lands on the carnage report like the guests, whose engines
-  end the game themselves when the host goes (check 14). "You ended the
-  game." is left for an engine that closes without a result. No engine
+  end the game themselves when the host goes (check 14). That holds once
+  the server's GO came; End Game before it (a guest still joining) has
+  its result dropped by h2live, so the lobby sends LEFT_MATCH alone and
+  keeps no result (`Told::ended_before_go`). "You ended the game." is
+  left for that and for an engine that closes without a result. No engine
   message ends the game for everyone (check 15), so End Game doesn't use
   one.
 - **Safety** (`gamemenu::watch`, Linux-tested; the driver does what it

@@ -598,6 +598,9 @@ pub struct Told {
     /// The player ended the game for everyone from the GAME MENU (End
     /// Game): the result that follows is a game cut short.
     ended_from_menu: bool,
+    /// The server's GO for the match came: it started the game, and takes
+    /// results for it from now on.
+    went: bool,
 }
 
 impl Told {
@@ -616,6 +619,17 @@ impl Told {
         self.over
     }
 
+    /// The player ended the game from the GAME MENU (End Game) before the
+    /// server's GO came: the engine's game ran, but h2live hadn't started
+    /// the match (a guest was still joining; it waits up to 20 s for them)
+    /// and would drop the result. That result, given as the engine quits,
+    /// isn't passed on then: this PC only leaves (LEFT_MATCH, which h2live
+    /// takes as the host leaving), and the lobby shows "You ended the
+    /// game." rather than a carnage report saying the host left.
+    pub fn ended_before_go(&self) -> bool {
+        self.ended_from_menu && !self.went
+    }
+
     /// What to send after `event` (from the server) or `engine` (from the
     /// launcher), for match `id`, which this PC hosts if `host`.
     pub fn next(
@@ -628,6 +642,7 @@ impl Told {
         let mut out = Vec::new();
         match event {
             Some(LiveEvent::HostMatch(m)) if *m == id => self.asked_to_host = true,
+            Some(LiveEvent::Go(m)) if *m == id => self.went = true,
             Some(LiveEvent::MatchOver(m)) if m.id == id => {
                 self.over = true;
                 self.verdict = true;
@@ -642,6 +657,15 @@ impl Told {
             Some(Engine::MapLoaded) if !host && !self.joined => {
                 self.joined = true;
                 out.push(ToServer::Joined(id));
+            }
+            // End Game before GO: the server would drop the result, so
+            // this PC only leaves, as when its engine closes.
+            Some(Engine::Ended(_)) if !self.over && self.ended_before_go() => {
+                self.over = true;
+                out.push(ToServer::LeftMatch {
+                    id,
+                    host_lost: false,
+                });
             }
             Some(Engine::Ended(players)) if !self.over => {
                 self.over = true;
@@ -1129,11 +1153,12 @@ mod tests {
         assert!(t.next(7, true, None, Some(Engine::Closing)).is_empty());
     }
 
-    /// End Game: the host's result as its engine quits goes as a game cut
-    /// short, then LEFT_MATCH at once, in that order (h2live then takes
-    /// the host as leaving at the end, not HOST_LEFT); the engine's
-    /// closing says nothing more. Leave Game's never goes this way: its
-    /// quit-time result isn't passed on (`gamemenu::result_is_the_games`).
+    /// End Game once the server's GO came: the host's result as its
+    /// engine quits goes as a game cut short, then LEFT_MATCH at once, in
+    /// that order (h2live then takes the host as leaving at the end, not
+    /// HOST_LEFT); the engine's closing says nothing more. Leave Game's
+    /// never goes this way: its quit-time result isn't passed on
+    /// (`gamemenu::result_is_the_games`).
     #[test]
     fn end_games_result_goes_cut_short_before_left_match() {
         let player = |relay_id: u64, score: i32| LauncherPlayerResult {
@@ -1154,10 +1179,11 @@ mod tests {
             t.next(7, true, None, Some(Engine::MapLoaded)),
             vec![ToServer::Hosting(7)]
         );
+        assert!(t.next(7, true, Some(&LiveEvent::Go(7)), None).is_empty());
         assert!(t
             .next(7, true, None, Some(Engine::Left(Leave::End)))
             .is_empty());
-        assert!(!t.over());
+        assert!(!t.over() && !t.ended_before_go());
         let both = vec![player(0x1111, 4), player(0x2222, 2)];
         let out = t.next(7, true, None, Some(Engine::Ended(both.clone())));
         let [ToServer::LauncherResult(r), ToServer::LeftMatch { id, host_lost }] = out.as_slice()
@@ -1176,5 +1202,70 @@ mod tests {
             panic!("{out:?}");
         };
         assert!(r.finished);
+    }
+
+    /// End Game before the server's GO (a guest still joining): h2live
+    /// hasn't started the match and would drop the result, so End Game's
+    /// result goes nowhere and this PC only leaves, as when its engine
+    /// closes; the closing after it says nothing more. Another match's GO
+    /// doesn't count, and a GO that came between End Game and its result
+    /// lets the result go as a game cut short.
+    #[test]
+    fn end_game_before_go_only_leaves() {
+        let player = LauncherPlayerResult {
+            relay_id: 0x1111,
+            team: 0,
+            place: 0,
+            score: 1,
+            kills: 1,
+            assists: 0,
+            deaths: 0,
+            betrayals: 0,
+            suicides: 0,
+            left: false,
+        };
+        let hosting = |t: &mut Told| {
+            t.next(7, true, Some(&LiveEvent::HostMatch(7)), None);
+            assert_eq!(
+                t.next(7, true, None, Some(Engine::MapLoaded)),
+                vec![ToServer::Hosting(7)]
+            );
+        };
+        let mut t = Told::default();
+        hosting(&mut t);
+        assert!(t.next(7, true, Some(&LiveEvent::Go(8)), None).is_empty());
+        assert!(!t.ended_before_go());
+        assert!(t
+            .next(7, true, None, Some(Engine::Left(Leave::End)))
+            .is_empty());
+        assert!(t.ended_before_go());
+        assert_eq!(
+            t.next(7, true, None, Some(Engine::Ended(vec![player]))),
+            vec![ToServer::LeftMatch {
+                id: 7,
+                host_lost: false
+            }]
+        );
+        assert!(t.over() && !t.reported());
+        assert!(t.next(7, true, None, Some(Engine::Closing)).is_empty());
+        // GO after End Game, before its result: the match started, and
+        // the result goes as a game cut short.
+        let mut t = Told::default();
+        hosting(&mut t);
+        t.next(7, true, None, Some(Engine::Left(Leave::End)));
+        assert!(t.next(7, true, Some(&LiveEvent::Go(7)), None).is_empty());
+        assert!(!t.ended_before_go());
+        let out = t.next(7, true, None, Some(Engine::Ended(vec![player])));
+        let [ToServer::LauncherResult(r), ToServer::LeftMatch { .. }] = out.as_slice() else {
+            panic!("{out:?}");
+        };
+        assert!(!r.finished);
+        assert!(t.reported());
+        // A game that ended by itself before GO is still reported as
+        // before (End Game alone is held back).
+        let mut t = Told::default();
+        hosting(&mut t);
+        let out = t.next(7, true, None, Some(Engine::Ended(vec![player])));
+        assert!(matches!(out.as_slice(), [ToServer::LauncherResult(r)] if r.finished));
     }
 }

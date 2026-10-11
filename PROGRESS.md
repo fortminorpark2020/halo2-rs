@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 18:45 UTC. Any assistant that works on the project
+Last updated 2026-10-11 19:05 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -209,7 +209,9 @@ step, when the owner says so: one weapon.
   host's quit-time result on, and the lobby sends it as LAUNCHER_RESULT
   with `finished` false, then LEFT_MATCH, so h2live ends the match with
   no HOST LEFT wording and the host gets the carnage report too (h2live
-  unchanged; a new server test covers it). Next: check 14 again on the
+  unchanged; a new server test covers it); before the server's GO (a
+  guest still joining) it goes as LEFT_MATCH alone and the host gets "You
+  ended the game." instead (`Told::ended_before_go`). Next: check 14 again on the
   PC with this build (both lobbies on the carnage report), and checks 16
   and 17.
 - Milestone 1 is done (2026-10-10 02:50 UTC): `h2launch` started MCC's

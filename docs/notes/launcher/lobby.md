@@ -47,7 +47,11 @@ the launcher doesn't do.
   once: h2live then takes the host as leaving once the game was over,
   not as a host who left, so the match ends with no reason, counts for
   no one (custom games are unranked), and the host gets the carnage
-  report like everyone else.
+  report like everyone else. That needs the server's GO for the match:
+  before it (a guest still joining, up to 20 s) h2live drops results, so
+  an `ended` after `left end` then goes as LEFT_MATCH alone
+  (`Told::ended_before_go`), and the host gets "You ended the game."
+  rather than a carnage report saying the host left.
 - A fresh engine process per match: halo2.dll is loaded once per process,
   as MCC does, and a crash in a match doesn't take the lobby with it.
 - The lobby writes `quit` on the child's standard input to close the

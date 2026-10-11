@@ -123,7 +123,8 @@ install. No game files are included in this repository.
   Custom Game); leaving a ranked game still counts toward your level, and
   leaving a game you host ends it for everyone. End Game ends a custom game
   for everyone, and everyone, you too, gets the carnage report; it doesn't
-  count. If the menu can't be shown on your PC, it turns itself off for the
+  count. (Ended in its first seconds, while someone is still joining, there
+  is no carnage report: you're told you ended the game.) If the menu can't be shown on your PC, it turns itself off for the
   rest of that game and Start goes back to the game (the lobby window
   stops saying Start opens it). If it misbehaves, setting
   `H2LOBBY_ENGINE_ARGS=--no-game-menu` before
