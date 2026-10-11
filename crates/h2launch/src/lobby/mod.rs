@@ -617,6 +617,30 @@ mod tests {
                 (0.0, Step::Set("look_sensitivity".into(), "5".into())),
             ]
         );
+        // The accounts screen and its popups.
+        let s = parse_script(
+            "0 wait accounts\n0 pick bravo\n0 a\n0 wait accountoptions\n0 a\n\
+             0 wait confirmaccount 5\n0 a\n0 wait newpassword\n0 b\n0 wait newaccount\n\
+             0 wait changepassword\n0 wait keychanged 30\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s,
+            vec![
+                (0.0, Step::Wait("accounts".into(), 120.0)),
+                (0.0, Step::Pick("bravo".into())),
+                (0.0, Step::Press(Input::A)),
+                (0.0, Step::Wait("accountoptions".into(), 120.0)),
+                (0.0, Step::Press(Input::A)),
+                (0.0, Step::Wait("confirmaccount".into(), 5.0)),
+                (0.0, Step::Press(Input::A)),
+                (0.0, Step::Wait("newpassword".into(), 120.0)),
+                (0.0, Step::Press(Input::B)),
+                (0.0, Step::Wait("newaccount".into(), 120.0)),
+                (0.0, Step::Wait("changepassword".into(), 120.0)),
+                (0.0, Step::Wait("keychanged".into(), 30.0)),
+            ]
+        );
         assert!(parse_script("1 set layout\n").is_err());
         assert!(parse_script("1 set\n").is_err());
         assert!(parse_script("1 see\n").is_err());

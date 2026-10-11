@@ -2,7 +2,8 @@
 //! and main menu (drawn by `h2ui`), signing in, the party and the
 //! playlists, searching, custom games, the pregame lobby, the match (its
 //! engine runs in a second copy of the launcher, see `child`), the carnage
-//! report, the friends list and players' service records.
+//! report, the friends list and players' service records, and the
+//! accounts screen (`accounts`).
 //! Nothing here opens a window: `window`, or the headless loop in
 //! `mod.rs`, gives it input and time and shows what it draws.
 
@@ -13,12 +14,16 @@ use super::ranks::{RankIcons, Size};
 use super::settings::{self, Settings, GAMERTAG_LEN};
 use crate::controls::{self, button, Controls};
 use crate::live::{self, Engine, Log, Told};
+use crate::pins::Pins;
 use crate::session::Session;
-use h2live::client::{LiveClient, LiveEvent, Profile, View};
+use accounts::{AccountAction, AccountScreen};
+use h2live::client::{Access, LiveClient, LiveEvent, Profile, View};
+use h2live::password::Secret;
 use h2net::live::{
     Activity, Friend, LauncherMatch, LauncherPlayerResult, MatchOver, Online, OnlinePlayer,
     PartyInfo, PartyMember, PlaylistInfo, Privacy, Relation, ServiceRecord, Stage, ToServer,
-    CUSTOM_GAME, GAMERTAG_TAKEN, MAX_FRIENDS, QUICKMATCH,
+    CUSTOM_GAME, GAMERTAG_TAKEN, MAX_FRIENDS, MAX_PASSWORD, PASSWORD_NEEDED, QUICKMATCH,
+    SIGNED_OUT, TOO_MANY_PCS, TOO_MANY_TRIES, UPDATE_YOUR_LAUNCHER, WRONG_PASSWORD,
 };
 use h2net::Connection;
 use h2ui::anim::{Animation, Focus};
@@ -34,6 +39,11 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// The accounts screen: `lobby/accounts.rs`, a child of this module so it
+// can reach the lobby's state.
+#[path = "accounts.rs"]
+mod accounts;
+
 /// How long the pregame lobby shows the match before the engine starts.
 const PREGAME: Duration = Duration::from_secs(5);
 /// How long reaching the server and signing in may take.
@@ -48,6 +58,12 @@ const POSTGAME: Duration = Duration::from_secs(20);
 const QUIT_WAIT: Duration = Duration::from_secs(10);
 /// The longest server address the sign-in screen takes.
 const SERVER_LEN: usize = 100;
+/// The sign-in form's fields: `App::fields`' two, and the password (kept
+/// apart, in a `Secret`); and the order they're shown and Tab goes in.
+const GAMERTAG_FIELD: usize = 0;
+const SERVER_FIELD: usize = 1;
+const PASSWORD_FIELD: usize = 2;
+const FORM_ORDER: [usize; 3] = [GAMERTAG_FIELD, PASSWORD_FIELD, SERVER_FIELD];
 /// How long the custom game screen says the game is starting, unless the
 /// match (or a notice) comes first.
 const CUSTOM_WAIT: Duration = Duration::from_secs(10);
@@ -158,6 +174,101 @@ pub enum Input {
     Char(char),
 }
 
+/// What a field typed on the keyboard takes. Every typed field goes
+/// through `edit`, so the on-screen keyboard (menu.md Phase 2) has one
+/// place to type into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Entry {
+    /// Letters, digits and spaces, in capitals, up to `GAMERTAG_LEN`
+    /// (`settings::clean_gamertag` tidies the spaces).
+    Gamertag,
+    /// A server's address: anything printable, up to `SERVER_LEN`.
+    Server,
+    /// A password: printable ASCII. Spaces and dashes don't count (see
+    /// `h2live::password`), so up to `MAX_PASSWORD` of the rest, and twice
+    /// that in all.
+    Password,
+}
+
+impl Entry {
+    /// `c` may be typed after `text`.
+    fn takes(self, text: &str, c: char) -> bool {
+        let n = text.chars().count();
+        match self {
+            Entry::Gamertag => (c.is_ascii_alphanumeric() || c == ' ') && n < GAMERTAG_LEN,
+            Entry::Server => !c.is_control() && n < SERVER_LEN,
+            Entry::Password => {
+                let free = |c: char| c == ' ' || c == '-';
+                let counted = text.chars().filter(|&c| !free(c)).count();
+                (c == ' ' || c.is_ascii_graphic())
+                    && n < 2 * MAX_PASSWORD
+                    && (free(c) || counted < MAX_PASSWORD)
+            }
+        }
+    }
+
+    /// `c` as it's typed in.
+    fn typed(self, c: char) -> char {
+        match self {
+            Entry::Gamertag => c.to_ascii_uppercase(),
+            Entry::Server | Entry::Password => c,
+        }
+    }
+}
+
+/// Text typed into: a plain string, or a password (`Secret`, wiped when
+/// dropped).
+trait Typed {
+    fn text(&self) -> &str;
+    fn put(&mut self, c: char);
+    fn rub(&mut self);
+}
+
+impl Typed for String {
+    fn text(&self) -> &str {
+        self
+    }
+    fn put(&mut self, c: char) {
+        self.push(c);
+    }
+    fn rub(&mut self) {
+        self.pop();
+    }
+}
+
+impl Typed for Secret {
+    fn text(&self) -> &str {
+        self.as_str()
+    }
+    fn put(&mut self, c: char) {
+        self.push(c);
+    }
+    fn rub(&mut self) {
+        self.pop();
+    }
+}
+
+/// Type `i` (a character, or Backspace) into `text` as `kind` allows; false
+/// for any other input.
+fn edit(kind: Entry, text: &mut impl Typed, i: Input) -> bool {
+    match i {
+        Input::Backspace => text.rub(),
+        Input::Char(c) => {
+            if kind.takes(text.text(), c) {
+                text.put(kind.typed(c));
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// A password drawn: one `*` for each character, so neither the screen
+/// nor `App::drawn` ever holds it.
+fn masked(password: &Secret) -> String {
+    "*".repeat(password.as_str().chars().count())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
     /// Halo 2's start screen ("PRESS START"), where the lobby opens.
@@ -186,6 +297,9 @@ enum Screen {
     /// menu's SETTINGS, the playlists' Settings row, or X on the sign-in
     /// and offline screens.
     Settings,
+    /// The accounts on the server (an admin's), or our own (`accounts`),
+    /// from the playlists' last row.
+    Accounts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +314,20 @@ enum Popup {
     FriendOptions(u64),
     /// Asking before removing this friend.
     Unfriend(u64),
+    /// An admin makes an account: its gamertag, the password made up for
+    /// it, and CREATE (`AccountScreen::row` is the row).
+    NewAccount,
+    /// A password just given out, shown once (`AccountScreen::shown`).
+    NewPassword,
+    /// What an admin may do to this account (`App::osel` is the option).
+    AccountOptions(u64),
+    /// Asking before doing this to this account.
+    ConfirmAccount(u64, AccountAction),
+    /// Changing our own password (`AccountScreen::row` is the field).
+    ChangePassword,
+    /// The server answered with another identity key than the one pinned
+    /// for it (`App::key_changed`).
+    KeyChanged,
 }
 
 /// What the options popup offers for a friend, in the order shown.
@@ -234,7 +362,8 @@ enum RecordView<'a> {
 enum Hit {
     /// Selects a row of the screen's list, or picks it if it was selected.
     Row(usize),
-    /// Puts the cursor in a field of the sign-in screen.
+    /// Puts the cursor in a field of the sign-in screen (or of a popup
+    /// with fields).
     Field(usize),
     /// Selects a row of the custom game screen and moves its choice on
     /// (`true`) or back.
@@ -282,8 +411,8 @@ pub struct App {
     cfg: Config,
     settings: Settings,
     screen: Screen,
-    /// The sign-in screen's gamertag and server, which has the cursor, and
-    /// why the last try failed.
+    /// The sign-in screen's gamertag and server, which has the cursor (one
+    /// of the `FORM_ORDER`), and why the last try failed.
     fields: [String; 2],
     /// The gamertag and server last saved by a sign-in (or read from
     /// `lobby.txt`): what ONLINE signs in with and the main menu's
@@ -292,6 +421,21 @@ pub struct App {
     saved: [String; 2],
     field: usize,
     form_error: Option<String>,
+    /// The sign-in form's password, for a PC its account doesn't know yet:
+    /// never saved, and forgotten once the sign-in ends.
+    password: Secret,
+    /// The sign-in under way sent a password.
+    with_password: bool,
+    /// The servers' identity keys, as last seen (`crate::pins`).
+    pins: Pins,
+    /// While the KEY CHANGED popup is up: the server, the key pinned for
+    /// it, and the key it answered with.
+    key_changed: Option<(String, [u8; 32], [u8; 32])>,
+    /// The server signed this PC out during a match: the sign-in form,
+    /// not the offline screen, once the match ends.
+    form_after_match: bool,
+    /// The accounts screen and its popups.
+    acc: AccountScreen,
     dialing: Option<(Receiver<Result<Connection, String>>, Instant)>,
     client: Option<LiveClient>,
     signing_in: Option<Instant>,
@@ -390,14 +534,24 @@ impl App {
             settings.server = s.clone();
         }
         let now = Instant::now();
+        let pins = Pins::load(&cfg.folder);
+        if let Some(note) = pins.note() {
+            (cfg.log)(&note);
+        }
         App {
             fields: [settings.gamertag.clone(), settings.server.clone()],
             saved: [settings.gamertag.clone(), settings.server.clone()],
             settings,
             cfg,
             screen: Screen::Start,
-            field: 0,
+            field: GAMERTAG_FIELD,
             form_error: None,
+            password: Secret::default(),
+            with_password: false,
+            pins,
+            key_changed: None,
+            form_after_match: false,
+            acc: AccountScreen::default(),
             dialing: None,
             client: None,
             signing_in: None,
@@ -467,6 +621,12 @@ impl App {
                 Popup::AddFriend => "addfriend",
                 Popup::FriendOptions(_) => "friend",
                 Popup::Unfriend(_) => "unfriend",
+                Popup::NewAccount => "newaccount",
+                Popup::NewPassword => "newpassword",
+                Popup::AccountOptions(_) => "accountoptions",
+                Popup::ConfirmAccount(..) => "confirmaccount",
+                Popup::ChangePassword => "changepassword",
+                Popup::KeyChanged => "keychanged",
             }
             .into();
         }
@@ -492,6 +652,7 @@ impl App {
             Screen::Record => "record",
             Screen::Friends => "friends",
             Screen::Settings => "settings",
+            Screen::Accounts => "accounts",
         }
         .into()
     }
@@ -503,31 +664,42 @@ impl App {
 
     // ------------------------------------------------------------ server
 
-    /// Sign in with what the sign-in screen says.
+    /// Sign in with what the sign-in screen says (the password too, if one
+    /// was typed: the PC's key alone signs in to an account that knows
+    /// the PC).
     fn connect(&mut self) {
-        let gamertag = settings::clean_gamertag(&self.fields[0]);
-        let server = self.fields[1].trim().to_string();
-        self.fields[0] = gamertag.clone();
+        let gamertag = settings::clean_gamertag(&self.fields[GAMERTAG_FIELD]);
+        let server = self.fields[SERVER_FIELD].trim().to_string();
+        self.fields[GAMERTAG_FIELD] = gamertag.clone();
         self.screen = Screen::SignIn;
         if gamertag.is_empty() {
-            self.field = 0;
+            self.field = GAMERTAG_FIELD;
             self.form_error = Some("Type a gamertag.".into());
             return;
         }
         if server.is_empty() {
-            self.field = 1;
+            self.field = SERVER_FIELD;
             self.form_error = Some("Type the server's address.".into());
             return;
         }
         self.form_error = None;
+        self.form_after_match = false;
         self.settings.server = server;
         self.settings.gamertag = gamertag;
+        self.with_password = !self.password.is_empty();
         let url = live::server_url(&self.settings.server);
+        // Never the password itself.
         self.log(&format!(
-            "lobby: signing in to {url} as {:?}",
-            self.settings.gamertag
+            "lobby: signing in to {url} as {:?}{}",
+            self.settings.gamertag,
+            if self.with_password {
+                " (with a password)"
+            } else {
+                ""
+            }
         ));
         self.client = None;
+        self.acc = AccountScreen::default();
         // Another server, maybe, with the same account numbers: nothing
         // kept from the last one counts.
         self.records.clear();
@@ -574,7 +746,12 @@ impl App {
         };
         let card = self.cfg.folder.join("live-card.txt");
         let now = self.clock.elapsed().as_secs_f64();
-        let client = LiveClient::launcher(conn, key, &profile, crate::BUILD, &card, now);
+        let mut client = LiveClient::launcher(conn, key, &profile, crate::BUILD, &card, now);
+        client.set_access(Access {
+            pin: self.pins.get(&self.settings.server),
+            password: (!self.password.is_empty()).then(|| self.password.clone()),
+            computer: h2net::computer_name(),
+        });
         self.client = Some(client);
     }
 
@@ -610,21 +787,20 @@ impl App {
         }
         match e {
             LiveEvent::Welcomed if self.screen == Screen::Connecting => self.signed_in(),
+            // Our account again: renamed on the server's command line.
+            LiveEvent::Welcomed => self.keep_gamertag(),
             LiveEvent::Refused(why) => {
                 self.client = None;
                 self.signing_in = None;
-                if why == GAMERTAG_TAKEN {
-                    self.screen = Screen::SignIn;
-                    self.field = 0;
-                    self.form_error = Some("Someone else has that gamertag. Pick another.".into());
-                } else {
-                    self.fail(format!("The server turned us away: {why}"));
-                }
+                self.password.clear();
+                self.refused(&why);
             }
             LiveEvent::Lost(why) => {
                 self.client = None;
                 self.fail(format!("Lost the server: {why}"));
             }
+            LiveEvent::KeyChanged { was, now } => self.key_changed(was, now),
+            LiveEvent::Accounts => self.on_accounts(),
             LiveEvent::Notice(text) => {
                 // A friend notice isn't the answer to the custom game asked
                 // for.
@@ -642,17 +818,132 @@ impl App {
         }
     }
 
+    /// The server welcomed us: the playlists. The gamertag is the
+    /// account's as the server has it (the server's owner names accounts),
+    /// saved for ONLINE next time, and the server's key is pinned if it's
+    /// new.
     fn signed_in(&mut self) {
         self.signing_in = None;
         self.screen = Screen::Live;
         self.sel = 0;
-        let path = self.cfg.folder.join("lobby.txt");
-        if let Err(e) = self.settings.save(&path) {
-            self.log(&format!("lobby: {e}"));
-        }
-        self.saved = [self.settings.gamertag.clone(), self.settings.server.clone()];
+        self.password.clear();
+        let with_password = std::mem::take(&mut self.with_password);
+        let typed = self.settings.gamertag.clone();
         let server = self.settings.server.clone();
+        self.keep_gamertag();
+        self.saved = [self.settings.gamertag.clone(), self.settings.server.clone()];
+        let key = self.client.as_ref().and_then(|c| c.view.server_key);
+        if let Some(key) = key.filter(|&k| self.pins.get(&server) != Some(k)) {
+            self.pins.set(&server, key);
+            let code = h2live::seal::short_code(&key);
+            match self.pins.save(&self.cfg.folder) {
+                Ok(()) => self.log(&format!("lobby: pinned {server}'s key {code}")),
+                Err(e) => self.log(&format!(
+                    "lobby: {server}'s key {code} couldn't be pinned in {}: {e}",
+                    crate::pins::path(&self.cfg.folder).display()
+                )),
+            }
+        }
         self.log(&format!("lobby: signed in to {server}"));
+        let tag = self.settings.gamertag.clone();
+        if !with_password && !tag.eq_ignore_ascii_case(&typed) {
+            self.toast(format!(
+                "This PC is signed in as {tag}. To use {typed} here, type {typed}'s password."
+            ));
+        }
+    }
+
+    /// Take the gamertag the server welcomed us as, and save it.
+    fn keep_gamertag(&mut self) {
+        let welcome = self.client.as_ref().and_then(|c| c.view.welcome.as_ref());
+        if let Some(tag) = welcome.map(|w| w.gamertag.clone()) {
+            if tag != self.settings.gamertag {
+                self.log(&format!("lobby: the server calls us {tag}"));
+                if self.saved[GAMERTAG_FIELD] == self.settings.gamertag {
+                    self.saved[GAMERTAG_FIELD] = tag.clone();
+                }
+            }
+            self.settings.gamertag = tag.clone();
+            self.fields[GAMERTAG_FIELD] = tag;
+        }
+        self.save_settings();
+    }
+
+    /// What the lobby does when the server turns us away for `why`.
+    fn refused(&mut self, why: &str) {
+        match why {
+            GAMERTAG_TAKEN => self.back_to_form(
+                Some(GAMERTAG_FIELD),
+                "Someone else has that gamertag. Pick another.",
+            ),
+            PASSWORD_NEEDED => self.back_to_form(
+                Some(PASSWORD_FIELD),
+                "This PC isn't signed in to that account. Type your password.",
+            ),
+            WRONG_PASSWORD => self.back_to_form(Some(PASSWORD_FIELD), "Wrong gamertag or password."),
+            TOO_MANY_TRIES => {
+                self.back_to_form(None, "Too many wrong passwords. Try again in 10 minutes.")
+            }
+            TOO_MANY_PCS => self.back_to_form(
+                None,
+                "This account is on too many PCs. Ask the server's owner to sign it out of all PCs.",
+            ),
+            SIGNED_OUT => self.back_to_form(
+                Some(PASSWORD_FIELD),
+                "You were signed out of this PC. Type your password.",
+            ),
+            UPDATE_YOUR_LAUNCHER => self.fail(
+                "The server runs a different version from this launcher. Ask its owner for the \
+                 right one."
+                    .into(),
+            ),
+            _ => self.fail(format!("The server turned us away: {why}")),
+        }
+    }
+
+    /// Back to the sign-in form, saying `error`, with the cursor in `field`
+    /// if given: now, or once a match being played ends (as `fail` waits).
+    /// On the start screen or the main menu (or the settings opened from
+    /// one) the player stays there and `error` is a notice; ONLINE then
+    /// signs in again.
+    fn back_to_form(&mut self, field: Option<usize>, error: &str) {
+        self.log(&format!("lobby: {error}"));
+        self.form_error = Some(error.into());
+        if let Some(f) = field {
+            self.field = f;
+        }
+        self.dialing = None;
+        self.signing_in = None;
+        self.password.clear();
+        if self.engine_running() {
+            self.form_after_match = true;
+            return;
+        }
+        self.game = None;
+        if self.away_from_live() {
+            self.toast(error.into());
+        } else {
+            self.popup = None;
+            self.screen = Screen::SignIn;
+        }
+    }
+
+    /// The server answered with key `now`, not `was`, the key pinned for it:
+    /// the launcher gave up before sending anything, and asks the player.
+    fn key_changed(&mut self, was: [u8; 32], now: [u8; 32]) {
+        self.client = None;
+        self.dialing = None;
+        self.signing_in = None;
+        let server = self.settings.server.clone();
+        self.log(&format!(
+            "lobby: {server} answered with key {} instead of {}: nothing was sent",
+            h2live::seal::short_code(&now),
+            h2live::seal::short_code(&was)
+        ));
+        self.key_changed = Some((server, was, now));
+        // The password typed, if any, waits for the player's answer.
+        self.screen = Screen::SignIn;
+        self.popup = Some(Popup::KeyChanged);
     }
 
     /// Show `why` on the failure screen, once any match being played ends.
@@ -664,6 +955,8 @@ impl App {
         self.failed = why.clone();
         self.dialing = None;
         self.signing_in = None;
+        self.password.clear();
+        self.with_password = false;
         let playing = self.game.as_ref().is_some_and(|g| g.child.is_some());
         if playing {
             return;
@@ -1164,11 +1457,14 @@ impl App {
             self.toast(t);
         }
         if self.client.is_none() && self.game.as_ref().is_none_or(|g| g.child.is_none()) {
-            // The server was lost during the match.
+            // The server was lost during the match (or it signed this PC
+            // out: then the form, for the password).
             self.game = None;
             let stay = [Screen::SignIn, Screen::Connecting];
+            let form = std::mem::take(&mut self.form_after_match);
             if !stay.contains(&self.screen) && !self.away_from_live() {
-                self.screen = Screen::Failed;
+                self.popup = None;
+                self.screen = if form { Screen::SignIn } else { Screen::Failed };
             }
         }
     }
@@ -1191,9 +1487,7 @@ impl App {
         }
         self.toasts
             .retain(|(_, at)| now.saturating_duration_since(*at) < TOAST);
-        // The playlists, then the custom game and settings rows.
-        let n = self.view().map(|v| v.playlists.len()).unwrap_or(0);
-        self.sel = self.sel.min(n + 1);
+        self.sel = self.sel.min(self.last_playlist_row());
         if self.screen == Screen::Custom && (!self.leader() || self.searching()) {
             self.screen = Screen::Live;
         }
@@ -1209,9 +1503,24 @@ impl App {
             self.asked = None;
         }
         self.follow();
+        self.tick_accounts();
         self.record_asks
             .retain(|(_, at)| now.saturating_duration_since(*at) < RECORD_WAIT);
         self.ask_member_records();
+    }
+
+    /// The playlists screen's last row: after the playlists come Custom
+    /// Game and Settings, then Accounts (or My account) once the server
+    /// sent the accounts.
+    fn last_playlist_row(&self) -> usize {
+        let n = self.view().map_or(0, |v| v.playlists.len());
+        n + 1 + usize::from(self.accounts().is_some())
+    }
+
+    /// The playlists screen's Accounts row, once there is one.
+    fn accounts_row(&self) -> Option<usize> {
+        let n = self.view()?.playlists.len();
+        self.accounts().map(|_| n + 2)
     }
 
     /// Keep the selections on the friends and players screens on the
@@ -1306,8 +1615,7 @@ impl App {
     pub fn input(&mut self, i: Input) {
         // Letters are buttons, except where a name is typed; Backspace is
         // B where it doesn't rub a letter out.
-        let typing = (self.screen == Screen::SignIn && self.popup.is_none())
-            || self.popup == Some(Popup::AddFriend);
+        let typing = self.typing();
         let i = match i {
             Input::Char(c) if !typing => match c.to_ascii_lowercase() {
                 'a' | ' ' => Input::A,
@@ -1355,6 +1663,8 @@ impl App {
                     self.dialing = None;
                     self.client = None;
                     self.signing_in = None;
+                    self.password.clear();
+                    self.with_password = false;
                     self.screen = Screen::Main;
                 }
             }
@@ -1373,6 +1683,7 @@ impl App {
             Screen::Record => self.record_input(i),
             Screen::Friends => self.friends_input(i),
             Screen::Settings => self.settings_input(i),
+            Screen::Accounts => self.accounts_input(i),
             Screen::Failed => match i {
                 Input::A => self.connect(),
                 Input::X => self.open_settings(),
@@ -1383,6 +1694,17 @@ impl App {
                 Input::B => self.screen = Screen::Main,
                 _ => {}
             },
+        }
+    }
+
+    /// Text is typed where the screen or popup has a field with the
+    /// cursor: there letters aren't buttons, and Backspace rubs out.
+    fn typing(&self) -> bool {
+        match self.popup {
+            None => self.screen == Screen::SignIn,
+            Some(Popup::AddFriend | Popup::ChangePassword) => true,
+            Some(Popup::NewAccount) => self.acc.typing(),
+            Some(_) => false,
         }
     }
 
@@ -1424,11 +1746,13 @@ impl App {
             self.screen = Screen::Live;
         } else if self.dialing.is_some() || self.signing_in.is_some() {
             self.screen = Screen::Connecting;
-        } else if !self.saved[0].is_empty() {
+        } else if !self.saved[GAMERTAG_FIELD].is_empty() {
+            // A PC that signed in before needs no password.
             self.fields = self.saved.clone();
+            self.password.clear();
             self.connect();
         } else {
-            self.field = 0;
+            self.field = GAMERTAG_FIELD;
             self.form_error = None;
             self.screen = Screen::SignIn;
         }
@@ -1445,6 +1769,7 @@ impl App {
             (Popup::Quit, Input::Y) if self.client.is_some() => {
                 self.log("lobby: signing out");
                 self.client = None;
+                self.acc = AccountScreen::default();
                 self.popup = None;
                 self.screen = Screen::SignIn;
             }
@@ -1465,16 +1790,19 @@ impl App {
                 let tag = std::mem::take(&mut self.friend_tag);
                 self.ask_friend(&tag);
             }
-            (Popup::AddFriend, Input::Backspace) => {
-                self.friend_tag.pop();
-            }
-            (Popup::AddFriend, Input::Char(c)) => {
-                let full = self.friend_tag.chars().count() >= GAMERTAG_LEN;
-                if (c.is_ascii_alphanumeric() || c == ' ') && !full {
-                    self.friend_tag.push(c.to_ascii_uppercase());
-                }
+            (Popup::AddFriend, Input::Backspace | Input::Char(_)) => {
+                edit(Entry::Gamertag, &mut self.friend_tag, i);
             }
             (Popup::FriendOptions(who), _) => self.options_input(who, i),
+            (
+                Popup::NewAccount
+                | Popup::NewPassword
+                | Popup::AccountOptions(_)
+                | Popup::ConfirmAccount(..)
+                | Popup::ChangePassword
+                | Popup::KeyChanged,
+                _,
+            ) => self.account_popup_input(p, i),
             (Popup::Unfriend(who), Input::A) => {
                 self.popup = None;
                 self.log(&format!("lobby: removing {who:#x} from the friends list"));
@@ -1660,26 +1988,29 @@ impl App {
     }
 
     fn sign_in_input(&mut self, i: Input) {
-        let f = &mut self.fields[self.field];
+        let at = FORM_ORDER
+            .iter()
+            .position(|&f| f == self.field)
+            .unwrap_or(0);
+        let n = FORM_ORDER.len();
         match i {
-            Input::Tab | Input::Up | Input::Down => self.field ^= 1,
-            Input::Backspace => {
-                f.pop();
-            }
-            Input::Char(c) if self.field == 0 => {
-                if (c.is_ascii_alphanumeric() || c == ' ') && f.chars().count() < GAMERTAG_LEN {
-                    f.push(c.to_ascii_uppercase());
-                }
-            }
-            Input::Char(c) => {
-                if !c.is_control() && f.chars().count() < SERVER_LEN {
-                    f.push(c);
-                }
+            Input::Tab | Input::Down => self.field = FORM_ORDER[(at + 1) % n],
+            Input::Up => self.field = FORM_ORDER[(at + n - 1) % n],
+            Input::Backspace | Input::Char(_) => {
+                match self.field {
+                    PASSWORD_FIELD => edit(Entry::Password, &mut self.password, i),
+                    GAMERTAG_FIELD => edit(Entry::Gamertag, &mut self.fields[GAMERTAG_FIELD], i),
+                    _ => edit(Entry::Server, &mut self.fields[SERVER_FIELD], i),
+                };
             }
             Input::A => self.connect(),
             // The controller's X: the letter x is typed.
             Input::X => self.open_settings(),
-            Input::B => self.screen = Screen::Main,
+            Input::B => {
+                // A password typed and not used isn't kept.
+                self.password.clear();
+                self.screen = Screen::Main;
+            }
             _ => {}
         }
     }
@@ -1710,11 +2041,12 @@ impl App {
             }
             return;
         }
-        // The playlists, then the custom game and settings rows.
+        // The playlists, then the custom game, settings and accounts rows.
         let n = self.view().map(|v| v.playlists.len()).unwrap_or(0);
         match i {
             Input::Up => self.sel = self.sel.saturating_sub(1),
-            Input::Down => self.sel = (self.sel + 1).min(n + 1),
+            Input::Down => self.sel = (self.sel + 1).min(self.last_playlist_row()),
+            Input::A if Some(self.sel) == self.accounts_row() => self.open_accounts(),
             Input::A if self.sel == n + 1 => self.open_settings(),
             Input::A if self.sel == n => {
                 if !self.leader() {
@@ -2050,6 +2382,7 @@ impl App {
             .map(|a| a.hit);
         match hit {
             Some(Hit::Press(i)) => self.input(i),
+            Some(Hit::Field(f)) if self.popup.is_some() => self.acc.row = f,
             Some(Hit::Field(f)) => self.field = f,
             Some(Hit::Step(r, on)) => {
                 if self.screen == Screen::Settings {
@@ -2064,6 +2397,14 @@ impl App {
                     self.input(Input::A);
                 } else if let Some(Popup::FriendOptions(who)) = self.popup {
                     self.pick_option(who, r);
+                }
+            }
+            Some(Hit::Row(r)) if self.popup.is_some() => self.account_popup_row(r),
+            Some(Hit::Row(r)) if self.screen == Screen::Accounts => {
+                if self.acc.sel == r {
+                    self.input(Input::A);
+                } else {
+                    self.select_account_row(r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Friends => {
@@ -2112,8 +2453,8 @@ impl App {
     }
 
     /// Select `gamertag`'s row (ignoring case) on the players, friends,
-    /// party or carnage screen, for the headless script's `pick`; false if
-    /// there is none.
+    /// party, carnage or accounts screen, for the headless script's `pick`;
+    /// false if there is none.
     pub fn pick(&mut self, gamertag: &str) -> bool {
         let is = |t: &str| t.eq_ignore_ascii_case(gamertag.trim());
         match self.screen {
@@ -2141,6 +2482,7 @@ impl App {
                 });
                 at.map(|k| self.csel = k).is_some()
             }
+            Screen::Accounts => self.pick_account(gamertag),
             _ => false,
         }
     }
@@ -2371,6 +2713,8 @@ impl App {
             Screen::Record => "SERVICE RECORD",
             Screen::Friends => "FRIENDS",
             Screen::Settings => "CONTROLLER",
+            Screen::Accounts if self.admin() => "ACCOUNTS",
+            Screen::Accounts => "MY ACCOUNT",
         };
         let menus = self.on_menus();
         if !menus {
@@ -2393,6 +2737,7 @@ impl App {
             Screen::Record => self.draw_record(p),
             Screen::Friends => self.draw_friends(p),
             Screen::Settings => self.draw_settings(p),
+            Screen::Accounts => self.draw_accounts(p),
         }
         if !menus {
             p.text(
@@ -2443,6 +2788,12 @@ impl App {
                         &[(Input::A, "Remove"), (Input::B, "Cancel")],
                     );
                 }
+                Popup::NewAccount
+                | Popup::NewPassword
+                | Popup::AccountOptions(_)
+                | Popup::ConfirmAccount(..)
+                | Popup::ChangePassword
+                | Popup::KeyChanged => self.draw_account_popup(p, popup),
             }
         } else if let Some((_, from)) = self.invite() {
             p.popup(
@@ -2485,52 +2836,63 @@ impl App {
     }
 
     fn draw_sign_in(&self, p: &mut Pen) {
-        p.panel(340.0, 150.0, 600.0, 380.0);
-        p.text(
-            640.0,
-            200.0,
-            20.0,
-            TEXT,
-            Align::Center,
-            "Pick a gamertag and the matchmaking server.",
-        );
-        let labels = ["Gamertag", "Server"];
-        for (k, label) in labels.iter().enumerate() {
-            let y = 240.0 + k as f32 * 110.0;
-            p.text(380.0, y + 10.0, 18.0, DIM, Align::Left, label);
-            let on = self.field == k;
+        p.panel(340.0, 112.0, 600.0, 466.0);
+        let prompt = "Type your gamertag and the password the server's owner gave you. \
+                      A PC that signed in before needs no password.";
+        for (k, line) in p.wrap(17.0, 560.0, prompt).iter().take(3).enumerate() {
+            p.text(
+                640.0,
+                142.0 + k as f32 * 23.0,
+                17.0,
+                TEXT,
+                Align::Center,
+                line,
+            );
+        }
+        for (row, &f) in FORM_ORDER.iter().enumerate() {
+            let y = 222.0 + row as f32 * 92.0;
+            let label = match f {
+                GAMERTAG_FIELD => "Gamertag",
+                PASSWORD_FIELD => "Password",
+                _ => "Server",
+            };
+            p.text(380.0, y, 18.0, DIM, Align::Left, label);
+            if f == PASSWORD_FIELD {
+                p.text(900.0, y, 15.0, DIM, Align::Right, "Only on a new PC");
+            }
+            let on = self.field == f;
             p.fill(
                 380.0,
-                y + 20.0,
+                y + 18.0,
                 520.0,
-                52.0,
+                46.0,
                 Color::rgb(0x06_1430).alpha(220),
             );
-            p.outline(
-                380.0,
-                y + 20.0,
-                520.0,
-                52.0,
-                2.0,
-                if on { SEL_EDGE } else { EDGE },
-            );
-            let shown = p.fit(26.0, 480.0, &self.fields[k]);
-            let wd = p.text(396.0, y + 56.0, 26.0, WHITE, Align::Left, &shown);
+            let edge = if on { SEL_EDGE } else { EDGE };
+            p.outline(380.0, y + 18.0, 520.0, 46.0, 2.0, edge);
+            // The password is masked before it's drawn.
+            let value = match f {
+                PASSWORD_FIELD => masked(&self.password),
+                f => self.fields[f].clone(),
+            };
+            let shown = p.fit(24.0, 480.0, &value);
+            let wd = p.text(396.0, y + 50.0, 24.0, WHITE, Align::Left, &shown);
             if on {
-                p.fill(398.0 + wd, y + 32.0, 2.0, 30.0, SEL_EDGE);
+                p.fill(398.0 + wd, y + 27.0, 2.0, 28.0, SEL_EDGE);
             }
-            p.area(380.0, y + 20.0, 520.0, 52.0, Hit::Field(k));
+            p.area(380.0, y + 18.0, 520.0, 46.0, Hit::Field(f));
         }
         if let Some(e) = &self.form_error {
-            p.text(640.0, 470.0, 20.0, ERROR, Align::Center, e);
+            let e = p.fit(20.0, 580.0, e);
+            p.text(640.0, 512.0, 20.0, ERROR, Align::Center, &e);
         }
         p.text(
             640.0,
-            505.0,
+            548.0,
             16.0,
             DIM,
             Align::Center,
-            "Tab moves between the two.",
+            "Tab moves between them. You type the password once on each PC.",
         );
         p.hints(&[
             (Input::A, "Sign in"),
@@ -2594,7 +2956,9 @@ impl App {
         } else {
             self.draw_playlists(p, v);
             let mut hints = Vec::new();
-            if self.sel == v.playlists.len() + 1 {
+            if Some(self.sel) == self.accounts_row() {
+                hints.push((Input::A, self.accounts_label()));
+            } else if self.sel == v.playlists.len() + 1 {
                 hints.push((Input::A, "Controller settings"));
             } else if self.leader() {
                 let custom = self.sel == v.playlists.len();
@@ -2619,14 +2983,19 @@ impl App {
         p.text(650.0, 142.0, 16.0, HEAD, Align::Center, "SEARCHING");
         p.text(735.0, 142.0, 16.0, HEAD, Align::Center, "PLAYING");
         let rows = 8;
-        // The playlists, then the custom game and settings rows.
-        let n = v.playlists.len() + 2;
+        // The playlists, then the custom game, settings and accounts rows.
+        let n = self.last_playlist_row() + 1;
         let first = first_row(self.sel, n, rows);
         for k in (first..n).take(rows) {
             let y = 156.0 + (k - first) as f32 * 50.0;
             let on = k == self.sel;
             p.row(72.0, y, 696.0, 46.0, on, Hit::Row(k));
             let col = if on { WHITE } else { TEXT };
+            if Some(k) == self.accounts_row() {
+                let label = self.accounts_label();
+                p.text(90.0, y + 32.0, 24.0, col, Align::Left, label);
+                continue;
+            }
             if k == v.playlists.len() + 1 {
                 p.text(90.0, y + 32.0, 24.0, col, Align::Left, "Settings");
                 continue;
@@ -2670,7 +3039,14 @@ impl App {
                 "The server has no playlists for the launcher.",
             );
         }
-        if self.sel == v.playlists.len() + 1 {
+        if Some(self.sel) == self.accounts_row() {
+            let line = if self.admin() {
+                "Make accounts for your friends, give new passwords, and change your own."
+            } else {
+                "Change your password."
+            };
+            p.text(84.0, 600.0, 18.0, DIM, Align::Left, line);
+        } else if self.sel == v.playlists.len() + 1 {
             let c = &self.settings.controls;
             let line = format!(
                 "Controller settings: {} buttons, {} thumbsticks, look sensitivity {}.",
@@ -4037,7 +4413,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    fn app(folder: &std::path::Path) -> App {
+    pub(super) fn app(folder: &std::path::Path) -> App {
         App::new(Config {
             folder: folder.to_path_buf(),
             exe: PathBuf::from("h2launch"),
@@ -4051,7 +4427,7 @@ mod tests {
         })
     }
 
-    fn scratch(name: &str) -> PathBuf {
+    pub(super) fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("h2lobby-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -4068,7 +4444,7 @@ mod tests {
     }
 
     /// From the start screen through the main menu's ONLINE.
-    fn to_online(a: &mut App) {
+    pub(super) fn to_online(a: &mut App) {
         assert_eq!(a.label(), "start");
         a.input(Input::A);
         assert_eq!(a.label(), "main");
@@ -4091,19 +4467,43 @@ mod tests {
         // The cleaned name, cut at 15 characters; letters don't press buttons here.
         assert_eq!(a.fields[0], "MASTER CHIEFX");
         a.input(Input::Backspace);
+        // Tab (or down) goes to the password, then the server, then round;
+        // up goes back.
         a.input(Input::Tab);
+        assert_eq!(a.field, PASSWORD_FIELD);
+        a.input(Input::Up);
+        assert_eq!(a.field, GAMERTAG_FIELD);
+        a.input(Input::Up);
+        assert_eq!(a.field, SERVER_FIELD);
+        a.input(Input::Down);
+        assert_eq!(a.field, GAMERTAG_FIELD);
+        a.input(Input::Down);
+        // The password takes printable characters as typed (letters aren't
+        // buttons here either, nor capitals), and nothing else.
+        for c in "k7mp 4qr9-xw2t\u{e9}".chars() {
+            a.input(Input::Char(c));
+        }
+        a.input(Input::Char('\t'));
+        assert_eq!(a.password.as_str(), "k7mp 4qr9-xw2t");
+        a.input(Input::Backspace);
+        assert_eq!(a.password.as_str(), "k7mp 4qr9-xw2");
+        assert_eq!(a.fields[0], "MASTER CHIEF");
+        a.input(Input::Tab);
+        assert_eq!(a.field, SERVER_FIELD);
         for _ in 0..settings::DEFAULT_SERVER.len() {
             a.input(Input::Backspace);
         }
         // Nothing to sign in to.
         a.input(Input::A);
         assert_eq!(a.label(), "signin");
-        assert_eq!(a.field, 1);
+        assert_eq!(a.field, SERVER_FIELD);
         assert!(a.form_error.is_some());
-        // Escape goes back to the main menu, and from there to the start
-        // screen, which asks before quitting.
+        assert!(a.dialing.is_none() && a.client.is_none());
+        // Escape goes back to the main menu (forgetting the password), and
+        // from there to the start screen, which asks before quitting.
         a.input(Input::B);
         assert_eq!(a.label(), "main");
+        assert!(a.password.is_empty());
         a.input(Input::B);
         assert_eq!(a.label(), "start");
         a.input(Input::B);
@@ -4214,6 +4614,7 @@ mod tests {
         a.input(Input::Char('a'));
         a.input(Input::Char('r'));
         a.input(Input::Char('b'));
+        a.input(Input::Tab);
         a.input(Input::Tab);
         a.input(Input::Backspace);
         assert_eq!(a.fields, ["ARB", "192.0.2.1:4705"]);
@@ -4641,12 +5042,138 @@ mod tests {
         let back = arrow(&a, 0, false);
         a.click(ox + (back.x + 5.0) * s, oy + (back.y + 5.0) * s);
         assert_eq!((a.crow, a.cgame), (0, names::CUSTOM_GAMES.len() - 1));
+        // The accounts screen (an admin's) and each of its popups: they
+        // draw, and clicks land on their rows, fields and buttons.
+        let (mut a, _server) = live_app(&dir);
+        let row = |account: u64, tag: &str, flags: u8| h2net::live::AccountRow {
+            account,
+            gamertag: tag.into(),
+            flags,
+            pcs: 2,
+            best: 5,
+        };
+        use h2net::live::{ROW_ADMIN, ROW_ONLINE, ROW_PASSWORD};
+        view(&mut a).accounts = Some(h2net::live::Accounts {
+            admin: true,
+            password: true,
+            answers: 0,
+            ok: true,
+            text: String::new(),
+            total: 2,
+            rows: vec![
+                row(1, "ALPHA", ROW_ADMIN | ROW_PASSWORD | ROW_ONLINE),
+                row(2, "BRAVO", 0),
+            ],
+        });
+        let pen = &mut (Canvas::new(1280, 720), text);
+        /// Draw, and see `texts` drawn.
+        fn shows(a: &mut App, pen: &mut (Canvas, Text), texts: &[&str]) {
+            a.draw(&mut pen.0, &mut pen.1);
+            for t in texts {
+                assert!(a.drawn().iter().any(|d| d == t), "{t}: {:?}", a.drawn());
+            }
+        }
+        /// Draw, and click in `hit`'s area (on the popup if `top`).
+        fn click(a: &mut App, pen: &mut (Canvas, Text), hit: Hit, top: bool) {
+            shows(a, pen, &[]);
+            let ar = a.areas.iter().find(|ar| ar.hit == hit && ar.top == top);
+            let ar = ar.copied().unwrap_or_else(|| panic!("{hit:?}"));
+            let (s, ox, oy) = a.view;
+            a.last_click = None;
+            a.click(ox + (ar.x + 5.0) * s, oy + (ar.y + 5.0) * s);
+        }
+        a.open_accounts();
+        shows(
+            &mut a,
+            pen,
+            &["ACCOUNTS", "Change my password", "Create account"],
+        );
+        shows(
+            &mut a,
+            pen,
+            &["ALPHA", "BRAVO", "ADMIN", "(YOU)", "NO PASSWORD", "2 PCs"],
+        );
+        // A click selects a row; a second one picks it.
+        click(&mut a, pen, Hit::Row(3), false);
+        assert_eq!((a.acc.sel, a.acc.account), (3, Some(2)));
+        shows(&mut a, pen, &["Options", "BRAVO"]);
+        click(&mut a, pen, Hit::Row(3), false);
+        assert_eq!(a.label(), "accountoptions");
+        shows(
+            &mut a,
+            pen,
+            &[
+                "Give a new password",
+                "Sign out of all PCs",
+                "Remove account",
+            ],
+        );
+        click(&mut a, pen, Hit::Row(1), true);
+        assert_eq!(a.osel, 1);
+        click(&mut a, pen, Hit::Row(1), true);
+        assert_eq!(a.label(), "confirmaccount");
+        shows(&mut a, pen, &["SIGN OUT", "Sign out", "Cancel"]);
+        click(&mut a, pen, Hit::Press(Input::B), true);
+        assert_eq!(a.label(), "accountoptions");
+        click(&mut a, pen, Hit::Press(Input::B), true);
+        assert_eq!(a.label(), "accounts");
+        // NEW ACCOUNT: its rows take clicks; Cancel closes it.
+        click(&mut a, pen, Hit::Row(1), false);
+        click(&mut a, pen, Hit::Row(1), false);
+        assert_eq!(a.label(), "newaccount");
+        shows(
+            &mut a,
+            pen,
+            &["NEW ACCOUNT", "GAMERTAG", "PASSWORD", "CREATE"],
+        );
+        click(&mut a, pen, Hit::Row(1), true);
+        assert_eq!(a.acc.row, 1);
+        shows(&mut a, pen, &["A makes another", "Another password"]);
+        click(&mut a, pen, Hit::Press(Input::B), true);
+        assert_eq!(a.label(), "accounts");
+        // NEW PASSWORD: the password given, once; Done forgets it.
+        a.acc.shown = Some(accounts::Shown {
+            gamertag: "BRAVO".into(),
+            password: Secret::new("TEST-ONLY-PASS"),
+            reset: true,
+        });
+        a.popup = Some(Popup::NewPassword);
+        assert_eq!(a.label(), "newpassword");
+        shows(
+            &mut a,
+            pen,
+            &["NEW PASSWORD", "BRAVO's new password is", "TEST-ONLY-PASS"],
+        );
+        click(&mut a, pen, Hit::Press(Input::A), true);
+        assert!(a.popup.is_none() && a.acc.shown.is_none());
+        // CHANGE PASSWORD: a click puts the cursor in a field.
+        click(&mut a, pen, Hit::Row(0), false);
+        click(&mut a, pen, Hit::Row(0), false);
+        assert_eq!(a.label(), "changepassword");
+        shows(
+            &mut a,
+            pen,
+            &["CHANGE PASSWORD", "CURRENT PASSWORD", "NEW PASSWORD AGAIN"],
+        );
+        click(&mut a, pen, Hit::Field(2), true);
+        assert_eq!(a.acc.row, 2);
+        click(&mut a, pen, Hit::Press(Input::B), true);
+        assert_eq!(a.label(), "accounts");
+        // SERVER KEY CHANGED: Cancel goes to the main menu.
+        a.key_changed = Some(("127.0.0.1:9".into(), [1; 32], [2; 32]));
+        a.screen = Screen::SignIn;
+        a.popup = Some(Popup::KeyChanged);
+        assert_eq!(a.label(), "keychanged");
+        shows(&mut a, pen, &["SERVER KEY CHANGED", "Trust the new key"]);
+        click(&mut a, pen, Hit::Press(Input::B), true);
+        assert_eq!(a.label(), "main");
+        assert!(a.key_changed.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A lobby signed in as ALPHA (account 1) over one end of a pair, on
     /// the playlists, and the server's end, to read what the lobby sends.
-    fn live_app(dir: &std::path::Path) -> (App, Connection) {
+    pub(super) fn live_app(dir: &std::path::Path) -> (App, Connection) {
         let mut a = app(dir);
         let (ours, mut theirs) = Connection::pair();
         let key = h2live::client::identity(&dir.join("key.bin")).unwrap();
@@ -4682,7 +5209,7 @@ mod tests {
             .collect()
     }
 
-    fn view(a: &mut App) -> &mut View {
+    pub(super) fn view(a: &mut App) -> &mut View {
         &mut a.client.as_mut().unwrap().view
     }
 

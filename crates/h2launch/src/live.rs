@@ -4,7 +4,10 @@
 //! match forms (LAUNCHER_MATCH) writes the session from it: the relay beside
 //! the server, the match's room and this PC's key for it, one machine per
 //! player, and who hosts. The engine then starts on the match's map and
-//! variant as it does with `--session`.
+//! variant as it does with `--session`. It sends no password: the PC must
+//! be one its account knows (the lobby signs a new PC in once with the
+//! password), and the server must have the key pinned for it, if one is
+//! (`crate::pins`).
 //!
 //! While the engine plays, a thread keeps the sign-in alive and tells the
 //! server what the engine does: HOSTING once the host's engine is running
@@ -15,9 +18,13 @@
 //! player's team, standing, score, kills, assists, deaths, betrayals and
 //! suicides from them), and LEFT_MATCH if the launcher closes before that.
 
+use crate::pins::Pins;
 use crate::session::{Player, Session};
-use h2live::client::{LiveClient, LiveEvent, Profile};
-use h2net::live::{AccountOp, LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer};
+use h2live::client::{Access, LiveClient, LiveEvent, Profile};
+use h2net::live::{
+    AccountOp, LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer, PASSWORD_NEEDED,
+    SIGNED_OUT,
+};
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
@@ -143,24 +150,39 @@ pub struct Lobby {
 }
 
 impl Lobby {
-    /// Dial `url` and sign in as the holder of the key at `key_path` (made
-    /// the first time), with the stat card at `card_path`, as `profile`
-    /// says. Waits up to `timeout` for the server's welcome.
+    /// Dial `server` and sign in as the holder of the key kept in `folder`
+    /// (`live-key.bin`, made the first time), with the stat card kept
+    /// there, as `profile` says. The server must have the identity key
+    /// pinned for it in `folder` (`crate::pins`), if one is; no password
+    /// is sent, so the account must know this PC already (the lobby signs
+    /// a new PC in with its password). Waits up to `timeout` for the
+    /// server's welcome.
     pub fn sign_in(
-        url: &str,
-        key_path: &Path,
-        card_path: &Path,
+        server: &str,
+        folder: &Path,
         profile: &Profile,
         log: Log,
         timeout: Duration,
     ) -> Result<Lobby, String> {
-        let key = h2live::client::identity(key_path)
+        let key_path = folder.join("live-key.bin");
+        let key = h2live::client::identity(&key_path)
             .map_err(|e| format!("the key at {}: {e}", key_path.display()))?;
-        let conn = h2net::dial(url, timeout)
+        let mut pins = Pins::load(folder);
+        if let Some(note) = pins.note() {
+            log(&note);
+        }
+        let url = server_url(server);
+        let conn = h2net::dial(&url, timeout)
             .recv()
             .map_err(|_| "dialling stopped".to_string())??;
         let start = Instant::now();
-        let client = LiveClient::launcher(conn, key, profile, crate::BUILD, card_path, 0.0);
+        let card_path = folder.join("live-card.txt");
+        let mut client = LiveClient::launcher(conn, key, profile, crate::BUILD, &card_path, 0.0);
+        client.set_access(Access {
+            pin: pins.get(server),
+            password: None,
+            computer: h2net::computer_name(),
+        });
         let mut lobby = Lobby {
             client,
             start,
@@ -169,7 +191,10 @@ impl Lobby {
         };
         lobby.wait(timeout, |e| match e {
             LiveEvent::Welcomed => Some(Ok(())),
-            LiveEvent::Refused(why) => Some(Err(format!("the server turned us away: {why}"))),
+            LiveEvent::Refused(why) => Some(Err(refusal(why))),
+            LiveEvent::KeyChanged { .. } => Some(Err(
+                "the server's key changed; open the lobby to check it".into(),
+            )),
             _ => None,
         })??;
         if let Some(w) = &lobby.client.view.welcome {
@@ -177,6 +202,22 @@ impl Lobby {
                 "live: signed in to {url} as {:?} (account {:#018x})",
                 w.gamertag, w.account
             ));
+        }
+        // The server proved it holds this key: pin it, as the lobby does.
+        if let Some(key) = lobby.client.view.server_key {
+            if pins.get(server) != Some(key) {
+                pins.set(server, key);
+                match pins.save(folder) {
+                    Ok(()) => (lobby.log)(&format!(
+                        "live: pinned the server's key {}",
+                        h2live::seal::short_code(&key)
+                    )),
+                    Err(e) => (lobby.log)(&format!(
+                        "live: the server's key couldn't be pinned in {}: {e}",
+                        crate::pins::path(folder).display()
+                    )),
+                }
+            }
         }
         Ok(lobby)
     }
@@ -296,11 +337,9 @@ pub fn prepare(
         maps,
         guests: 0,
     };
-    let url = server_url(server);
     let mut lobby = Lobby::sign_in(
-        &url,
-        &folder.join("live-key.bin"),
-        &folder.join("live-card.txt"),
+        server,
+        folder,
         &profile,
         log.clone(),
         Duration::from_secs(15),
@@ -316,6 +355,19 @@ pub fn prepare(
         variant: game.variant,
         link,
     })
+}
+
+/// What `--live` says when the server turns it away for `why`: a PC the
+/// account doesn't know (or no longer knows) must sign in once from the
+/// lobby with the password, since `--live` sends none.
+fn refusal(why: &str) -> String {
+    if why == PASSWORD_NEEDED || why == SIGNED_OUT {
+        "this PC isn't signed in to that account: sign in once from the lobby (same --instance) \
+         with your password"
+            .into()
+    } else {
+        format!("the server turned us away: {why}")
+    }
 }
 
 /// Read `events` in order, logging each, until `pick` takes one or one
@@ -673,6 +725,12 @@ pub fn log_event(log: &Log, e: &LiveEvent) {
             m.id, m.counted, m.reason
         ),
         LiveEvent::Welcomed => "live: welcomed".to_string(),
+        LiveEvent::KeyChanged { was, now } => format!(
+            "live: the server's key is {}, not {} as pinned",
+            h2live::seal::short_code(now),
+            h2live::seal::short_code(was)
+        ),
+        LiveEvent::Accounts => "live: accounts".to_string(),
         other => format!("live: {other:?}"),
     };
     log(&line);
@@ -709,6 +767,22 @@ mod tests {
             countdown: 20,
             players: vec![player(0x1111, 1, "Alpha"), player(0x2222, 0, "Bravo")],
         }
+    }
+
+    #[test]
+    fn a_pc_the_account_doesnt_know_is_sent_to_the_lobby() {
+        for why in [PASSWORD_NEEDED, SIGNED_OUT] {
+            let said = refusal(why);
+            assert!(
+                said.starts_with("this PC isn't signed in to that account"),
+                "{said}"
+            );
+            assert!(said.contains("from the lobby (same --instance)"), "{said}");
+        }
+        assert_eq!(
+            refusal(h2net::live::SERVER_FULL),
+            "the server turned us away: SERVER FULL"
+        );
     }
 
     #[test]

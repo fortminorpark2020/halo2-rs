@@ -664,7 +664,8 @@ impl LiveClient {
         self.seal = Some((key, nonce));
         let me = self.key.verifying_key().to_bytes();
         let signature = self.key.sign(&live::proof(&nonce, &me)).to_bytes();
-        let Some(typed) = self.access.password.clone() else {
+        // The password goes once, and isn't kept after it's sealed.
+        let Some(typed) = self.access.password.take() else {
             return ToServer::Prove(signature).send(&mut self.conn);
         };
         let aad = seal::aad(seal::SIGN_IN, &nonce, &me, self.gamertag.as_bytes());

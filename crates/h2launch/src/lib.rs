@@ -24,6 +24,7 @@ pub mod options;
 pub mod padpick;
 pub mod paths;
 pub mod pe;
+pub mod pins;
 pub mod profile;
 pub mod results;
 pub mod script;

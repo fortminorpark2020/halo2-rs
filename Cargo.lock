@@ -1147,6 +1147,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "blam-cache",
+ "ed25519-dalek",
  "gilrs",
  "h2live",
  "h2net",
