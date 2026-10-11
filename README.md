@@ -66,7 +66,8 @@ install. No game files are included in this repository.
   beginning back on the main menu; it never starts or stops more often
   than once every 6 seconds), and its menu sounds when you leave the
   start screen, move, choose (with a second sound as a new screen or
-  popup opens, as on the Xbox), go back, are told you can't do
+  popup opens, as on the Xbox, also when one opens by itself, such as
+  the playlists after signing in), go back, are told you can't do
   something, start a search, or get an invitation or a friend request.
   Nothing plays during a match, and nothing from before it plays on
   after it. Without Cartographer the menus are silent for now (MCC's own

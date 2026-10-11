@@ -378,7 +378,8 @@ pub struct App {
     /// The menu music is wanted (`music_rule`).
     music_on: bool,
     /// The press `input_inner` acted on last, after letters and Backspace
-    /// were turned into buttons: B's changes sound as Back.
+    /// were turned into buttons: B's changes sound as Back, and only A's
+    /// opening a screen as Select too (`cue_for`).
     pressed: Option<Input>,
     /// Something asked for couldn't be done (`refuse`).
     refused: bool,
@@ -402,16 +403,19 @@ struct CueState {
     refused: bool,
 }
 
-/// The sounds of a press, from the state before and after it (`back`: the
-/// press was B), as Halo 2 plays them: Error if it was refused; if the
-/// screen, popup or invitation changed, Back on B (a screen brought back
-/// from the history plays no `advance`, 0x23553f), else Select (the
-/// press's `forward1`) and then Advance when a screen or a popup opens
-/// (every screen and dialog loaded forward plays `advance`, 0x147f6d),
-/// but not between the Y menu's tabs (the players and friends lists: only
-/// the tab's `forward1`) nor when a popup only closes; Cursor if only the
-/// focus or a value changed.
-fn cue_for(before: &CueState, after: &CueState, back: bool) -> &'static [Cue] {
+/// The sounds of a press, from the state before and after it (`pressed`:
+/// the button it was), as Halo 2 plays them: Error if it was refused; if
+/// the screen, popup or invitation changed, Back on B (a screen brought
+/// back from the history plays no `advance`, 0x23553f); else, when a
+/// screen or a popup opens, its `advance` (every screen and dialog loaded
+/// forward plays it, 0x147f6d), after Select for A (the list item's or
+/// button's `forward1`, 0x24ac05 and 0x2540e8, which only A and Start
+/// play; a shortcut such as X or RB opening a screen, like Halo 2's Y
+/// opening its Y menu, is the `advance` alone); Select alone between the
+/// Y menu's tabs (the players and friends lists: the tab's `forward1`)
+/// and when a popup only closes; Cursor if only the focus or a value
+/// changed.
+fn cue_for(before: &CueState, after: &CueState, pressed: Option<Input>) -> &'static [Cue] {
     if after.refused {
         return &[Cue::Error];
     }
@@ -421,10 +425,11 @@ fn cue_for(before: &CueState, after: &CueState, back: bool) -> &'static [Cue] {
         let y_menu = |s: Screen| matches!(s, Screen::Players | Screen::Friends);
         let tab = y_menu(before.screen) && y_menu(after.screen);
         let opens = (screen && !tab) || (popup && after.popup.is_some());
-        return match (back, opens) {
-            (true, _) => &[Cue::Back],
-            (false, true) => &[Cue::Select, Cue::Advance],
-            (false, false) => &[Cue::Select],
+        return match (pressed, opens) {
+            (Some(Input::B), _) => &[Cue::Back],
+            (Some(Input::A), true) => &[Cue::Select, Cue::Advance],
+            (_, true) => &[Cue::Advance],
+            (_, false) => &[Cue::Select],
         };
     }
     if before.focus != after.focus || before.values != after.values {
@@ -674,7 +679,7 @@ impl App {
         if !after.refused && self.cues.len() > asked {
             return;
         }
-        for &c in cue_for(&before, &after, self.pressed == Some(Input::B)) {
+        for &c in cue_for(&before, &after, self.pressed) {
             self.cue(c);
         }
     }
@@ -843,6 +848,10 @@ impl App {
         self.saved = [self.settings.gamertag.clone(), self.settings.server.clone()];
         let server = self.settings.server.clone();
         self.log(&format!("lobby: signed in to {server}"));
+        // Halo 2's main menu loads the online screen by itself once signed
+        // in (0x230ba6 calls the item's handler again), so it advances
+        // (0x147f6d) with no press.
+        self.cue(Cue::Advance);
     }
 
     /// Show `why` on the failure screen, once any match being played ends.
@@ -862,6 +871,11 @@ impl App {
         if self.away_from_live() {
             self.toast(why);
         } else {
+            // Halo 2's error dialog loading by itself (0x1486b8 through
+            // `dialog_ok`, then 0x147f6d), once.
+            if self.screen != Screen::Failed {
+                self.cue(Cue::Advance);
+            }
             self.popup = None;
             self.screen = Screen::Failed;
         }
@@ -1387,6 +1401,11 @@ impl App {
             self.game = None;
             let stay = [Screen::SignIn, Screen::Connecting];
             if !stay.contains(&self.screen) && !self.away_from_live() {
+                // The failure screen loading (as in `fail`), unless the
+                // carnage report's advance has just sounded for it.
+                if self.screen != Screen::Failed && !carnage {
+                    self.cue(Cue::Advance);
+                }
                 self.screen = Screen::Failed;
             }
         }
@@ -2300,7 +2319,9 @@ impl App {
                 Screen::Main => {
                     if let Some(row) = self.main_row_at(x, y) {
                         if row == self.main_focus.item && !second {
-                            self.pick_main(row);
+                            // Picked as A picks the focused row, and
+                            // sounding as A.
+                            self.input_inner(Input::A);
                         } else {
                             self.focus_main(row);
                         }
@@ -5567,11 +5588,11 @@ mod tests {
         view(&mut a).party = Some(pt);
         a.screen = Screen::Party;
         assert!(a.pick("bravo"));
-        // X opens the kick confirmation: the press, then the dialog
-        // loading.
+        // X opens the kick confirmation: the dialog loading alone (only
+        // A and Start play a list item's or button's `forward1`).
         a.input(Input::X);
         assert!(matches!(a.popup, Some(Popup::Kick(2))));
-        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
+        assert_eq!(a.take_cues(), [Cue::Advance]);
         // A on it only closes it: the press alone.
         a.input(Input::A);
         assert!(a.popup.is_none());
@@ -5582,13 +5603,14 @@ mod tests {
         a.take_cues();
         a.input(Input::B);
         assert_eq!(a.take_cues(), [Cue::Back]);
-        // X on the playlists opens the players list (Halo 2's Y menu
-        // loading), and RB there goes to its friends tab: the tab's press
-        // alone.
+        // X on the playlists opens the players list: Halo 2's Y menu
+        // loading, which Y opens with no sound of its own (0x1494af), so
+        // the advance alone. RB there goes to its friends tab: the tab's
+        // press alone.
         a.screen = Screen::Live;
         a.input(Input::X);
         assert_eq!(a.label(), "players");
-        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
+        assert_eq!(a.take_cues(), [Cue::Advance]);
         a.input(Input::Rb);
         assert_eq!(a.label(), "friends");
         assert_eq!(a.take_cues(), [Cue::Select]);
@@ -5619,6 +5641,64 @@ mod tests {
         a.tick(a.now);
         assert_eq!(a.screen, Screen::Carnage);
         assert_eq!(a.take_cues(), [Cue::Advance]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn screens_the_lobby_opens_by_itself_advance() {
+        let dir = scratch("cue-itself");
+        // Signed in: the playlists load with no press.
+        let (mut a, _server) = live_app(&dir);
+        a.screen = Screen::Connecting;
+        a.signing_in = Some(Instant::now());
+        a.on_event(LiveEvent::Welcomed);
+        assert_eq!(a.label(), "live");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        // The server lost on the playlists: the failure screen loads,
+        // once.
+        a.on_event(LiveEvent::Lost("gone".into()));
+        assert_eq!(a.label(), "failed");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        a.tick(a.now);
+        a.fail("again".into());
+        assert!(a.take_cues().is_empty());
+        // Lost on the main menu: a notice, and no screen loads.
+        let (mut a, _server) = live_app(&dir);
+        a.screen = Screen::Main;
+        a.on_event(LiveEvent::Lost("gone".into()));
+        assert_eq!(a.label(), "main");
+        assert!(a.take_cues().is_empty());
+        // Lost during a match: nothing until the engine closes, then the
+        // failure screen loads.
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        let g = a.game.as_mut().unwrap();
+        g.results = None;
+        g.ended_at = None;
+        g.child = Some(Running::waiting());
+        a.screen = Screen::InGame;
+        a.on_event(LiveEvent::Lost("gone".into()));
+        a.tick(a.now);
+        assert_eq!(a.label(), "ingame");
+        assert!(a.take_cues().is_empty());
+        a.game.as_mut().unwrap().child.as_mut().unwrap().kill();
+        a.tick(a.now);
+        assert_eq!(a.label(), "failed");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        // The same after a game with results: the carnage report's
+        // advance stands for the failure screen it gives way to, once.
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        a.screen = Screen::InGame;
+        let mut engine = Running::waiting();
+        engine.kill();
+        a.game.as_mut().unwrap().child = Some(engine);
+        a.client = None;
+        a.tick(a.now);
+        assert_eq!(a.label(), "failed");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        a.tick(a.now);
+        assert!(a.take_cues().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6091,9 +6171,9 @@ mod tests {
             openings: 0,
         }];
         // RB from the playlists opens the friends list (Halo 2's Y menu
-        // loading).
+        // loading: the advance alone, as for Y).
         a.input(Input::Rb);
-        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
+        assert_eq!(a.take_cues(), [Cue::Advance]);
         a.tick(a.now);
         assert!(a.take_cues().is_empty());
         let last = |a: &App| a.toasts.back().map(|(t, _)| t.clone());
@@ -6136,9 +6216,9 @@ mod tests {
         assert!(a.pick("DAN"));
         a.input(Input::X);
         assert_eq!(sent(&mut server), [ToServer::JoinParty(500)]);
-        // A friend who can be joined: the press, and the playlists
-        // again with the party joined.
-        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
+        // A friend who can be joined: the playlists again with the party
+        // joined, loading (X plays no `forward1`).
+        assert_eq!(a.take_cues(), [Cue::Advance]);
         assert_eq!(a.label(), "live");
         a.on_event(LiveEvent::Notice("THAT PARTY IS INVITE ONLY".into()));
         assert_eq!(last(&a).as_deref(), Some("THAT PARTY IS INVITE ONLY"));

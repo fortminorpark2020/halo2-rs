@@ -1020,11 +1020,16 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   flags, fade-in and fade-out (0x4, 0xC, 0x10).
 - **The mixer** (`lobby/audio.rs`), copied from `h2viewer/src/audio.rs`
   without the game's voices and placing: linear resampling, looping, a
-  random next loop, per-voice fades, 16 voices at most and MASTER 0.55.
+  random next loop, per-voice fade-outs, 16 voices at most and MASTER
+  0.55. Beyond 16 the oldest menu sound makes room, never the music
+  (review round 3: the quietest went, and the music, at 0.50 under every
+  menu sound's 0.71, was the one dropped once a held Esc's repeats
+  stacked 16 `back` sounds, and it never came back on that screen).
   New: `pause`, which stops the cpal stream, and `Output::{Device, Null,
   Wav}`. (A fade back up, `fade_to`, went in review round 1: Halo 2
-  starts the music again from its beginning.) cpal (0.16, as h2viewer) is
-  new in h2launch.
+  starts the music again from its beginning; round 3 narrowed the
+  mixer's fade to fade-outs.) cpal (0.16, as h2viewer) is new in
+  h2launch.
 - **Loading** (`lobby/sound.rs`, `load`, on its own thread): the globals
   from `Menus::open`, then `MapSet::open` on the same map (with shared.map
   beside it) to decode each sound's first variation at its tag's gain.
@@ -1067,21 +1072,28 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   game's game and map and the controls, and a refused flag) before and
   after `input` and `click` (their bodies are now `input_inner` and
   `click_inner`): refused gives Error; another screen, popup or
-  invitation gives Back on B (or Esc, Backspace, the b key), else
-  Select, followed by Advance when a screen or a popup opened (not
-  between the players and friends lists, the Y menu's tabs, nor when a
-  popup only closes; see the next point); only the row or a value
-  changing gives Cursor. `refuse()`
+  invitation gives Back on B (or Esc, Backspace, the b key); else, when a
+  screen or a popup opened, Advance, after Select when the press was A
+  (Enter, Space, the pad's A or Start, or a click that picks; review
+  round 3: X, Y, the bumpers and the other shortcuts opening something
+  give Advance alone); else Select (the players and friends lists, the Y
+  menu's tabs, and a popup only closing; see the next point); only the
+  row or a value changing gives Cursor. `refuse()`
   (a notice and the flag) is used for the leader-only notices, a friend
   who can't be joined, a player who can't be asked (with the server's
   own words: already a friend, already asked, asked you; ourselves only
   sounds), and no maps for a custom game. A search started pushes Select
   then Advance itself (Halo 2's matchmaking screen loading; ours stays
   on the playlists), a custom game asked for Select only (Halo 2's START
-  GAME is a button that loads nothing), and the screens the server and
-  the engine open push Advance: the pregame lobby (`on_match`, not when
-  the same match comes again with a new host) and the carnage report
-  (`poll_game`). A new invitation on show
+  GAME is a button that loads nothing), and the screens the lobby opens
+  by itself push Advance: the pregame lobby (`on_match`, not when the
+  same match comes again with a new host), the carnage report
+  (`poll_game`) and, since review round 3, the playlists once signed in
+  (`signed_in`: Halo 2's main menu loads its online screen by itself,
+  0x230ba6) and the failure screen (`fail`, and `poll_game` when the
+  server was lost during a match, unless the carnage report's advance
+  has just sounded; Halo 2's error dialogs from 0x1486b8 load forward),
+  once each. A new invitation on show
   pushes Notify once (`tick`; one that has left the invitations list is
   forgotten, so the same party inviting again sounds again), and so does
   the server's notice of a friend request to us (Halo 2 sounds every
@@ -1092,7 +1104,7 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   screen pushes Select, Advance (the main menu loading), then Transport.
   Countdown and KeyClick wait for
   the countdown and the on-screen keyboard. The sign-in functions are
-  unchanged.
+  unchanged but for `signed_in`'s Advance.
 - **Select, then advance, on a screen opening** (review round 2, from
   the decompilation). One press that opens a screen plays two sounds in
   Halo 2, in the same frame: the press's `forward1` (sound 1, from the
@@ -1110,7 +1122,11 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   no screen, and a dialog closing on a choice runs an animation, not a
   load, so both stay `select` alone. The start screen's A gives
   `forward1`, `advance` (the main menu, id 6, type 0, from 0x22f28c),
-  then `transport`.
+  then `transport`. Only A and Start play `forward1` (0x24ac05 and
+  0x2540e8 check the press); Y opens the Y menu through 0x1494af and
+  0x1496c7, which play nothing, so that is `advance` alone, and so are
+  the lobby's shortcuts (X, Y, LB, RB) opening a screen or a popup
+  (review round 3; until then they sounded `select` too).
 - **LGPL** (review round 2). Since 2.2 the launcher calls
   `blam_cache::sound`'s WMA decoding, so `crates/wma` (ported from
   FFmpeg, LGPL 2.1 or later) is in `h2launch.exe`, linked statically. It
@@ -1142,9 +1158,12 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   back on the main menu it starts again from its beginning;
 - the cursor, select and back sounds play with the pad and the keyboard
   (and a click on a main menu row); A on the start screen sounds select,
-  advance, then transport; a screen or popup opening sounds select then
-  advance, and the pregame lobby and the carnage report advance as they
-  open;
+  advance, then transport; a screen or popup opened with A sounds select
+  then advance, and with X, Y or a bumper advance alone; the playlists
+  after signing in, a failure screen, the pregame lobby and the carnage
+  report advance as they open;
+- holding Esc on the start screen (the quit popup opening and closing
+  with each repeat) never stops the music;
 - a friend request to us sounds as a message;
 - silence through a match (nothing of the menu music playing on after
   it, even when the match started within 6 s of the music starting), and

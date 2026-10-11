@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// Most sounds playing at once; the quietest is dropped beyond this. The
-/// menus play a few at most (the music and a cue or two).
+/// Most sounds playing at once; beyond this the oldest menu sound is
+/// dropped, never the music. The menus play a few at most (the music and
+/// a cue or two), more only with a key held down (each repeat a press).
 const MAX_VOICES: usize = 16;
 /// Overall volume, leaving headroom for several sounds at once (the
 /// from-scratch game's).
@@ -55,16 +56,15 @@ struct Voice {
     /// Source frames per output frame.
     step: f64,
     gain: f32,
-    /// The gain a fade goes to, and how far it moves each output frame
-    /// (0: no fade).
-    target: f32,
-    speed: f32,
-    /// The voice ends when its gain reaches 0 (a fade out).
-    ends: bool,
+    /// A fade out: how much gain it loses each output frame (0: none).
+    /// The voice ends when its gain reaches 0.
+    fade: f32,
     looping: bool,
     /// Clips to go on with when this one ends, one picked at random each
     /// time (music).
     next: Vec<Arc<Clip>>,
+    /// The music (`Audio::play_music`): never dropped to make room.
+    music: bool,
 }
 
 #[derive(Default)]
@@ -108,18 +108,13 @@ impl Mixer {
                         return false;
                     }
                 }
-                if v.speed > 0.0 {
-                    v.gain = if v.gain < v.target {
-                        (v.gain + v.speed).min(v.target)
-                    } else {
-                        (v.gain - v.speed).max(v.target)
-                    };
-                    if v.gain == v.target {
-                        v.speed = 0.0;
+                if v.fade > 0.0 {
+                    v.gain -= v.fade;
+                    // Silent (below -100 dB, whatever the steps' rounding
+                    // left): the fade is over.
+                    if v.gain <= 1e-5 {
+                        return false;
                     }
-                }
-                if v.ends && v.gain <= 0.0 {
-                    return false;
                 }
                 let t = (v.position - i as f64) as f32;
                 let left = v.clip.at(i, 0) + (v.clip.at(i + 1, 0) - v.clip.at(i, 0)) * t;
@@ -137,12 +132,20 @@ impl Mixer {
         }
     }
 
-    /// Start a voice; with `MAX_VOICES` playing, the quietest makes room.
-    fn start(&mut self, id: u64, clip: &Arc<Clip>, gain: f32, next: Vec<Arc<Clip>>) {
+    /// Start a voice (`music`: the music). With `MAX_VOICES` playing, the
+    /// oldest menu sound makes room (ids only grow), so the music plays on
+    /// however many presses sound at once (a held key's repeats); only if
+    /// every voice were music would the quietest go.
+    fn start(&mut self, id: u64, clip: &Arc<Clip>, gain: f32, next: Vec<Arc<Clip>>, music: bool) {
         if self.voices.len() >= MAX_VOICES {
-            if let Some(k) = (0..self.voices.len())
-                .min_by(|&a, &b| self.voices[a].gain.total_cmp(&self.voices[b].gain))
-            {
+            let k = (0..self.voices.len())
+                .filter(|&k| !self.voices[k].music)
+                .min_by_key(|&k| self.voices[k].id)
+                .or_else(|| {
+                    (0..self.voices.len())
+                        .min_by(|&a, &b| self.voices[a].gain.total_cmp(&self.voices[b].gain))
+                });
+            if let Some(k) = k {
                 self.voices.swap_remove(k);
             }
         }
@@ -152,29 +155,21 @@ impl Mixer {
             position: 0.0,
             step: clip.rate as f64 / self.rate.max(1) as f64,
             gain,
-            target: gain,
-            speed: 0.0,
-            ends: false,
+            fade: 0.0,
             looping: false,
             next,
+            music,
         });
     }
 
-    /// Move voice `id`'s gain to `target` over `seconds`, ending it there
-    /// if `ends` (and `target` is 0). False if it has ended already.
-    fn fade(&mut self, id: u64, target: f32, seconds: f32, ends: bool) -> bool {
+    /// Fade voice `id` out over `seconds`, then end it (a voice silent
+    /// already ends at the next mix). False if it has ended already.
+    fn fade_out(&mut self, id: u64, seconds: f32) -> bool {
         let rate = self.rate.max(1) as f32;
         let Some(v) = self.voices.iter_mut().find(|v| v.id == id) else {
             return false;
         };
-        let target = target.max(0.0);
-        v.target = target;
-        v.ends = ends && target == 0.0;
-        v.speed = (v.gain - target).abs() / (seconds.max(0.01) * rate);
-        if v.speed == 0.0 && v.ends {
-            // Silent already: it ends at the next mix.
-            v.gain = 0.0;
-        }
+        v.fade = (v.gain / (seconds.max(0.01) * rate)).max(f32::MIN_POSITIVE);
         true
     }
 }
@@ -244,18 +239,22 @@ impl Audio {
 
     /// Play a menu sound once at `gain`; returns its voice id.
     pub fn play_ui(&mut self, clip: &Arc<Clip>, gain: f32) -> u64 {
-        self.play_music(clip, &[], gain)
+        self.play(clip, &[], gain, false)
     }
 
     /// Music: `first`, then one of `then` after another for as long as it
     /// plays (all at the same sample rate); returns its voice id.
     pub fn play_music(&mut self, first: &Arc<Clip>, then: &[Arc<Clip>], gain: f32) -> u64 {
+        self.play(first, then, gain, true)
+    }
+
+    fn play(&mut self, first: &Arc<Clip>, then: &[Arc<Clip>], gain: f32, music: bool) -> u64 {
         let id = self.id();
         if matches!(self.sink, Sink::Null) || gain < 0.002 {
             return id;
         }
         if let Ok(mut m) = self.mixer.lock() {
-            m.start(id, first, gain, then.to_vec());
+            m.start(id, first, gain, then.to_vec(), music);
         }
         id
     }
@@ -263,7 +262,7 @@ impl Audio {
     /// Fade a voice out over `seconds`, then stop it.
     pub fn fade_out(&mut self, id: u64, seconds: f32) {
         if let Ok(mut m) = self.mixer.lock() {
-            m.fade(id, 0.0, seconds, true);
+            m.fade_out(id, seconds);
         }
     }
 
@@ -273,7 +272,7 @@ impl Audio {
         if let Ok(mut m) = self.mixer.lock() {
             let ids: Vec<u64> = m.voices.iter().map(|v| v.id).collect();
             for id in ids {
-                m.fade(id, 0.0, seconds, true);
+                m.fade_out(id, seconds);
             }
         }
     }
@@ -478,7 +477,7 @@ mod tests {
     fn a_clip_is_resampled_and_finishes() {
         let mut m = mixer(44100);
         // 100 frames at 22.05 kHz: about 200 output frames at 44.1 kHz.
-        m.start(1, &clip(16384, 100, 22050), 1.0, Vec::new());
+        m.start(1, &clip(16384, 100, 22050), 1.0, Vec::new(), false);
         assert_eq!(m.voices[0].step, 0.5);
         let mut out = vec![0.0; 2 * 150];
         m.mix(&mut out, 2);
@@ -494,7 +493,7 @@ mod tests {
             channels: 1,
             rate: 100,
         });
-        m.start(1, &ramp, 1.0, Vec::new());
+        m.start(1, &ramp, 1.0, Vec::new(), false);
         let mut out = vec![0.0; 2 * 3];
         m.mix(&mut out, 2);
         let at = |f: usize| out[2 * f] / MASTER;
@@ -506,8 +505,8 @@ mod tests {
     #[test]
     fn two_voices_mix() {
         let mut m = mixer(100);
-        m.start(1, &clip(8192, 50, 100), 1.0, Vec::new());
-        m.start(2, &clip(4096, 50, 100), 0.5, Vec::new());
+        m.start(1, &clip(8192, 50, 100), 1.0, Vec::new(), false);
+        m.start(2, &clip(4096, 50, 100), 0.5, Vec::new(), false);
         let mut out = vec![0.0; 2 * 10];
         m.mix(&mut out, 2);
         // 0.25 and half of 0.125.
@@ -520,7 +519,7 @@ mod tests {
             channels: 2,
             rate: 100,
         });
-        m.start(1, &stereo, 1.0, Vec::new());
+        m.start(1, &stereo, 1.0, Vec::new(), false);
         let mut out = vec![0.0; 2 * 3];
         m.mix(&mut out, 2);
         assert!(out[0] > 0.0 && out[1] < 0.0);
@@ -532,7 +531,7 @@ mod tests {
     #[test]
     fn a_looping_voice_wraps() {
         let mut m = mixer(100);
-        m.start(1, &clip(8192, 10, 100), 1.0, Vec::new());
+        m.start(1, &clip(8192, 10, 100), 1.0, Vec::new(), false);
         m.voices[0].looping = true;
         let mut out = vec![0.0; 2 * 35];
         m.mix(&mut out, 2);
@@ -544,7 +543,13 @@ mod tests {
     #[test]
     fn music_goes_from_its_intro_to_its_loops() {
         let mut m = mixer(100);
-        m.start(1, &clip(8192, 10, 100), 1.0, vec![clip(16384, 10, 100)]);
+        m.start(
+            1,
+            &clip(8192, 10, 100),
+            1.0,
+            vec![clip(16384, 10, 100)],
+            true,
+        );
         let mut out = vec![0.0; 2 * 30];
         m.mix(&mut out, 2);
         // The intro, then the loop without a gap, then the loop again.
@@ -563,9 +568,9 @@ mod tests {
     #[test]
     fn a_fade_out_ends_the_voice() {
         let mut m = mixer(100);
-        m.start(1, &clip(8192, 1000, 100), 1.0, Vec::new());
+        m.start(1, &clip(8192, 1000, 100), 1.0, Vec::new(), false);
         // 0.2 s at 100 frames a second: 20 frames.
-        assert!(m.fade(1, 0.0, 0.2, true));
+        assert!(m.fade_out(1, 0.2));
         let mut out = vec![0.0; 2 * 10];
         m.mix(&mut out, 2);
         let g = m.voices[0].gain;
@@ -574,42 +579,63 @@ mod tests {
         assert!(out[2 * 9] < out[0]);
         m.mix(&mut out, 2);
         assert!(m.voices.is_empty());
-        assert!(!m.fade(1, 1.0, 0.2, false));
+        assert!(!m.fade_out(1, 0.2));
         // A voice silent already ends at once.
-        m.start(2, &clip(8192, 1000, 100), 0.0, Vec::new());
-        m.fade(2, 0.0, 1.0, true);
+        m.start(2, &clip(8192, 1000, 100), 0.0, Vec::new(), false);
+        m.fade_out(2, 1.0);
         m.mix(&mut out, 2);
         assert!(m.voices.is_empty());
     }
 
     #[test]
-    fn a_fade_out_turned_back_rises_and_plays_on() {
+    fn the_music_is_never_dropped_to_make_room() {
+        // The music (quieter than any menu sound), then a held key's
+        // repeats: 20 menu sounds, each longer than the repeats' gap.
         let mut m = mixer(100);
-        m.start(1, &clip(8192, 1000, 100), 0.5, Vec::new());
-        m.fade(1, 0.0, 1.0, true);
-        let mut out = vec![0.0; 2 * 50];
-        m.mix(&mut out, 2);
-        let low = m.voices[0].gain;
-        assert!((low - 0.25).abs() < 1e-3, "{low}");
-        // Back up to 0.5 over a quarter second: 25 frames.
-        assert!(m.fade(1, 0.5, 0.25, false));
-        let mut out = vec![0.0; 2 * 10];
-        m.mix(&mut out, 2);
-        let g = m.voices[0].gain;
-        assert!(g > low && g < 0.5, "{g}");
-        let mut out = vec![0.0; 2 * 100];
-        m.mix(&mut out, 2);
-        assert_eq!(m.voices.len(), 1);
-        assert_eq!(m.voices[0].gain, 0.5);
-        assert_eq!(m.voices[0].speed, 0.0);
-        assert!(!m.voices[0].ends);
+        m.start(
+            1,
+            &clip(8192, 1000, 100),
+            0.5,
+            vec![clip(8192, 1000, 100)],
+            true,
+        );
+        for id in 2..=21 {
+            m.start(id, &clip(8192, 1000, 100), 0.71, Vec::new(), false);
+        }
+        assert_eq!(m.voices.len(), MAX_VOICES);
+        let mut ids: Vec<u64> = m.voices.iter().map(|v| v.id).collect();
+        ids.sort();
+        // The music, and the newest 15 menu sounds: the oldest made room.
+        assert_eq!(ids, [1].into_iter().chain(7..=21).collect::<Vec<u64>>());
+        // A music without loops is music too, and a music starting with
+        // every voice a menu sound gets one (the oldest's).
+        let mut m = mixer(100);
+        for id in 1..=16 {
+            m.start(id, &clip(8192, 1000, 100), 0.71, Vec::new(), false);
+        }
+        m.start(17, &clip(8192, 1000, 100), 0.5, Vec::new(), true);
+        assert_eq!(m.voices.len(), MAX_VOICES);
+        assert!(m.voices.iter().all(|v| v.id != 1));
+        for id in 18..=40 {
+            m.start(id, &clip(8192, 1000, 100), 0.71, Vec::new(), false);
+        }
+        assert!(m.voices.iter().any(|v| v.id == 17 && v.music));
+        // Only if every voice were music would the quietest go.
+        let mut m = mixer(100);
+        for id in 1..=16 {
+            let gain = if id == 5 { 0.1 } else { 0.5 };
+            m.start(id, &clip(8192, 1000, 100), gain, Vec::new(), true);
+        }
+        m.start(17, &clip(8192, 1000, 100), 0.5, Vec::new(), true);
+        assert!(m.voices.iter().all(|v| v.id != 5));
+        assert_eq!(m.voices.len(), MAX_VOICES);
     }
 
     #[test]
     fn paused_is_silent_and_holds_every_voice() {
         let mut m = mixer(100);
-        m.start(1, &clip(8192, 1000, 100), 1.0, Vec::new());
-        m.fade(1, 0.0, 1.0, true);
+        m.start(1, &clip(8192, 1000, 100), 1.0, Vec::new(), false);
+        m.fade_out(1, 1.0);
         m.paused = true;
         let mut out = vec![1.0; 2 * 20];
         m.mix(&mut out, 2);

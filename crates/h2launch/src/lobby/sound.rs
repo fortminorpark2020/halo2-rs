@@ -763,6 +763,33 @@ mod tests {
     }
 
     #[test]
+    fn the_engine_fades_every_voice_before_the_pause() {
+        let (mut s, dir) = playing("engine-fade");
+        let t0 = Instant::now();
+        let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        // The music and a menu sound, both far longer than the test.
+        s.update_at(at(0.0), &[], true, false);
+        s.update_at(at(0.1), &[Cue::Select], true, false);
+        assert_eq!(s.audio.as_ref().unwrap().voices(), 2);
+        // The engine starts: nothing stops at once (the recording has
+        // mixed far less than the 0.5 s fade since it opened)...
+        s.update_at(at(0.2), &[], false, true);
+        let a = s.audio.as_ref().unwrap();
+        assert_eq!(a.voices(), 2);
+        assert!(!a.is_paused());
+        // ...but both fade out and end in about 0.5 s of the recording's
+        // mixing, with no further update (so no `stop_all`).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while a.voices() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(a.voices(), 0);
+        assert!(!a.is_paused());
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_music_fades_over_its_tracks_fade_out() {
         let track = |flags, fade_out, end| sound::Track {
             flags,

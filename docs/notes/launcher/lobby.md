@@ -149,17 +149,20 @@ the launcher doesn't do.
   asked for sooner waits), and each start plays it again from its
   beginning. Presses sound by what they did, as in Halo 2 (menu.md
   "What Phase 2.2 built"): the focus moving is `cursor`; a screen or
-  popup opening `select` then `advance` (the new screen loading), but a
-  popup closing and the players and friends lists' tab change `select`
-  alone; a request sent to the server (make leader, privacy, an
+  popup opened with A `select` then `advance` (the new screen loading),
+  and with a shortcut (X, Y, LB, RB) `advance` alone, as Halo 2's Y menu
+  opens; a popup closing and the players and friends lists' tab change
+  `select` alone; a request sent to the server (make leader, privacy, an
   invitation, a friend request or its answer, a custom game) `select`;
   B `back` (the leader's B stopping a search too); a refusal (the
   leader-only notices, a friend who can't be joined or asked, no maps)
   `error`; a search `select` then `advance`; A on the start screen
-  `select`, `advance`, then `transport`; the pregame lobby and the
-  carnage report `advance` as they open; and a new invitation or a
-  friend request to us `message`, all at their tags' gains. While a
-  match's engine runs every sound fades in 0.5 s, presses are silent,
+  `select`, `advance`, then `transport`; the playlists after signing
+  in, the failure screen, the pregame lobby and the carnage report
+  `advance` as they open; and a new invitation or a friend request to
+  us `message`, all at their tags' gains. With 16 sounds playing the
+  oldest menu sound makes room, never the music. While a match's
+  engine runs every sound fades in 0.5 s, presses are silent,
   then the sounds stop and the audio stream pauses; it plays again
   after, with nothing from before the match. The log's `sound:` line
   says what loaded (each sound's length, the music's start and loops,
@@ -417,8 +420,8 @@ Cartographer' H2LOBBY_AUDIO_WAV=menu.wav`. With the script `0 wait start
 10`, `20 a`, `0 wait main 10`, `1 down`, `1 up`, `2 quit` (2026-10-11, the
 container's copy) the WAV held 23 s of music from its first 0.05 s, and
 taking away a second run's with no presses left only the select and two
-cursor sounds, where the presses were (A on the start screen now adds
-`transport`). Keep such WAVs on the PC: they are the game's sound.
+cursor sounds, where the presses were (A on the start screen now gives
+`select`, `advance` and `transport`). Keep such WAVs on the PC: they are the game's sound.
 
 Two lobbies on one machine against a local server:
 

@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 (menu 2.2, review round 2). Any assistant that
+Last updated 2026-10-11 (menu 2.2, review round 3). Any assistant that
 works on the project should update this file before it stops, so the next
 one can pick up. Read AGENTS.md first for the rules.
 
@@ -141,7 +141,12 @@ Next, in order:
    pregame lobby and carnage report advance as they open, a custom game
    asked for is select alone), and a music fade still running when an
    engine starts no longer plays on after the match (every voice fades,
-   then stops, before the pause). On the owner's PC (check P2): music on
+   then stops, before the pause). Review round 3: the music is never
+   dropped to make room for menu sounds (a held Esc could leave the menus
+   silent), only A sounds select before a screen's advance (X, Y and
+   the bumpers opening one give advance alone, as Halo 2's Y menu
+   does), and the playlists after signing in and the failure screen
+   advance as they open. On the owner's PC (check P2): music on
    start and main from Cartographer's files, fading on the playlists;
    the sounds with the pad and the keyboard; silence in a match and the
    music again on the main menu after; with `H2LOBBY_VISTA=off`, silence
