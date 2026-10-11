@@ -255,7 +255,9 @@ fn file_log(path: &Path) -> Log {
 /// `see <text> [<seconds>]` (until text containing `<text>`, ignoring
 /// case, is drawn; the last word is the seconds when it is a number),
 /// `pick <gamertag>` (select their row on the players, friends, party or
-/// carnage screen; the run fails if there is none), `shot <name>` and
+/// carnage screen; the run fails if there is none), `set <control>
+/// <value>` (change a controller setting by its `lobby.txt` name, as the
+/// settings screen would; the run fails on a bad one), `shot <name>` and
 /// `quit`.
 #[derive(Clone, Debug, PartialEq)]
 enum Step {
@@ -264,6 +266,7 @@ enum Step {
     Wait(String, f64),
     See(String, f64),
     Pick(String),
+    Set(String, String),
     Shot(String),
     Quit,
 }
@@ -327,6 +330,10 @@ fn parse_script(text: &str) -> Result<Vec<(f64, Step)>, String> {
             }
             "pick" if !arg.is_empty() => Step::Pick(arg.to_string()),
             "pick" => return Err(bad("pick whom?")),
+            "set" => match arg.split_once(char::is_whitespace) {
+                Some((k, v)) if !v.trim().is_empty() => Step::Set(k.into(), v.trim().into()),
+                _ => return Err(bad("set what to what?")),
+            },
             "shot" => Step::Shot(arg.to_string()),
             "quit" => Step::Quit,
             _ => return Err(bad("unknown command")),
@@ -429,6 +436,13 @@ fn headless(mut app: App, mut text: Text, log: &Log) -> i32 {
                         break;
                     }
                 }
+                Step::Set(key, value) => {
+                    if let Err(e) = app.set_control(&key, &value) {
+                        log(&format!("lobby: script: set: {e}"));
+                        code = 1;
+                        break;
+                    }
+                }
                 Step::Shot(name) => save(&canvas, &name),
                 Step::Quit => break,
             }
@@ -488,6 +502,20 @@ mod tests {
                 (0.0, Step::Pick("bravo one".into())),
             ]
         );
+        let s =
+            parse_script("0 set button_layout bumper_jumper\n0 set look_sensitivity 5\n").unwrap();
+        assert_eq!(
+            s,
+            vec![
+                (
+                    0.0,
+                    Step::Set("button_layout".into(), "bumper_jumper".into())
+                ),
+                (0.0, Step::Set("look_sensitivity".into(), "5".into())),
+            ]
+        );
+        assert!(parse_script("1 set layout\n").is_err());
+        assert!(parse_script("1 set\n").is_err());
         assert!(parse_script("1 see\n").is_err());
         assert!(parse_script("1 pick\n").is_err());
         assert!(parse_script("a\n").is_err());

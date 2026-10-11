@@ -19,7 +19,10 @@
 //! `base` picks time 0: `input` (default) the engine's first input poll,
 //! `state1` its `set_game_state(1)` (map loaded), `launch` the start of
 //! h2launch. Pad and keyboard/mouse input are merged into what the real
-//! devices give for local player 0.
+//! devices give for local player 0. `stick` lines stand for the physical
+//! sticks: the thumbstick layout (`--sticks`) moves them as it does a
+//! pad's, and the button presses go through the button layout's mapping
+//! in the engine, as a pad's do.
 
 use crate::profile::{mouse, pad};
 

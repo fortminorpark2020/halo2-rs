@@ -50,7 +50,8 @@ install. No game files are included in this repository.
 - `h2launch`: the launcher (Windows only, work in progress) that starts MCC's
   own classic Halo 2 engine from your Master Chief Collection install,
   without running MCC. Double-click it to open its lobby: pick a gamertag,
-  form a party, search a playlist, play the match on the real engine, and
+  form a party (the sign-in screen offers the project's server,
+  h2.mohnjorrow.com, by default), search a playlist, play the match on the real engine, and
   see the carnage report with your new level afterwards. Custom Game (under
   the playlists) lets the party leader pick any game type and map for the
   party, unranked; it works alone too. Y on the playlists opens the party:
@@ -72,8 +73,33 @@ install. No game files are included in this repository.
   Vista install if MCC's can't be read); without either they are numbers. Friends and service records need the matching
   server: an older launcher signing in to it is told UPDATE YOUR LAUNCHER.
   Its text is in Halo 2's own fonts, read from your MCC install.
+  Settings (the row after Custom Game, or X on a controller at the sign-in
+  screen) holds Halo 2's controller settings, in the order of its
+  CONTROLLER screen: Thumbstick Layout (Default, Southpaw, Legacy, Legacy
+  Southpaw), Button Layout (Halo 2's Default, Southpaw, Boxer and Green
+  Thumb, plus Halo 3's Bumper Jumper, with jump on LB and melee on RB, and
+  MCC's Recon), Look Sensitivity (1 to 10, 3 by default), Look Inversion
+  (the thumbstick's), Automatic Look Centering and Controller Vibration,
+  then Mouse Sensitivity and Mouse Inversion, and Restore Defaults. It
+  lists what every button does in the layout you pick, and the keyboard
+  keys. Your choice is saved and used in every match. On a keyboard and
+  mouse: W A S D to move, the mouse to look, left button to fire, right
+  button to zoom, Space to jump, Left Ctrl to crouch, G to throw a
+  grenade, F for the flashlight, Q to melee, R to reload, E for the action
+  and Tab to switch weapons. Those are Halo 2's own keys on the PC, as
+  others have read them from the game's code; moving, jumping, crouching
+  and the grenade have been tried in this launcher, the rest not yet.
+  MCC's other keys (the right button for the left gun,
+  1 to switch weapons, 2 to swap grenades, 4 for the flashlight, C to
+  dual wield) are given to the game too, but may do nothing. When a match
+  starts the game's window comes to the front by itself; if it doesn't,
+  click it. While the game is on, the
+  lobby window ignores the controller and the keys that could leave the
+  game (Esc, Enter, Backspace, letters), so leaving takes a click. In the
+  lobby, Enter or Space is A and Esc or Backspace is B.
   `--offline` starts
-  an offline Slayer match on Lockout instead. It reads the game's
+  an offline Slayer match on Lockout instead (with the controls saved in
+  Settings, or flags such as `--layout bumper_jumper`). It reads the game's
   `halo2.dll` and never changes any MCC file. It is not part of the game
   above. See `docs/notes/launcher/README.md`.
 - `h2ui`: the original Xbox Halo 2 menus for the launcher (work in progress,
