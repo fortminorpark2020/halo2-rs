@@ -99,7 +99,36 @@ install. No game files are included in this repository.
   1 to switch weapons, 2 to swap grenades, 4 for the flashlight, C to
   dual wield) are given to the game too, but may do nothing. When a match
   starts the game's window comes to the front by itself; if it doesn't,
-  click it. While the game is on, the
+  click it. In a match, Start (or Esc on the keyboard) opens Halo 2's GAME
+  MENU over the game, which keeps running behind it: Leave Game, Settings,
+  and End Game if you host a custom game (or in an offline run), with the
+  game's players listed beside them (the host marked). Up and down pick,
+  A (or Enter) chooses, and B, Back or Start (or Esc or Backspace) closes
+  it; while it is open your Spartan stands still, and a button you were
+  still holding when it closed does nothing in the game until you let go.
+  Settings opens CONTROLLER SETTINGS: the lobby's settings in the same
+  order and saved the same way, under Halo 2's in-game names (Auto Look
+  Centering, and Use Default Settings last, which asks first). A on a
+  setting opens its choices, and A on one picks it; Left, Right or A
+  change the two mouse rows. On these pages B, Back, Esc or Backspace goes
+  back one page, and Start does nothing. Thumbstick Layout, Look
+  Inversion, Controller Vibration and the two mouse settings change at
+  once; Button Layout, Look Sensitivity and Auto Look Centering change in
+  the game you're in when you close the menu (the launcher asks the game
+  to read them again). Only turning vibration on in a game that started
+  with it off waits for your next game, and is marked NEXT GAME. Your
+  changes are saved for the next match when you leave CONTROLLER
+  SETTINGS or close the menu (or a second after the last one). Leave Game asks first, closes the game
+  and takes you back to ONLINE (a custom game's party leader goes back to
+  Custom Game); leaving a ranked game still counts toward your level, and
+  leaving a game you host ends it for everyone. End Game ends a custom game
+  for everyone, and everyone, you too, gets the carnage report; it doesn't
+  count. (Ended in its first seconds, while someone is still joining, there
+  is no carnage report: you're told you ended the game.) If the menu can't be shown on your PC, it turns itself off for the
+  rest of that game and Start goes back to the game (the lobby window
+  stops saying Start opens it). If it misbehaves, setting
+  `H2LOBBY_ENGINE_ARGS=--no-game-menu` before
+  starting the launcher turns it off and gives Start back to the game. While the game is on, the
   lobby window ignores the controller and the keys that could leave the
   game (Esc, Enter, Backspace, letters), so leaving takes a click. In the
   lobby, Enter or Space is A and Esc or Backspace is B. B on the playlists

@@ -6,7 +6,8 @@
 //! The modules at the top level are plain Rust with unit tests that run on
 //! any platform: the byte layouts the engine reads (game options, player
 //! profile, input state), the Steam library parser, the PE reader for
-//! `--check`, the map table, the input script and the log summaries.
+//! `--check`, the map table, the input script, the log summaries and the
+//! in-game GAME MENU's logic (`gamemenu`).
 //! `win` is the Windows program itself.
 //!
 //! Facts about the engine come from the research behind
@@ -15,6 +16,7 @@
 
 pub mod cli;
 pub mod controls;
+pub mod gamemenu;
 pub mod live;
 pub mod lobby;
 pub mod maps;

@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 02:55 UTC. Any assistant that works on the project
+Last updated 2026-10-11 19:05 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -149,6 +149,71 @@ step, when the owner says so: one weapon.
 
 ## In progress
 
+- In-game GAME MENU (Start or Esc in a match, as Halo 2's screen 0xC3), on
+  `launcher-gamemenu` off `launcher-menu` f0b718b. Stage 1 done
+  (2026-10-11): the menu's logic, pad edges and input gate in
+  `crates/h2launch/src/gamemenu/` (plain Rust, Linux-tested; no Windows,
+  wire or lobby changes yet), and its opaque panel with the players column
+  in `crates/h2ui/src/gamemenu.rs` (`cargo run --release -p h2ui --example
+  gamemenu_png -- <out dir> [<h2_fonts dir>]` draws every page). Stage 2
+  done (2026-10-11): the lobby and the engine's copy exchange the menu's
+  events (`H2EVENT left game|end`, `H2EVENT controls` with the eight
+  `lobby.txt` pairs; `PROTOCOL` and `LIVE_PROTOCOL` unchanged); the lobby
+  saves the controls through `App::set_control`, lands a player who left
+  on ONLINE (a custom game's leader on Custom) with the lobby in front,
+  and passes `--game-kind`; the stand-in engine runs the real menu from
+  `H2LOBBY_FAKE_MENU` (`crates/h2launch/tests/game_menu.rs`). New engine
+  flags `--no-game-menu`, `--reload-message`, `--end-game-message` are
+  parsed. Stage 3 done in code (2026-10-11, cross-compiled and
+  clippy-clean, not yet run on the PC): the driver on the window thread
+  (`win/menu.rs`), the panel copied into back buffer 0 in `end_frame`
+  (`win/overlay.rs`), the input gate for player 0 (`win/input.rs`), live
+  controls, and the profile and gamepad mapping served as generations
+  (`win/host.rs`); what it does and the settings table are in
+  `docs/notes/launcher/menu.md`, phase 4. Review fixes, round 1
+  (2026-10-11): the engine's profile and mapping generations are built
+  when the menu closes (not per step; each kind has its own cap of 64);
+  a stick held into the menu no longer scrolls it; a pad's first Start
+  opens it; `--live` takes the game kind from the server's match; runs
+  without the lobby save only the settings changed in the menu; turning
+  vibration on in a game started with it off says NEXT GAME. Review
+  fixes, round 2 (2026-10-11): a trigger resting above 30 is let go near
+  its rest; the menu's safety rules moved into `gamemenu::watch` with
+  Linux tests, PLEASE WAIT survives an overlay failure, a failed panel
+  publish turns the overlay off, and `H2LAUNCH_OVERLAY_FAIL=stall|copy`
+  fail at run time for the new check 17; the engine says `H2EVENT menu
+  off` and the lobby drops its hint; Use Default Settings is said
+  explicitly (`Effect::Defaults`); the lobby saves only what the menu
+  changed from the engine's own controls. Review fixes, round 3
+  (2026-10-11): the players column's team colours follow Halo 2's tag
+  order (red, blue, yellow, green, purple, orange, brown, pink) in the
+  lobby roster's shades; Use Default Settings reaches the lobby as
+  `H2EVENT controls defaults ...`, so a lobby match saves every one too;
+  `H2LOBBY_ENGINE_ARGS` is read once into the lobby's `Config`, and the
+  engine's start and start failure have tests; `--reload-message` and
+  `--end-game-message` are documented as tried offline first, not
+  refused online. PC checks 1 to 15 ran on the owner's PC on 2026-10-11
+  (672bf4a; results in menu.md section 9.5): the menu draws, holds and
+  releases input, applies the live settings, survives resizing and the
+  game's end, and costs about 2 us a frame. The engine doesn't read a new
+  profile or mapping by itself (check 7), but engine message 5 makes it
+  (check 8); no engine message ends the game for everyone (check 15).
+  Follow-ups from those checks (2026-10-11): the reload message 5 is the
+  default (`--reload-message 0` or `off` turns it off), so Button Layout,
+  Look Sensitivity and Auto Look Centering take effect when the menu
+  closes and aren't tagged NEXT GAME; the controls go to the lobby once a
+  visit to CONTROLLER SETTINGS (leaving it or the menu, 1 s after the
+  last change, or before a quit; `gamemenu::save`), not once a step; a
+  guest who left from the menu is told "You left the game." even when
+  the server's verdict with no reason came first; End Game passes the
+  host's quit-time result on, and the lobby sends it as LAUNCHER_RESULT
+  with `finished` false, then LEFT_MATCH, so h2live ends the match with
+  no HOST LEFT wording and the host gets the carnage report too (h2live
+  unchanged; a new server test covers it); before the server's GO (a
+  guest still joining) it goes as LEFT_MATCH alone and the host gets "You
+  ended the game." instead (`Told::ended_before_go`). Next: check 14 again on the
+  PC with this build (both lobbies on the carnage report), and checks 16
+  and 17.
 - Milestone 1 is done (2026-10-10 02:50 UTC): `h2launch` started MCC's
   halo2.dll on the owner's PC and played offline Slayer on Lockout (HUD,
   60 fps, mouse and controller). Code is on `h2launch-m1`, then
