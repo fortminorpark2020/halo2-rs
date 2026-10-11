@@ -1776,11 +1776,12 @@ mod tests {
             gamertag: "ALPHA".into(),
             instance: None,
             controls: Controls::default(),
+            game_kind: child::game_kind(&m),
         };
         // A script just written can be busy for a moment, while another
         // test starts a process.
         let child = (0..50)
-            .find_map(|_| match Running::start(&exe, dir, &engine) {
+            .find_map(|_| match Running::start(&exe, dir, &engine, "") {
                 Ok(c) => Some(c),
                 Err(_) => {
                     std::thread::sleep(Duration::from_millis(20));
@@ -1801,6 +1802,9 @@ mod tests {
             results: None,
             ended_at: None,
             over: None,
+            left: None,
+            menu: true,
+            engine_controls: None,
         });
         a.screen = Screen::InGame;
     }

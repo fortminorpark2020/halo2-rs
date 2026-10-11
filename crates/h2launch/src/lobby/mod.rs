@@ -118,6 +118,7 @@ pub fn run(args: &Args) -> i32 {
         log: log.clone(),
         ranks,
         menus,
+        engine_args: std::env::var("H2LOBBY_ENGINE_ARGS").unwrap_or_default(),
     };
     let app = App::new(cfg);
     if std::env::var_os("H2LOBBY_HEADLESS").is_some() {

@@ -11,7 +11,7 @@ use crate::options::GameOptions;
 /// Options offsets the variant copy fills (seen on the owner's PC).
 const NAME: usize = 0x304;
 const GAME_TYPE: usize = 0x344;
-const FLAGS: usize = 0x348;
+pub(super) const FLAGS: usize = 0x348;
 const SCORE_TO_WIN: usize = 0x350;
 const TIME_LIMIT: usize = 0x354;
 /// Number of rounds (0 = one).
@@ -20,7 +20,7 @@ const ROUNDS: usize = 0x34C;
 const MAX_PLAYERS: usize = 0x378;
 /// In FLAGS: teams on (Slayer 0x0FDA vs Team Slayer 0x0FDB, Phantoms vs Team
 /// Phantoms, King vs Team King; every CTF, Assault and Territories variant).
-const FLAG_TEAMS: i32 = 0x1;
+pub(super) const FLAG_TEAMS: i32 = 0x1;
 /// The rest of the variant's settings block, printed as `offset=value`
 /// for every non-zero dword so differences between variants show.
 const OTHER: std::ops::Range<usize> = 0x340..0x430;

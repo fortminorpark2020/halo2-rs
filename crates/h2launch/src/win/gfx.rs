@@ -73,8 +73,19 @@ pub fn raw() -> Option<(*mut c_void, *mut c_void, *mut c_void)> {
     Some((g.device.as_raw(), g.context.as_raw(), g.swap.as_raw()))
 }
 
+/// The shared device, for the game menu's overlay textures (D3D11
+/// devices are free-threaded; this one has no SINGLETHREADED flag).
+pub fn device() -> Option<ID3D11Device> {
+    GFX.get().map(|g| g.device.clone())
+}
+
 static SWAP_W: AtomicU32 = AtomicU32::new(0);
 static SWAP_H: AtomicU32 = AtomicU32::new(0);
+
+/// The swap chain's size as last made or resized.
+pub fn swap_size() -> (u32, u32) {
+    (SWAP_W.load(Ordering::SeqCst), SWAP_H.load(Ordering::SeqCst))
+}
 /// The window's client size from the last WM_SIZE and when it came.
 static WANT: Mutex<(u32, u32, f64)> = Mutex::new((0, 0, 0.0));
 static RESIZE_POSTED: Mutex<(u32, u32)> = Mutex::new((0, 0));
@@ -405,8 +416,9 @@ pub fn presents() -> Option<u32> {
         .then(|| PRESENTS.load(Ordering::SeqCst))
 }
 
-/// Host slot 1, on the engine's render thread: count presents and take a
-/// waiting screenshot.
+/// Host slot 1, on the engine's render thread: count presents, copy the
+/// game menu's panel in while it shows, and take a waiting screenshot
+/// (with the panel in it).
 pub fn on_end_frame(engine_swap: *mut c_void) {
     let Some(g) = GFX.get() else { return };
     if !CHECKED_SWAP.swap(true, Ordering::SeqCst) {
@@ -425,6 +437,7 @@ pub fn on_end_frame(engine_swap: *mut c_void) {
         PRESENTS.store(n, Ordering::SeqCst);
         PRESENTS_KNOWN.store(true, Ordering::SeqCst);
     }
+    super::overlay::draw(&g.context, &g.swap);
     let label = SHOT_QUEUE.lock().ok().and_then(|mut q| {
         if q.is_empty() {
             None

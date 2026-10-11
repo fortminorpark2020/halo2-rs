@@ -15,6 +15,11 @@
 //!   the engine on it that never returns), runs the deferred end of a
 //!   stack-overflow crash, and makes sure the run always ends with a
 //!   RESULT line.
+//!
+//! The in-game GAME MENU (`menu`) runs on the window thread too: it reads
+//! player 0's pad and the menu keys itself, gates what the engine's input
+//! polls get (`input`), and shows its panel through `overlay`, which the
+//! render thread copies into the back buffer in `end_frame`.
 
 pub mod check;
 mod crash;
@@ -25,6 +30,8 @@ mod gfx;
 mod host;
 mod input;
 mod log;
+mod menu;
+mod overlay;
 mod screen;
 mod variants;
 
@@ -99,9 +106,38 @@ pub(crate) struct Setup {
     pub map: &'static MapEntry,
     /// The networked match (`--session`) and which machine we are.
     pub session: Option<(crate::session::Session, usize)>,
-    /// The player's controls: the flags over what the lobby saved.
+    /// The player's controls: the flags over what the lobby saved. The
+    /// engine was started with these; the game menu changes the live ones
+    /// (`controls()`).
     pub controls: crate::controls::Controls,
 }
+
+/// The live controls, once the game menu has changed them
+/// (`Controls::pack`); until then `LIVE_SET` is false and the launch
+/// controls are the live ones.
+static LIVE_CONTROLS: AtomicU64 = AtomicU64::new(0);
+static LIVE_SET: AtomicBool = AtomicBool::new(false);
+
+/// The player's controls as they are now: the game menu's changes over
+/// the ones the engine was started with. The input polls read them each
+/// time (a few atomic loads).
+pub(crate) fn controls() -> crate::controls::Controls {
+    let launch = || setup().map(|s| s.controls).unwrap_or_default();
+    if !LIVE_SET.load(Ordering::Acquire) {
+        return launch();
+    }
+    crate::controls::Controls::unpack(LIVE_CONTROLS.load(Ordering::Acquire)).unwrap_or_else(launch)
+}
+
+/// The game menu changed the controls.
+pub(crate) fn set_controls(c: crate::controls::Controls) {
+    LIVE_CONTROLS.store(c.pack(), Ordering::Release);
+    LIVE_SET.store(true, Ordering::Release);
+}
+
+/// The game's teams flag from the variant copied into the options (as
+/// `--variants` reads it), for the game menu's team colours.
+pub(crate) static VARIANT_TEAMS: AtomicBool = AtomicBool::new(false);
 
 /// `--instance`: set before the log opens.
 static INSTANCE: OnceLock<String> = OnceLock::new();
@@ -155,6 +191,13 @@ pub(crate) static DEFERRED_CRASH: AtomicU32 = AtomicU32::new(0);
 /// The console window is closing: Windows ends the process about 5 s after
 /// it tells us, so the quit sequence is kept short.
 pub(crate) static CONSOLE_CLOSING: AtomicBool = AtomicBool::new(false);
+/// The game ended by itself (set_game_result while not quitting): the
+/// game menu closes and can't open again.
+pub(crate) static GAME_ENDED: AtomicBool = AtomicBool::new(false);
+/// The host ended the game for everyone from the game menu (End Game):
+/// the result the engine gives as it quits is the game's, cut short
+/// (`gamemenu::result_is_the_games`).
+pub(crate) static ENDED_FROM_MENU: AtomicBool = AtomicBool::new(false);
 /// finish() has started (it runs once), and when.
 static FINISHING: AtomicBool = AtomicBool::new(false);
 static FINISH_AT: AtomicU64 = AtomicU64::new(0);
@@ -193,6 +236,26 @@ pub(crate) static RESTART_REASON: AtomicI64 = AtomicI64::new(0);
 pub(crate) fn request_quit(kind: u32) {
     let _ = QUIT.compare_exchange(QUIT_NONE, kind, Ordering::SeqCst, Ordering::SeqCst);
     wake();
+}
+
+/// Why the next quit happens, for its log line and the RESULT line (the
+/// game menu's "left from the game menu"); the first reason given wins.
+static QUIT_REASON: Mutex<String> = Mutex::new(String::new());
+
+pub(crate) fn set_reason(reason: &str) {
+    if let Ok(mut r) = QUIT_REASON.lock() {
+        if r.is_empty() {
+            *r = reason.to_string();
+        }
+    }
+}
+
+fn take_reason() -> Option<String> {
+    let r = QUIT_REASON
+        .lock()
+        .ok()
+        .map(|mut r| std::mem::take(&mut *r))?;
+    (!r.is_empty()).then_some(r)
 }
 
 /// Wakes the window thread's wait.
@@ -541,6 +604,17 @@ fn launch(mut args: Args) -> i32 {
         }
         args.map = Some(ready.map.clone());
         args.variant = Some(ready.variant.clone());
+        if args.game_kind_set {
+            log!(
+                "live: a {} game (the GAME MENU takes --game-kind {})",
+                ready.game_kind.key(),
+                args.game_kind.key()
+            );
+        } else {
+            // A ranked match's leave counts, and the menu says so.
+            args.game_kind = ready.game_kind;
+            log!("live: a {} game", ready.game_kind.key());
+        }
         ready
     });
     if let Some(v) = &args.variant {
@@ -810,6 +884,7 @@ fn main_loop() -> i32 {
     let mut attach = input::Attach::default();
     let mut running_since: Option<f64> = None;
     let mut reason = String::new();
+    let mut driver = menu::Driver::new(s);
 
     loop {
         beat();
@@ -872,10 +947,11 @@ fn main_loop() -> i32 {
             }
             script_t = st;
         }
+        driver.tick(t);
 
         gfx::resize_if_settled();
         gfx::come_to_front(t);
-        input::update_cursor_clip(game.is_some() && quit_started.is_none());
+        input::update_cursor_clip(game.is_some() && quit_started.is_none() && !menu::is_open());
         if s.args.attach_input {
             if let Some(h) = game {
                 attach.try_attach(h, t);
@@ -902,6 +978,9 @@ fn main_loop() -> i32 {
         if q != QUIT_NONE && quit_started.is_none() {
             set_step(13);
             if reason.is_empty() {
+                reason = take_reason().unwrap_or_default();
+            }
+            if reason.is_empty() {
                 reason = match q {
                     QUIT_USER => "window closed".into(),
                     QUIT_CONSOLE if CONSOLE_CLOSING.load(Ordering::SeqCst) => {
@@ -915,6 +994,7 @@ fn main_loop() -> i32 {
                 };
             }
             log!("quitting: {reason}");
+            driver.quitting();
             let wait = match game {
                 Some(h) if !thread_exited(h) => {
                     engine::post_message(13, "quit");
@@ -980,6 +1060,9 @@ fn summary(periodic: bool) {
     );
     host::log_summary();
     events::log_summary();
+    if let Some(l) = overlay::summary_line(menu::ready()) {
+        log!("{l}");
+    }
     if let Some(net) = host::net() {
         let lines = net.summary();
         let n = if periodic { 1 } else { lines.len() };

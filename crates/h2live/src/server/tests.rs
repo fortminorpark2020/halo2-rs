@@ -1124,6 +1124,95 @@ fn a_launcher_party_plays_custom_games() {
     drop(relay);
 }
 
+/// The launcher's End Game (PC check 14): the custom game's host sends the
+/// result its engine gave as it quit, saying the game was cut short
+/// (finished false), then LEFT_MATCH; the guest's engine ended the game
+/// too and sends its own. The host counts as leaving once the game was
+/// over, not as a host who left: the match ends with no reason for
+/// either PC, nothing counts (an unranked custom game), and the party is
+/// free again.
+#[test]
+fn a_launcher_host_ending_a_custom_game_leaves_at_its_end() {
+    let mut w = World::new("launcher-end-game");
+    let config = h2relay::ServerConfig {
+        admission: h2relay::Admission::Issued,
+        ..Default::default()
+    };
+    let relay = h2relay::RelayServer::bind(("127.0.0.1", 0), config).unwrap();
+    w.server.set_relay(relay.handle());
+    let a = sign_in_launcher(&mut w, 1, "ALPHA", &["lockout"]);
+    let b = sign_in_launcher(&mut w, 2, "BRAVO", &["lockout"]);
+    let party = w.party(a).id;
+    w.send(a, ToServer::Invite(w.id(b)));
+    w.until(|w| w.pcs[b].view.invites.iter().any(|i| i.0 == party));
+    w.send(b, ToServer::Accept(party));
+    w.until(|w| w.members(a).contains(&w.id(b)));
+    w.send(
+        a,
+        ToServer::LauncherCustom {
+            map: "lockout".into(),
+            variant: "H2_Team_Slayer".into(),
+        },
+    );
+    w.until(|w| !launcher_matches(w, a).is_empty() && !launcher_matches(w, b).is_empty());
+    let m = launcher_matches(&w, b).remove(0);
+    assert_eq!(m.host, super::matches::relay_id(w.id(a)));
+    w.send(a, ToServer::Hosting(m.id));
+    w.send(b, ToServer::Joined(m.id));
+    let went = |w: &World, i: usize| w.events[i].contains(&LiveEvent::Go(m.id));
+    w.until(|w| went(w, a) && went(w, b));
+    w.run(5.0);
+
+    let result = |finished: bool| LauncherResult {
+        id: m.id,
+        finished,
+        team_scores: Vec::new(),
+        players: m
+            .players
+            .iter()
+            .map(|p| h2net::live::LauncherPlayerResult {
+                relay_id: p.relay_id,
+                team: p.team,
+                place: p.team,
+                score: 3 - i32::from(p.team),
+                kills: 3 - u16::from(p.team),
+                assists: 0,
+                deaths: 1,
+                betrayals: 0,
+                suicides: 0,
+                left: false,
+            })
+            .collect(),
+    };
+    // The host: its cut-short result, then that it left, in that order.
+    w.send(a, ToServer::LauncherResult(result(false)));
+    w.send(
+        a,
+        ToServer::LeftMatch {
+            id: m.id,
+            host_lost: false,
+        },
+    );
+    w.run(0.5);
+    // The guest's engine ended the game as well.
+    w.send(b, ToServer::LauncherResult(result(true)));
+    let over = |w: &World, i: usize| {
+        w.events[i].iter().find_map(|e| match e {
+            LiveEvent::MatchOver(o) if o.id == m.id => Some(o.clone()),
+            _ => None,
+        })
+    };
+    w.until(|w| over(w, a).is_some() && over(w, b).is_some());
+    for i in [a, b] {
+        let o = over(&w, i).unwrap();
+        assert!(!o.counted, "{o:?}");
+        assert!(o.levels.is_empty(), "{o:?}");
+        assert_eq!(o.reason, "", "PC {i}: not THE HOST LEFT");
+    }
+    w.until(|w| w.party(a).activity == Activity::Lobby);
+    drop(relay);
+}
+
 mod accounts;
 mod matches;
 mod social;

@@ -8,11 +8,12 @@
 //! `mod.rs`, gives it input and time and shows what it draws.
 
 use super::canvas::{Align, Canvas, Color, Style, Text};
-use super::child::{Kind, Match, Running, Said};
+use super::child::{self, Kind, Match, Running, Said};
 use super::names;
 use super::ranks::{RankIcons, Size};
 use super::settings::{self, Settings, GAMERTAG_LEN};
 use crate::controls::{self, button, Controls};
+use crate::gamemenu::Leave;
 use crate::live::{self, Engine, Log, Told};
 use crate::pins::Pins;
 use crate::session::Session;
@@ -103,6 +104,8 @@ const LIST_ROWS: usize = 9;
 const MAIN_ROWS: [&str; 2] = ["ONLINE", "SETTINGS"];
 const LIVE_ROW: usize = 0;
 const MAIN_SETTINGS_ROW: usize = 1;
+/// The in-game screen's line while the engine plays.
+const IN_GAME_MENU_HINT: &str = "Start or Esc in the game's window opens the game menu.";
 /// Frames of a menu screen timed at each window size before the log says
 /// how long one takes.
 const MENU_FRAMES: u32 = 30;
@@ -150,6 +153,10 @@ pub struct Config {
     pub ranks: Option<Arc<RankIcons>>,
     /// The start screen and main menu (`Menus::flat` without the files).
     pub menus: Arc<Menus>,
+    /// For tests: more words for each match's engine
+    /// (`H2LOBBY_ENGINE_ARGS`: `--set-option`, `--pad`, a control flag),
+    /// read once when the lobby starts.
+    pub engine_args: String,
 }
 
 /// A key, button or typed character.
@@ -399,6 +406,16 @@ struct Game {
     results: Option<Vec<LauncherPlayerResult>>,
     ended_at: Option<Instant>,
     over: Option<MatchOver>,
+    /// The player left the game from the engine's GAME MENU (or ended it
+    /// for everyone).
+    left: Option<Leave>,
+    /// The engine was started with its GAME MENU (not turned off with
+    /// `H2LOBBY_ENGINE_ARGS=--no-game-menu` or `H2LAUNCH_OVERLAY_FAIL=1`),
+    /// and hasn't said since that it turned it off (`Engine::MenuOff`).
+    menu: bool,
+    /// The controls the engine runs with: those it was started with, then
+    /// the GAME MENU's last; None before it starts.
+    engine_controls: Option<Controls>,
 }
 
 impl Game {
@@ -627,7 +644,8 @@ impl App {
         self.quit
     }
 
-    /// The window should come to the front (once): the carnage report is up.
+    /// The window should come to the front (once): the engine closed, and
+    /// the carnage report or the menus are up.
     pub fn take_focus(&mut self) -> bool {
         std::mem::take(&mut self.focus)
     }
@@ -1327,6 +1345,7 @@ impl App {
             g.told = Told::default();
             g.running = false;
             g.loaded = false;
+            g.left = None;
             g.launch = true;
             if restart {
                 g.start_at = self.now;
@@ -1347,6 +1366,9 @@ impl App {
             results: None,
             ended_at: None,
             over: None,
+            left: None,
+            menu: true,
+            engine_controls: None,
         });
         self.close_popup();
         self.asked = None;
@@ -1410,8 +1432,9 @@ impl App {
                 gamertag: self.settings.gamertag.clone(),
                 instance: self.cfg.instance.clone(),
                 controls: self.settings.controls,
+                game_kind: child::game_kind(&g.m),
             };
-            match Running::start(&self.cfg.exe, &self.cfg.folder, &m) {
+            match Running::start(&self.cfg.exe, &self.cfg.folder, &m, &self.cfg.engine_args) {
                 Ok(c) => {
                     notes.push(format!(
                         "lobby: engine started for match {id:016x} ({} on {}, {})",
@@ -1419,6 +1442,8 @@ impl App {
                         m.map,
                         if host { "hosting" } else { "joining" }
                     ));
+                    g.menu = c.game_menu();
+                    g.engine_controls = Some(c.launch_controls());
                     g.child = Some(c);
                     self.screen = Screen::InGame;
                 }
@@ -1428,35 +1453,25 @@ impl App {
                 }
             }
         }
+        // What the engine said, handled once the borrow of the child ends
+        // (`on_engine_event` takes the whole lobby).
+        let said = g.child.as_mut().map(|c| c.poll()).unwrap_or_default();
+        for n in notes.drain(..) {
+            self.log(&n);
+        }
+        for s in said {
+            match s {
+                Said::Event(e) => self.on_engine_event(&e, now),
+                Said::Line(l) => self.log(&format!("engine: {l}")),
+                Said::Done => {}
+            }
+        }
+        let Some(g) = self.game.as_mut() else {
+            self.send_all(out);
+            return;
+        };
         let mut exited = false;
         if let Some(c) = g.child.as_mut() {
-            for said in c.poll() {
-                match said {
-                    Said::Event(e) => {
-                        notes.push(format!("lobby: the engine says {}", live::event_line(&e)));
-                        match &e {
-                            Engine::Running => {
-                                g.running = true;
-                                // Its window is about to open.
-                                c.let_to_front();
-                            }
-                            Engine::MapLoaded => {
-                                g.running = true;
-                                g.loaded = true;
-                                c.let_to_front();
-                            }
-                            Engine::Ended(players) => {
-                                g.results = Some(players.clone());
-                                g.ended_at = Some(now);
-                            }
-                            Engine::Closing => {}
-                        }
-                        out.extend(g.told.next(id, host, None, Some(e)));
-                    }
-                    Said::Line(l) => notes.push(format!("engine: {l}")),
-                    Said::Done => {}
-                }
-            }
             // An engine that stays up after its game is asked to close,
             // and one that doesn't close when asked is stopped.
             if g.ended_at
@@ -1470,43 +1485,16 @@ impl App {
             }
             exited = c.exited();
         }
-        let mut done = false;
-        if exited {
-            g.child = None;
-            notes.push("lobby: the engine closed".into());
-            if !g.told.over() {
-                out.extend(g.told.next(id, host, None, Some(Engine::Closing)));
-            }
-            if g.results.is_some() {
-                self.screen = Screen::Carnage;
-                self.focus = true;
-                // Start on this PC's player.
-                let me = g.m.relay.id;
-                self.csel = carnage_rows(g)
-                    .iter()
-                    .position(|r| r.relay_id == me)
-                    .unwrap_or(0);
-            } else {
-                let why = g.over.as_ref().map(|o| o.reason.clone());
-                toast = Some(match why {
-                    Some(w) if !w.is_empty() => w,
-                    Some(_) => "The match was called off.".into(),
-                    None => "You left the game.".into(),
-                });
-                done = true;
-            }
-        } else if toast.is_some() {
-            done = true;
-        }
         for n in &notes {
             self.log(n);
         }
         self.send_all(out);
-        if done {
+        if exited {
+            self.on_engine_exit();
+        } else if let Some(t) = toast {
+            // The engine didn't start.
+            self.screen = self.after_game_screen();
             self.game = None;
-            self.screen = Screen::Live;
-        }
-        if let Some(t) = toast {
             self.toast(t);
         }
         if self.client.is_none() && self.game.as_ref().is_none_or(|g| g.child.is_none()) {
@@ -1519,6 +1507,168 @@ impl App {
                 self.close_popup();
                 self.screen = if form { Screen::SignIn } else { Screen::Failed };
             }
+        }
+    }
+
+    /// What the engine's launcher said about the engine: kept on the
+    /// match, and told to the server as `Told` decides. Controls changed
+    /// in the engine's GAME MENU are saved as the Settings screen saves
+    /// them, for the next match.
+    fn on_engine_event(&mut self, e: &Engine, now: Instant) {
+        self.log(&format!("lobby: the engine says {}", live::event_line(e)));
+        if let Engine::Controls { pairs, defaults } = e {
+            self.on_engine_controls(pairs, *defaults);
+        }
+        let Some(g) = self.game.as_mut() else {
+            return;
+        };
+        let (id, host) = (g.m.id, g.host());
+        let mut note = None;
+        match e {
+            Engine::Running => {
+                g.running = true;
+                // Its window is about to open.
+                if let Some(c) = &g.child {
+                    c.let_to_front();
+                }
+            }
+            Engine::MapLoaded => {
+                g.running = true;
+                g.loaded = true;
+                if let Some(c) = &g.child {
+                    c.let_to_front();
+                }
+            }
+            // End Game before the server's GO: h2live hadn't started the
+            // match, so its result isn't the game's (`Told` sends only
+            // LEFT_MATCH), and the host gets "You ended the game." when
+            // the engine closes rather than a carnage report.
+            Engine::Ended(_) if g.told.ended_before_go() => {
+                note = Some(
+                    "lobby: the game was ended before the server started the match; \
+                     its result isn't kept",
+                );
+            }
+            Engine::Ended(players) => {
+                g.results = Some(players.clone());
+                g.ended_at = Some(now);
+            }
+            Engine::Left(k) => {
+                g.left = Some(*k);
+                note = Some(match k {
+                    Leave::Game => "lobby: the player left the game from its game menu",
+                    Leave::End => {
+                        "lobby: the player ended the game for everyone from its game menu"
+                    }
+                });
+            }
+            Engine::MenuOff => {
+                // Start goes to the game now: the in-game screen stops
+                // saying it opens the game menu.
+                g.menu = false;
+                note = Some("lobby: the engine's game menu is off for the rest of the game");
+            }
+            Engine::Closing | Engine::Controls { .. } => {}
+        }
+        let out = g.told.next(id, host, None, Some(e.clone()));
+        if let Some(n) = note {
+            self.log(n);
+        }
+        self.send_all(out);
+    }
+
+    /// The GAME MENU's controls (`Engine::Controls`), saved through
+    /// `set_control`: only the ones it changed from the controls the
+    /// engine ran with, so a control flag a test gave the engine for one
+    /// run (`H2LOBBY_ENGINE_ARGS`) isn't saved with them; every one for
+    /// Use Default Settings (`defaults`), even those that flag already
+    /// put at the default. With no engine, they are taken from the
+    /// lobby's own.
+    fn on_engine_controls(&mut self, pairs: &[(String, String)], defaults: bool) {
+        let old = self
+            .game
+            .as_ref()
+            .and_then(|g| g.engine_controls)
+            .unwrap_or(self.settings.controls);
+        let mut new = old;
+        for (k, v) in pairs {
+            let taken = match new.set(k, v) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(format!("no control called {k:?}")),
+                Err(why) => Err(why),
+            };
+            if let Err(why) = taken {
+                self.log(&format!(
+                    "lobby: the game menu's {k} = {v} wasn't taken: {why}"
+                ));
+            }
+        }
+        for ((k, v), (_, was)) in new.pairs().into_iter().zip(old.pairs()) {
+            if defaults || v != was {
+                if let Err(why) = self.set_control(&k, &v) {
+                    self.log(&format!("lobby: {k} = {v} wasn't saved: {why}"));
+                }
+            }
+        }
+        if let Some(g) = self.game.as_mut() {
+            g.engine_controls = Some(new);
+        }
+        let c = self.settings.controls.describe();
+        self.log(&format!("lobby: controls from the game menu: {c}"));
+    }
+
+    /// The engine's copy exited: on to the carnage report if its game
+    /// ended (End Game's too: its result came as the host's engine quit,
+    /// unless that was before the server's GO, `Told::ended_before_go`),
+    /// otherwise back where a player lands after a game, with why (the
+    /// server's reason, or that they left or ended it: a leave from the
+    /// GAME MENU wins over a verdict with no reason, which the server
+    /// gives when the game ended without them, as when the host's engine
+    /// ended a Team Slayer game whose team emptied, PC check 13). Either
+    /// way the lobby's window comes to the front.
+    fn on_engine_exit(&mut self) {
+        // The lobby's own "leave the game?" has nothing left to ask once
+        // the engine is gone (the player left from the GAME MENU, or the
+        // game ended), and it would cover the screen landed on.
+        if self.popup == Some(Popup::LeaveGame) {
+            self.popup = None;
+        }
+        let Some(g) = self.game.as_mut() else {
+            return;
+        };
+        g.child = None;
+        let (id, host) = (g.m.id, g.host());
+        let out = if g.told.over() {
+            Vec::new()
+        } else {
+            g.told.next(id, host, None, Some(Engine::Closing))
+        };
+        self.focus = true;
+        let toast = if g.results.is_some() {
+            self.screen = Screen::Carnage;
+            // Start on this PC's player.
+            let me = g.m.relay.id;
+            self.csel = carnage_rows(g)
+                .iter()
+                .position(|r| r.relay_id == me)
+                .unwrap_or(0);
+            None
+        } else {
+            let why = g.over.as_ref().map(|o| o.reason.clone());
+            Some(match (g.left, why) {
+                (Some(Leave::End), _) => "You ended the game.".to_string(),
+                (_, Some(w)) if !w.is_empty() => w,
+                (Some(Leave::Game), _) => "You left the game.".into(),
+                (_, Some(_)) => "The match was called off.".into(),
+                (_, None) => "You left the game.".into(),
+            })
+        };
+        self.log("lobby: the engine closed");
+        self.send_all(out);
+        if let Some(t) = toast {
+            self.screen = self.after_game_screen();
+            self.game = None;
+            self.toast(t);
         }
     }
 
@@ -1964,19 +2114,25 @@ impl App {
                 }
             }
             Input::A | Input::B => {
-                // The leader of a custom game picks the next.
-                let custom = self
-                    .game
-                    .as_ref()
-                    .is_some_and(|g| g.m.playlist == CUSTOM_GAME);
+                self.screen = self.after_game_screen();
                 self.game = None;
-                self.screen = if custom && self.leader() {
-                    Screen::Custom
-                } else {
-                    Screen::Live
-                };
             }
             _ => {}
+        }
+    }
+
+    /// Where the player lands after a game: the custom game screen for
+    /// the leader of a custom game's party (they pick the next), otherwise
+    /// the playlists.
+    fn after_game_screen(&self) -> Screen {
+        let custom = self
+            .game
+            .as_ref()
+            .is_some_and(|g| g.m.playlist == CUSTOM_GAME);
+        if custom && self.leader() {
+            Screen::Custom
+        } else {
+            Screen::Live
         }
     }
 
@@ -3691,6 +3847,9 @@ impl App {
             "You join this game."
         };
         p.text(640.0, 404.0, 20.0, DIM, Align::Center, role);
+        if g.results.is_none() && g.running && g.menu {
+            p.text(640.0, 448.0, 20.0, DIM, Align::Center, IN_GAME_MENU_HINT);
+        }
         if g.results.is_none() {
             p.hints(&[(Input::B, "Leave game")]);
         }
@@ -4507,6 +4666,7 @@ mod tests {
             log: Arc::new(|_: &str| {}),
             ranks: None,
             menus: Arc::new(Menus::flat()),
+            engine_args: String::new(),
         })
     }
 
@@ -5712,6 +5872,9 @@ mod tests {
             results: Some(results),
             ended_at: Some(a.now),
             over: None,
+            left: None,
+            menu: true,
+            engine_controls: None,
         });
         a.screen = Screen::Carnage;
         a.csel = 1;
@@ -6325,6 +6488,678 @@ mod tests {
         a.draw(&mut c, &mut text);
         assert!(a.drawn().iter().any(|d| d == "ONLINE"));
         assert!(a.drawn().iter().any(|d| d == "CHIEF"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lobby whose log is kept, for the tests to read.
+    fn logged_app(dir: &std::path::Path) -> (App, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let a = App::new(Config {
+            log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
+            ..app(dir).cfg
+        });
+        (a, lines)
+    }
+
+    /// ALPHA (this PC, relay id 0x11, hosting if `host`) and BRAVO in a
+    /// match of `playlist`, on the in-game screen with the engine's game
+    /// on. There is no engine process: the tests call `on_engine_event`
+    /// and `on_engine_exit` as `poll_game` would.
+    fn in_game(a: &mut App, playlist: u8, ranked: bool, host: bool) {
+        let player = |relay_id: u64, account: u64, tag: &str| h2net::live::LauncherPlayer {
+            relay_id,
+            account,
+            gamertag: tag.into(),
+            team: 0,
+            level: 4,
+            party: account,
+        };
+        let m = LauncherMatch {
+            id: 0x78,
+            playlist,
+            ranked,
+            teams: false,
+            map: "lockout".into(),
+            variant: "01_slayer".into(),
+            relay: h2net::live::RelaySeat {
+                port: 47050,
+                room: 0x78,
+                id: 0x11,
+                key: [0; 16],
+            },
+            host: if host { 0x11 } else { 0x22 },
+            countdown: 20,
+            players: vec![player(0x11, 1, "ALPHA"), player(0x22, 2, "BRAVO")],
+        };
+        let ip = "127.0.0.1".parse().unwrap();
+        let (session, me) = live::session_from(&m, ip).unwrap();
+        a.game = Some(Game {
+            m,
+            session,
+            me,
+            told: Told::default(),
+            launch: false,
+            start_at: a.now,
+            child: None,
+            running: true,
+            loaded: true,
+            results: None,
+            ended_at: None,
+            over: None,
+            left: None,
+            menu: true,
+            engine_controls: None,
+        });
+        a.screen = Screen::InGame;
+        a.focus = false;
+    }
+
+    fn last_toast(a: &App) -> Option<String> {
+        a.toasts.back().map(|(t, _)| t.clone())
+    }
+
+    #[test]
+    fn controls_changed_in_the_game_menu_are_saved_for_the_next_match() {
+        let dir = scratch("menu-controls");
+        let (mut a, lines) = logged_app(&dir);
+        let changed = Controls {
+            buttons: controls::ButtonLayout::BumperJumper,
+            look_sensitivity: 8,
+            vibration: false,
+            mouse_sensitivity: 2.5,
+            ..Controls::default()
+        };
+        // With a match on or not, they are taken and saved.
+        a.on_engine_event(&Engine::controls(changed, false), a.now);
+        assert_eq!(a.settings.controls, changed);
+        let saved = Settings::load(&dir.join("lobby.txt"));
+        assert_eq!(saved.controls, changed);
+        in_game(&mut a, 12, false, false);
+        let back = Controls::default();
+        a.on_engine_event(&Engine::controls(back, false), a.now);
+        assert_eq!(a.settings.controls, back);
+        assert_eq!(Settings::load(&dir.join("lobby.txt")).controls, back);
+        // The next engine is started with them.
+        a.on_engine_event(&Engine::controls(changed, false), a.now);
+        let g = a.game.as_ref().unwrap();
+        let m = Match {
+            kind: Kind::Fake,
+            map: g.m.map.clone(),
+            variant: g.m.variant.clone(),
+            session: g.session.clone(),
+            me: g.me,
+            gamertag: "ALPHA".into(),
+            instance: None,
+            controls: a.settings.controls,
+            game_kind: child::game_kind(&g.m),
+        };
+        let parsed = crate::cli::parse(m.args(std::path::Path::new("s.txt"))).unwrap();
+        assert_eq!(parsed.controls.over(Controls::default()), changed);
+        // A pair the lobby won't take is logged, and the others still are.
+        let mut pairs = Controls::default().pairs();
+        pairs[0].1 = "claw".into();
+        pairs[1].0 = "rumble".into();
+        a.on_engine_event(
+            &Engine::Controls {
+                pairs,
+                defaults: false,
+            },
+            a.now,
+        );
+        assert_eq!(
+            a.settings.controls,
+            Controls {
+                buttons: changed.buttons,
+                ..Controls::default()
+            }
+        );
+        let log = lines.lock().unwrap().clone();
+        assert!(
+            log.iter()
+                .any(|l| l.starts_with("lobby: the game menu's button_layout = claw wasn't taken")),
+            "{log:?}"
+        );
+        assert!(
+            log.iter()
+                .any(|l| l.starts_with("lobby: the game menu's rumble = ")),
+            "{log:?}"
+        );
+        assert!(a.game.as_ref().unwrap().left.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leaving_from_the_game_menu_lands_on_the_playlists_in_front() {
+        let dir = scratch("menu-left");
+        let (mut a, mut server) = live_app(&dir);
+        in_game(&mut a, 12, false, false);
+        a.on_engine_event(&Engine::Left(Leave::Game), a.now);
+        assert_eq!(a.game.as_ref().unwrap().left, Some(Leave::Game));
+        // Nothing new for the server until the engine closes.
+        assert!(sent(&mut server).is_empty());
+        assert_eq!(a.label(), "ingame");
+        a.on_engine_event(&Engine::Closing, a.now);
+        assert_eq!(
+            sent(&mut server),
+            [ToServer::LeftMatch {
+                id: 0x78,
+                host_lost: false
+            }]
+        );
+        a.on_engine_exit();
+        assert_eq!(a.label(), "live");
+        assert!(a.game.is_none());
+        assert!(a.take_focus() && !a.take_focus());
+        assert_eq!(last_toast(&a).as_deref(), Some("You left the game."));
+        // Said once.
+        assert!(sent(&mut server).is_empty());
+        // A custom game's leader who leaves lands on the custom game
+        // screen, as after a carnage report; the server's reason, when it
+        // came, is the notice.
+        in_game(&mut a, CUSTOM_GAME, false, false);
+        a.on_engine_event(&Engine::Left(Leave::Game), a.now);
+        a.game.as_mut().unwrap().over = Some(MatchOver {
+            id: 0x78,
+            counted: false,
+            reason: "THE HOST LEFT. THE GAME DIDN'T COUNT.".into(),
+            card: String::new(),
+            levels: Vec::new(),
+            players: Vec::new(),
+        });
+        a.on_engine_exit();
+        assert_eq!(a.label(), "custom");
+        assert!(a.take_focus());
+        assert_eq!(
+            last_toast(&a).as_deref(),
+            Some("THE HOST LEFT. THE GAME DIDN'T COUNT.")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PC check 13: the host's engine ended a Team Slayer game when the
+    /// guest's team emptied, and the server's verdict (no reason, not
+    /// counted) reached the guest's lobby before its engine closed. The
+    /// guest left from the GAME MENU, and is told so.
+    #[test]
+    fn a_leave_wins_over_a_verdict_with_no_reason() {
+        let dir = scratch("menu-left-verdict");
+        let (mut a, mut server) = live_app(&dir);
+        in_game(&mut a, 13, false, false);
+        a.on_engine_event(&Engine::Left(Leave::Game), a.now);
+        a.game.as_mut().unwrap().over = Some(MatchOver {
+            id: 0x78,
+            counted: false,
+            reason: String::new(),
+            card: String::new(),
+            levels: Vec::new(),
+            players: Vec::new(),
+        });
+        a.on_engine_exit();
+        assert_eq!(a.label(), "live");
+        assert!(a.take_focus());
+        assert_eq!(last_toast(&a).as_deref(), Some("You left the game."));
+        assert!(a.game.is_none());
+        let _ = sent(&mut server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End Game with no result from the engine (one that closed without
+    /// giving it): the host lands on Custom with "You ended the game.".
+    #[test]
+    fn ending_a_custom_game_from_the_game_menu_lands_on_the_custom_screen() {
+        let dir = scratch("menu-end");
+        let (mut a, mut server) = live_app(&dir);
+        in_game(&mut a, CUSTOM_GAME, false, true);
+        a.on_engine_event(&Engine::Left(Leave::End), a.now);
+        assert_eq!(a.game.as_ref().unwrap().left, Some(Leave::End));
+        assert!(sent(&mut server).is_empty());
+        // The server's verdict (the host left) came while the engine
+        // closed; the host is told they ended it.
+        a.game.as_mut().unwrap().over = Some(MatchOver {
+            id: 0x78,
+            counted: false,
+            reason: "THE HOST LEFT. THE GAME DIDN'T COUNT.".into(),
+            card: String::new(),
+            levels: Vec::new(),
+            players: Vec::new(),
+        });
+        a.on_engine_exit();
+        assert_eq!(a.label(), "custom");
+        assert!(a.take_focus());
+        assert_eq!(last_toast(&a).as_deref(), Some("You ended the game."));
+        assert_eq!(
+            sent(&mut server),
+            [ToServer::LeftMatch {
+                id: 0x78,
+                host_lost: false
+            }]
+        );
+        // Not the party's leader: the playlists.
+        let mut pt = party(500, Activity::Playing);
+        pt.leader = 2;
+        view(&mut a).party = Some(pt);
+        in_game(&mut a, CUSTOM_GAME, false, true);
+        a.on_engine_event(&Engine::Left(Leave::End), a.now);
+        a.on_engine_exit();
+        assert_eq!(a.label(), "live");
+        assert_eq!(last_toast(&a).as_deref(), Some("You ended the game."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End Game as PC check 14 saw it, once the server's GO came: `left
+    /// end`, then the host's result as its engine quits, holding every
+    /// player. It goes to the server as a game cut short (finished false),
+    /// then LEFT_MATCH, so h2live takes the host as leaving at the end
+    /// rather than HOST_LEFT; the engine's closing says nothing more, and
+    /// the host lands on the carnage report like the guests, with no "You
+    /// ended the game.".
+    #[test]
+    fn ending_a_custom_game_with_its_result_shows_the_carnage_report() {
+        let dir = scratch("menu-end-result");
+        let (mut a, mut server) = live_app(&dir);
+        in_game(&mut a, CUSTOM_GAME, false, true);
+        a.on_event(LiveEvent::Go(0x78));
+        a.on_engine_event(&Engine::Left(Leave::End), a.now);
+        assert!(sent(&mut server).is_empty());
+        let result = |relay_id: u64, place: u8| LauncherPlayerResult {
+            relay_id,
+            team: place,
+            place,
+            score: 5 - i32::from(place),
+            kills: 5 - u16::from(place),
+            assists: 0,
+            deaths: 1,
+            betrayals: 0,
+            suicides: 0,
+            left: false,
+        };
+        let both = vec![result(0x11, 0), result(0x22, 1)];
+        a.on_engine_event(&Engine::Ended(both.clone()), a.now);
+        let out = sent(&mut server);
+        let [ToServer::LauncherResult(r), ToServer::LeftMatch { id, host_lost }] = out.as_slice()
+        else {
+            panic!("{out:?}");
+        };
+        assert_eq!((r.id, r.finished), (0x78, false));
+        assert_eq!(r.players, both);
+        assert_eq!((*id, *host_lost), (0x78, false));
+        a.on_engine_event(&Engine::Closing, a.now);
+        a.on_engine_exit();
+        assert!(sent(&mut server).is_empty());
+        assert_eq!(
+            (a.label().as_str(), a.take_focus()),
+            ("carnage-waiting", true)
+        );
+        assert_eq!(a.csel, 0);
+        assert_ne!(last_toast(&a).as_deref(), Some("You ended the game."));
+        // The server's verdict: no reason, not counted (an unranked
+        // custom game cut short).
+        a.on_match_over(MatchOver {
+            id: 0x78,
+            counted: false,
+            reason: String::new(),
+            card: String::new(),
+            levels: Vec::new(),
+            players: Vec::new(),
+        });
+        assert_eq!(a.label(), "carnage");
+        // A goes on to the custom game screen, as after any custom game.
+        a.input(Input::A);
+        assert_eq!(a.label(), "custom");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End Game before the server's GO (a guest still joining): h2live
+    /// hasn't started the match and would drop the result, so End Game's
+    /// result isn't kept or sent; the host only leaves (LEFT_MATCH) and,
+    /// when the engine closes, lands on Custom with "You ended the
+    /// game.", not on a carnage report saying the host left. Another
+    /// match's GO doesn't change that.
+    #[test]
+    fn ending_a_custom_game_before_go_lands_on_the_custom_screen() {
+        let dir = scratch("menu-end-before-go");
+        let (mut a, mut server) = live_app(&dir);
+        in_game(&mut a, CUSTOM_GAME, false, true);
+        a.on_event(LiveEvent::Go(0x79));
+        a.on_engine_event(&Engine::Left(Leave::End), a.now);
+        assert!(sent(&mut server).is_empty());
+        let result = |relay_id: u64, place: u8| LauncherPlayerResult {
+            relay_id,
+            team: place,
+            place,
+            score: 0,
+            kills: 0,
+            assists: 0,
+            deaths: 0,
+            betrayals: 0,
+            suicides: 0,
+            left: false,
+        };
+        a.on_engine_event(
+            &Engine::Ended(vec![result(0x11, 0), result(0x22, 1)]),
+            a.now,
+        );
+        assert_eq!(
+            sent(&mut server),
+            [ToServer::LeftMatch {
+                id: 0x78,
+                host_lost: false
+            }]
+        );
+        let g = a.game.as_ref().unwrap();
+        assert!(g.results.is_none() && g.ended_at.is_none());
+        // The in-game screen still lets B ask to leave.
+        a.input(Input::B);
+        assert_eq!(a.popup, Some(Popup::LeaveGame));
+        a.on_engine_event(&Engine::Closing, a.now);
+        a.on_engine_exit();
+        assert!(sent(&mut server).is_empty());
+        assert_eq!((a.label().as_str(), a.take_focus()), ("custom", true));
+        assert_eq!(a.popup, None);
+        assert_eq!(last_toast(&a).as_deref(), Some("You ended the game."));
+        assert!(a.game.is_none());
+        // The server's verdict (the host left), after the engine closed,
+        // changes nothing.
+        a.on_match_over(MatchOver {
+            id: 0x78,
+            counted: false,
+            reason: "THE HOST LEFT. THE GAME DIDN'T COUNT.".into(),
+            card: String::new(),
+            levels: Vec::new(),
+            players: Vec::new(),
+        });
+        assert_eq!(a.label(), "custom");
+        assert_eq!(last_toast(&a).as_deref(), Some("You ended the game."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_engine_that_closes_takes_the_lobby_to_the_front() {
+        let dir = scratch("menu-exit");
+        let mut a = app(&dir);
+        // No results and no leave from the menu: today's notices.
+        in_game(&mut a, 11, true, false);
+        a.on_engine_exit();
+        assert_eq!((a.label().as_str(), a.take_focus()), ("live", true));
+        assert_eq!(last_toast(&a).as_deref(), Some("You left the game."));
+        in_game(&mut a, 11, true, false);
+        a.game.as_mut().unwrap().over = Some(MatchOver {
+            id: 0x78,
+            counted: false,
+            reason: String::new(),
+            card: String::new(),
+            levels: Vec::new(),
+            players: Vec::new(),
+        });
+        a.on_engine_exit();
+        assert_eq!((a.label().as_str(), a.take_focus()), ("live", true));
+        assert_eq!(last_toast(&a).as_deref(), Some("The match was called off."));
+        // Results: the carnage report, on this PC's player, as before,
+        // and A goes on to the playlists.
+        in_game(&mut a, 11, true, false);
+        let result = |relay_id: u64, place: u8| LauncherPlayerResult {
+            relay_id,
+            team: place,
+            place,
+            score: 2 - i32::from(place),
+            kills: 1,
+            assists: 0,
+            deaths: 1,
+            betrayals: 0,
+            suicides: 0,
+            left: false,
+        };
+        a.on_engine_event(
+            &Engine::Ended(vec![result(0x11, 1), result(0x22, 0)]),
+            a.now,
+        );
+        a.on_engine_exit();
+        // (Waiting for the server's verdict.)
+        assert_eq!(
+            (a.label().as_str(), a.take_focus()),
+            ("carnage-waiting", true)
+        );
+        assert_eq!(a.csel, 1);
+        assert!(a.game.is_some());
+        a.input(Input::A);
+        assert_eq!(a.label(), "live");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_one_run_control_flag_is_not_saved_with_the_game_menus_changes() {
+        // lobby.txt has vibration on; a test started the engine with
+        // H2LOBBY_ENGINE_ARGS=--no-vibration, so it runs with it off.
+        let dir = scratch("menu-controls-flag");
+        let mut a = app(&dir);
+        in_game(&mut a, 12, false, false);
+        let saved = a.settings.controls;
+        assert!(saved.vibration);
+        let launch = child::launch_controls("--no-vibration", saved);
+        a.game.as_mut().unwrap().engine_controls = Some(launch);
+        // Only Mouse Sensitivity is changed in the game menu; the engine
+        // says all eight, vibration off among them.
+        let live = Controls {
+            mouse_sensitivity: 4.0,
+            ..launch
+        };
+        a.on_engine_event(&Engine::controls(live, false), a.now);
+        let want = Controls {
+            mouse_sensitivity: 4.0,
+            ..saved
+        };
+        assert_eq!(a.settings.controls, want);
+        assert_eq!(Settings::load(&dir.join("lobby.txt")).controls, want);
+        // Then vibration itself: that is the player's, and saved.
+        let on = Controls {
+            vibration: true,
+            ..live
+        };
+        let off = Controls {
+            vibration: false,
+            ..live
+        };
+        a.on_engine_event(&Engine::controls(on, false), a.now);
+        a.on_engine_event(&Engine::controls(off, false), a.now);
+        assert!(!a.settings.controls.vibration);
+        assert_eq!(a.settings.controls.mouse_sensitivity, 4.0);
+        assert_eq!(
+            Settings::load(&dir.join("lobby.txt")).controls,
+            a.settings.controls
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn use_default_settings_in_the_game_menu_saves_every_one() {
+        // lobby.txt has look sensitivity 7 and vibration off; a test
+        // started the engine with H2LOBBY_ENGINE_ARGS=--look-sensitivity 3
+        // --vibration, so it ran on Halo 2's defaults already.
+        let dir = scratch("menu-controls-defaults");
+        let mut a = app(&dir);
+        in_game(&mut a, 12, false, false);
+        for (k, v) in [("look_sensitivity", "7"), ("vibration", "off")] {
+            a.set_control(k, v).unwrap();
+        }
+        let saved = a.settings.controls;
+        let launch = child::launch_controls("--look-sensitivity 3 --vibration", saved);
+        assert_eq!(launch, Controls::default());
+        a.game.as_mut().unwrap().engine_controls = Some(launch);
+        // The same eight as an ordinary change: nothing differs from what
+        // the engine ran with, so lobby.txt keeps the player's.
+        a.on_engine_event(&Engine::controls(Controls::default(), false), a.now);
+        assert_eq!(a.settings.controls, saved);
+        assert_eq!(Settings::load(&dir.join("lobby.txt")).controls, saved);
+        // Said as Use Default Settings: every one is saved.
+        a.on_engine_event(&Engine::controls(Controls::default(), true), a.now);
+        assert_eq!(a.settings.controls, Controls::default());
+        assert_eq!(
+            Settings::load(&dir.join("lobby.txt")).controls,
+            Controls::default()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The match `in_game` sets up, before its engine is started.
+    fn about_to_start(a: &mut App, playlist: u8, host: bool) {
+        in_game(a, playlist, false, host);
+        let g = a.game.as_mut().unwrap();
+        (g.launch, g.running, g.loaded, g.start_at) = (true, false, false, a.now);
+    }
+
+    /// A stand-in for the engine's launcher that takes any words and stays
+    /// up (until it is killed). A shell of its own writes it, so no handle
+    /// of this process to the file is inherited by another test's child,
+    /// which would make starting it fail as "text file busy".
+    #[cfg(unix)]
+    fn sleeper(dir: &std::path::Path) -> PathBuf {
+        let exe = dir.join("engine.sh");
+        let made = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf '#!/bin/sh\\nexec sleep 30\\n' > \"$1\" && chmod +x \"$1\"",
+            ])
+            .arg("sh")
+            .arg(&exe)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        exe
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_started_engine_keeps_its_one_run_flags_apart_from_the_players() {
+        // H2LOBBY_ENGINE_ARGS (read once into the lobby's Config) turns
+        // vibration off for this run and the game menu off.
+        let dir = scratch("engine-start");
+        let mut a = app(&dir);
+        a.cfg.exe = sleeper(&dir);
+        a.cfg.engine_args = "--no-vibration --no-game-menu".into();
+        let saved = a.settings.controls;
+        assert!(saved.vibration);
+        about_to_start(&mut a, 12, false);
+        a.poll_game();
+        let g = a.game.as_mut().unwrap();
+        assert!(g.child.is_some(), "the stand-in started");
+        assert_eq!(a.screen, Screen::InGame);
+        // The in-game screen won't say Start opens the game menu, and the
+        // GAME MENU's changes are told apart from the flag's.
+        assert!(!g.menu);
+        let launch = Controls {
+            vibration: false,
+            ..saved
+        };
+        assert_eq!(g.engine_controls, Some(launch));
+        a.on_engine_event(&Engine::controls(launch, false), a.now);
+        assert_eq!(Settings::load(&dir.join("lobby.txt")).controls, saved);
+        assert!(a.settings.controls.vibration);
+        // Without the words, the engine has its menu and the lobby's
+        // controls.
+        a.game.as_mut().unwrap().child.as_mut().unwrap().kill();
+        a.cfg.engine_args.clear();
+        about_to_start(&mut a, 12, false);
+        a.poll_game();
+        let g = a.game.as_mut().unwrap();
+        assert!(g.menu);
+        assert_eq!(g.engine_controls, Some(saved));
+        g.child.as_mut().unwrap().kill();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_engine_that_does_not_start_lands_as_after_a_game() {
+        let dir = scratch("engine-no-start");
+        let (mut a, mut server) = live_app(&dir);
+        a.cfg.exe = dir.join("no-such-engine");
+        // A custom game's leader: back on the custom game screen.
+        about_to_start(&mut a, CUSTOM_GAME, true);
+        a.poll_game();
+        assert_eq!(a.label(), "custom");
+        assert!(a.game.is_none());
+        let toast = last_toast(&a).unwrap();
+        assert!(toast.starts_with("The engine didn't start: "), "{toast}");
+        assert_eq!(
+            sent(&mut server),
+            [ToServer::LeftMatch {
+                id: 0x78,
+                host_lost: false
+            }]
+        );
+        // A playlist's game: the playlists.
+        about_to_start(&mut a, 12, false);
+        a.poll_game();
+        assert_eq!(a.label(), "live");
+        assert!(a.game.is_none());
+        assert_eq!(
+            sent(&mut server),
+            [ToServer::LeftMatch {
+                id: 0x78,
+                host_lost: false
+            }]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_in_game_screen_says_how_to_open_the_game_menu() {
+        let Ok(mut text) = Text::system() else {
+            return;
+        };
+        let dir = scratch("menu-hint");
+        let mut a = app(&dir);
+        in_game(&mut a, 12, false, false);
+        let mut c = Canvas::new(640, 360);
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().any(|d| d == IN_GAME_MENU_HINT));
+        // Not once the game is over, nor before the engine runs.
+        a.game.as_mut().unwrap().results = Some(Vec::new());
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().all(|d| d != IN_GAME_MENU_HINT));
+        in_game(&mut a, 12, false, false);
+        a.game.as_mut().unwrap().running = false;
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().all(|d| d != IN_GAME_MENU_HINT));
+        // Nor when the engine runs without its menu (the README's
+        // fallback): Start goes to the game then.
+        in_game(&mut a, 12, false, false);
+        a.game.as_mut().unwrap().menu = false;
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().all(|d| d != IN_GAME_MENU_HINT));
+        // Nor once the engine turned its menu off mid-game (its overlay
+        // failed): the line goes.
+        in_game(&mut a, 12, false, false);
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().any(|d| d == IN_GAME_MENU_HINT));
+        a.on_engine_event(&Engine::MenuOff, a.now);
+        assert!(!a.game.as_ref().unwrap().menu);
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().all(|d| d != IN_GAME_MENU_HINT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leaving_from_the_game_menu_clears_the_lobbys_leave_question() {
+        // The lobby's "Leave game" asked, unanswered; the player leaves
+        // from the engine's GAME MENU instead.
+        let dir = scratch("menu-popup");
+        let mut a = app(&dir);
+        in_game(&mut a, 11, true, false);
+        a.input(Input::B);
+        assert_eq!(a.popup, Some(Popup::LeaveGame));
+        a.on_engine_event(&Engine::Left(Leave::Game), a.now);
+        a.on_engine_exit();
+        assert_eq!(a.popup, None);
+        assert_eq!(a.label(), "live");
+        assert_eq!(last_toast(&a).as_deref(), Some("You left the game."));
+        // The same when the game ended and the carnage report comes.
+        in_game(&mut a, 11, true, false);
+        a.input(Input::B);
+        assert_eq!(a.popup, Some(Popup::LeaveGame));
+        a.on_engine_event(&Engine::Ended(Vec::new()), a.now);
+        a.on_engine_exit();
+        assert_eq!(a.popup, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
