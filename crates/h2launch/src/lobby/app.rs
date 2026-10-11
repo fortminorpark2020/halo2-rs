@@ -1082,35 +1082,25 @@ impl App {
                 }
             }
         }
+        // What the engine said, handled once the borrow of the child ends
+        // (`on_engine_event` takes the whole lobby).
+        let said = g.child.as_mut().map(|c| c.poll()).unwrap_or_default();
+        for n in notes.drain(..) {
+            self.log(&n);
+        }
+        for s in said {
+            match s {
+                Said::Event(e) => self.on_engine_event(&e, now),
+                Said::Line(l) => self.log(&format!("engine: {l}")),
+                Said::Done => {}
+            }
+        }
+        let Some(g) = self.game.as_mut() else {
+            self.send_all(out);
+            return;
+        };
         let mut exited = false;
         if let Some(c) = g.child.as_mut() {
-            for said in c.poll() {
-                match said {
-                    Said::Event(e) => {
-                        notes.push(format!("lobby: the engine says {}", live::event_line(&e)));
-                        match &e {
-                            Engine::Running => {
-                                g.running = true;
-                                // Its window is about to open.
-                                c.let_to_front();
-                            }
-                            Engine::MapLoaded => {
-                                g.running = true;
-                                g.loaded = true;
-                                c.let_to_front();
-                            }
-                            Engine::Ended(players) => {
-                                g.results = Some(players.clone());
-                                g.ended_at = Some(now);
-                            }
-                            Engine::Closing => {}
-                        }
-                        out.extend(g.told.next(id, host, None, Some(e)));
-                    }
-                    Said::Line(l) => notes.push(format!("engine: {l}")),
-                    Said::Done => {}
-                }
-            }
             // An engine that stays up after its game is asked to close,
             // and one that doesn't close when asked is stopped.
             if g.ended_at
@@ -1171,6 +1161,39 @@ impl App {
                 self.screen = Screen::Failed;
             }
         }
+    }
+
+    /// What the engine's launcher said about the engine: kept on the
+    /// match, and told to the server as `Told` decides.
+    fn on_engine_event(&mut self, e: &Engine, now: Instant) {
+        self.log(&format!("lobby: the engine says {}", live::event_line(e)));
+        let Some(g) = self.game.as_mut() else {
+            return;
+        };
+        let (id, host) = (g.m.id, g.host());
+        match e {
+            Engine::Running => {
+                g.running = true;
+                // Its window is about to open.
+                if let Some(c) = &g.child {
+                    c.let_to_front();
+                }
+            }
+            Engine::MapLoaded => {
+                g.running = true;
+                g.loaded = true;
+                if let Some(c) = &g.child {
+                    c.let_to_front();
+                }
+            }
+            Engine::Ended(players) => {
+                g.results = Some(players.clone());
+                g.ended_at = Some(now);
+            }
+            Engine::Closing => {}
+        }
+        let out = g.told.next(id, host, None, Some(e.clone()));
+        self.send_all(out);
     }
 
     // -------------------------------------------------------------- time
@@ -1567,19 +1590,25 @@ impl App {
                 }
             }
             Input::A | Input::B => {
-                // The leader of a custom game picks the next.
-                let custom = self
-                    .game
-                    .as_ref()
-                    .is_some_and(|g| g.m.playlist == CUSTOM_GAME);
+                self.screen = self.after_game_screen();
                 self.game = None;
-                self.screen = if custom && self.leader() {
-                    Screen::Custom
-                } else {
-                    Screen::Live
-                };
             }
             _ => {}
+        }
+    }
+
+    /// Where the player lands after a game: the custom game screen for
+    /// the leader of a custom game's party (they pick the next), otherwise
+    /// the playlists.
+    fn after_game_screen(&self) -> Screen {
+        let custom = self
+            .game
+            .as_ref()
+            .is_some_and(|g| g.m.playlist == CUSTOM_GAME);
+        if custom && self.leader() {
+            Screen::Custom
+        } else {
+            Screen::Live
         }
     }
 
