@@ -1,0 +1,523 @@
+//! The in-game GAME MENU inside the engine's process (the game menu's
+//! design, section 2). Its logic is `crate::gamemenu`; this is the driver
+//! on the window thread, which ticks at least every 5 ms. Each tick it:
+//!
+//! 1. reads player 0's pad itself (the pad the engine's polls picked),
+//!    the input script's pad buttons, stick and keys, and the menu keys
+//!    our window got (Esc, the arrows, Enter, Backspace);
+//! 2. turns them into menu keys (`gamemenu::edges`) and runs `GameMenu`;
+//! 3. applies what it says: the input gate opened or closed
+//!    (`input::open_menu`, `input::close_menu`), the live controls, the
+//!    lobby's events, the quit;
+//! 4. draws the panel on the CPU when the page or the back buffer's size
+//!    changed, and publishes it for the render thread (`overlay`);
+//! 5. checks that the panel was drawn: one not drawn within a second
+//!    (window not minimised) closes the menu and lets go of the game's
+//!    input, and three of those, or any overlay failure, turn the menu
+//!    off for the run, giving Start back to the engine.
+//!
+//! It opens with Start on player 0's pad or Esc in the game's window,
+//! once the fonts are loaded (`prepare`, at map load), while the game is
+//! on and no quit has started. The match keeps running; the engine just
+//! gets neutral input for player 0.
+//!
+//! Nothing here touches halo2.dll beyond the host interface: engine
+//! messages through `engine::post_message`, the window thread being its
+//! caller, and answers to the engine's own calls.
+
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::time::Instant;
+
+use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, IsIconic, ASFW_ANY};
+
+use super::log::log;
+use super::{engine, gfx, input, overlay, Setup};
+use crate::controls::Controls;
+use crate::gamemenu::edges::PadEdges;
+use crate::gamemenu::{self, Effect, GameMenu, GameMenuFrame, Key, Leave, MenuContext};
+use crate::live::{self, Engine};
+use crate::profile::InputFrame;
+
+/// Whether the engine picks up a new player profile mid-match (look
+/// sensitivity, automatic look centering). PC check 7 sets it; until
+/// then the menu tags those settings NEXT GAME once changed.
+pub const ENGINE_REREADS_PROFILE: bool = false;
+/// Whether the engine picks up a new gamepad mapping mid-match (the
+/// button layout). PC check 7 sets it, as above.
+pub const ENGINE_REREADS_MAPPING: bool = false;
+
+/// How long the panel may go undrawn while the menu shows.
+const HEALTH_WAIT: f64 = 1.0;
+/// How many such closes turn the menu off for the run.
+const HEALTH_CLOSES: u32 = 3;
+/// With `--end-game-message`, how long End Game waits for the game to end
+/// before it quits anyway.
+const END_GAME_WAIT: f64 = 10.0;
+
+/// The fonts are loaded and the menu may open; Start and Esc are its own.
+static READY: AtomicBool = AtomicBool::new(false);
+/// `prepare` has run.
+static PREPARED: AtomicBool = AtomicBool::new(false);
+static FONTS: OnceLock<h2ui::text::Fonts> = OnceLock::new();
+
+pub fn ready() -> bool {
+    READY.load(Ordering::SeqCst)
+}
+
+pub fn is_open() -> bool {
+    input::menu_open()
+}
+
+/// At map load (host slot 3, state 1): loads Halo 2's fonts from MCC's
+/// `halo2\h2_fonts` (or uses the built-in font) on a thread of its own,
+/// then makes the menu ready, unless `--no-game-menu` or
+/// `H2LAUNCH_OVERLAY_FAIL=1` keep it off. Runs once.
+pub fn prepare() {
+    if PREPARED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Some(s) = super::setup() else { return };
+    if !s.args.game_menu {
+        log!("game menu: off (--no-game-menu): Start and Esc reach the game");
+        return;
+    }
+    if std::env::var_os("H2LAUNCH_OVERLAY_FAIL").is_some_and(|v| v == "1") {
+        log!("game menu: off (H2LAUNCH_OVERLAY_FAIL=1): Start and Esc reach the game");
+        return;
+    }
+    let dir = crate::mccroot::join(&s.root, r"halo2\h2_fonts");
+    let spawned = std::thread::Builder::new()
+        .name("h2launch-menu-fonts".into())
+        .spawn(move || {
+            let start = Instant::now();
+            let fonts = h2ui::text::Fonts::read(Path::new(&dir));
+            let loaded = fonts.loaded();
+            let which = if loaded.is_empty() {
+                format!("the built-in font; none read from {dir}")
+            } else {
+                format!("Halo 2's from {dir}: {}", loaded.join(", "))
+            };
+            let _ = FONTS.set(fonts);
+            READY.store(true, Ordering::SeqCst);
+            log!(
+                "game menu: ready (fonts: {which}; {:.0} ms); Start on the pad or Esc in the window opens it",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        });
+    if let Err(e) = spawned {
+        log!("game menu: off (no thread for its fonts: {e})");
+    }
+}
+
+/// A key for the menu: from the pad (and the script's pad), or a keyboard
+/// key by its virtual-key code (our window's, or the script's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Press {
+    Pad(Key),
+    Keyboard(u32),
+}
+
+/// The menu on the window thread.
+pub struct Driver {
+    menu: GameMenu,
+    ctx: MenuContext,
+    edges: PadEdges,
+    /// The XInput slot read last (-1: none).
+    pad: i32,
+    /// The input script's time at the last tick (this driver's own, apart
+    /// from the input polls').
+    script_t: Option<f64>,
+    /// The script's keys held at the last tick.
+    script_keys: Vec<u8>,
+    /// The frame and the back buffer size of the panel published last.
+    shown: Option<(GameMenuFrame, (u32, u32))>,
+    /// The overlay generation of that panel.
+    published: u64,
+    /// Since when the panel has been waiting to be drawn.
+    behind_since: Option<f64>,
+    health_closes: u32,
+    /// Turned off for the run.
+    off: bool,
+    game_over_seen: bool,
+    /// `--end-game-message`: when End Game quits anyway.
+    end_game_at: Option<f64>,
+}
+
+impl Driver {
+    pub fn new(s: &Setup) -> Driver {
+        let players = match &s.session {
+            Some((sess, me)) => {
+                gamemenu::roster(sess, *me, super::VARIANT_TEAMS.load(Ordering::SeqCst))
+            }
+            None => gamemenu::offline_roster(&s.args.name),
+        };
+        let ctx = MenuContext {
+            kind: s.args.game_kind,
+            host: s
+                .session
+                .as_ref()
+                .is_none_or(|(sess, me)| sess.is_host(*me)),
+            launch: s.controls,
+            rereads_profile: ENGINE_REREADS_PROFILE,
+            rereads_mapping: ENGINE_REREADS_MAPPING,
+            players,
+        };
+        Driver {
+            menu: GameMenu::new(s.controls),
+            ctx,
+            edges: PadEdges::new(),
+            pad: -1,
+            script_t: None,
+            script_keys: Vec::new(),
+            shown: None,
+            published: 0,
+            behind_since: None,
+            health_closes: 0,
+            off: false,
+            game_over_seen: false,
+            end_game_at: None,
+        }
+    }
+
+    /// One pass of the window thread's loop (`t`: seconds since start).
+    pub fn tick(&mut self, t: f64) {
+        if self.off {
+            return;
+        }
+        if !ready() {
+            // Presses before the menu is ready never open it later.
+            let _ = input::take_menu_keys();
+            return;
+        }
+        let (reading, presses) = self.read(t);
+        if overlay::failed() {
+            self.turn_off("the overlay failed", &reading);
+            return;
+        }
+        let ended = super::GAME_ENDED.load(Ordering::SeqCst);
+        if ended && !self.game_over_seen {
+            self.game_over_seen = true;
+            if self.end_game_at.take().is_some() {
+                // The End Game experiment ended the game: show its end.
+                log!("game menu: the game ended after End Game's engine message");
+                self.force_close(&reading);
+            } else {
+                let fx = self.menu.game_over();
+                if !fx.is_empty() {
+                    log!("game menu: closed (game over)");
+                }
+                self.apply(fx, &reading, t);
+            }
+        }
+        if let Some(at) = self.end_game_at {
+            if t >= at {
+                self.end_game_at = None;
+                log!("game menu: the game didn't end {END_GAME_WAIT} s after End Game's engine message; quitting");
+                super::set_reason("ended from the game menu");
+                super::request_quit(super::QUIT_USER);
+            }
+        }
+        for p in presses {
+            let fx = if self.menu.is_open() {
+                let before = self.menu.page();
+                let fx = match p {
+                    Press::Pad(k) => self.menu.press(k, false, &self.ctx),
+                    Press::Keyboard(code) => match gamemenu::menu_key(code) {
+                        Some(k) => self.menu.press(k, true, &self.ctx),
+                        None => Vec::new(),
+                    },
+                };
+                if self.menu.page() != before {
+                    log!("game menu: {p:?}: {:?}", self.menu.page());
+                }
+                fx
+            } else if p == Press::Pad(Key::Start) || p == Press::Keyboard(gamemenu::vk::ESCAPE) {
+                if self.can_open() {
+                    let fx = self.menu.open();
+                    self.menu.set_keyboard(matches!(p, Press::Keyboard(_)));
+                    log!(
+                        "game menu: opened ({})",
+                        if matches!(p, Press::Keyboard(_)) {
+                            "Esc"
+                        } else {
+                            "Start"
+                        }
+                    );
+                    fx
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            self.apply(fx, &reading, t);
+        }
+        if self.menu.is_open() && !self.off {
+            self.draw();
+            overlay::show(true);
+            self.health(t, &reading);
+        }
+    }
+
+    /// A quit started (from the menu or not): PLEASE WAIT if it is open.
+    pub fn quitting(&mut self) {
+        self.menu.quitting();
+    }
+
+    /// The menu may open: ready, the map loaded, the game on, no quit.
+    fn can_open(&self) -> bool {
+        !self.off
+            && ready()
+            && super::marked(&super::STATE1_AT).is_some()
+            && !super::GAME_ENDED.load(Ordering::SeqCst)
+            && super::QUIT.load(Ordering::SeqCst) == super::QUIT_NONE
+    }
+
+    /// One reading of everything the menu listens to: what is held (for
+    /// the hold when it closes) and the presses since the last tick.
+    fn read(&mut self, t: f64) -> (InputFrame, Vec<Press>) {
+        let mut r = InputFrame::default();
+        let pad = input::menu_pad();
+        let index = pad.map_or(-1, |(i, _)| i);
+        if index != self.pad {
+            // Another pad (or none): what it holds now counts once let go.
+            self.edges.reset();
+            self.pad = index;
+        }
+        let (mut lx, mut ly) = (0i16, 0i16);
+        if let Some((_, g)) = pad {
+            r.pad_buttons = g.buttons;
+            r.left_trigger = g.left_trigger;
+            r.right_trigger = g.right_trigger;
+            (lx, ly) = (g.lx, g.ly);
+        }
+        let mut script_keys = Vec::new();
+        if let (Some(sc), Some(st)) = (
+            super::setup().and_then(|s| s.script.as_ref()),
+            super::script_time(),
+        ) {
+            let t0 = self.script_t.replace(st).unwrap_or(st);
+            let syn = sc.sample(t0.min(st), st);
+            r.pad_buttons |= syn.pad_buttons;
+            r.left_trigger = r.left_trigger.max(syn.left_trigger);
+            r.right_trigger = r.right_trigger.max(syn.right_trigger);
+            r.mouse_buttons |= syn.mouse_buttons;
+            if let Some((x, y)) = syn.left_stick {
+                (lx, ly) = (x, y);
+            }
+            for &k in &syn.keys {
+                r.keys[k as usize] = true;
+            }
+            script_keys = syn.keys;
+        }
+        input::add_held_keys(&mut r);
+        // The left stick read raw, before the thumbstick layout.
+        let mut presses: Vec<Press> = self
+            .edges
+            .update(r.pad_buttons, lx, ly, t)
+            .into_iter()
+            .map(Press::Pad)
+            .collect();
+        for &k in &script_keys {
+            let code = u32::from(k);
+            let menu = gamemenu::menu_key(code).is_some();
+            if menu && !self.script_keys.contains(&k) {
+                presses.push(Press::Keyboard(code));
+            }
+        }
+        self.script_keys = script_keys;
+        presses.extend(input::take_menu_keys().into_iter().map(Press::Keyboard));
+        (r, presses)
+    }
+
+    fn apply(&mut self, fx: Vec<Effect>, reading: &InputFrame, t: f64) {
+        for e in fx {
+            match e {
+                Effect::Opened => input::open_menu(),
+                Effect::Closed => {
+                    self.closed(reading);
+                    log!("game menu: closed");
+                }
+                Effect::Controls(c) => self.controls(c),
+                Effect::Leave(k) => self.leave(k, t),
+            }
+        }
+    }
+
+    /// The menu closed: the input gate takes what is held, the panel goes.
+    fn closed(&mut self, reading: &InputFrame) {
+        input::close_menu(reading);
+        overlay::show(false);
+        overlay::clear();
+        self.shown = None;
+        self.behind_since = None;
+    }
+
+    /// Closes the menu from any page (keeping the live controls).
+    fn force_close(&mut self, reading: &InputFrame) {
+        if self.menu.is_open() {
+            self.menu = GameMenu::new(self.menu.live());
+            self.closed(reading);
+        }
+    }
+
+    fn turn_off(&mut self, why: &str, reading: &InputFrame) {
+        self.force_close(reading);
+        self.off = true;
+        self.end_game_at = None;
+        READY.store(false, Ordering::SeqCst);
+        overlay::show(false);
+        overlay::clear();
+        log!("game menu: off for this run ({why}); Start and Esc reach the game again");
+    }
+
+    /// Draws and publishes the panel if its page or the back buffer's
+    /// size changed.
+    fn draw(&mut self) {
+        let frame = self.menu.frame(&self.ctx);
+        let size = overlay::seen_size().unwrap_or_else(gfx::swap_size);
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|(f, sz)| *f == frame && *sz == size)
+        {
+            return;
+        }
+        let Some(fonts) = FONTS.get() else { return };
+        let (w, h) = size;
+        if w == 0 || h == 0 {
+            return;
+        }
+        let start = Instant::now();
+        let panel = h2ui::gamemenu::draw_panel(&frame, fonts, w, h);
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        if panel.w == 0 || panel.h == 0 {
+            // A window too small for it; the health check closes the menu.
+            return;
+        }
+        let Some(device) = gfx::device() else { return };
+        match overlay::publish(&device, &panel, size) {
+            Ok(gen) => {
+                log!(
+                    "game menu: panel {}x{} at {},{} drawn in {ms:.1} ms for a {w}x{h} back buffer",
+                    panel.w,
+                    panel.h,
+                    panel.x,
+                    panel.y
+                );
+                self.published = gen;
+                self.shown = Some((frame, size));
+            }
+            Err(e) => {
+                log!("game menu: the panel wasn't published: {e}");
+                self.shown = None;
+            }
+        }
+    }
+
+    /// The panel must reach the screen: see the module notes.
+    fn health(&mut self, t: f64, reading: &InputFrame) {
+        // SAFETY: a query on our own window.
+        let iconic = unsafe { IsIconic(super::hwnd()) }.as_bool();
+        let behind = self.shown.is_none() || overlay::drawn() < self.published;
+        if !behind || iconic {
+            self.behind_since = None;
+            return;
+        }
+        let since = *self.behind_since.get_or_insert(t);
+        if t - since < HEALTH_WAIT {
+            return;
+        }
+        self.health_closes += 1;
+        log!(
+            "game menu: its panel wasn't drawn for {HEALTH_WAIT} s; closed it and let go of the game's input ({} of {HEALTH_CLOSES})",
+            self.health_closes
+        );
+        self.force_close(reading);
+        if self.health_closes >= HEALTH_CLOSES {
+            self.turn_off("its panel didn't show three times", reading);
+        }
+    }
+
+    /// The menu changed the controls: the launcher's own use of them now,
+    /// the engine's profile and mapping for its next look, saved.
+    fn controls(&mut self, c: Controls) {
+        let old = super::controls();
+        super::set_controls(c);
+        if old.vibration && !c.vibration {
+            input::stop_rumble();
+            log!("game menu: rumble stopped (vibration off)");
+        }
+        super::host::publish_controls(&c);
+        log!("game menu: controls now {}", c.describe());
+        let event = Engine::Controls(c.pairs());
+        if live::to_lobby() {
+            // The lobby saves them (lobby.txt is its file in a match).
+            live::tell(event);
+        } else {
+            log!("game menu: {}", live::event_line(&event));
+            save_controls(&c);
+        }
+        let load_only = old.buttons != c.buttons
+            || old.look_sensitivity != c.look_sensitivity
+            || old.auto_center != c.auto_center;
+        if let (true, Some(n)) = (
+            load_only,
+            super::setup().and_then(|s| s.args.reload_message),
+        ) {
+            engine::post_message(n, "--reload-message: the profile or mapping changed");
+        }
+    }
+
+    /// Leave Game or End Game confirmed: tell the lobby, quit the engine
+    /// as closing its window does (the menu shows PLEASE WAIT).
+    fn leave(&mut self, k: Leave, t: f64) {
+        let event = Engine::Left(k);
+        if !live::to_lobby() {
+            log!("game menu: {}", live::event_line(&event));
+        }
+        live::tell(event);
+        // The lobby may take the foreground back once this process ends.
+        // SAFETY: a plain call with a constant.
+        if let Err(e) = unsafe { AllowSetForegroundWindow(ASFW_ANY) } {
+            log!("game menu: AllowSetForegroundWindow: {e}");
+        }
+        let reason = match k {
+            Leave::Game => "left from the game menu",
+            Leave::End => "ended from the game menu",
+        };
+        let experiment = super::setup()
+            .and_then(|s| s.args.end_game_message)
+            .filter(|_| k == Leave::End);
+        match experiment {
+            Some(n) => {
+                log!("game menu: End Game: posting engine message {n} (--end-game-message); quitting in {END_GAME_WAIT} s unless the game ends");
+                engine::post_message(n, "--end-game-message");
+                self.end_game_at = Some(t + END_GAME_WAIT);
+            }
+            None => {
+                log!("game menu: {reason}");
+                super::set_reason(reason);
+                super::request_quit(super::QUIT_USER);
+            }
+        }
+    }
+}
+
+/// Saves the controls in `lobby.txt` in the launcher's folder (with
+/// `--instance`, its own), for runs with no lobby (`--offline`, `--live`).
+fn save_controls(c: &Controls) {
+    let dir = crate::lobby::settings::folder(super::instance());
+    let path = dir.join("lobby.txt");
+    let mut s = crate::lobby::settings::Settings::load(&path);
+    s.controls = *c;
+    let saved = std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))
+        .and_then(|_| s.save(&path));
+    match saved {
+        Ok(()) => log!("game menu: controls saved in {}", path.display()),
+        Err(e) => log!("game menu: the controls weren't saved: {e}"),
+    }
+}

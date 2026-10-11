@@ -90,8 +90,18 @@ Usage: h2launch [flags]
                           (for testing the lobby without MCC).
   --game-kind <kind>      What kind of game this is, for the in-game GAME
                           MENU: offline, ranked, social or custom (default
-                          offline, or social with --session). The lobby
-                          passes it.
+                          offline, or social with --session or --live). The
+                          lobby passes it. A custom game's host and an
+                          offline run get End Game.
+  --no-game-menu          No in-game GAME MENU: Start and Esc reach the
+                          engine as they did before it.
+  --reload-message <n>    Post engine message n after the GAME MENU changes
+                          the button layout, look sensitivity or automatic
+                          look centering, which the engine may read only
+                          when it loads (an experiment; offline only).
+  --end-game-message <n>  End Game posts engine message n, then quits only
+                          if the game hasn't ended 10 s later (an
+                          experiment; offline only, one id per run).
   --live-wait <seconds>   How long to search before giving up (default 600).
   --relay-wait <seconds>  How long to wait for the relay to take us in before
                           the engine starts (default 15).
@@ -557,7 +567,9 @@ where
     if a.offline && (a.lobby || a.live.is_some() || a.session.is_some()) {
         return Err("--offline can't go with --lobby, --live or --session".into());
     }
-    a.game_kind = game_kind.unwrap_or(if a.session.is_some() {
+    // A networked match (a session file, or one the server makes with
+    // --live) is social unless told; a test run alone is offline.
+    a.game_kind = game_kind.unwrap_or(if a.session.is_some() || a.live.is_some() {
         GameKind::Social
     } else {
         GameKind::Offline
@@ -642,6 +654,10 @@ mod tests {
         assert_eq!(parse(["--offline"]).unwrap().game_kind, GameKind::Offline);
         assert_eq!(
             parse(["--session", "m.txt"]).unwrap().game_kind,
+            GameKind::Social
+        );
+        assert_eq!(
+            parse(["--live", "127.0.0.1"]).unwrap().game_kind,
             GameKind::Social
         );
         assert_eq!(

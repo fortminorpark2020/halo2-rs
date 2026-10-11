@@ -99,7 +99,25 @@ install. No game files are included in this repository.
   1 to switch weapons, 2 to swap grenades, 4 for the flashlight, C to
   dual wield) are given to the game too, but may do nothing. When a match
   starts the game's window comes to the front by itself; if it doesn't,
-  click it. While the game is on, the
+  click it. In a match, Start (or Esc on the keyboard) opens Halo 2's GAME
+  MENU over the game, which keeps running behind it: Leave Game, Settings,
+  and End Game if you host a custom game (or in an offline run). Up and
+  down pick, A (or Enter) chooses, and B, Back or Start (or Esc or
+  Backspace) closes it; while it is open your Spartan stands still, and a
+  button you were still holding when it closed does nothing in the game
+  until you let go. Settings is the same controller list as the lobby's,
+  saved the same way. Thumbstick Layout, Look Inversion, Controller
+  Vibration and the two mouse settings change at once; Button Layout, Look
+  Sensitivity and Automatic Look Centering are saved but marked NEXT GAME,
+  because the game reads them only when a match loads (this may change
+  once it has been tried on a PC). Leave Game asks first, closes the game
+  and takes you back to ONLINE (a custom game's party leader goes back to
+  Custom Game); leaving a ranked game still counts toward your level, and
+  leaving a game you host ends it for everyone. End Game ends a custom game
+  for everyone; it doesn't count, and there is no carnage report for it
+  yet. The menu hasn't been tried on a PC yet; if it misbehaves, setting
+  `H2LOBBY_ENGINE_ARGS=--no-game-menu` before starting the launcher turns
+  it off and gives Start back to the game. While the game is on, the
   lobby window ignores the controller and the keys that could leave the
   game (Esc, Enter, Backspace, letters), so leaving takes a click. In the
   lobby, Enter or Space is A and Esc or Backspace is B. B on the playlists

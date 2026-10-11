@@ -512,6 +512,12 @@ pub fn install_events() {
     let _ = SINK.set(Sink::Lobby);
 }
 
+/// The engine's events go to a lobby that started it (`--events`), which
+/// saves the game menu's controls itself; otherwise the engine saves them.
+pub fn to_lobby() -> bool {
+    matches!(SINK.get(), Some(Sink::Lobby))
+}
+
 fn say(what: &Engine) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();

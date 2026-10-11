@@ -12,7 +12,9 @@
 //!   act in the game. A hold only ever removes input;
 //! - `look_flip`: look inversion changed in the menu, applied by flipping
 //!   the look stick, since the profile keeps its launch value (the engine
-//!   would flip it a second time).
+//!   would flip it a second time);
+//! - `gate`: the first three together, in the order the input polls run
+//!   them.
 
 use crate::controls::Controls;
 use crate::profile::{pad, InputFrame};
@@ -49,6 +51,38 @@ pub fn look_flip(f: &mut InputFrame, live: &Controls, launch: &Controls) {
     }
 }
 
+/// Player 0's frame through the menu's gate, after the pad, keys, mouse
+/// and script are merged and before the mouse's scaling, the thumbstick
+/// layout, the look flip and mouse-to-stick (the game menu's design,
+/// section 3, steps 2 to 4):
+///
+/// 2. once the menu is `ready`, Start and Esc are taken out;
+/// 3. while it is `open`, everything held goes into `hold` and the frame
+///    becomes `neutral`, with `is_km` frozen and the cursor kept (the
+///    caller then skips the steps after this one);
+/// 4. otherwise `hold` takes out what is still held and lets go of what
+///    was released, and a frozen `is_km` stays frozen (the caller
+///    unfreezes it once `hold` is empty).
+///
+/// `frozen_km` is `is_km` as it was when the menu opened, while the menu
+/// is open or a hold from it is pending.
+pub fn gate(f: &mut InputFrame, ready: bool, open: bool, hold: &mut Hold, frozen_km: Option<bool>) {
+    if ready {
+        strip(f);
+    }
+    if open {
+        hold.add(f);
+        *f = neutral(frozen_km.unwrap_or(f.is_km), (f.cursor_x, f.cursor_y));
+        return;
+    }
+    if !hold.is_empty() {
+        hold.apply(f);
+    }
+    if let Some(km) = frozen_km {
+        f.is_km = km;
+    }
+}
+
 /// Input held when the menu closed, kept from the engine until released.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Hold {
@@ -64,6 +98,17 @@ pub struct Hold {
 }
 
 impl Hold {
+    /// Nothing held (`Default`, usable in a static).
+    pub const fn new() -> Hold {
+        Hold {
+            pad: 0,
+            lt: false,
+            rt: false,
+            mouse: 0,
+            keys: [0; 4],
+        }
+    }
+
     /// Adds everything held in `f`.
     pub fn add(&mut self, f: &InputFrame) {
         self.pad |= f.pad_buttons;
@@ -200,6 +245,7 @@ mod tests {
     fn a_hold_lets_go_bit_by_bit() {
         let mut h = Hold::default();
         assert!(h.is_empty());
+        assert_eq!(Hold::new(), h);
         h.add(&busy());
         assert!(!h.is_empty());
         // Everything still held: none of it reaches the engine, but the
@@ -340,6 +386,92 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_gate_before_the_menu_is_ready_changes_nothing() {
+        let mut h = Hold::default();
+        let mut f = busy();
+        gate(&mut f, false, false, &mut h, None);
+        assert_eq!(f, busy());
+        assert!(h.is_empty());
+        // Ready, closed, nothing held: only Start and Esc go.
+        let mut f = busy();
+        gate(&mut f, true, false, &mut h, None);
+        let mut want = busy();
+        strip(&mut want);
+        assert_eq!(f, want);
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn the_gate_while_open_holds_everything_and_sends_nothing() {
+        let mut h = Hold::default();
+        // Opened in keyboard-and-mouse mode; the pad was used since, so
+        // the raw frame says pad mode: the frozen mode wins.
+        let mut f = busy();
+        f.is_km = false;
+        gate(&mut f, true, true, &mut h, Some(true));
+        assert_eq!(f, neutral(true, (100.0, 50.0)));
+        // Everything but Start and Esc (taken first) went into the hold.
+        let mut want = Hold::default();
+        let mut stripped = busy();
+        strip(&mut stripped);
+        want.add(&stripped);
+        assert_eq!(h, want);
+        assert_eq!(h.pad & pad::START, 0);
+        assert_eq!(h.keys[0] & (1 << VK_ESCAPE), 0);
+        // With no frozen mode, the frame's own.
+        let mut f = busy();
+        gate(&mut f, true, true, &mut Hold::default(), None);
+        assert!(f.is_km);
+        // Even before the menu is ready (it can't be open then, but the
+        // order holds): Start stays in the hold's view.
+        let mut h = Hold::default();
+        let mut f = busy();
+        gate(&mut f, false, true, &mut h, None);
+        assert_ne!(h.pad & pad::START, 0);
+    }
+
+    #[test]
+    fn the_gate_after_closing_masks_until_release_then_unfreezes() {
+        let mut h = Hold::default();
+        // The menu closed with B and the right trigger held.
+        let mut closing = InputFrame {
+            pad_buttons: pad::B,
+            right_trigger: 255,
+            ..InputFrame::default()
+        };
+        h.add(&closing);
+        // Still held: masked; the frozen mode stays; the sticks pass.
+        closing.thumb_lx = 9000;
+        closing.is_km = true;
+        let mut f = closing.clone();
+        gate(&mut f, true, false, &mut h, Some(false));
+        assert_eq!((f.pad_buttons, f.right_trigger, f.thumb_lx), (0, 0, 9000));
+        assert!(!f.is_km, "frozen until the hold empties");
+        // Start pressed meanwhile is the menu's, never the engine's.
+        let mut f = InputFrame {
+            pad_buttons: pad::B | pad::START,
+            right_trigger: 255,
+            ..InputFrame::default()
+        };
+        gate(&mut f, true, false, &mut h, Some(false));
+        assert_eq!(f.pad_buttons, 0);
+        // Both released: the hold is empty and the frame passes whole.
+        let mut f = InputFrame {
+            right_trigger: 20,
+            ..InputFrame::default()
+        };
+        gate(&mut f, true, false, &mut h, Some(false));
+        assert!(h.is_empty());
+        assert_eq!(f.right_trigger, 20);
+        // Pressed again (the caller has unfrozen the mode): through.
+        let mut f = busy();
+        gate(&mut f, true, false, &mut h, None);
+        let mut want = busy();
+        strip(&mut want);
+        assert_eq!(f, want);
     }
 
     #[test]

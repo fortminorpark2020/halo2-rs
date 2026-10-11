@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 08:10 UTC. Any assistant that works on the project
+Last updated 2026-10-11 08:40 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -164,9 +164,19 @@ step, when the owner says so: one weapon.
   and passes `--game-kind`; the stand-in engine runs the real menu from
   `H2LOBBY_FAKE_MENU` (`crates/h2launch/tests/game_menu.rs`). New engine
   flags `--no-game-menu`, `--reload-message`, `--end-game-message` are
-  parsed but do nothing until stage 3. Next: stage 3 (the engine-side
-  driver, the end_frame copy and the input gate in `win/`), then the PC
-  checks.
+  parsed. Stage 3 done in code (2026-10-11, cross-compiled and
+  clippy-clean, not yet run on the PC): the driver on the window thread
+  (`win/menu.rs`), the panel copied into back buffer 0 in `end_frame`
+  (`win/overlay.rs`), the input gate for player 0 (`win/input.rs`), live
+  controls, and the profile and gamepad mapping served as generations
+  (`win/host.rs`); what it does and the settings table are in
+  `docs/notes/launcher/menu.md`, phase 4. Next: the numbered PC checks in
+  menu.md section 9.5 (Remote Control session), then a small commit that
+  sets `ENGINE_REREADS_PROFILE` and `ENGINE_REREADS_MAPPING` in
+  `win/menu.rs` from check 7 (they are false, so Button Layout, Look
+  Sensitivity and Automatic Look Centering say NEXT GAME), or makes the
+  reload message the default if check 8 shows it works, and records the
+  results there and here.
 - Milestone 1 is done (2026-10-10 02:50 UTC): `h2launch` started MCC's
   halo2.dll on the owner's PC and played offline Slayer on Lockout (HUD,
   60 fps, mouse and controller). Code is on `h2launch-m1`, then
