@@ -144,20 +144,24 @@ the launcher doesn't do.
   music is off on the playlists (searching too), the party, the custom
   game and the match's screens, and fades out over its track's own 5 s
   when it stops; every other screen keeps it as it was, so the settings
-  keep it and the carnage report stays silent after a game. As in Halo
-  2, it starts or stops at most once every 6 s (a change asked for
-  sooner waits), and each start plays it again from its beginning.
-  Presses sound by what they did: the focus moving is `cursor`, a screen
-  or popup opening `select` (Halo 2's `advance` on a screen opening
-  isn't played; menu.md "What Phase 2.2 built"), a request sent to the
-  server (make leader, privacy, an invitation, a friend request or its
-  answer) `select`, B `back` (the leader's B stopping a search too), a
-  refusal (the leader-only notices, a friend who can't be joined or
-  asked) `error`, a search or a custom game asked for `advance`, A on
-  the start screen `select` then `transport`, and a new invitation or a
+  keep it and the music stays off on the carnage report after a game.
+  As in Halo 2, it starts or stops at most once every 6 s (a change
+  asked for sooner waits), and each start plays it again from its
+  beginning. Presses sound by what they did, as in Halo 2 (menu.md
+  "What Phase 2.2 built"): the focus moving is `cursor`; a screen or
+  popup opening `select` then `advance` (the new screen loading), but a
+  popup closing and the players and friends lists' tab change `select`
+  alone; a request sent to the server (make leader, privacy, an
+  invitation, a friend request or its answer, a custom game) `select`;
+  B `back` (the leader's B stopping a search too); a refusal (the
+  leader-only notices, a friend who can't be joined or asked, no maps)
+  `error`; a search `select` then `advance`; A on the start screen
+  `select`, `advance`, then `transport`; the pregame lobby and the
+  carnage report `advance` as they open; and a new invitation or a
   friend request to us `message`, all at their tags' gains. While a
-  match's engine runs the music fades in 0.5 s, presses are silent and
-  the audio stream pauses; it plays again after. The log's `sound:` line
+  match's engine runs every sound fades in 0.5 s, presses are silent,
+  then the sounds stop and the audio stream pauses; it plays again
+  after, with nothing from before the match. The log's `sound:` line
   says what loaded (each sound's length, the music's start and loops,
   the decoding time) or why nothing did, then where it plays. Silent,
   without ever opening an audio device: without Vista's files, with

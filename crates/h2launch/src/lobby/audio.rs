@@ -267,6 +267,24 @@ impl Audio {
         }
     }
 
+    /// Fade every voice out over `seconds` (the music, one fading out
+    /// already, a menu sound), then stop each.
+    pub fn fade_all(&mut self, seconds: f32) {
+        if let Ok(mut m) = self.mixer.lock() {
+            let ids: Vec<u64> = m.voices.iter().map(|v| v.id).collect();
+            for id in ids {
+                m.fade(id, 0.0, seconds, true);
+            }
+        }
+    }
+
+    /// Stop every voice at once.
+    pub fn stop_all(&mut self) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.voices.clear();
+        }
+    }
+
     /// A voice's gain now, if it still plays.
     pub fn gain(&self, id: u64) -> Option<f32> {
         let m = self.mixer.lock().ok()?;

@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 (menu 2.2, review round 1). Any assistant that
+Last updated 2026-10-11 (menu 2.2, review round 2). Any assistant that
 works on the project should update this file before it stops, so the next
 one can pick up. Read AGENTS.md first for the rules.
 
@@ -136,11 +136,21 @@ Next, in order:
    `menu_sound = off`). Review round 1 fixed the music's timing, the
    gains, the start screen's transport sound, friend requests and
    presses that only ask the server sounding, and a re-sent invitation
-   sounding again. On the owner's PC (check P2): music on start and main
-   from Cartographer's files, fading on the playlists; the sounds with
-   the pad and the keyboard; silence in a match and the music again on
-   the main menu after; with `H2LOBBY_VISTA=off`, silence and no error.
-   Next: 2.3, the intro movie.
+   sounding again. Review round 2: a screen or popup opening sounds
+   select then advance, as Halo 2 does (from the decompilation; the
+   pregame lobby and carnage report advance as they open, a custom game
+   asked for is select alone), and a music fade still running when an
+   engine starts no longer plays on after the match (every voice fades,
+   then stops, before the pause). On the owner's PC (check P2): music on
+   start and main from Cartographer's files, fading on the playlists;
+   the sounds with the pad and the keyboard; silence in a match and the
+   music again on the main menu after; with `H2LOBBY_VISTA=off`, silence
+   and no error. **Before the next friends' zip** (the first with 2.2):
+   `h2launch.exe` now contains `crates/wma` (ported from FFmpeg, LGPL 2.1
+   or later), so the zip's READ ME must name it and the zip must carry
+   `crates/wma/LICENSE` and the crate's source or a written offer of it
+   (and of h2launch's for relinking); menu.md "What Phase 2.2 built",
+   LGPL. Next: 2.3, the intro movie.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

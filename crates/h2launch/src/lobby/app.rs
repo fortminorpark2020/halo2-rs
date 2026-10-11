@@ -402,23 +402,35 @@ struct CueState {
     refused: bool,
 }
 
-/// The sound of a press, from the state before and after it (`back`: the
-/// press was B): Error if it was refused, Back or Select if the screen,
-/// popup or invitation changed, Cursor if only the focus or a value did.
-fn cue_for(before: &CueState, after: &CueState, back: bool) -> Option<Cue> {
+/// The sounds of a press, from the state before and after it (`back`: the
+/// press was B), as Halo 2 plays them: Error if it was refused; if the
+/// screen, popup or invitation changed, Back on B (a screen brought back
+/// from the history plays no `advance`, 0x23553f), else Select (the
+/// press's `forward1`) and then Advance when a screen or a popup opens
+/// (every screen and dialog loaded forward plays `advance`, 0x147f6d),
+/// but not between the Y menu's tabs (the players and friends lists: only
+/// the tab's `forward1`) nor when a popup only closes; Cursor if only the
+/// focus or a value changed.
+fn cue_for(before: &CueState, after: &CueState, back: bool) -> &'static [Cue] {
     if after.refused {
-        return Some(Cue::Error);
+        return &[Cue::Error];
     }
-    let moved = before.screen != after.screen
-        || before.popup != after.popup
-        || before.invite != after.invite;
-    if moved {
-        return Some(if back { Cue::Back } else { Cue::Select });
+    let screen = before.screen != after.screen;
+    let popup = before.popup != after.popup;
+    if screen || popup || before.invite != after.invite {
+        let y_menu = |s: Screen| matches!(s, Screen::Players | Screen::Friends);
+        let tab = y_menu(before.screen) && y_menu(after.screen);
+        let opens = (screen && !tab) || (popup && after.popup.is_some());
+        return match (back, opens) {
+            (true, _) => &[Cue::Back],
+            (false, true) => &[Cue::Select, Cue::Advance],
+            (false, false) => &[Cue::Select],
+        };
     }
     if before.focus != after.focus || before.values != after.values {
-        return Some(Cue::Cursor);
+        return &[Cue::Cursor];
     }
-    None
+    &[]
 }
 
 /// `text` is the server's notice that someone sent us a friend request
@@ -649,8 +661,8 @@ impl App {
         }
     }
 
-    /// Run a press (`act`), then ask for its sound: a cue it asked for
-    /// itself (Advance) stands, else `cue_for` from before and after.
+    /// Run a press (`act`), then ask for its sounds: cues it asked for
+    /// itself stand, else `cue_for`'s from before and after.
     fn sounding(&mut self, act: impl FnOnce(&mut App)) {
         let before = self.cue_state();
         let asked = self.cues.len();
@@ -662,7 +674,7 @@ impl App {
         if !after.refused && self.cues.len() > asked {
             return;
         }
-        if let Some(c) = cue_for(&before, &after, self.pressed == Some(Input::B)) {
+        for &c in cue_for(&before, &after, self.pressed == Some(Input::B)) {
             self.cue(c);
         }
     }
@@ -1204,6 +1216,8 @@ impl App {
         self.popup = None;
         self.asked = None;
         self.screen = Screen::Pregame;
+        // The pregame lobby loading (0x147f6d).
+        self.cue(Cue::Advance);
     }
 
     fn on_match_over(&mut self, over: MatchOver) {
@@ -1324,6 +1338,7 @@ impl App {
             exited = c.exited();
         }
         let mut done = false;
+        let mut carnage = false;
         if exited {
             g.child = None;
             notes.push("lobby: the engine closed".into());
@@ -1332,6 +1347,7 @@ impl App {
             }
             if g.results.is_some() {
                 self.screen = Screen::Carnage;
+                carnage = true;
                 self.focus = true;
                 // Start on this PC's player.
                 let me = g.m.relay.id;
@@ -1355,6 +1371,10 @@ impl App {
             self.log(n);
         }
         self.send_all(out);
+        if carnage {
+            // The carnage report loading (0x147f6d).
+            self.cue(Cue::Advance);
+        }
         if done {
             self.game = None;
             self.screen = Screen::Live;
@@ -1571,9 +1591,11 @@ impl App {
             Screen::Start => match i {
                 Input::A => {
                     self.screen = Screen::Main;
-                    // The press, then Halo 2's start screen going on to
-                    // the main menu (sound 5, 0x22f28c).
+                    // The press, the main menu loading (0x147f6d), then
+                    // Halo 2's start screen going on to it (sound 5,
+                    // 0x22f28c).
                     self.cue(Cue::Select);
+                    self.cue(Cue::Advance);
                     self.cue(Cue::Transport);
                 }
                 Input::B => self.popup = Some(Popup::Quit),
@@ -1973,6 +1995,9 @@ impl App {
                     c.view.status = None;
                 }
                 self.send(ToServer::Search(id));
+                // The press, then Halo 2's matchmaking screen loading
+                // (here the search shows on this screen).
+                self.cue(Cue::Select);
                 self.cue(Cue::Advance);
             }
             Input::X => {
@@ -2090,7 +2115,9 @@ impl App {
             map,
             variant: variant.into(),
         });
-        self.cue(Cue::Advance);
+        // Halo 2's START GAME is a button: its press only (no screen
+        // loads until the match comes, `on_match`).
+        self.cue(Cue::Select);
     }
 
     // ---------------------------------------------------------- settings
@@ -4945,8 +4972,16 @@ mod tests {
     /// A lobby signed in as ALPHA (account 1) over one end of a pair, on
     /// the playlists, and the server's end, to read what the lobby sends.
     fn live_app(dir: &std::path::Path) -> (App, Connection) {
-        let mut a = app(dir);
         let (ours, mut theirs) = Connection::pair();
+        let a = live_app_over(dir, ours);
+        // The LOGIN.
+        sent(&mut theirs);
+        (a, theirs)
+    }
+
+    /// `live_app` signed in over `ours`.
+    fn live_app_over(dir: &std::path::Path, ours: Connection) -> App {
+        let mut a = app(dir);
         let key = h2live::client::identity(&dir.join("key.bin")).unwrap();
         let profile = Profile {
             gamertag: "ALPHA".into(),
@@ -4965,9 +5000,7 @@ mod tests {
         });
         a.client = Some(c);
         a.screen = Screen::Live;
-        // The LOGIN.
-        sent(&mut theirs);
-        (a, theirs)
+        a
     }
 
     /// What the lobby sent since the last look (pings left out).
@@ -5300,31 +5333,7 @@ mod tests {
     /// A game of ALPHA (this PC) against BRAVO, over, on the carnage
     /// report.
     fn carnage(a: &mut App) {
-        let player = |relay_id: u64, account: u64, tag: &str| h2net::live::LauncherPlayer {
-            relay_id,
-            account,
-            gamertag: tag.into(),
-            team: 0,
-            level: 4,
-            party: account,
-        };
-        let m = LauncherMatch {
-            id: 0x77,
-            playlist: 11,
-            ranked: true,
-            teams: false,
-            map: "lockout".into(),
-            variant: "H2_FFA_HeadtoHead_b".into(),
-            relay: h2net::live::RelaySeat {
-                port: 47050,
-                room: 0x77,
-                id: 0x11,
-                key: [0; 16],
-            },
-            host: 0x11,
-            countdown: 20,
-            players: vec![player(0x11, 1, "ALPHA"), player(0x22, 2, "BRAVO")],
-        };
+        let m = a_match();
         let ip = "127.0.0.1".parse().unwrap();
         let (session, me) = live::session_from(&m, ip).unwrap();
         let result = |relay_id, place, score| LauncherPlayerResult {
@@ -5358,6 +5367,36 @@ mod tests {
         a.csel = 1;
     }
 
+    /// A Head to Head match on Lockout for ALPHA (us) and BRAVO, ALPHA
+    /// hosting.
+    fn a_match() -> LauncherMatch {
+        let player = |relay_id: u64, account: u64, tag: &str| h2net::live::LauncherPlayer {
+            relay_id,
+            account,
+            gamertag: tag.into(),
+            team: 0,
+            level: 4,
+            party: account,
+        };
+        LauncherMatch {
+            id: 0x77,
+            playlist: 11,
+            ranked: true,
+            teams: false,
+            map: "lockout".into(),
+            variant: "H2_FFA_HeadtoHead_b".into(),
+            relay: h2net::live::RelaySeat {
+                port: 47050,
+                room: 0x77,
+                id: 0x11,
+                key: [0; 16],
+            },
+            host: 0x11,
+            countdown: 20,
+            players: vec![player(0x11, 1, "ALPHA"), player(0x22, 2, "BRAVO")],
+        }
+    }
+
     #[test]
     fn presses_ask_for_halo_2s_sounds() {
         let dir = scratch("cues");
@@ -5367,10 +5406,10 @@ mod tests {
         assert_eq!(a.take_cues(), [Cue::Back]);
         a.input(Input::Char('b'));
         assert_eq!(a.take_cues(), [Cue::Back]);
-        // A on the start screen: the press, and the start screen going
-        // on to the main menu.
+        // A on the start screen: the press, the main menu loading, and
+        // the start screen going on to it.
         a.input(Input::A);
-        assert_eq!(a.take_cues(), [Cue::Select, Cue::Transport]);
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance, Cue::Transport]);
         assert_eq!(a.label(), "main");
         // Down moves the focus; at the end it doesn't, and is silent.
         a.input(Input::Down);
@@ -5379,10 +5418,11 @@ mod tests {
         assert!(a.take_cues().is_empty());
         a.input(Input::Up);
         assert_eq!(a.take_cues(), [Cue::Cursor]);
-        // A on ONLINE (no gamertag yet: the sign-in form).
+        // A on ONLINE (no gamertag yet: the sign-in form): the press,
+        // then the screen loading.
         a.input(Input::A);
         assert_eq!(a.label(), "signin");
-        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
         // Typing is silent; Tab moves to the other field.
         a.input(Input::Char('j'));
         assert!(a.take_cues().is_empty());
@@ -5394,7 +5434,7 @@ mod tests {
         a.input(Input::Down);
         a.input(Input::A);
         assert_eq!(a.label(), "settings");
-        assert_eq!(a.take_cues(), [Cue::Cursor, Cue::Select]);
+        assert_eq!(a.take_cues(), [Cue::Cursor, Cue::Select, Cue::Advance]);
         a.input(Input::Right);
         assert_eq!(a.take_cues(), [Cue::Cursor]);
         a.input(Input::Backspace);
@@ -5411,7 +5451,7 @@ mod tests {
         assert_eq!(a.take_cues(), [Cue::Cursor]);
         a.last_click = None;
         a.click(row.0, row.1);
-        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
         assert_eq!(a.label(), "signin");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5458,12 +5498,13 @@ mod tests {
         assert_eq!(a.take_cues(), [Cue::Cursor]);
         a.input(Input::A);
         assert_eq!(a.take_cues(), [Cue::Error]);
-        // Leading it, A searches: Advance, and only that.
+        // Leading it, A searches: the press, then Halo 2's matchmaking
+        // screen loading.
         view(&mut a).party.as_mut().unwrap().leader = 1;
         a.input(Input::Up);
         a.take_cues();
         a.input(Input::A);
-        assert_eq!(a.take_cues(), [Cue::Advance]);
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
         assert_eq!(sent(&mut server), [ToServer::Search(11)]);
         // Searching: the leader's B stops it, as Back; a member's is
         // refused.
@@ -5475,6 +5516,109 @@ mod tests {
         a.input(Input::B);
         assert_eq!(a.take_cues(), [Cue::Error]);
         assert!(sent(&mut server).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_custom_game_asked_for_sounds_its_press_and_no_maps_is_an_error() {
+        let dir = scratch("cue-custom");
+        let mut a = app(&dir);
+        a.cfg.maps = vec![("midship".into(), 1), ("lockout".into(), 2)];
+        a.open_custom();
+        // The game and the map change in place.
+        a.input(Input::Left);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::Down);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::Right);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        // A asks for it: Halo 2's START GAME is a button, so its press
+        // only (the pregame lobby's advance comes with the match).
+        a.input(Input::A);
+        assert!(a.asked.is_some());
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        // Asked already: nothing happens, silently.
+        a.input(Input::A);
+        assert!(a.take_cues().is_empty());
+        // No maps: refused, with the error sound.
+        a.cfg.maps = Vec::new();
+        a.open_custom();
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Error]);
+        assert!(a.asked.is_none());
+        let said = "No Halo 2 maps were found in MCC's folder.";
+        assert!(a.toasts.iter().any(|(t, _)| t == said));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_popup_opening_advances_but_one_closing_or_a_tab_doesnt() {
+        let dir = scratch("cue-popups");
+        let (mut a, mut server) = live_app(&dir);
+        let mut pt = party(7, Activity::Lobby);
+        pt.members.push(PartyMember {
+            account: 2,
+            gamertag: "BRAVO".into(),
+            look: Default::default(),
+            best: 1,
+            level: 1,
+            guests: 0,
+        });
+        view(&mut a).party = Some(pt);
+        a.screen = Screen::Party;
+        assert!(a.pick("bravo"));
+        // X opens the kick confirmation: the press, then the dialog
+        // loading.
+        a.input(Input::X);
+        assert!(matches!(a.popup, Some(Popup::Kick(2))));
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
+        // A on it only closes it: the press alone.
+        a.input(Input::A);
+        assert!(a.popup.is_none());
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(sent(&mut server), [ToServer::Kick(2)]);
+        // B on a popup, as on a screen: back alone.
+        a.input(Input::X);
+        a.take_cues();
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        // X on the playlists opens the players list (Halo 2's Y menu
+        // loading), and RB there goes to its friends tab: the tab's press
+        // alone.
+        a.screen = Screen::Live;
+        a.input(Input::X);
+        assert_eq!(a.label(), "players");
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
+        a.input(Input::Rb);
+        assert_eq!(a.label(), "friends");
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_pregame_lobby_and_the_carnage_report_advance_as_they_open() {
+        let dir = scratch("cue-match");
+        // A match needs the server's address: a real connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ours = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _theirs = listener.accept().unwrap();
+        let mut a = live_app_over(&dir, Connection::tcp(ours).unwrap());
+        a.on_event(LiveEvent::LauncherMatch(a_match()));
+        assert_eq!(a.label(), "pregame");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        // The same match again with another host: nothing opens.
+        a.on_event(LiveEvent::LauncherMatch(a_match()));
+        assert!(a.take_cues().is_empty());
+        // The engine closes after the game: the carnage report.
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        a.screen = Screen::InGame;
+        let mut engine = Running::waiting();
+        engine.kill();
+        a.game.as_mut().unwrap().child = Some(engine);
+        a.tick(a.now);
+        assert_eq!(a.screen, Screen::Carnage);
+        assert_eq!(a.take_cues(), [Cue::Advance]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5946,33 +6090,44 @@ mod tests {
             size: 1,
             openings: 0,
         }];
+        // RB from the playlists opens the friends list (Halo 2's Y menu
+        // loading).
         a.input(Input::Rb);
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
         a.tick(a.now);
+        assert!(a.take_cues().is_empty());
         let last = |a: &App| a.toasts.back().map(|(t, _)| t.clone());
         assert!(a.pick("DAN"));
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS INVITE ONLY"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         view(&mut a).online[0].open = true;
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS FULL"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         view(&mut a).online[0].openings = 3;
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY CAN'T BE JOINED"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         view(&mut a).friends[0].activity = Activity::Playing;
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS IN A MATCH"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         view(&mut a).friends[0].party = 500;
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("DAN IS ALREADY IN YOUR PARTY"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         assert!(a.pick("BOB"));
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("BOB IS OFFLINE"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         assert!(a.pick("CAT"));
         a.input(Input::X);
         assert_eq!(
             last(&a).as_deref(),
             Some("CAT IS ON ANOTHER VERSION OF THE GAME")
         );
+        assert_eq!(a.take_cues(), [Cue::Error]);
         assert_eq!(a.label(), "friends");
         assert!(sent(&mut server).is_empty());
         // A join the server turns down (the flag was a second old) is told
@@ -5981,6 +6136,10 @@ mod tests {
         assert!(a.pick("DAN"));
         a.input(Input::X);
         assert_eq!(sent(&mut server), [ToServer::JoinParty(500)]);
+        // A friend who can be joined: the press, and the playlists
+        // again with the party joined.
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
+        assert_eq!(a.label(), "live");
         a.on_event(LiveEvent::Notice("THAT PARTY IS INVITE ONLY".into()));
         assert_eq!(last(&a).as_deref(), Some("THAT PARTY IS INVITE ONLY"));
         let _ = std::fs::remove_dir_all(&dir);

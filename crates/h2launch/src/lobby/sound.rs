@@ -49,13 +49,14 @@ const MUSIC_LOOP: &str = r"sound\ui\main_menu_music\menu_music\loop";
 pub enum Cue {
     /// The focus moved.
     Cursor,
-    /// A choice was made (a screen or popup opens or closes).
+    /// A press that chose something (`forward1`).
     Select,
     /// Back (B).
     Back,
     /// A choice that can't be made.
     Error,
-    /// A search started, or a custom game was asked for.
+    /// A screen or a popup opened, after the press's Select (`advance`,
+    /// as Halo 2 plays it when a screen loads).
     Advance,
     /// An invitation or a friend request arrived.
     Notify,
@@ -483,8 +484,9 @@ impl MenuSound {
     }
 
     /// Each tick: play `cues`, start or fade the music as `music_on` says
-    /// (`set_music`), and while `engine_running` fade it at once, drop the
-    /// cues and pause the stream (it plays again after).
+    /// (`set_music`), and while `engine_running` fade every voice at once,
+    /// drop the cues, then stop them all and pause the stream (it plays
+    /// again after, with nothing from before).
     pub fn update(&mut self, cues: &[Cue], music_on: bool, engine_running: bool) {
         self.update_at(Instant::now(), cues, music_on, engine_running);
     }
@@ -498,14 +500,18 @@ impl MenuSound {
             if !self.engine {
                 self.engine = true;
                 self.pause_at = Some(now + ENGINE_FADE);
-                if let Some(id) = self.music.take() {
-                    audio.fade_out(id, ENGINE_FADE.as_secs_f32());
+                // Every voice fades: the music, a stop's fade still going
+                // (it isn't in `music` any more) and a menu sound.
+                audio.fade_all(ENGINE_FADE.as_secs_f32());
+                if self.music.take().is_some() {
                     self.music_changed = Some(now);
                 }
                 self.music_playing = false;
             }
             if self.pause_at.is_some_and(|t| now >= t) {
                 self.pause_at = None;
+                // Nothing from before the match plays on after it.
+                audio.stop_all();
                 if let Err(e) = audio.pause(true) {
                     (self.log)(&format!("sound: the stream didn't pause ({e})"));
                 }
@@ -707,11 +713,11 @@ mod tests {
         assert!(!audio(&s).1);
         s.update_at(at(13.6), &[], false, true);
         assert!(s.pause_at.is_none());
-        assert!(audio(&s).1);
+        // Paused with every voice stopped (the first's fade too).
+        assert_eq!(audio(&s), (0, true));
         // Cues are dropped while it runs.
-        let voices = audio(&s).0;
         s.update_at(at(14.0), &[Cue::Back, Cue::Select], false, true);
-        assert_eq!(audio(&s), (voices, true));
+        assert_eq!(audio(&s), (0, true));
         // After it the stream plays again, and the music starts again
         // when it's wanted.
         s.update_at(at(60.0), &[], false, false);
@@ -719,6 +725,39 @@ mod tests {
         assert!(!audio(&s).1);
         s.update_at(at(61.0), &[], true, false);
         assert!(s.music.is_some_and(|m| m != second));
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stop_still_fading_when_a_match_starts_doesnt_play_after_it() {
+        let (mut s, dir) = playing("fading");
+        let t0 = Instant::now();
+        let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        let audio = |s: &MenuSound| -> (usize, bool) {
+            let a = s.audio.as_ref().unwrap();
+            (a.voices(), a.is_paused())
+        };
+        // The music starts (the main menu), is wanted off 2 s later (the
+        // pregame lobby), and stops once the 6 s have passed: its 5 s
+        // fade runs.
+        s.update_at(at(0.0), &[], true, false);
+        let music = s.music.unwrap();
+        s.update_at(at(2.0), &[], false, false);
+        s.update_at(at(6.5), &[], false, false);
+        assert_eq!(s.music, None);
+        assert!(s.audio.as_ref().unwrap().gain(music).is_some());
+        // The engine starts 7 s in, a menu sound just before it.
+        s.update_at(at(6.9), &[Cue::Select], false, false);
+        assert_eq!(audio(&s), (2, false));
+        s.update_at(at(7.0), &[], false, true);
+        s.update_at(at(7.6), &[], false, true);
+        // Paused, with nothing left to play on.
+        assert_eq!(audio(&s), (0, true));
+        // After the match (the carnage report: no music) it stays silent.
+        s.update_at(at(60.0), &[], false, false);
+        assert_eq!(audio(&s), (0, false));
+        assert_eq!(s.audio.as_ref().unwrap().gain(music), None);
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
     }

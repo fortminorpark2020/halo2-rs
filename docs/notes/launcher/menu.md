@@ -1052,7 +1052,13 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   `App::take_cues()`, starts or fades the music by `App::music_on()` as
   Halo 2 does (section 5: at most once every 6 s, each start a new voice
   from the music's start, each stop its track's fade-out), and while
-  `App::engine_running()` fades it at once, drops the cues and pauses.
+  `App::engine_running()` fades every voice at once (`Audio::fade_all`:
+  the music, a stop's fade still running and a menu sound), drops the
+  cues, then stops every voice (`Audio::stop_all`) and pauses, so nothing
+  from before a match plays on after it. (Until review round 2 only the
+  playing music faded: a stop held by the 6 s rule and still fading when
+  the engine started was frozen by the pause and finished on the
+  carnage report.)
 - **App** stays free of cpal. `music_rule(screen, current)` is Halo 2's
   (section 5): on at Start and Main; off on Live (searching too), Party,
   Custom, Pregame and InGame, and whenever an engine runs; the rest keep
@@ -1061,13 +1067,21 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   game's game and map and the controls, and a refused flag) before and
   after `input` and `click` (their bodies are now `input_inner` and
   `click_inner`): refused gives Error; another screen, popup or
-  invitation gives Back on B (or Esc, Backspace, the b key) and Select
-  otherwise; only the row or a value changing gives Cursor. `refuse()`
+  invitation gives Back on B (or Esc, Backspace, the b key), else
+  Select, followed by Advance when a screen or a popup opened (not
+  between the players and friends lists, the Y menu's tabs, nor when a
+  popup only closes; see the next point); only the row or a value
+  changing gives Cursor. `refuse()`
   (a notice and the flag) is used for the leader-only notices, a friend
   who can't be joined, a player who can't be asked (with the server's
   own words: already a friend, already asked, asked you; ourselves only
-  sounds), and no maps for a custom game. A search started and a custom
-  game asked for push Advance themselves; a new invitation on show
+  sounds), and no maps for a custom game. A search started pushes Select
+  then Advance itself (Halo 2's matchmaking screen loading; ours stays
+  on the playlists), a custom game asked for Select only (Halo 2's START
+  GAME is a button that loads nothing), and the screens the server and
+  the engine open push Advance: the pregame lobby (`on_match`, not when
+  the same match comes again with a new host) and the carnage report
+  (`poll_game`). A new invitation on show
   pushes Notify once (`tick`; one that has left the invitations list is
   forgotten, so the same party inviting again sounds again), and so does
   the server's notice of a friend request to us (Halo 2 sounds every
@@ -1075,19 +1089,39 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   sound, as nothing on screen changes: the leader's B stopping a search
   Back; make leader, party privacy, an invitation, a friend request,
   accepting or declining one and taking ours back Select. A on the start
-  screen pushes Select then Transport. Countdown and KeyClick wait for
+  screen pushes Select, Advance (the main menu loading), then Transport.
+  Countdown and KeyClick wait for
   the countdown and the on-screen keyboard. The sign-in functions are
   unchanged.
-- **Select, not advance, on a screen opening.** Unlike section 5's
-  table, a screen or popup opening sounds `select` (`forward1`), not
-  `advance`. Halo 2 plays `forward1` for the A on a button and `advance`
-  as the next screen loads (0x147f6d), in the same press; whether both
-  are heard depends on 0x236299, which isn't decompiled. We follow
-  menu-preview and the plan: `select` for a new screen (with `transport`
-  too from the start screen), `advance` only for a search started or a
-  custom game asked for. Screens the server opens (the pregame lobby,
-  the carnage report) are silent here, where Halo 2 plays `advance`. To
-  be checked by ear on the owner's PC (P2).
+- **Select, then advance, on a screen opening** (review round 2, from
+  the decompilation). One press that opens a screen plays two sounds in
+  Halo 2, in the same frame: the press's `forward1` (sound 1, from the
+  list item's A at 0x24ac05 or the button's at 0x2540e8, after its
+  handler has loaded the screen) and the new screen's `advance` (sound
+  3: every screen and dialog load calls 0x147f6d, which plays it unless
+  the load came from the back history or is the start screen's, id 9).
+  Forward loads (the main menu's rows, `dialog_ok` and `dialog_choice`)
+  have type 0; only B's reloads from the history set bit 0 (0x23553f),
+  so B plays `back1` alone. 0x236299 plays any sound below 13 through
+  0x1896c0 at a scale of 1 and drops none, so both are heard (until
+  round 2 this note wrongly said 0x236299 wasn't decompiled, and the
+  lobby played `select` alone). A Y-menu tab change plays only the tab's
+  sound (9, `forward1`, from the Y menu's tab bar, 0x2b41ea) and loads
+  no screen, and a dialog closing on a choice runs an animation, not a
+  load, so both stay `select` alone. The start screen's A gives
+  `forward1`, `advance` (the main menu, id 6, type 0, from 0x22f28c),
+  then `transport`.
+- **LGPL** (review round 2). Since 2.2 the launcher calls
+  `blam_cache::sound`'s WMA decoding, so `crates/wma` (ported from
+  FFmpeg, LGPL 2.1 or later) is in `h2launch.exe`, linked statically. It
+  stays a crate of its own (AGENTS.md). The next friends' zip built with
+  2.2 (the READ ME isn't in the repository) must: say in its READ ME that
+  `h2launch.exe` contains the `wma` crate, a WMA decoder ported from
+  FFmpeg under the LGPL 2.1 or later; carry `crates/wma/LICENSE`; and
+  carry `crates/wma`'s source or the owner's written offer to provide it,
+  plus an offer of h2launch's own source or object files so the library
+  can be relinked (LGPL 2.1 section 6). The repository stays private, so
+  "see the repository" doesn't do.
 - **Checked in the container** (2026-10-11), headless with the uploaded
   Cartographer folder: the start screen, then the main menu, down and up
   gave a 23 s WAV with music from its first 0.05 s; a second run with no
@@ -1107,11 +1141,14 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   about 5 s on the playlists (a change within 6 s of the last waits);
   back on the main menu it starts again from its beginning;
 - the cursor, select and back sounds play with the pad and the keyboard
-  (and a click on a main menu row); A on the start screen sounds select
-  then transport; whether a screen opening should also sound `advance`;
+  (and a click on a main menu row); A on the start screen sounds select,
+  advance, then transport; a screen or popup opening sounds select then
+  advance, and the pregame lobby and the carnage report advance as they
+  open;
 - a friend request to us sounds as a message;
-- silence through a match, and the music from its start again on the
-  main menu after it;
+- silence through a match (nothing of the menu music playing on after
+  it, even when the match started within 6 s of the music starting), and
+  the music from its start again on the main menu after it;
 - with `H2LOBBY_VISTA=off`: silence, `sound: the menus are silent (no
   Halo 2 Vista files)` and no error.
 
@@ -1525,3 +1562,4 @@ A 2004-era video of the Live flow would settle most of them.
 | halo2.dll updates beyond 1.3528 | A breaks; offsets move | A stays optional; C needs no engine knowledge |
 | The `app.rs` restyle (4,300 lines) breaks lobby features | Regressions in friends, parties and custom games | Keep `App`'s logic and replace only drawing and navigation; rerun the multi-lobby scripts each phase |
 | Halo 2's own text or art ends up in the repository | Breaks the asset rules | Text read at run time; PNGs with art stay on the PC; review every diff for strings |
+| `crates/wma` (LGPL) is in `h2launch.exe` once the menus play music (2.2) | The friends' zip must meet the LGPL | Keep it a separate crate; the zip's READ ME names it, with its licence and source or a written offer ("What Phase 2.2 built") |

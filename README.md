@@ -65,9 +65,11 @@ install. No game files are included in this repository.
   out over about 5 seconds on the playlists, and starts again from the
   beginning back on the main menu; it never starts or stops more often
   than once every 6 seconds), and its menu sounds when you leave the
-  start screen, move, choose, go back, are told you can't do something,
-  start a search, or get an invitation or a friend request. Nothing
-  plays during a match. Without Cartographer the menus are silent for now (MCC's own
+  start screen, move, choose (with a second sound as a new screen or
+  popup opens, as on the Xbox), go back, are told you can't do
+  something, start a search, or get an invitation or a friend request.
+  Nothing plays during a match, and nothing from before it plays on
+  after it. Without Cartographer the menus are silent for now (MCC's own
   sounds can't be read yet); `menu_sound = off` in `lobby.txt` (or
   `H2LOBBY_SOUND=off`) silences them. ONLINE
   takes you to its lobby: pick a gamertag the first time (after that it
