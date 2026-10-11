@@ -272,6 +272,9 @@ pub struct Ready {
     pub me: usize,
     pub map: String,
     pub variant: String,
+    /// What kind of game the match is, for the GAME MENU (ranked, custom
+    /// or social, by the lobby's rule).
+    pub game_kind: crate::gamemenu::GameKind,
     pub link: Link,
 }
 
@@ -314,6 +317,7 @@ pub fn prepare(
     Ok(Ready {
         session,
         me,
+        game_kind: crate::lobby::child::game_kind(&game),
         map: game.map,
         variant: game.variant,
         link,

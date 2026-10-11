@@ -42,8 +42,9 @@ pub struct PadEdges {
     stick: Option<usize>,
     /// When each held direction repeats next (None: not held).
     next: [Option<f64>; 4],
-    /// The next reading only sets what is held (after `reset`).
-    settle: bool,
+    /// After `reset`: the next reading only sets what is held, except
+    /// these buttons, which give their key if down.
+    settle: Option<u16>,
 }
 
 impl PadEdges {
@@ -54,10 +55,26 @@ impl PadEdges {
     /// Forget the pad (another one was picked): what the next reading
     /// finds held gives no keys until it is released and pressed again.
     pub fn reset(&mut self) {
+        self.reset_except(0);
+    }
+
+    /// `reset`, except that the `keep` buttons held at the next reading
+    /// give their keys. With the menu closed a pad's first Start is what
+    /// makes it player 1's (padpick), and that press is for the menu.
+    pub fn reset_except(&mut self, keep: u16) {
         *self = PadEdges {
-            settle: true,
+            settle: Some(keep),
             ..PadEdges::default()
         };
+    }
+
+    /// The directions held now give no more keys (no repeats either) until
+    /// released and pressed again: for the menu opening while the stick or
+    /// the d-pad was held in the game. The stick's hysteresis is kept.
+    pub fn hold_directions(&mut self) {
+        for at in self.next.iter_mut().flatten() {
+            *at = f64::INFINITY;
+        }
     }
 
     /// The stick's direction with hysteresis: a new one past
@@ -82,14 +99,14 @@ impl PadEdges {
     /// the buttons) and the held directions that repeat now.
     pub fn update(&mut self, buttons: u16, lx: i16, ly: i16, now: f64) -> Vec<Key> {
         let stick = self.stick_direction(lx, ly);
-        let settle = std::mem::take(&mut self.settle);
+        let settle = self.settle.take();
         let mut keys = Vec::new();
         for (d, &(bit, key)) in DIRECTIONS.iter().enumerate() {
             let held = buttons & bit != 0 || stick == Some(d);
             self.next[d] = match (held, self.next[d]) {
                 (false, _) => None,
                 // Held through a reset: no key until pressed again.
-                (true, None) if settle => Some(f64::INFINITY),
+                (true, None) if settle.is_some() => Some(f64::INFINITY),
                 (true, None) => {
                     keys.push(key);
                     Some(now + REPEAT)
@@ -104,16 +121,14 @@ impl PadEdges {
                 (true, held) => held,
             };
         }
-        let down = buttons & !self.last;
+        let down = buttons & !self.last & settle.unwrap_or(!0);
         self.last = buttons;
-        if !settle {
-            keys.extend(
-                BUTTONS
-                    .iter()
-                    .filter(|(bit, _)| down & bit != 0)
-                    .map(|&(_, k)| k),
-            );
-        }
+        keys.extend(
+            BUTTONS
+                .iter()
+                .filter(|(bit, _)| down & bit != 0)
+                .map(|&(_, k)| k),
+        );
         keys
     }
 }
@@ -247,5 +262,69 @@ mod tests {
         assert!(e.update(0, 0, 32767, 0.5).is_empty());
         assert!(e.update(0, 0, 0, 0.6).is_empty());
         assert_eq!(e.update(0, 0, 32767, 0.7), [Key::Up]);
+    }
+
+    #[test]
+    fn a_reset_can_keep_start() {
+        // A pad picked by its Start press (the menu closed): Start counts;
+        // A and the directions held with it don't.
+        let mut e = PadEdges::new();
+        e.reset_except(pad::START);
+        assert_eq!(
+            e.update(pad::START | pad::A | pad::DPAD_DOWN, 0, 32767, 0.0),
+            [Key::Start]
+        );
+        assert!(e
+            .update(pad::START | pad::A | pad::DPAD_DOWN, 0, 32767, 0.5)
+            .is_empty());
+        // Let go and pressed again: keys as usual.
+        assert!(e.update(0, 0, 0, 0.6).is_empty());
+        assert_eq!(
+            e.update(pad::A | pad::DPAD_DOWN, 0, 0, 0.7),
+            [Key::Down, Key::A]
+        );
+        // Start held after a plain reset gives nothing.
+        let mut e = PadEdges::new();
+        e.reset();
+        assert!(e.update(pad::START, 0, 0, 0.0).is_empty());
+        // Only the next reading is settled.
+        let mut e = PadEdges::new();
+        e.reset_except(pad::START);
+        assert!(e.update(0, 0, 0, 0.0).is_empty());
+        assert_eq!(e.update(pad::A, 0, 0, 0.1), [Key::A]);
+    }
+
+    #[test]
+    fn directions_held_when_the_menu_opens_wait_for_a_new_press() {
+        // The stick held forward in the game, then Start: no Up keys from
+        // the hold, now or when it would have repeated.
+        let mut e = PadEdges::new();
+        assert_eq!(e.update(0, 0, 32767, 0.0), [Key::Up]);
+        assert_eq!(e.update(pad::START, 0, 32767, 0.25), [Key::Up, Key::Start]);
+        e.hold_directions();
+        for t in [0.3, 0.5, 0.75, 1.0, 2.0] {
+            assert!(e.update(pad::START, 0, 32767, t).is_empty(), "{t}");
+        }
+        // Down to 85%: still the same hold (the hysteresis is kept).
+        assert!(e.update(0, 0, 27_800, 2.1).is_empty());
+        assert!(e.update(0, 0, 32_767, 2.2).is_empty());
+        // Let go (under 80%), then pushed again: a key at once, repeating.
+        assert!(e.update(0, 0, 20_000, 2.3).is_empty());
+        assert_eq!(e.update(0, 0, 32767, 2.4), [Key::Up]);
+        assert_eq!(e.update(0, 0, 32767, 2.7), [Key::Up]);
+        // The d-pad the same way; buttons held through it give nothing new.
+        let mut e = PadEdges::new();
+        assert_eq!(
+            e.update(pad::DPAD_LEFT | pad::A, 0, 0, 0.0),
+            [Key::Left, Key::A]
+        );
+        e.hold_directions();
+        assert!(e.update(pad::DPAD_LEFT | pad::A, 0, 0, 0.5).is_empty());
+        assert!(e.update(0, 0, 0, 0.6).is_empty());
+        assert_eq!(e.update(pad::DPAD_LEFT, 0, 0, 0.7), [Key::Left]);
+        // Nothing held: nothing changes.
+        let mut e = PadEdges::new();
+        e.hold_directions();
+        assert_eq!(e.update(pad::DPAD_UP, 0, 0, 0.0), [Key::Up]);
     }
 }

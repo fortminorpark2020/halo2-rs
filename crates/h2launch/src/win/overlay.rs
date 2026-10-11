@@ -14,8 +14,9 @@
 //! - never keeps the back buffer past `end_frame`, so the engine's
 //!   `ResizeBuffers` keeps working;
 //! - is skipped when the back buffer isn't the size, format or sample
-//!   count the panel was drawn for; the size it saw is the menu's cue to
-//!   draw it again (`seen_size`).
+//!   count the panel was drawn for. The menu draws for the swap chain's
+//!   size (`gfx::swap_size`), which only our resize changes, so this is a
+//!   safety net: a resize's new panel comes on the menu's next tick.
 //!
 //! A panic or a Direct3D error turns the overlay off for the run
 //! (`failed`); the menu then turns itself off and Start goes back to the
@@ -69,18 +70,15 @@ static PUBLISHED_GEN: AtomicU64 = AtomicU64::new(0);
 static DRAWN_GEN: AtomicU64 = AtomicU64::new(0);
 /// The overlay failed; it stays off for the run.
 static FAILED: AtomicBool = AtomicBool::new(false);
-/// The back buffer's size as the render thread last saw it (width << 32
-/// | height; 0 = not seen). A panel drawn for another size isn't copied,
-/// and the menu draws one for this size.
-static SEEN: AtomicU64 = AtomicU64::new(0);
 /// Since the last summary: copies, failures, and microseconds in all and
 /// at most.
 static COPIES: AtomicU64 = AtomicU64::new(0);
 static FAILURES: AtomicU64 = AtomicU64::new(0);
 static TOTAL_NS: AtomicU64 = AtomicU64::new(0);
 static MAX_NS: AtomicU64 = AtomicU64::new(0);
-/// Mismatches already logged (a few each kind, not every frame).
-static ODD_LOGS: AtomicU64 = AtomicU64::new(0);
+/// Mismatches already logged, of each kind (format, samples, size): a
+/// few each, not every frame.
+static ODD_LOGS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 /// Shows or hides the panel.
 pub fn show(on: bool) {
@@ -94,15 +92,6 @@ pub fn failed() -> bool {
 /// The newest generation the render thread copied.
 pub fn drawn() -> u64 {
     DRAWN_GEN.load(Ordering::SeqCst)
-}
-
-/// The back buffer's size as the render thread last saw it: the size the
-/// menu draws its panel for.
-pub fn seen_size() -> Option<(u32, u32)> {
-    match SEEN.load(Ordering::SeqCst) {
-        0 => None,
-        v => Some(((v >> 32) as u32, v as u32)),
-    }
 }
 
 /// Makes a texture from `panel` (drawn for a `target` back buffer) and
@@ -228,25 +217,27 @@ fn copy(context: &ID3D11DeviceContext, swap: &IDXGISwapChain) -> Result<bool, St
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: fills our struct.
     unsafe { back.GetDesc(&mut desc) };
-    SEEN.store(
-        (u64::from(desc.Width) << 32) | u64::from(desc.Height),
-        Ordering::SeqCst,
-    );
     let odd = if desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM {
-        Some(format!("back buffer format {}", desc.Format.0))
+        Some((0, format!("back buffer format {}", desc.Format.0)))
     } else if desc.SampleDesc.Count != 1 {
-        Some(format!("back buffer has {} samples", desc.SampleDesc.Count))
+        Some((
+            1,
+            format!("back buffer has {} samples", desc.SampleDesc.Count),
+        ))
     } else if (desc.Width, desc.Height) != p.target {
-        Some(format!(
-            "back buffer {}x{}, panel drawn for {}x{}",
-            desc.Width, desc.Height, p.target.0, p.target.1
+        Some((
+            2,
+            format!(
+                "back buffer {}x{}, panel drawn for {}x{}; the menu draws the next for the swap chain's size",
+                desc.Width, desc.Height, p.target.0, p.target.1
+            ),
         ))
     } else {
         None
     };
-    if let Some(why) = odd {
-        if ODD_LOGS.fetch_add(1, Ordering::Relaxed) < 8 {
-            log!("overlay: not copied ({why}); the menu redraws it for this back buffer");
+    if let Some((kind, why)) = odd {
+        if ODD_LOGS[kind].fetch_add(1, Ordering::Relaxed) < 8 {
+            log!("overlay: not copied ({why})");
         }
         return Ok(false);
     }

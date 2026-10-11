@@ -235,12 +235,16 @@ impl Setting {
 
     /// Whether the engine takes a change of it only at the next load (it
     /// reads it from the profile or the mapping at load, and the context
-    /// says it doesn't re-read them).
+    /// says it doesn't re-read them). Vibration is the launcher's to stop
+    /// at once, but not to start: from a launch with it off, the profile
+    /// the engine loaded says off (0x1F) and the launcher can only pass on
+    /// the rumble the engine asks for.
     pub fn next_game_only(self, ctx: &MenuContext) -> bool {
         match self {
             Setting::Buttons => !ctx.rereads_mapping,
             Setting::LookSensitivity | Setting::AutoCenter => !ctx.rereads_profile,
-            Setting::Thumbstick | Setting::LookInversion | Setting::Vibration => false,
+            Setting::Vibration => !ctx.launch.vibration && !ctx.rereads_profile,
+            Setting::Thumbstick | Setting::LookInversion => false,
         }
     }
 
@@ -1521,6 +1525,34 @@ mod tests {
         ] {
             assert_eq!(note(page(s), all, &base), None);
         }
+        // Vibration from a launch with it off: turning it on waits for the
+        // next game (the engine's profile says off), unless the engine
+        // re-reads the profile; off again is the launch value, untagged.
+        let off = MenuContext {
+            launch: Controls {
+                vibration: false,
+                ..launch
+            },
+            ..base.clone()
+        };
+        let on = Controls {
+            vibration: true,
+            ..launch
+        };
+        let mut want = [false; 9];
+        want[Setting::Vibration.row()] = true;
+        assert_eq!(tags(on, &off), want);
+        assert!(tags(off.launch, &off).iter().all(|&t| !t));
+        assert_eq!(
+            note(page(Setting::Vibration), on, &off).as_deref(),
+            Some(words::NEXT_GAME_NOTE)
+        );
+        let off_rereads = MenuContext {
+            rereads_profile: true,
+            ..off.clone()
+        };
+        assert!(tags(on, &off_rereads).iter().all(|&t| !t));
+        assert_eq!(note(page(Setting::Vibration), on, &off_rereads), None);
     }
 
     #[test]

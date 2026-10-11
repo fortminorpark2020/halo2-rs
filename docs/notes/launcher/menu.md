@@ -906,9 +906,11 @@ in section 9.5 pass.
   it into back buffer 0 with one `CopySubresourceRegion`: no pipeline
   state is touched, a busy lock never makes it wait (it keeps its own copy
   of the last panel), and the back buffer is let go before `end_frame`
-  returns, so `ResizeBuffers` keeps working. A back buffer of another size,
-  format or sample count is skipped, and the size it saw makes the driver
-  draw the panel again. Any Direct3D error or panic turns the overlay off
+  returns, so `ResizeBuffers` keeps working. The driver draws the panel for
+  the swap chain's size, which only our own resize changes (on the window
+  thread, while the engine waits in slot 2), so after a resize the next
+  tick draws it again. A back buffer of another size, format or sample
+  count is skipped, as a safety net. Any Direct3D error or panic turns the overlay off
   for the run. The 10 s summary gets an `overlay: N copies, F failures,
   mean X us, max Y us` line.
 - **The input gate** (`win/input.rs`, rules in `gamemenu::gate`), for
@@ -930,14 +932,19 @@ in section 9.5 pass.
     being picked drops its pad buttons.
 - **Live controls** (`win/mod.rs`): one atomic holds the controls the menu
   set, read by the input polls (stick layout, look flip, mouse) and by
-  rumble. Turning vibration off stops the motors at once.
+  rumble. Turning vibration off stops the motors at once, and while it is
+  off every rumble call from the engine sends zeros (so one racing the
+  switch can't leave the motors on).
 - **Profile and mapping generations** (`win/host.rs`): host slots 34
   (`get_player_profile`) and 116 (`get_player_gamepad_mapping`) serve the
-  newest generation. Generation 0 is the launch buffers, as before; a
-  change builds new bytes (`profile::profile_for`, plus `--set-profile`,
-  and the button layout's mapping) and swaps them in only when the bytes
-  differ. Old generations are never freed, since the engine may keep a
-  pointer (at most 64 per run). The log says when the engine first gets a
+  newest generation. Generation 0 is the launch buffers, as before; when
+  the menu closes having changed the controls, new bytes are built
+  (`profile::profile_for`, plus `--set-profile`, and the button layout's
+  mapping) and swapped in only when they differ. One generation a visit,
+  not one a step: the engine gets neutral input while the menu is open,
+  so it misses nothing by the wait. Old generations are never freed, since
+  the engine may keep a pointer (at most 64 of each kind per run; past
+  that the menu treats that kind as read only at load). The log says when the engine first gets a
   new one (`profile generation N first served at call #k (t s)`, and the
   same for the gamepad mapping), which is how check 7 tells whether it
   asks again mid-match.
@@ -951,17 +958,23 @@ in section 9.5 pass.
 - **Safety.** A panel not drawn within 1 s while the window isn't
   minimised closes the menu and lets go of the game's input; three of
   those, or an overlay failure, turn the menu off for the run and Start
-  goes back to the engine. A natural end while the menu is open closes it
+  goes back to the engine. PLEASE WAIT is exempt (it lasts until the
+  process ends), and an End Game waiting on `--end-game-message` still
+  quits on time if the menu is turned off meanwhile. A natural end while the menu is open closes it
   (`game menu: closed (game over)`), so the scoreboard shows, and it can't
   be opened again after the game has ended.
 - **Flags.** `--no-game-menu` (the menu off; Start and Esc reach the
   game). `H2LAUNCH_OVERLAY_FAIL=1` (environment; the same, as a stand-in
-  for an overlay failure, for check 11). `--reload-message N` (after a
-  change to Button Layout, Look Sensitivity or Automatic Look Centering,
-  post engine message N; the experiment of check 8). `--end-game-message
-  N` (End Game posts N and quits 10 s later if the game hasn't ended; the
-  search of check 15). `--game-kind` (the lobby passes it; it defaults to
-  social with `--session` or `--live`, offline otherwise).
+  for an overlay failure, for check 11). `--reload-message N` (when the
+  menu closes after a change to Button Layout, Look Sensitivity, Auto Look
+  Centering, or vibration turned on, post engine message N once the new
+  generations are in place; the experiment of check 8).
+  `--end-game-message N` (End Game posts N and quits 10 s later if the
+  game hasn't ended; the search of check 15). `--game-kind` (the lobby
+  passes it; it defaults to social with `--session`, to the kind of the
+  server's match with `--live`, and to offline otherwise). The lobby
+  leaves out its "Start or Esc ... opens the game menu" line when its
+  engines run without the menu.
 - **Still to settle on the PC.** `ENGINE_REREADS_PROFILE` and
   `ENGINE_REREADS_MAPPING` in `win/menu.rs` are false until check 7 says
   the engine picks up a new profile or mapping mid-match; until then the
@@ -980,7 +993,7 @@ list and `lobby.txt` keys as the lobby's Settings):
 | Look Sensitivity | a new profile generation (0x1B5, 0x1B6) | NEXT GAME until check 7 (or 8) | slot 34 |
 | Look Inversion | the launcher flips the look stick's up and down when the live value differs from the launch one; profile 0x1D keeps the launch value, so the engine never flips it twice | at once | launcher (`gate::look_flip`) |
 | Auto Look Centering | a new profile generation (0x23) | NEXT GAME until check 7 (or 8) | slot 34 |
-| Controller Vibration | the launcher's rumble follows it; off stops the motors; also profile 0x1F | at once | launcher (`rumble`) |
+| Controller Vibration | the launcher's rumble follows it; off stops the motors; also profile 0x1F | off at once; on, from a game started with it off, NEXT GAME until check 7 (the engine's profile says off, and the launcher can only pass on rumble the engine asks for) | launcher (`rumble`), slot 34 |
 | Mouse Sensitivity | the launcher's mouse-to-look; also profile 0x410 | at once | launcher (`mouse_motion`) |
 | Mouse Inversion | the launcher's mouse-to-look (profile 0x1E stays 0) | at once | launcher (`mouse_motion`) |
 | Use Default Settings | every row above back to Halo 2's defaults | as each row | all of the above |
@@ -988,7 +1001,10 @@ list and `lobby.txt` keys as the lobby's Settings):
 Every change is saved: through the lobby (`H2EVENT controls`) when the
 lobby started the engine, or straight into `lobby.txt` in the instance's
 settings folder in `--offline` runs, which also print the same `H2EVENT
-controls ...` line in the log. The PC checks are in section 9.5.
+controls ...` line in the log. Those runs save only the settings changed
+in the menu, so a control flag given for one run (`--layout`,
+`--no-vibration`, ...) isn't saved with them; Use Default Settings saves
+every one. The PC checks are in section 9.5.
 
 ## 8. Option A's work, if it is chosen
 
@@ -1303,7 +1319,8 @@ the saved controls away from the owner's own. Each script starts with
      `(game menu open)`) while frames go on; shots 6.2 and 8 show the
      Spartan in one place; no B (no melee) until it is let go at 12; RT
      masked until it is let go at 15 (no firing); the stick walks again at
-     once after 10.
+     once after 10; shot 8 shows the focus still on Leave Game (a stick
+     held when the menu opens doesn't move it).
    - B: `4.8 press a for 2`, `5 press start`, `6 press start`, `9 press
      a`, `12 quit`. Pass: one jump at 4.8 (before the menu); the menu
      opens at 5 and closes at 6; no A reaches the engine from 5 until it
@@ -1342,7 +1359,10 @@ the saved controls away from the owner's own. Each script starts with
       Did it jump? Any `gamepad mapping generation 1 first served` line?
    3. Look Sensitivity 3 to 10, with `stick R 1 0 for 0.5` before and
       after; compare the turn. Any `profile generation N first served`?
-   4. Automatic Look Centering on: anything visible?
+   4. Auto Look Centering on: anything visible?
+   5. Started with `--no-vibration`, Controller Vibration on (the row says
+      NEXT GAME), then fire a weapon: a `first rumble` line with non-zero
+      motors, and a `profile generation N first served` line?
 
    Result: for each setting, whether it took effect mid-match.
 8. **Only if check 7 showed nothing.** Repeat it with `--reload-message 5`

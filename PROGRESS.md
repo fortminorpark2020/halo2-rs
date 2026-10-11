@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 08:40 UTC. Any assistant that works on the project
+Last updated 2026-10-11 12:45 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -170,11 +170,17 @@ step, when the owner says so: one weapon.
   (`win/overlay.rs`), the input gate for player 0 (`win/input.rs`), live
   controls, and the profile and gamepad mapping served as generations
   (`win/host.rs`); what it does and the settings table are in
-  `docs/notes/launcher/menu.md`, phase 4. Next: the numbered PC checks in
+  `docs/notes/launcher/menu.md`, phase 4. Review fixes, round 1
+  (2026-10-11): the engine's profile and mapping generations are built
+  when the menu closes (not per step; each kind has its own cap of 64);
+  a stick held into the menu no longer scrolls it; a pad's first Start
+  opens it; `--live` takes the game kind from the server's match; runs
+  without the lobby save only the settings changed in the menu; turning
+  vibration on in a game started with it off says NEXT GAME. Next: the numbered PC checks in
   menu.md section 9.5 (Remote Control session), then a small commit that
   sets `ENGINE_REREADS_PROFILE` and `ENGINE_REREADS_MAPPING` in
   `win/menu.rs` from check 7 (they are false, so Button Layout, Look
-  Sensitivity and Automatic Look Centering say NEXT GAME), or makes the
+  Sensitivity and Auto Look Centering say NEXT GAME), or makes the
   reload message the default if check 8 shows it works, and records the
   results there and here.
 - Milestone 1 is done (2026-10-10 02:50 UTC): `h2launch` started MCC's

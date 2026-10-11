@@ -831,9 +831,10 @@ unsafe extern "system" fn get_player_profile(_this: *mut c_void, xuid: u64) -> *
 
 /// One generation of the profile (slot 34) or the gamepad mapping (slot
 /// 116). Generation 0 is built at the first call, from the controls the
-/// engine was started with; the game menu adds one each time it changes
-/// them (`publish_controls`). They are never freed, so a pointer the
-/// engine kept stays valid; at most `MAX_GENERATIONS` are made in a run.
+/// engine was started with; the game menu adds one when it closes having
+/// changed them (`publish_controls`). They are never freed, so a pointer
+/// the engine kept stays valid; at most `MAX_GENERATIONS` of each kind are
+/// made in a run.
 struct Gen {
     n: u64,
     bytes: Box<[u8]>,
@@ -847,8 +848,9 @@ static MAPPING_LIVE: AtomicPtr<Gen> = AtomicPtr::new(std::ptr::null_mut());
 /// The newest generation served, plus 1 (0: none yet).
 static PROFILE_SERVED: AtomicU64 = AtomicU64::new(0);
 static MAPPING_SERVED: AtomicU64 = AtomicU64::new(0);
-/// Generations past 0 made in this run (both kinds together).
-static GENERATIONS: AtomicU32 = AtomicU32::new(0);
+/// Generations past 0 made in this run, of each kind.
+static PROFILE_GENERATIONS: AtomicU32 = AtomicU32::new(0);
+static MAPPING_GENERATIONS: AtomicU32 = AtomicU32::new(0);
 const MAX_GENERATIONS: u32 = 64;
 
 /// The newest of a kind's generations.
@@ -896,12 +898,13 @@ fn note_served(slot: usize, served: &AtomicU64, g: &Gen, what: &str) {
     }
 }
 
-/// A new generation, leaked; None past the cap (logged once).
-fn leak_gen(n: u64, bytes: Vec<u8>) -> Option<*mut Gen> {
-    if GENERATIONS.fetch_add(1, Ordering::SeqCst) >= MAX_GENERATIONS {
-        static WARNED: AtomicBool = AtomicBool::new(false);
-        if !WARNED.swap(true, Ordering::SeqCst) {
-            log!("the game menu changed the controls {MAX_GENERATIONS} times: the engine keeps the last profile and gamepad mapping for the rest of this run (the launcher's own use of the controls still follows)");
+/// A new generation of a kind (`made` counts them), leaked; None past the
+/// cap (logged once a kind).
+fn leak_gen(made: &AtomicU32, what: &str, n: u64, bytes: Vec<u8>) -> Option<*mut Gen> {
+    let count = made.fetch_add(1, Ordering::SeqCst);
+    if count >= MAX_GENERATIONS {
+        if count == MAX_GENERATIONS {
+            log!("the game menu changed the {what} {MAX_GENERATIONS} times: the engine keeps the last one for the rest of this run (the launcher's own use of the controls still follows)");
         }
         return None;
     }
@@ -911,13 +914,26 @@ fn leak_gen(n: u64, bytes: Vec<u8>) -> Option<*mut Gen> {
     })))
 }
 
-/// The game menu changed the controls to `c`: a new profile (with the
-/// launch's look inversion, see `profile::profile_for`, and the
+/// Whether the engine's newest profile and gamepad mapping are the ones
+/// for the controls `publish_controls` was given (false past a kind's
+/// cap).
+#[derive(Clone, Copy, Debug)]
+pub struct Published {
+    pub profile: bool,
+    pub mapping: bool,
+}
+
+/// The game menu closed having changed the controls to `c`: a new profile
+/// (with the launch's look inversion, see `profile::profile_for`, and the
 /// `--set-profile` overrides) and a new gamepad mapping (all zero stays
 /// all zero with `--pad-map zero`), each only if its bytes changed. The
 /// engine gets them the next time it asks. Window thread.
-pub fn publish_controls(c: &crate::controls::Controls) {
-    let Some(s) = super::setup() else { return };
+pub fn publish_controls(c: &crate::controls::Controls) -> Published {
+    let mut now = Published {
+        profile: true,
+        mapping: true,
+    };
+    let Some(s) = super::setup() else { return now };
     let mut p = profile::profile_for(c, &s.controls, s.args.key_bindings);
     for w in &s.args.set_profile {
         // Each was logged when generation 0 was built.
@@ -925,7 +941,9 @@ pub fn publish_controls(c: &crate::controls::Controls) {
     }
     let cur = profile_now();
     if *cur.bytes != p[..] {
-        if let Some(g) = leak_gen(cur.n + 1, p) {
+        let made = leak_gen(&PROFILE_GENERATIONS, "profile", cur.n + 1, p);
+        now.profile = made.is_some();
+        if let Some(g) = made {
             PROFILE_LIVE.store(g, Ordering::Release);
             log!(
                 "profile generation {}: look sensitivity {}, auto look centering {}, vibration {}, mouse sensitivity {} (look inversion stays {} from the launch)",
@@ -941,7 +959,14 @@ pub fn publish_controls(c: &crate::controls::Controls) {
     let m = s.args.pad_map.mapping(c.buttons);
     let cur = mapping_now(s);
     if *cur.bytes != m[..] {
-        if let Some(g) = leak_gen(cur.n + 1, m.to_vec()) {
+        let made = leak_gen(
+            &MAPPING_GENERATIONS,
+            "gamepad mapping",
+            cur.n + 1,
+            m.to_vec(),
+        );
+        now.mapping = made.is_some();
+        if let Some(g) = made {
             MAPPING_LIVE.store(g, Ordering::Release);
             log!(
                 "gamepad mapping generation {}: {}",
@@ -950,6 +975,7 @@ pub fn publish_controls(c: &crate::controls::Controls) {
             );
         }
     }
+    now
 }
 
 /// The profile bytes for generation 0, from the controls the engine was

@@ -24,14 +24,18 @@ the launcher doesn't do.
   picks ONLINE on the main menu, and stays signed in between matches
   (and on the main menu).
 - For each match it starts a second copy of itself for the engine:
-  `h2launch --session <file> --me <n> --map <m> --variant <v> --events`.
-  The session file is written from LAUNCHER_MATCH (`live::session_from`).
-  The child joins the relay room and plays the match exactly as `--live`
-  does, but tells the lobby what the engine does on its standard output
-  (`H2EVENT running`, `maploaded`, `ended <players>`, `closing`) instead of
-  talking to the server. The lobby turns those into HOSTING, JOINED,
-  LAUNCHER_RESULT and LEFT_MATCH with the same rules `--live` uses
-  (`live::Told`), and shows the carnage report when MATCH_OVER comes.
+  `h2launch --session <file> --me <n> --map <m> --variant <v> --events
+  --game-kind <ranked|social|custom>` (plus the player's name, controls
+  and instance). The session file is written from LAUNCHER_MATCH
+  (`live::session_from`). The child joins the relay room and plays the
+  match exactly as `--live` does, but tells the lobby what the engine does
+  on its standard output (`H2EVENT running`, `maploaded`, `ended
+  <players>`, `closing`; from the in-game GAME MENU also `controls
+  <key=value ...>`, which the lobby saves, and `left game` or `left end`,
+  after which the engine closes without `ended`) instead of talking to
+  the server. The lobby turns those into HOSTING, JOINED, LAUNCHER_RESULT
+  and LEFT_MATCH with the same rules `--live` uses (`live::Told`), and
+  shows the carnage report when MATCH_OVER comes.
 - A fresh engine process per match: halo2.dll is loaded once per process,
   as MCC does, and a crash in a match doesn't take the lobby with it.
 - The lobby writes `quit` on the child's standard input to close the

@@ -713,18 +713,22 @@ pub fn rumble(player: i32, state: *const u8) {
     if !(0..4).contains(&index) {
         return;
     }
-    // Vibration off: the profile says so, and none goes to the pad here
-    // even if the engine asks (the live setting: the game menu may have
-    // turned it off since the launch).
-    if !super::controls().vibration {
-        return;
-    }
-    if !RUMBLE_LOGGED.swap(true, Ordering::SeqCst) {
+    // Vibration off (the live setting: the game menu may have turned it
+    // off since the launch): the motors get zeros whatever the engine
+    // asks. Zeros rather than nothing, so that a request racing the menu's
+    // `stop_rumble` (read as on, written after the stop) is undone by the
+    // engine's next call instead of buzzing for the rest of the match.
+    let on = super::controls().vibration;
+    if on && !RUMBLE_LOGGED.swap(true, Ordering::SeqCst) {
         log!("first rumble: player {player} pad {index} left {left} right {right}");
     }
-    let v = XINPUT_VIBRATION {
-        wLeftMotorSpeed: left,
-        wRightMotorSpeed: right,
+    let v = if on {
+        XINPUT_VIBRATION {
+            wLeftMotorSpeed: left,
+            wRightMotorSpeed: right,
+        }
+    } else {
+        XINPUT_VIBRATION::default()
     };
     // SAFETY: plain call with our struct.
     unsafe { XInputSetState(index as u32, &v) };

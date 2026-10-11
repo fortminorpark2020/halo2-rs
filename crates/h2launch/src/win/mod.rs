@@ -600,6 +600,17 @@ fn launch(mut args: Args) -> i32 {
         }
         args.map = Some(ready.map.clone());
         args.variant = Some(ready.variant.clone());
+        if args.game_kind_set {
+            log!(
+                "live: a {} game (the GAME MENU takes --game-kind {})",
+                ready.game_kind.key(),
+                args.game_kind.key()
+            );
+        } else {
+            // A ranked match's leave counts, and the menu says so.
+            args.game_kind = ready.game_kind;
+            log!("live: a {} game", ready.game_kind.key());
+        }
         ready
     });
     if let Some(v) = &args.variant {

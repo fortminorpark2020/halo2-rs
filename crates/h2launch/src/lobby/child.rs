@@ -149,6 +149,18 @@ pub struct Running {
     done: bool,
     /// When it was asked to quit.
     asked: Option<Instant>,
+    /// It was started with its GAME MENU (`game_menu_on`).
+    game_menu: bool,
+}
+
+/// Whether an engine started with these extra words
+/// (`H2LOBBY_ENGINE_ARGS`) and this `H2LAUNCH_OVERLAY_FAIL` has its
+/// in-game GAME MENU: not with `--no-game-menu`, nor with the overlay
+/// failure's stand-in set to 1 (the engine inherits the lobby's
+/// environment).
+pub fn game_menu_on(extra: &str, overlay_fail: Option<&std::ffi::OsStr>) -> bool {
+    !extra.split_whitespace().any(|w| w == "--no-game-menu")
+        && overlay_fail.is_none_or(|v| v != "1")
 }
 
 impl Running {
@@ -219,7 +231,13 @@ impl Running {
             said: rx,
             done: false,
             asked: None,
+            game_menu: game_menu_on(&extra, std::env::var_os("H2LAUNCH_OVERLAY_FAIL").as_deref()),
         })
+    }
+
+    /// It was started with its in-game GAME MENU.
+    pub fn game_menu(&self) -> bool {
+        self.game_menu
     }
 
     /// Let its window come to the front (again: the engine's window
@@ -716,6 +734,22 @@ mod tests {
             assert_eq!(parsed.game_kind, k);
             fake = m;
         }
+    }
+
+    #[test]
+    fn whether_the_engine_has_its_game_menu() {
+        use std::ffi::OsStr;
+        assert!(game_menu_on("", None));
+        assert!(game_menu_on("--pad none --set-option 0x354=i32:60", None));
+        // The README's fallback, anywhere in the words.
+        assert!(!game_menu_on("--no-game-menu", None));
+        assert!(!game_menu_on("  --pad 1   --no-game-menu ", None));
+        // Only the flag itself (the engine refuses anything else).
+        assert!(game_menu_on("--no-game-menus", None));
+        // The overlay failure's stand-in turns it off at 1 only.
+        assert!(!game_menu_on("", Some(OsStr::new("1"))));
+        assert!(game_menu_on("", Some(OsStr::new("0"))));
+        assert!(game_menu_on("", Some(OsStr::new(""))));
     }
 
     #[test]

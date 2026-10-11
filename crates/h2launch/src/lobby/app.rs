@@ -276,6 +276,9 @@ struct Game {
     /// The player left the game from the engine's GAME MENU (or ended it
     /// for everyone).
     left: Option<Leave>,
+    /// The engine was started with its GAME MENU (not turned off with
+    /// `H2LOBBY_ENGINE_ARGS=--no-game-menu` or `H2LAUNCH_OVERLAY_FAIL=1`).
+    menu: bool,
 }
 
 impl Game {
@@ -1010,6 +1013,7 @@ impl App {
             ended_at: None,
             over: None,
             left: None,
+            menu: true,
         });
         self.popup = None;
         self.asked = None;
@@ -1083,6 +1087,7 @@ impl App {
                         m.map,
                         if host { "hosting" } else { "joining" }
                     ));
+                    g.menu = c.game_menu();
                     g.child = Some(c);
                     self.screen = Screen::InGame;
                 }
@@ -1210,6 +1215,12 @@ impl App {
     /// (the server's reason, or that they left or ended it). Either way
     /// the lobby's window comes to the front.
     fn on_engine_exit(&mut self) {
+        // The lobby's own "leave the game?" has nothing left to ask once
+        // the engine is gone (the player left from the GAME MENU, or the
+        // game ended), and it would cover the screen landed on.
+        if self.popup == Some(Popup::LeaveGame) {
+            self.popup = None;
+        }
         let Some(g) = self.game.as_mut() else {
             return;
         };
@@ -3324,7 +3335,7 @@ impl App {
             "You join this game."
         };
         p.text(640.0, 404.0, 20.0, DIM, Align::Center, role);
-        if g.results.is_none() && g.running {
+        if g.results.is_none() && g.running && g.menu {
             p.text(640.0, 448.0, 20.0, DIM, Align::Center, IN_GAME_MENU_HINT);
         }
         if g.results.is_none() {
@@ -5140,6 +5151,7 @@ mod tests {
             ended_at: Some(a.now),
             over: None,
             left: None,
+            menu: true,
         });
         a.screen = Screen::Carnage;
         a.csel = 1;
@@ -5813,6 +5825,7 @@ mod tests {
             ended_at: None,
             over: None,
             left: None,
+            menu: true,
         });
         a.screen = Screen::InGame;
         a.focus = false;
@@ -6047,6 +6060,36 @@ mod tests {
         a.game.as_mut().unwrap().running = false;
         a.draw(&mut c, &mut text);
         assert!(a.drawn().iter().all(|d| d != IN_GAME_MENU_HINT));
+        // Nor when the engine runs without its menu (the README's
+        // fallback): Start goes to the game then.
+        in_game(&mut a, 12, false, false);
+        a.game.as_mut().unwrap().menu = false;
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().all(|d| d != IN_GAME_MENU_HINT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leaving_from_the_game_menu_clears_the_lobbys_leave_question() {
+        // The lobby's "Leave game" asked, unanswered; the player leaves
+        // from the engine's GAME MENU instead.
+        let dir = scratch("menu-popup");
+        let mut a = app(&dir);
+        in_game(&mut a, 11, true, false);
+        a.input(Input::B);
+        assert_eq!(a.popup, Some(Popup::LeaveGame));
+        a.on_engine_event(&Engine::Left(Leave::Game), a.now);
+        a.on_engine_exit();
+        assert_eq!(a.popup, None);
+        assert_eq!(a.label(), "live");
+        assert_eq!(last_toast(&a).as_deref(), Some("You left the game."));
+        // The same when the game ended and the carnage report comes.
+        in_game(&mut a, 11, true, false);
+        a.input(Input::B);
+        assert_eq!(a.popup, Some(Popup::LeaveGame));
+        a.on_engine_event(&Engine::Ended(Vec::new()), a.now);
+        a.on_engine_exit();
+        assert_eq!(a.popup, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

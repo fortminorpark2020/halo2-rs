@@ -101,16 +101,22 @@ install. No game files are included in this repository.
   starts the game's window comes to the front by itself; if it doesn't,
   click it. In a match, Start (or Esc on the keyboard) opens Halo 2's GAME
   MENU over the game, which keeps running behind it: Leave Game, Settings,
-  and End Game if you host a custom game (or in an offline run). Up and
-  down pick, A (or Enter) chooses, and B, Back or Start (or Esc or
-  Backspace) closes it; while it is open your Spartan stands still, and a
-  button you were still holding when it closed does nothing in the game
-  until you let go. Settings is the same controller list as the lobby's,
-  saved the same way. Thumbstick Layout, Look Inversion, Controller
-  Vibration and the two mouse settings change at once; Button Layout, Look
-  Sensitivity and Automatic Look Centering are saved but marked NEXT GAME,
-  because the game reads them only when a match loads (this may change
-  once it has been tried on a PC). Leave Game asks first, closes the game
+  and End Game if you host a custom game (or in an offline run), with the
+  game's players listed beside them (the host marked). Up and down pick,
+  A (or Enter) chooses, and B, Back or Start (or Esc or Backspace) closes
+  it; while it is open your Spartan stands still, and a button you were
+  still holding when it closed does nothing in the game until you let go.
+  Settings opens CONTROLLER SETTINGS: the lobby's settings in the same
+  order and saved the same way, under Halo 2's in-game names (Auto Look
+  Centering, and Use Default Settings last, which asks first). A on a
+  setting opens its choices, and A on one picks it; Left, Right or A
+  change the two mouse rows. On these pages B, Back, Esc or Backspace goes
+  back one page, and Start does nothing. Thumbstick Layout, Look
+  Inversion, Controller Vibration and the two mouse settings change at
+  once; Button Layout, Look Sensitivity and Auto Look Centering are saved
+  but marked NEXT GAME, because the game reads them only when a match
+  loads (this may change once it has been tried on a PC), and so is
+  turning vibration on in a game that started with it off. Leave Game asks first, closes the game
   and takes you back to ONLINE (a custom game's party leader goes back to
   Custom Game); leaving a ranked game still counts toward your level, and
   leaving a game you host ends it for everyone. End Game ends a custom game

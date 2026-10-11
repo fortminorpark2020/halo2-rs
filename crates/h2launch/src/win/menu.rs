@@ -8,7 +8,8 @@
 //! 2. turns them into menu keys (`gamemenu::edges`) and runs `GameMenu`;
 //! 3. applies what it says: the input gate opened or closed
 //!    (`input::open_menu`, `input::close_menu`), the live controls, the
-//!    lobby's events, the quit;
+//!    lobby's events, the quit, and once it closes the engine's profile
+//!    and gamepad mapping for the controls it left;
 //! 4. draws the panel on the CPU when the page or the back buffer's size
 //!    changed, and publishes it for the render thread (`overlay`);
 //! 5. checks that the panel was drawn: one not drawn within a second
@@ -38,7 +39,7 @@ use crate::controls::Controls;
 use crate::gamemenu::edges::PadEdges;
 use crate::gamemenu::{self, Effect, GameMenu, GameMenuFrame, Key, Leave, MenuContext};
 use crate::live::{self, Engine};
-use crate::profile::InputFrame;
+use crate::profile::{pad, InputFrame};
 
 /// Whether the engine picks up a new player profile mid-match (look
 /// sensitivity, automatic look centering). PC check 7 sets it; until
@@ -124,8 +125,8 @@ pub struct Driver {
     menu: GameMenu,
     ctx: MenuContext,
     edges: PadEdges,
-    /// The XInput slot read last (-1: none).
-    pad: i32,
+    /// The XInput slot read last (-1: none; None: nothing read yet).
+    pad: Option<i32>,
     /// The input script's time at the last tick (this driver's own, apart
     /// from the input polls').
     script_t: Option<f64>,
@@ -143,6 +144,9 @@ pub struct Driver {
     game_over_seen: bool,
     /// `--end-game-message`: when End Game quits anyway.
     end_game_at: Option<f64>,
+    /// The controls the engine's profile and gamepad mapping were last
+    /// built from (`host::publish_controls`).
+    engine_controls: Controls,
 }
 
 impl Driver {
@@ -168,7 +172,7 @@ impl Driver {
             menu: GameMenu::new(s.controls),
             ctx,
             edges: PadEdges::new(),
-            pad: -1,
+            pad: None,
             script_t: None,
             script_keys: Vec::new(),
             shown: None,
@@ -178,17 +182,20 @@ impl Driver {
             off: false,
             game_over_seen: false,
             end_game_at: None,
+            engine_controls: s.controls,
         }
     }
 
     /// One pass of the window thread's loop (`t`: seconds since start).
     pub fn tick(&mut self, t: f64) {
-        if self.off {
-            return;
-        }
-        if !ready() {
-            // Presses before the menu is ready never open it later.
-            let _ = input::take_menu_keys();
+        if self.off || !ready() {
+            // An End Game confirmed before the menu was turned off still
+            // quits on time.
+            self.end_game_wait(t);
+            if !self.off {
+                // Presses before the menu is ready never open it later.
+                let _ = input::take_menu_keys();
+            }
             return;
         }
         let (reading, presses) = self.read(t);
@@ -211,14 +218,7 @@ impl Driver {
                 self.apply(fx, &reading, t);
             }
         }
-        if let Some(at) = self.end_game_at {
-            if t >= at {
-                self.end_game_at = None;
-                log!("game menu: the game didn't end {END_GAME_WAIT} s after End Game's engine message; quitting");
-                super::set_reason("ended from the game menu");
-                super::request_quit(super::QUIT_USER);
-            }
-        }
+        self.end_game_wait(t);
         for p in presses {
             let fx = if self.menu.is_open() {
                 let before = self.menu.page();
@@ -236,6 +236,9 @@ impl Driver {
             } else if p == Press::Pad(Key::Start) || p == Press::Keyboard(gamemenu::vk::ESCAPE) {
                 if self.can_open() {
                     let fx = self.menu.open();
+                    // A stick or d-pad direction held in the game moves
+                    // nothing here until it is let go.
+                    self.edges.hold_directions();
                     self.menu.set_keyboard(matches!(p, Press::Keyboard(_)));
                     log!(
                         "game menu: opened ({})",
@@ -257,7 +260,29 @@ impl Driver {
         if self.menu.is_open() && !self.off {
             self.draw();
             overlay::show(true);
-            self.health(t, &reading);
+            // PLEASE WAIT stays until the process ends (the quit's wait, or
+            // End Game's): a slow panel there must not let go of the
+            // game's input, nor let the menu open again.
+            if self.menu.page() != gamemenu::Page::Wait {
+                self.health(t, &reading);
+            }
+        }
+    }
+
+    /// `--end-game-message`'s wait: done once the game has ended (the
+    /// game's end shows), or past its time a quit as Leave Game's. It
+    /// runs with the menu off too, so a confirmed End Game is never
+    /// dropped.
+    fn end_game_wait(&mut self, t: f64) {
+        let Some(at) = self.end_game_at else { return };
+        if super::GAME_ENDED.load(Ordering::SeqCst) {
+            self.end_game_at = None;
+            log!("game menu: the game ended after End Game's engine message");
+        } else if t >= at {
+            self.end_game_at = None;
+            log!("game menu: the game didn't end {END_GAME_WAIT} s after End Game's engine message; quitting");
+            super::set_reason("ended from the game menu");
+            super::request_quit(super::QUIT_USER);
         }
     }
 
@@ -281,10 +306,20 @@ impl Driver {
         let mut r = InputFrame::default();
         let pad = input::menu_pad();
         let index = pad.map_or(-1, |(i, _)| i);
-        if index != self.pad {
-            // Another pad (or none): what it holds now counts once let go.
-            self.edges.reset();
-            self.pad = index;
+        if self.pad != Some(index) {
+            // Another pad (or none): what it holds now counts once let go,
+            // except Start with the menu closed. The engine's poll picks a
+            // pad when it is used (padpick), so its Start may be the very
+            // press that picked it, and that press is the menu's (the gate
+            // took it from the engine). The first reading, when the menu
+            // gets ready, settles everything: a Start held through the
+            // load is old.
+            if self.pad.is_none() || self.menu.is_open() {
+                self.edges.reset();
+            } else {
+                self.edges.reset_except(pad::START);
+            }
+            self.pad = Some(index);
         }
         let (mut lx, mut ly) = (0i16, 0i16);
         if let Some((_, g)) = pad {
@@ -346,13 +381,50 @@ impl Driver {
         }
     }
 
-    /// The menu closed: the input gate takes what is held, the panel goes.
+    /// The menu closed: the input gate takes what is held, the panel
+    /// goes, and the engine gets the controls it left.
     fn closed(&mut self, reading: &InputFrame) {
         input::close_menu(reading);
         overlay::show(false);
         overlay::clear();
         self.shown = None;
         self.behind_since = None;
+        self.publish();
+    }
+
+    /// A profile and gamepad mapping for the controls the menu left, built
+    /// when it closes: one generation a visit rather than one a step (a
+    /// held arrow on Mouse Sensitivity would use the cap up in seconds).
+    /// The engine gets neutral input while the menu is open, so it misses
+    /// nothing by the wait. `--reload-message` follows a change to a
+    /// setting the engine may read only at load.
+    fn publish(&mut self) {
+        let c = self.menu.live();
+        let old = std::mem::replace(&mut self.engine_controls, c);
+        if c == old {
+            return;
+        }
+        let now = super::host::publish_controls(&c);
+        // Past a kind's cap the engine keeps an older one: its settings
+        // are the next game's from here on, whatever it re-reads.
+        if !now.profile && self.ctx.rereads_profile {
+            self.ctx.rereads_profile = false;
+            log!("game menu: profile settings take effect in the next game from now on");
+        }
+        if !now.mapping && self.ctx.rereads_mapping {
+            self.ctx.rereads_mapping = false;
+            log!("game menu: the button layout takes effect in the next game from now on");
+        }
+        let load_only = old.buttons != c.buttons
+            || old.look_sensitivity != c.look_sensitivity
+            || old.auto_center != c.auto_center
+            || (!old.vibration && c.vibration);
+        if let (true, Some(n)) = (
+            load_only,
+            super::setup().and_then(|s| s.args.reload_message),
+        ) {
+            engine::post_message(n, "--reload-message: the profile or mapping changed");
+        }
     }
 
     /// Closes the menu from any page (keeping the live controls).
@@ -366,7 +438,7 @@ impl Driver {
     fn turn_off(&mut self, why: &str, reading: &InputFrame) {
         self.force_close(reading);
         self.off = true;
-        self.end_game_at = None;
+        // A pending End Game (`end_game_at`) is kept: `tick` still quits.
         READY.store(false, Ordering::SeqCst);
         overlay::show(false);
         overlay::clear();
@@ -374,10 +446,12 @@ impl Driver {
     }
 
     /// Draws and publishes the panel if its page or the back buffer's
-    /// size changed.
+    /// size changed. The size is the swap chain's: only our
+    /// `resize_swap_chain`, on this thread, changes it, while the engine
+    /// waits in slot 2.
     fn draw(&mut self) {
         let frame = self.menu.frame(&self.ctx);
-        let size = overlay::seen_size().unwrap_or_else(gfx::swap_size);
+        let size = gfx::swap_size();
         if self
             .shown
             .as_ref()
@@ -442,7 +516,8 @@ impl Driver {
     }
 
     /// The menu changed the controls: the launcher's own use of them now,
-    /// the engine's profile and mapping for its next look, saved.
+    /// saved; the engine's profile and mapping follow when the menu
+    /// closes (`publish`).
     fn controls(&mut self, c: Controls) {
         let old = super::controls();
         super::set_controls(c);
@@ -450,7 +525,6 @@ impl Driver {
             input::stop_rumble();
             log!("game menu: rumble stopped (vibration off)");
         }
-        super::host::publish_controls(&c);
         log!("game menu: controls now {}", c.describe());
         let event = Engine::Controls(c.pairs());
         if live::to_lobby() {
@@ -458,16 +532,7 @@ impl Driver {
             live::tell(event);
         } else {
             log!("game menu: {}", live::event_line(&event));
-            save_controls(&c);
-        }
-        let load_only = old.buttons != c.buttons
-            || old.look_sensitivity != c.look_sensitivity
-            || old.auto_center != c.auto_center;
-        if let (true, Some(n)) = (
-            load_only,
-            super::setup().and_then(|s| s.args.reload_message),
-        ) {
-            engine::post_message(n, "--reload-message: the profile or mapping changed");
+            save_controls(&old, &c);
         }
     }
 
@@ -506,13 +571,16 @@ impl Driver {
     }
 }
 
-/// Saves the controls in `lobby.txt` in the launcher's folder (with
-/// `--instance`, its own), for runs with no lobby (`--offline`, `--live`).
-fn save_controls(c: &Controls) {
+/// Saves the change from `old` to `c` in `lobby.txt` in the launcher's
+/// folder (with `--instance`, its own), for runs with no lobby
+/// (`--offline`, `--live`): only the settings the player changed, so a
+/// control flag given for this run isn't saved with them
+/// (`Controls::with_changes`).
+fn save_controls(old: &Controls, c: &Controls) {
     let dir = crate::lobby::settings::folder(super::instance());
     let path = dir.join("lobby.txt");
     let mut s = crate::lobby::settings::Settings::load(&path);
-    s.controls = *c;
+    s.controls = s.controls.with_changes(old, c);
     let saved = std::fs::create_dir_all(&dir)
         .map_err(|e| format!("{}: {e}", dir.display()))
         .and_then(|_| s.save(&path));

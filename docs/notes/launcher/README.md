@@ -173,6 +173,22 @@ then (`--no-watchdog` turns both off, for a debugger session).
 --watch <name>=<path>:<type>  Log an engine value (read only) whenever it
                         changes, e.g. --watch state=0xE15048+0x90A8:i32
                         (see --help for the path syntax).
+--game-kind <kind>      What kind of game this is, for the in-game GAME
+                        MENU: offline, ranked, social or custom (default
+                        offline, social with --session, or with --live the
+                        kind of the match the server made). The lobby
+                        passes it. A custom game's host and an offline run
+                        get End Game.
+--no-game-menu          No in-game GAME MENU: Start and Esc reach the
+                        engine as they did before it.
+--reload-message <n>    Post engine message n when the GAME MENU closes
+                        having changed the button layout, look sensitivity
+                        or automatic look centering, or turned vibration
+                        on, which the engine may read only when it loads
+                        (an experiment; offline only).
+--end-game-message <n>  End Game posts engine message n, then quits only
+                        if the game hasn't ended 10 s later (an
+                        experiment; offline only, one id per run).
 --diag                  More detail in the log: dumps of the options, the
                         variant copy's effect, new calling threads, every
                         event-manager slot's first call, the input sent each
@@ -185,6 +201,10 @@ then (`--no-watchdog` turns both off, for a debugger session).
 
 `H2LAUNCH_NET_HEAD=<n>` makes the `net:` lines show the first n bytes of
 each packet (default 16, at most 4096). The log stays on the owner's PC.
+
+`H2LAUNCH_OVERLAY_FAIL=1` turns the in-game GAME MENU off, as an overlay
+failure would (a stand-in for testing): Start and Esc then reach the
+engine.
 
 `--set-option` and `--set-profile` take `<offset>=<type>:<value>`, where the
 offset is decimal or `0x...` and the type is one of `u8 i8 u16 i16 u32 i32
@@ -318,7 +338,10 @@ its code (`crates/h2launch/src/controls.rs`):
   clicks, 10 LB, 11 RB, 12 A, 13 B, 14 X, 15 Y, 0xFF none). Before this
   the default was all zero, which puts every action on LT: that is why A,
   B and RT did nothing in the first PC test. Start (pause) and the menus'
-  buttons aren't in it; the engine reads those from the raw buttons.
+  buttons aren't in it; the engine reads those from the raw buttons. Once
+  the launcher's GAME MENU is ready (after the map loads), it takes Start
+  and Esc out of player 1's input, so the engine never sees them (see the
+  note after the layouts' table).
 - **Sticks**: the launcher moves the axes between the sticks before they go
   into the input state (slot 36/37), the same for the pad and for the input
   script's `stick` lines (they stand for the physical sticks). The
@@ -362,8 +385,12 @@ The button layouts, action by action (`*` an estimate):
 | 56 | previous grenade | - | - | - | - | D-left* | D-left |
 | 64 | flashlight alt | - | - | - | - | D-up* | X |
 
-Every other action has no button (movement is on the sticks). Start is
-the pause in every layout. Where they come from and how sure each is:
+Every other action has no button (movement is on the sticks). Start, or
+Esc on the keyboard, opens the launcher's GAME MENU once the map has
+loaded and the menu is ready (menu.md, phase 4). Before that (on the
+loading screen), with `--no-game-menu`, or with `H2LAUNCH_OVERLAY_FAIL=1`,
+Start reaches the engine as its pause, in every layout. Where they come
+from and how sure each is:
 
 - Default, Southpaw and Green Thumb: Halo 2's own BUTTON LAYOUT screen
   and the Xbox decompilation (high). Boxer: melee on LT and grenades on B

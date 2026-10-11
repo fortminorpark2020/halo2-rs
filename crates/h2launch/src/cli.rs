@@ -90,15 +90,17 @@ Usage: h2launch [flags]
                           (for testing the lobby without MCC).
   --game-kind <kind>      What kind of game this is, for the in-game GAME
                           MENU: offline, ranked, social or custom (default
-                          offline, or social with --session or --live). The
+                          offline, social with --session, or with --live
+                          the kind of the match the server made). The
                           lobby passes it. A custom game's host and an
                           offline run get End Game.
   --no-game-menu          No in-game GAME MENU: Start and Esc reach the
                           engine as they did before it.
-  --reload-message <n>    Post engine message n after the GAME MENU changes
-                          the button layout, look sensitivity or automatic
-                          look centering, which the engine may read only
-                          when it loads (an experiment; offline only).
+  --reload-message <n>    Post engine message n when the GAME MENU closes
+                          having changed the button layout, look
+                          sensitivity or automatic look centering, or
+                          turned vibration on, which the engine may read
+                          only when it loads (an experiment; offline only).
   --end-game-message <n>  End Game posts engine message n, then quits only
                           if the game hasn't ended 10 s later (an
                           experiment; offline only, one id per run).
@@ -206,12 +208,16 @@ pub struct Args {
     /// `--fake-engine`.
     pub fake_engine: bool,
     /// `--game-kind`: what kind of game the GAME MENU is over (offline
-    /// without `--session`, social with one, unless given).
+    /// without `--session`, social with one, unless given; with `--live`
+    /// the server's match decides it once made, see `game_kind_set`).
     pub game_kind: GameKind,
+    /// `--game-kind` was given (it then wins over the `--live` match's).
+    pub game_kind_set: bool,
     /// `--no-game-menu` clears it: Start and Esc then reach the engine.
     pub game_menu: bool,
-    /// `--reload-message N`: the engine message posted after the GAME
-    /// MENU changes a setting the engine reads at load (an experiment).
+    /// `--reload-message N`: the engine message posted when the GAME
+    /// MENU closes having changed a setting the engine reads at load (an
+    /// experiment).
     pub reload_message: Option<u32>,
     /// `--end-game-message N`: the engine message End Game posts before
     /// quitting (an experiment, offline only).
@@ -266,6 +272,7 @@ impl Default for Args {
             events: false,
             fake_engine: false,
             game_kind: GameKind::Offline,
+            game_kind_set: false,
             game_menu: true,
             reload_message: None,
             end_game_message: None,
@@ -569,6 +576,7 @@ where
     }
     // A networked match (a session file, or one the server makes with
     // --live) is social unless told; a test run alone is offline.
+    a.game_kind_set = game_kind.is_some();
     a.game_kind = game_kind.unwrap_or(if a.session.is_some() || a.live.is_some() {
         GameKind::Social
     } else {
@@ -638,6 +646,7 @@ mod tests {
         assert_eq!(a.relay_wait, 15.0);
         assert_eq!(a.recv_port, RecvPort::Auto);
         assert_eq!(a.game_kind, GameKind::Offline);
+        assert!(!a.game_kind_set);
         assert!(a.game_menu);
         assert_eq!((a.reload_message, a.end_game_message), (None, None));
     }
@@ -647,10 +656,12 @@ mod tests {
         // The kind: as given, else offline, or social with a session.
         for k in GameKind::ALL {
             let a = parse(["--game-kind", k.key()]).unwrap();
-            assert_eq!(a.game_kind, k);
+            assert_eq!((a.game_kind, a.game_kind_set), (k, true));
             let a = parse(["--session", "m.txt", &format!("--game-kind={}", k.key())]).unwrap();
-            assert_eq!(a.game_kind, k);
+            assert_eq!((a.game_kind, a.game_kind_set), (k, true));
         }
+        // With --live and no --game-kind, the server's match decides.
+        assert!(!parse(["--live", "127.0.0.1"]).unwrap().game_kind_set);
         assert_eq!(parse(["--offline"]).unwrap().game_kind, GameKind::Offline);
         assert_eq!(
             parse(["--session", "m.txt"]).unwrap().game_kind,

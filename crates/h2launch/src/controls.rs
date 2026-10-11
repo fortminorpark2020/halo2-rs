@@ -997,6 +997,44 @@ impl Controls {
         })
     }
 
+    /// These (the saved settings) with the change from `old` to `new`:
+    /// only the settings that differ between the two. A value `old` and
+    /// `new` share came from somewhere else, such as a control flag given
+    /// for one run, and isn't the player's to save. `new` being Halo 2's
+    /// defaults when `old` wasn't (Use Default Settings) puts every one
+    /// back.
+    pub fn with_changes(&self, old: &Controls, new: &Controls) -> Controls {
+        if new != old && *new == Controls::default() {
+            return *new;
+        }
+        let mut c = *self;
+        if new.buttons != old.buttons {
+            c.buttons = new.buttons;
+        }
+        if new.sticks != old.sticks {
+            c.sticks = new.sticks;
+        }
+        if new.look_sensitivity != old.look_sensitivity {
+            c.look_sensitivity = new.look_sensitivity;
+        }
+        if new.look_inverted != old.look_inverted {
+            c.look_inverted = new.look_inverted;
+        }
+        if new.auto_center != old.auto_center {
+            c.auto_center = new.auto_center;
+        }
+        if new.vibration != old.vibration {
+            c.vibration = new.vibration;
+        }
+        if new.mouse_sensitivity != old.mouse_sensitivity {
+            c.mouse_sensitivity = new.mouse_sensitivity;
+        }
+        if new.mouse_inverted != old.mouse_inverted {
+            c.mouse_inverted = new.mouse_inverted;
+        }
+        c
+    }
+
     /// `lobby.txt`'s lines for them.
     pub fn lines(&self) -> String {
         KEYS.iter()
@@ -1598,5 +1636,64 @@ mod tests {
         assert_eq!(parse_switch("Enabled"), Some(true));
         assert_eq!(parse_switch("off"), Some(false));
         assert_eq!(enabled(false), "Disabled");
+    }
+
+    #[test]
+    fn only_the_players_changes_are_saved() {
+        // lobby.txt has Southpaw sticks and vibration on; the run was
+        // started with --sticks default --no-vibration --layout boxer.
+        let saved = Controls {
+            sticks: StickLayout::Southpaw,
+            ..Controls::default()
+        };
+        let flags = ControlFlags {
+            sticks: Some(StickLayout::Default),
+            vibration: Some(false),
+            buttons: Some(ButtonLayout::Boxer),
+            ..ControlFlags::default()
+        };
+        let launch = flags.over(saved);
+        // Only Mouse Sensitivity changed in the game menu: only it is saved.
+        let live = Controls {
+            mouse_sensitivity: 4.0,
+            ..launch
+        };
+        assert_eq!(
+            saved.with_changes(&launch, &live),
+            Controls {
+                mouse_sensitivity: 4.0,
+                ..saved
+            }
+        );
+        // Then the button layout, one change after another.
+        let next = Controls {
+            buttons: ButtonLayout::Recon,
+            ..live
+        };
+        let saved2 = saved.with_changes(&launch, &live);
+        assert_eq!(
+            saved2.with_changes(&live, &next),
+            Controls {
+                buttons: ButtonLayout::Recon,
+                mouse_sensitivity: 4.0,
+                ..saved
+            }
+        );
+        // Nothing changed: nothing saved.
+        assert_eq!(saved.with_changes(&launch, &launch), saved);
+        // Use Default Settings puts every one back, the flags' too.
+        assert_eq!(
+            saved2.with_changes(&next, &Controls::default()),
+            Controls::default()
+        );
+        // With no flags the change is the whole of it, as before.
+        let off = Controls {
+            vibration: false,
+            ..Controls::default()
+        };
+        assert_eq!(
+            Controls::default().with_changes(&Controls::default(), &off),
+            off
+        );
     }
 }
