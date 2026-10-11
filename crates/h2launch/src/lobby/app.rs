@@ -1,7 +1,8 @@
-//! The lobby's screens and what happens on them: signing in, the party and
-//! the playlists, searching, custom games, the pregame lobby, the match
-//! (its engine runs in a second copy of the launcher, see `child`), the
-//! carnage report, the friends list and players' service records.
+//! The lobby's screens and what happens on them: Halo 2's start screen
+//! and main menu (drawn by `h2ui`), signing in, the party and the
+//! playlists, searching, custom games, the pregame lobby, the match (its
+//! engine runs in a second copy of the launcher, see `child`), the carnage
+//! report, the friends list and players' service records.
 //! Nothing here opens a window: `window`, or the headless loop in
 //! `mod.rs`, gives it input and time and shows what it draws.
 
@@ -20,6 +21,13 @@ use h2net::live::{
     CUSTOM_GAME, GAMERTAG_TAKEN, MAX_FRIENDS, QUICKMATCH,
 };
 use h2net::Connection;
+use h2ui::anim::{Animation, Focus};
+use h2ui::cpu::Kept;
+use h2ui::layout::{BitmapWidget, Space};
+use h2ui::paint::Resources;
+use h2ui::screens::{self, Backdrop, MainMenu, Start};
+use h2ui::shell::Shell;
+use h2ui::text::Fonts;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -74,6 +82,37 @@ const RECORD_WAIT: Duration = Duration::from_secs(5);
 /// Rows a list shows at once on the friends, players, party and service
 /// record screens.
 const LIST_ROWS: usize = 9;
+/// The main menu's rows, in the original Xbox wording (MCC's own strings
+/// say LIVE). Split screen and system link aren't offered.
+const MAIN_ROWS: [&str; 2] = ["XBOX LIVE", "SETTINGS"];
+const LIVE_ROW: usize = 0;
+const MAIN_SETTINGS_ROW: usize = 1;
+/// Frames of a menu screen timed at each window size before the log says
+/// how long one takes.
+const MENU_FRAMES: u32 = 30;
+/// A click this soon (seconds) after one that changed the screen or shut a
+/// popup is the second half of a double-click: on the start screen it
+/// doesn't go on, and on the main menu it only focuses a row. Windows'
+/// default double-click time is 0.5 s; 0.4 s is our own choice.
+const DOUBLE_CLICK: f64 = 0.4;
+
+/// The start screen's and main menu's layouts, pictures and fonts
+/// (`h2ui`), read once when the lobby opens.
+pub struct Menus {
+    pub shell: Shell,
+    pub fonts: Fonts,
+}
+
+impl Menus {
+    /// The flat look: the built-in layouts, plain shapes and the built-in
+    /// font (what CI and Linux get, and the tests use).
+    pub fn flat() -> Menus {
+        Menus {
+            shell: Shell::from_tags(None, None),
+            fonts: Fonts::fallback(),
+        }
+    }
+}
 
 /// What the lobby starts with.
 pub struct Config {
@@ -93,6 +132,8 @@ pub struct Config {
     /// Halo 2's level icons, if a Halo 2 Vista mainmenu.map was found
     /// (`ranks::load`); without them levels are drawn as numbers.
     pub ranks: Option<Arc<RankIcons>>,
+    /// The start screen and main menu (`Menus::flat` without the files).
+    pub menus: Arc<Menus>,
 }
 
 /// A key, button or typed character.
@@ -119,6 +160,10 @@ pub enum Input {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
+    /// Halo 2's start screen ("PRESS START"), where the lobby opens.
+    Start,
+    /// Halo 2's main menu: XBOX LIVE and SETTINGS.
+    Main,
     SignIn,
     Connecting,
     /// The party and the playlists, or the search while the party searches.
@@ -137,8 +182,9 @@ enum Screen {
     Record,
     /// The friends list and friend requests.
     Friends,
-    /// The controller settings (`Settings::controls`), from the
-    /// playlists' Settings row, or X on the sign-in and offline screens.
+    /// The controller settings (`Settings::controls`), from the main
+    /// menu's SETTINGS, the playlists' Settings row, or X on the sign-in
+    /// and offline screens.
     Settings,
 }
 
@@ -239,6 +285,11 @@ pub struct App {
     /// The sign-in screen's gamertag and server, which has the cursor, and
     /// why the last try failed.
     fields: [String; 2],
+    /// The gamertag and server last saved by a sign-in (or read from
+    /// `lobby.txt`): what XBOX LIVE signs in with and the main menu's
+    /// small print shows, whatever the form or a refused sign-in left in
+    /// `fields` and `settings`.
+    saved: [String; 2],
     field: usize,
     form_error: Option<String>,
     dialing: Option<(Receiver<Result<Connection, String>>, Instant)>,
@@ -297,21 +348,54 @@ pub struct App {
     view: (f32, f32, f32),
     quit: bool,
     focus: bool,
+    /// The main menu's focus: which row has it, and its fades. The row
+    /// picked last keeps it when the player comes back.
+    main_focus: Focus,
+    /// The screen drawn last, and when (on the menus' clock) the start
+    /// screen or main menu on screen opened, for their intro animations.
+    drawn_screen: Option<Screen>,
+    menu_opened: f64,
+    /// The menus' still background, drawn once for a window size.
+    backdrop: Kept<u32>,
+    /// The window's size in pixels at the last draw of the start screen
+    /// or main menu: the main menu's rows are found under the mouse at it.
+    size: (usize, usize),
+    menu_times: MenuTimes,
+    /// The last click: when (on the menus' clock), the screen it was on,
+    /// and whether a popup took it (`DOUBLE_CLICK`).
+    last_click: Option<(f64, Screen, bool)>,
+}
+
+/// How long the menus take to draw on the CPU, for the log (menu.md phase
+/// 1, "Done when"): the kept background once for each window size, and
+/// each screen's frames, averaged over the first `MENU_FRAMES` at a size.
+#[derive(Default)]
+struct MenuTimes {
+    size: (usize, usize),
+    /// The start screen's frames timed at this size, then the main
+    /// menu's, with their total time (ms).
+    frames: [(u32, f64); 2],
+    /// Each size's background time (ms), the first time it was drawn.
+    backgrounds: Vec<((usize, usize), f64)>,
+    /// The sizes and screens already logged.
+    logged: Vec<((usize, usize), usize)>,
 }
 
 impl App {
-    /// The lobby, signing in at once if `lobby.txt` has a gamertag.
+    /// The lobby, on the start screen. It signs in when the player picks
+    /// XBOX LIVE on the main menu.
     pub fn new(cfg: Config) -> App {
         let mut settings = Settings::load(&cfg.folder.join("lobby.txt"));
         if let Some(s) = &cfg.server {
             settings.server = s.clone();
         }
         let now = Instant::now();
-        let mut app = App {
+        App {
             fields: [settings.gamertag.clone(), settings.server.clone()],
+            saved: [settings.gamertag.clone(), settings.server.clone()],
             settings,
             cfg,
-            screen: Screen::SignIn,
+            screen: Screen::Start,
             field: 0,
             form_error: None,
             dialing: None,
@@ -340,7 +424,7 @@ impl App {
             cmap: 0,
             asked: None,
             srow: 0,
-            settings_back: Screen::SignIn,
+            settings_back: Screen::Main,
             game: None,
             popup: None,
             toasts: VecDeque::new(),
@@ -349,11 +433,14 @@ impl App {
             view: (1.0, 0.0, 0.0),
             quit: false,
             focus: false,
-        };
-        if !app.settings.gamertag.is_empty() {
-            app.connect();
+            main_focus: Focus::on(LIVE_ROW, 0.0),
+            drawn_screen: None,
+            menu_opened: 0.0,
+            backdrop: Kept::default(),
+            size: (0, 0),
+            menu_times: MenuTimes::default(),
+            last_click: None,
         }
-        app
     }
 
     fn log(&self, line: &str) {
@@ -388,6 +475,8 @@ impl App {
         }
         let waiting = self.game.as_ref().is_some_and(|g| g.over.is_none());
         match self.screen {
+            Screen::Start => "start",
+            Screen::Main => "main",
             Screen::SignIn => "signin",
             Screen::Connecting => "connecting",
             Screen::Live if self.searching() => "searching",
@@ -561,22 +650,45 @@ impl App {
         if let Err(e) = self.settings.save(&path) {
             self.log(&format!("lobby: {e}"));
         }
+        self.saved = [self.settings.gamertag.clone(), self.settings.server.clone()];
         let server = self.settings.server.clone();
         self.log(&format!("lobby: signed in to {server}"));
     }
 
     /// Show `why` on the failure screen, once any match being played ends.
+    /// On the start screen or the main menu (or the settings opened from
+    /// it) the player stays there and `why` is a notice; XBOX LIVE then
+    /// signs in again.
     fn fail(&mut self, why: String) {
         self.log(&format!("lobby: {why}"));
-        self.failed = why;
+        self.failed = why.clone();
         self.dialing = None;
         self.signing_in = None;
         let playing = self.game.as_ref().is_some_and(|g| g.child.is_some());
-        if !playing {
-            self.game = None;
+        if playing {
+            return;
+        }
+        self.game = None;
+        if self.away_from_live() {
+            self.toast(why);
+        } else {
             self.popup = None;
             self.screen = Screen::Failed;
         }
+    }
+
+    /// The start screen or the main menu is up.
+    fn on_menus(&self) -> bool {
+        matches!(self.screen, Screen::Start | Screen::Main)
+    }
+
+    /// The player is on the start screen or the main menu, or in the
+    /// settings opened from one: nowhere that needs the server, so losing
+    /// it doesn't move them.
+    fn away_from_live(&self) -> bool {
+        self.on_menus()
+            || (self.screen == Screen::Settings
+                && matches!(self.settings_back, Screen::Start | Screen::Main))
     }
 
     fn toast(&mut self, text: String) {
@@ -613,6 +725,7 @@ impl App {
     /// The invitation to show: the latest, on the party screens.
     fn invite(&self) -> Option<(u64, String)> {
         let party_screens = [
+            Screen::Main,
             Screen::Live,
             Screen::Players,
             Screen::Party,
@@ -1053,7 +1166,8 @@ impl App {
         if self.client.is_none() && self.game.as_ref().is_none_or(|g| g.child.is_none()) {
             // The server was lost during the match.
             self.game = None;
-            if !matches!(self.screen, Screen::SignIn | Screen::Connecting) {
+            let stay = [Screen::SignIn, Screen::Connecting];
+            if !stay.contains(&self.screen) && !self.away_from_live() {
                 self.screen = Screen::Failed;
             }
         }
@@ -1215,6 +1329,12 @@ impl App {
                 Input::A => {
                     self.log(&format!("lobby: joining {from}'s party"));
                     self.send(ToServer::Accept(party));
+                    // From the main menu, to the playlists, where the new
+                    // party shows (as if XBOX LIVE had been picked).
+                    if self.screen == Screen::Main {
+                        self.main_focus = Focus::on(LIVE_ROW, self.menu_clock());
+                        self.screen = Screen::Live;
+                    }
                 }
                 Input::B => self.send(ToServer::Decline(party)),
                 _ => {}
@@ -1222,13 +1342,20 @@ impl App {
             return;
         }
         match self.screen {
+            Screen::Start => match i {
+                Input::A => self.screen = Screen::Main,
+                Input::B => self.popup = Some(Popup::Quit),
+                _ => {}
+            },
+            Screen::Main => self.main_input(i),
             Screen::SignIn => self.sign_in_input(i),
             Screen::Connecting => {
                 if i == Input::B {
+                    self.log("lobby: signing in called off");
                     self.dialing = None;
                     self.client = None;
                     self.signing_in = None;
-                    self.screen = Screen::SignIn;
+                    self.screen = Screen::Main;
                 }
             }
             Screen::Live => self.live_input(i),
@@ -1253,10 +1380,63 @@ impl App {
                     self.form_error = None;
                     self.screen = Screen::SignIn;
                 }
-                Input::B => self.popup = Some(Popup::Quit),
+                Input::B => self.screen = Screen::Main,
                 _ => {}
             },
         }
+    }
+
+    fn main_input(&mut self, i: Input) {
+        let row = self.main_focus.item;
+        match i {
+            Input::Up => self.focus_main(row.saturating_sub(1)),
+            Input::Down => self.focus_main((row + 1).min(MAIN_ROWS.len() - 1)),
+            Input::A => self.pick_main(row),
+            Input::B => self.screen = Screen::Start,
+            _ => {}
+        }
+    }
+
+    /// Move the main menu's focus to `row`, with the skin's fades.
+    fn focus_main(&mut self, row: usize) {
+        let look = &self.cfg.menus.shell.main.list.skin.items;
+        self.main_focus = self.main_focus.moved_in(look, row, self.menu_clock());
+    }
+
+    fn pick_main(&mut self, row: usize) {
+        match row {
+            LIVE_ROW => self.xbox_live(),
+            MAIN_SETTINGS_ROW => self.open_settings(),
+            _ => {}
+        }
+    }
+
+    /// XBOX LIVE on the main menu: the playlists when signed in, the
+    /// signing-in screen while that goes on, else sign in with the saved
+    /// gamertag and server (the form is put back to them, whatever was
+    /// typed there and abandoned), or the sign-in form when there is none.
+    fn xbox_live(&mut self) {
+        let welcomed = self
+            .client
+            .as_ref()
+            .is_some_and(|c| c.view.welcome.is_some());
+        if welcomed {
+            self.screen = Screen::Live;
+        } else if self.dialing.is_some() || self.signing_in.is_some() {
+            self.screen = Screen::Connecting;
+        } else if !self.saved[0].is_empty() {
+            self.fields = self.saved.clone();
+            self.connect();
+        } else {
+            self.field = 0;
+            self.form_error = None;
+            self.screen = Screen::SignIn;
+        }
+    }
+
+    /// The menus' clock: seconds since the lobby opened.
+    fn menu_clock(&self) -> f64 {
+        self.clock.elapsed().as_secs_f64()
     }
 
     fn popup_input(&mut self, p: Popup, i: Input) {
@@ -1499,7 +1679,7 @@ impl App {
             Input::A => self.connect(),
             // The controller's X: the letter x is typed.
             Input::X => self.open_settings(),
-            Input::B => self.popup = Some(Popup::Quit),
+            Input::B => self.screen = Screen::Main,
             _ => {}
         }
     }
@@ -1571,7 +1751,8 @@ impl App {
                     .unwrap_or(0);
                 self.screen = Screen::Party;
             }
-            Input::B => self.popup = Some(Popup::Quit),
+            // Back to the main menu, still signed in and in the party.
+            Input::B => self.screen = Screen::Main,
             _ => {}
         }
     }
@@ -1829,6 +2010,34 @@ impl App {
 
     /// A click at window pixel (`x`, `y`).
     pub fn click(&mut self, x: f32, y: f32) {
+        let clock = self.menu_clock();
+        let over = self.popup.is_some() || self.invite().is_some();
+        let before = self.last_click.replace((clock, self.screen, over));
+        // The second half of a double-click whose first half changed the
+        // screen or shut a popup: it mustn't go on again.
+        let second = before.is_some_and(|(t, screen, over)| {
+            clock - t < DOUBLE_CLICK && (over || screen != self.screen)
+        });
+        // The start screen goes on with a click anywhere, and a main menu
+        // row is focused, or picked if it had the focus. A popup over
+        // them takes the click as on any screen.
+        if !over {
+            match self.screen {
+                Screen::Start if second => return,
+                Screen::Start => return self.input(Input::A),
+                Screen::Main => {
+                    if let Some(row) = self.main_row_at(x, y) {
+                        if row == self.main_focus.item && !second {
+                            self.pick_main(row);
+                        } else {
+                            self.focus_main(row);
+                        }
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         let (s, ox, oy) = self.view;
         let (x, y) = ((x - ox) / s, (y - oy) / s);
         let top = self.areas.iter().any(|a| a.top);
@@ -1938,16 +2147,60 @@ impl App {
 
     // -------------------------------------------------------------- draw
 
+    /// The main menu's row under window pixel (`x`, `y`), at the size it
+    /// was last drawn.
+    fn main_row_at(&self, x: f32, y: f32) -> Option<usize> {
+        let menus = &self.cfg.menus;
+        let (w, h) = self.size;
+        let space = Space::new(w as u32, h as u32);
+        let m = self.main_menu(&menus.shell, "");
+        screens::main_menu_row_at(&m, space, [x, y])
+    }
+
+    /// The main menu's state for `h2ui`.
+    fn main_menu<'a>(&self, shell: &'a Shell, small_print: &'a str) -> MainMenu<'a> {
+        MainMenu {
+            layout: &shell.main,
+            opened: self.menu_opened,
+            rows: &MAIN_ROWS,
+            focus: self.main_focus,
+            small_print,
+        }
+    }
+
+    /// The main menu's small print, at the bottom right: the gamertag
+    /// signed in, else the one saved, else nothing.
+    fn small_print(&self) -> String {
+        let signed_in = self.client.as_ref().and_then(|c| c.view.welcome.as_ref());
+        match signed_in {
+            Some(w) => w.gamertag.clone(),
+            None => self.saved[0].clone(),
+        }
+    }
+
     /// Draw the screen into `c`.
     pub fn draw(&mut self, c: &mut Canvas, t: &mut Text) {
         let (w, h) = (c.w as f32, c.h as f32);
         let s = (w / 1280.0).min(h / 720.0).max(0.01);
         let (ox, oy) = ((w - 1280.0 * s) / 2.0, (h - 720.0 * s) / 2.0);
-        c.gradient(0.0, 0.0, w, h, BG_TOP, BG_BOTTOM);
-        c.fill(0.0, 0.0, w, oy + 88.0 * s, Color::rgb(0).alpha(90));
-        c.fill(0.0, oy + 88.0 * s, w, (2.0 * s).max(1.0), EDGE.alpha(120));
-        let mut areas = Vec::new();
         let mut drawn = Vec::new();
+        if self.drawn_screen != Some(self.screen) {
+            self.drawn_screen = Some(self.screen);
+            if self.on_menus() {
+                // It opened: its intro animations start now.
+                self.menu_opened = self.menu_clock();
+                self.main_focus = Focus::on(self.main_focus.item, self.menu_opened);
+            }
+        }
+        if self.on_menus() {
+            // Halo 2's own screen in place of the lobby's chrome.
+            self.draw_menu(c, &mut drawn);
+        } else {
+            c.gradient(0.0, 0.0, w, h, BG_TOP, BG_BOTTOM);
+            c.fill(0.0, 0.0, w, oy + 88.0 * s, Color::rgb(0).alpha(90));
+            c.fill(0.0, oy + 88.0 * s, w, (2.0 * s).max(1.0), EDGE.alpha(120));
+        }
+        let mut areas = Vec::new();
         let ranks = self.cfg.ranks.clone();
         let mut p = Pen {
             c,
@@ -1966,8 +2219,144 @@ impl App {
         self.view = (s, ox, oy);
     }
 
+    /// The start screen or the main menu, drawn by `h2ui` over the still
+    /// background (drawn once for a window size), with the strings shown
+    /// put in `drawn`. The first frames at each size are timed for the
+    /// log.
+    fn draw_menu(&mut self, c: &mut Canvas, drawn: &mut Vec<String>) {
+        let started = Instant::now();
+        let clock = self.menu_clock();
+        let menus = self.cfg.menus.clone();
+        let (shell, fonts) = (&menus.shell, &menus.fonts);
+        let art = shell.art();
+        let res = Resources { art, fonts };
+        let (w, h) = (c.w, c.h);
+        self.size = (w, h);
+        let space = Space::new(w as u32, h as u32);
+        let framing = &shell.main.framing;
+        let behind = screens::background(clock, Backdrop::Still, framing, art, fonts, space);
+        self.backdrop.draw(&behind, &mut c.px, w, h, &res);
+        let background_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let small_print = self.small_print();
+        // Its text counts as drawn (for `see`) once it has faded in.
+        let shown = clock - self.menu_opened >= self.menu_intro();
+        let (list, k) = match self.screen {
+            Screen::Start => {
+                let start = Start {
+                    layout: &shell.start,
+                    opened: self.menu_opened,
+                    text: screens::PRESS_START,
+                    small_print: "",
+                };
+                if shown {
+                    drawn.push(screens::PRESS_START.to_string());
+                }
+                (screens::start(clock, &start, art, fonts, space), 0)
+            }
+            _ => {
+                let m = self.main_menu(shell, &small_print);
+                if shown {
+                    drawn.extend(MAIN_ROWS.iter().map(|r| r.to_string()));
+                    if !small_print.is_empty() {
+                        drawn.push(small_print.clone());
+                    }
+                }
+                (screens::main_menu(clock, &m, art, fonts, space), 1)
+            }
+        };
+        h2ui::cpu::draw_u32(&list, &mut c.px, w, h, &res);
+        let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
+        self.time_menu((w, h), k, background_ms, frame_ms);
+    }
+
+    /// How long (seconds) the start screen or main menu on show takes to
+    /// come in after it opens: the end of the last intro animation of its
+    /// pictures and text, and on the main menu of its list and the
+    /// focused row's fade (each with its delay).
+    fn menu_intro(&self) -> f64 {
+        let ends = |intro: Option<&Animation>, delay_ms: f32| {
+            f64::from(delay_ms.max(0.0) / 1000.0 + intro.map_or(0.0, Animation::seconds))
+        };
+        let pictures = |art: &[BitmapWidget]| {
+            art.iter()
+                .map(|b| ends(b.intro.as_ref(), b.delay_ms))
+                .fold(0.0, f64::max)
+        };
+        let shell = &self.cfg.menus.shell;
+        match self.screen {
+            Screen::Start => {
+                let t = &shell.start.press_start;
+                pictures(&shell.start.art).max(ends(t.intro.as_ref(), t.delay_ms))
+            }
+            _ => {
+                let list = &shell.main.list;
+                let gain = f64::from(list.skin.items.gain.seconds());
+                pictures(&shell.main.art)
+                    .max(pictures(&list.skin.bitmaps))
+                    .max(ends(list.intro.as_ref(), list.delay_ms))
+                    .max(gain)
+            }
+        }
+    }
+
+    /// The start screen or main menu has come in and is worth a picture
+    /// (always true on the other screens): its intro is over, and on the
+    /// start screen PRESS START is back at the top of its pulse. The
+    /// headless run waits for it before its automatic screenshot.
+    pub fn menu_settled(&self) -> bool {
+        if !self.on_menus() {
+            return true;
+        }
+        if self.drawn_screen != Some(self.screen) {
+            return false;
+        }
+        let mut at = self.menu_intro();
+        if self.screen == Screen::Start && self.cfg.menus.shell.start.press_start.pulsating {
+            let pulse = f64::from(h2ui::anim::PULSE_SECONDS);
+            at = (at / pulse).ceil().max(1.0) * pulse;
+        }
+        self.menu_clock() - self.menu_opened >= at
+    }
+
+    /// Count a menu frame's time (screen `k`: 0 the start screen, 1 the
+    /// main menu) at window size `size`, and log the average once its
+    /// first `MENU_FRAMES` there are timed. The first frame at a size,
+    /// which draws the background, is timed apart.
+    fn time_menu(&mut self, size: (usize, usize), k: usize, background_ms: f64, frame_ms: f64) {
+        let t = &mut self.menu_times;
+        if t.size != size {
+            t.size = size;
+            t.frames = [(0, 0.0); 2];
+            if !t.backgrounds.iter().any(|b| b.0 == size) {
+                t.backgrounds.push((size, background_ms));
+            }
+            return;
+        }
+        let (n, total) = &mut t.frames[k];
+        *n += 1;
+        *total += frame_ms;
+        if *n != MENU_FRAMES || t.logged.contains(&(size, k)) {
+            return;
+        }
+        t.logged.push((size, k));
+        let average = *total / f64::from(MENU_FRAMES);
+        let background = t
+            .backgrounds
+            .iter()
+            .find(|b| b.0 == size)
+            .map_or(0.0, |b| b.1);
+        let screen = ["start screen", "main menu"][k];
+        let line = format!(
+            "menus: {}x{}, {screen} {average:.1} ms a frame on the CPU (background {background:.0} ms once)",
+            size.0, size.1
+        );
+        self.log(&line);
+    }
+
     fn draw_screen(&self, p: &mut Pen) {
         let title = match self.screen {
+            // Halo 2's own screens have no title or header.
+            Screen::Start | Screen::Main => "",
             Screen::SignIn => "SIGN IN",
             Screen::Connecting => "SIGNING IN",
             Screen::Live if self.searching() => "MATCHMAKING",
@@ -1983,9 +2372,14 @@ impl App {
             Screen::Friends => "FRIENDS",
             Screen::Settings => "CONTROLLER",
         };
-        p.text(60.0, 58.0, 36.0, WHITE, Align::Left, title);
-        self.draw_header(p);
+        let menus = self.on_menus();
+        if !menus {
+            p.text(60.0, 58.0, 36.0, WHITE, Align::Left, title);
+            self.draw_header(p);
+        }
         match self.screen {
+            // Drawn already (`draw_menu`).
+            Screen::Start | Screen::Main => {}
             Screen::SignIn => self.draw_sign_in(p),
             Screen::Connecting => self.draw_connecting(p),
             Screen::Live => self.draw_live(p),
@@ -2000,14 +2394,16 @@ impl App {
             Screen::Friends => self.draw_friends(p),
             Screen::Settings => self.draw_settings(p),
         }
-        p.text(
-            1220.0,
-            712.0,
-            14.5,
-            DIM,
-            Align::Right,
-            "Keyboard: Enter or Space = A, Esc or Backspace = B, X, Y, Q = LB, E = RB, arrows",
-        );
+        if !menus {
+            p.text(
+                1220.0,
+                712.0,
+                14.5,
+                DIM,
+                Align::Right,
+                "Keyboard: Enter or Space = A, Esc or Backspace = B, X, Y, Q = LB, E = RB, arrows",
+            );
+        }
         if let Some(popup) = self.popup {
             match popup {
                 Popup::Quit => {
@@ -2139,7 +2535,7 @@ impl App {
         p.hints(&[
             (Input::A, "Sign in"),
             (Input::X, "Controller settings"),
-            (Input::B, "Quit"),
+            (Input::B, "Back"),
         ]);
     }
 
@@ -2167,7 +2563,7 @@ impl App {
             (Input::A, "Try again"),
             (Input::Y, "Change gamertag or server"),
             (Input::X, "Controller settings"),
-            (Input::B, "Quit"),
+            (Input::B, "Back"),
         ]);
     }
 
@@ -2210,7 +2606,7 @@ impl App {
             }
             hints.push((Input::Rb, friends.as_str()));
             hints.push((Input::Lb, "Service record"));
-            hints.push((Input::B, "Quit"));
+            hints.push((Input::B, "Back"));
             p.hints(&hints);
         }
         self.draw_party(p, v);
@@ -3639,6 +4035,7 @@ impl Pen<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn app(folder: &std::path::Path) -> App {
         App::new(Config {
@@ -3650,6 +4047,7 @@ mod tests {
             instance: None,
             log: Arc::new(|_: &str| {}),
             ranks: None,
+            menus: Arc::new(Menus::flat()),
         })
     }
 
@@ -3669,11 +4067,23 @@ mod tests {
         assert_eq!(first_row(3, 2, 8), 0);
     }
 
+    /// From the start screen through the main menu's XBOX LIVE.
+    fn to_xbox_live(a: &mut App) {
+        assert_eq!(a.label(), "start");
+        a.input(Input::A);
+        assert_eq!(a.label(), "main");
+        assert_eq!(a.main_focus.item, LIVE_ROW);
+        a.input(Input::A);
+    }
+
     #[test]
     fn the_sign_in_form_takes_a_gamertag_and_a_server() {
         let dir = scratch("form");
         let mut a = app(&dir);
+        // With no gamertag saved, XBOX LIVE opens the form.
+        to_xbox_live(&mut a);
         assert_eq!(a.label(), "signin");
+        assert!(a.dialing.is_none() && a.client.is_none());
         assert_eq!(a.fields[1], settings::DEFAULT_SERVER);
         for c in "master chief!x".chars() {
             a.input(Input::Char(c));
@@ -3690,17 +4100,32 @@ mod tests {
         assert_eq!(a.label(), "signin");
         assert_eq!(a.field, 1);
         assert!(a.form_error.is_some());
-        // Escape asks before quitting.
+        // Escape goes back to the main menu, and from there to the start
+        // screen, which asks before quitting.
+        a.input(Input::B);
+        assert_eq!(a.label(), "main");
+        a.input(Input::B);
+        assert_eq!(a.label(), "start");
         a.input(Input::B);
         assert_eq!(a.label(), "quit");
         a.input(Input::Char('b'));
-        assert_eq!(a.label(), "signin");
+        assert_eq!(a.label(), "start");
         assert!(!a.quitting());
+        // What was typed is still there.
+        a.input(Input::A);
+        a.input(Input::A);
+        assert_eq!(a.label(), "signin");
+        assert_eq!(a.fields[0], "MASTER CHIEF");
+        a.input(Input::B);
+        a.input(Input::B);
+        a.input(Input::B);
+        a.input(Input::A);
+        assert!(a.quitting());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_saved_gamertag_signs_in_at_once() {
+    fn a_saved_gamertag_signs_in_from_xbox_live() {
         let dir = scratch("saved");
         Settings {
             // Nothing listens on port 9 here, so the dial fails quickly.
@@ -3711,7 +4136,14 @@ mod tests {
         .save(&dir.join("lobby.txt"))
         .unwrap();
         let mut a = app(&dir);
+        // Not at start-up: on the start screen nothing is dialled.
+        a.tick(Instant::now());
+        assert_eq!(a.label(), "start");
+        assert!(a.dialing.is_none() && a.signing_in.is_none());
+        // XBOX LIVE signs in with it, without the form.
+        to_xbox_live(&mut a);
         assert_eq!(a.label(), "connecting");
+        assert!(a.dialing.is_some());
         let until = Instant::now() + Duration::from_secs(20);
         while a.label() == "connecting" && Instant::now() < until {
             a.tick(Instant::now());
@@ -3722,6 +4154,149 @@ mod tests {
         a.input(Input::Char('y'));
         assert_eq!(a.label(), "signin");
         assert_eq!(a.fields, ["ALPHA".to_string(), "127.0.0.1:9".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_main_menu_moves_its_focus_and_keeps_the_row_picked() {
+        let dir = scratch("main-menu");
+        let mut a = app(&dir);
+        a.input(Input::A);
+        assert_eq!(a.label(), "main");
+        // Up and down stop at the ends.
+        a.input(Input::Up);
+        assert_eq!(a.main_focus.item, LIVE_ROW);
+        a.input(Input::Down);
+        a.input(Input::Down);
+        assert_eq!(a.main_focus.item, MAIN_SETTINGS_ROW);
+        // The row that lost the focus fades out.
+        assert_eq!(a.main_focus.previous(), Some(LIVE_ROW));
+        // SETTINGS opens the controller settings, which come back here
+        // with SETTINGS still focused.
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        a.input(Input::B);
+        assert_eq!(a.label(), "main");
+        assert_eq!(a.main_focus.item, MAIN_SETTINGS_ROW);
+        // And through the start screen too.
+        a.input(Input::B);
+        assert_eq!(a.label(), "start");
+        a.input(Input::Char(' '));
+        assert_eq!(a.label(), "main");
+        assert_eq!(a.main_focus.item, MAIN_SETTINGS_ROW);
+        // With no gamertag, XBOX LIVE is the form, whose B comes back.
+        a.input(Input::Up);
+        a.input(Input::A);
+        assert_eq!(a.label(), "signin");
+        a.input(Input::B);
+        assert_eq!(a.label(), "main");
+        assert_eq!(a.main_focus.item, LIVE_ROW);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn xbox_live_signs_in_with_the_gamertag_saved_not_one_abandoned() {
+        let dir = scratch("abandoned");
+        Settings {
+            server: "192.0.2.1:47050".into(),
+            gamertag: "CHIEF".into(),
+            ..Settings::default()
+        }
+        .save(&dir.join("lobby.txt"))
+        .unwrap();
+        let mut a = app(&dir);
+        a.input(Input::A);
+        // The form (as after signing out), edited and then left with B.
+        a.screen = Screen::SignIn;
+        for _ in 0..5 {
+            a.input(Input::Backspace);
+        }
+        a.input(Input::Char('a'));
+        a.input(Input::Char('r'));
+        a.input(Input::Char('b'));
+        a.input(Input::Tab);
+        a.input(Input::Backspace);
+        assert_eq!(a.fields, ["ARB", "192.0.2.1:4705"]);
+        a.input(Input::B);
+        assert_eq!(a.label(), "main");
+        assert_eq!(a.small_print(), "CHIEF");
+        // XBOX LIVE signs in as the gamertag saved, at the server saved.
+        a.input(Input::A);
+        assert_eq!(a.label(), "connecting");
+        assert_eq!(a.fields, ["CHIEF", "192.0.2.1:47050"]);
+        assert_eq!(a.settings.gamertag, "CHIEF");
+        // A gamertag that is taken isn't tried again from the main menu
+        // either, nor shown there.
+        a.screen = Screen::SignIn;
+        a.fields[0] = "ARB".into();
+        a.input(Input::A);
+        assert_eq!(a.settings.gamertag, "ARB");
+        // The dial is through by the time the server can refuse.
+        a.dialing = None;
+        a.on_event(LiveEvent::Refused(GAMERTAG_TAKEN.into()));
+        assert_eq!(a.label(), "signin");
+        a.input(Input::B);
+        assert_eq!(a.small_print(), "CHIEF");
+        a.input(Input::A);
+        assert_eq!(a.label(), "connecting");
+        assert_eq!(a.settings.gamertag, "CHIEF");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn signing_in_can_be_called_off_back_to_the_main_menu() {
+        let dir = scratch("call-off");
+        Settings {
+            // A documentation address (TEST-NET-1): the dial is still
+            // going when B is pressed.
+            server: "192.0.2.1:47050".into(),
+            gamertag: "ALPHA".into(),
+            ..Settings::default()
+        }
+        .save(&dir.join("lobby.txt"))
+        .unwrap();
+        let mut a = app(&dir);
+        to_xbox_live(&mut a);
+        assert_eq!(a.label(), "connecting");
+        a.input(Input::B);
+        assert_eq!(a.label(), "main");
+        assert!(a.dialing.is_none() && a.signing_in.is_none() && a.client.is_none());
+        // Nothing comes back from the dial called off.
+        a.tick(Instant::now());
+        assert_eq!(a.label(), "main");
+        // Picked again, it signs in again.
+        a.input(Input::A);
+        assert_eq!(a.label(), "connecting");
+        // While it goes on, XBOX LIVE from the main menu is the same
+        // screen, not a second sign-in.
+        a.screen = Screen::Main;
+        let dial = a.signing_in;
+        a.input(Input::A);
+        assert_eq!(a.label(), "connecting");
+        assert_eq!(a.signing_in, dial);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_offline_screens_b_goes_to_the_main_menu() {
+        let dir = scratch("failed-b");
+        let mut a = app(&dir);
+        a.input(Input::A);
+        a.fail("Couldn't reach the server.".into());
+        // On the main menu it stays, and says why.
+        assert_eq!(a.label(), "main");
+        assert_eq!(a.failed, "Couldn't reach the server.");
+        assert!(a.toasts.iter().any(|t| t.0 == a.failed));
+        // Elsewhere it is the offline screen, whose A, X and Y stay.
+        a.screen = Screen::Live;
+        a.fail("Lost the server: gone".into());
+        assert_eq!(a.label(), "failed");
+        a.input(Input::X);
+        assert_eq!(a.label(), "settings");
+        a.input(Input::B);
+        assert_eq!(a.label(), "failed");
+        a.input(Input::B);
+        assert_eq!(a.label(), "main");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3761,6 +4336,7 @@ mod tests {
         use crate::controls::{ButtonLayout, StickLayout};
         let dir = scratch("settings");
         let mut a = app(&dir);
+        to_xbox_live(&mut a);
         // From the sign-in screen: the controller's X (the letter is typed).
         a.input(Input::Char('x'));
         assert_eq!(a.label(), "signin");
@@ -3870,10 +4446,25 @@ mod tests {
         a.input(Input::B);
         assert_eq!(a.label(), "live");
         assert_eq!(a.sel, 2);
-        // Escape still asks to quit from the playlists, and so does
-        // Backspace.
+        // Escape (or Backspace) goes back to the main menu, signed in
+        // and in the party; XBOX LIVE comes back to the playlists as they
+        // were.
+        view(&mut a).party = Some(party(7, Activity::Lobby));
         a.input(Input::Backspace);
+        assert_eq!(a.label(), "main");
+        assert!(a.client.is_some() && a.party().is_some());
+        a.input(Input::A);
+        assert_eq!(a.label(), "live");
+        assert_eq!(a.sel, 2);
+        // From the start screen, the quit popup offers to sign out.
+        a.input(Input::B);
+        a.input(Input::B);
+        assert_eq!(a.label(), "start");
+        a.input(Input::B);
         assert_eq!(a.label(), "quit");
+        a.input(Input::Y);
+        assert_eq!(a.label(), "signin");
+        assert!(a.client.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3884,7 +4475,11 @@ mod tests {
         };
         let dir = scratch("settings-draw");
         let mut a = app(&dir);
-        a.input(Input::X);
+        // The main menu's SETTINGS.
+        a.input(Input::A);
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
         let mut c = Canvas::new(1280, 720);
         for l in crate::controls::ButtonLayout::ALL {
             a.settings.controls.buttons = l;
@@ -3977,10 +4572,11 @@ mod tests {
         };
         let dir = scratch("draw");
         let mut a = app(&dir);
+        to_xbox_live(&mut a);
         let mut c = Canvas::new(640, 480);
         a.draw(&mut c, &mut text);
         assert!(c.px.contains(&0xFF_FFFF), "the title is drawn");
-        // The B hint ("Quit") sits second in the row along the bottom.
+        // The B hint ("Back") sits last in the row along the bottom.
         let b = a
             .areas
             .iter()
@@ -3989,9 +4585,13 @@ mod tests {
             .unwrap();
         let (s, ox, oy) = a.view;
         a.click(ox + (b.x + 5.0) * s, oy + (b.y + 5.0) * s);
+        assert_eq!(a.label(), "main");
+        a.input(Input::B);
+        a.input(Input::B);
         assert_eq!(a.label(), "quit");
         a.draw(&mut c, &mut text);
-        // With the popup up, only its buttons take clicks.
+        // With the popup up, only its buttons take clicks: not even the
+        // start screen's click anywhere.
         a.click(ox + 400.0 * s, oy + 270.0 * s);
         assert_eq!(a.label(), "quit");
         let stay = a
@@ -4001,7 +4601,32 @@ mod tests {
             .copied()
             .unwrap();
         a.click(ox + (stay.x + 5.0) * s, oy + (stay.y + 5.0) * s);
-        assert_eq!(a.label(), "signin");
+        assert_eq!(a.label(), "start");
+        // A second click straight after (a double-click on Stay) stays on
+        // the start screen; a click anywhere a moment later goes on.
+        a.click(3.0, 3.0);
+        assert_eq!(a.label(), "start");
+        a.last_click = None;
+        a.click(3.0, 3.0);
+        assert_eq!(a.label(), "main");
+        // Halo 2's screens are drawn in place of the lobby's, and say
+        // what the headless script's `see` looks for once they have faded
+        // in.
+        a.input(Input::B);
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().all(|d| d != screens::PRESS_START));
+        a.menu_opened -= 5.0;
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().any(|d| d == screens::PRESS_START));
+        assert!(a.drawn().iter().all(|d| !d.starts_with("Keyboard:")));
+        a.input(Input::A);
+        a.draw(&mut c, &mut text);
+        a.menu_opened -= 5.0;
+        a.draw(&mut c, &mut text);
+        for row in MAIN_ROWS {
+            assert!(a.drawn().iter().any(|d| d == row), "{row}");
+        }
+        assert!(a.drawn().iter().all(|d| d != "SIGN IN"));
         // The custom game screen's arrows move the choices on and back.
         a.cfg.maps = vec![("midship".into(), 1), ("lockout".into(), 2)];
         a.open_custom();
@@ -4861,6 +5486,188 @@ mod tests {
             let y = toast_top(k) as usize;
             assert_eq!(c.px[y * 1280 + 640], 0x9F_D0FF, "notice {k}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_server_lost_on_the_main_menu_leaves_the_player_there() {
+        let dir = scratch("lost-on-main");
+        let (mut a, mut server) = live_app(&dir);
+        // B on the playlists: the main menu, still signed in, with the
+        // gamertag in the small print.
+        a.input(Input::B);
+        assert_eq!(a.label(), "main");
+        assert_eq!(a.small_print(), "ALPHA");
+        // An invitation still pops up here. B declines it.
+        view(&mut a).invites.push((9, "BRAVO".into()));
+        assert_eq!(a.label(), "invite");
+        a.input(Input::B);
+        assert_eq!(sent(&mut server), [ToServer::Decline(9)]);
+        view(&mut a).invites.clear();
+        assert_eq!(a.label(), "main");
+        // A accepts it, and shows the playlists, where the new party is;
+        // XBOX LIVE has the focus when the player comes back.
+        a.input(Input::Down);
+        view(&mut a).invites.push((9, "BRAVO".into()));
+        a.input(Input::A);
+        assert_eq!(sent(&mut server), [ToServer::Accept(9)]);
+        view(&mut a).invites.clear();
+        assert_eq!(a.label(), "live");
+        a.input(Input::B);
+        assert_eq!((a.label().as_str(), a.main_focus.item), ("main", LIVE_ROW));
+        // The settings opened from here stay up when the server is lost,
+        // with the reason as a notice, and still go back here.
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        a.on_event(LiveEvent::Lost("restarting".into()));
+        assert_eq!(a.label(), "settings");
+        assert!(a
+            .toasts
+            .iter()
+            .any(|t| t.0 == "Lost the server: restarting"));
+        a.tick(Instant::now());
+        assert_eq!(a.label(), "settings");
+        a.input(Input::B);
+        assert_eq!(a.label(), "main");
+        // Signed in again for the rest.
+        let (mut a, _server) = live_app(&dir);
+        a.input(Input::B);
+        a.on_event(LiveEvent::Lost("the connection closed".into()));
+        assert_eq!(a.label(), "main");
+        assert!(a.client.is_none());
+        assert_eq!(a.failed, "Lost the server: the connection closed");
+        assert!(a.toasts.iter().any(|t| t.0 == a.failed));
+        // Signed out, the small print is the gamertag saved (none here).
+        assert_eq!(a.small_print(), "");
+        // On the start screen too.
+        a.input(Input::B);
+        a.fail("The server didn't answer.".into());
+        assert_eq!(a.label(), "start");
+        // Then XBOX LIVE signs in again (the form, as none was saved).
+        a.input(Input::A);
+        a.input(Input::A);
+        assert_eq!(a.label(), "signin");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_click_focuses_a_main_menu_row_then_picks_it() {
+        let dir = scratch("main-click");
+        let mut a = app(&dir);
+        let mut c = Canvas::new(1280, 720);
+        a.draw_menu(&mut c, &mut Vec::new());
+        // A double-click on PRESS START, which lies over XBOX LIVE: the
+        // first click opens the main menu, and the second only focuses
+        // the row under it.
+        let space = Space::new(1280, 720);
+        let [px, py] = space.at([0.0, -85.0]);
+        a.click(px, py);
+        assert_eq!(a.label(), "main");
+        a.draw_menu(&mut c, &mut Vec::new());
+        a.click(px, py);
+        assert_eq!((a.label().as_str(), a.main_focus.item), ("main", LIVE_ROW));
+        a.last_click = None;
+        // As drawn last in a 1280 by 720 window, in the built-in layout:
+        // row 1's label box is from y -120 to -170 in Halo 2's UI units,
+        // across -240 to 240.
+        let [x, y] = space.at([0.0, -145.0]);
+        a.click(x, y);
+        assert_eq!(a.label(), "main");
+        assert_eq!(a.main_focus.item, MAIN_SETTINGS_ROW);
+        // Beside the rows: nothing.
+        let [bx, by] = space.at([300.0, -145.0]);
+        a.click(bx, by);
+        assert_eq!((a.label().as_str(), a.main_focus.item), ("main", 1));
+        a.click(x, y);
+        assert_eq!(a.label(), "settings");
+        a.input(Input::B);
+        // XBOX LIVE, clicked twice.
+        let [x, y] = space.at([0.0, -95.0]);
+        a.click(x, y);
+        assert_eq!(a.main_focus.item, LIVE_ROW);
+        a.click(x, y);
+        assert_eq!(a.label(), "signin");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_start_screen_and_main_menu_draw_in_the_flat_look() {
+        let dir = scratch("menus-draw");
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let mut a = App::new(Config {
+            log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
+            ..app(&dir).cfg
+        });
+        let (w, h) = (320, 180);
+        // The still background on its own, to tell the screens from.
+        let menus = Menus::flat();
+        let (art, fonts) = (menus.shell.art(), &menus.fonts);
+        let res = Resources { art, fonts };
+        let space = Space::new(w as u32, h as u32);
+        let framing = &menus.shell.main.framing;
+        let behind = screens::background(0.0, Backdrop::Still, framing, art, fonts, space);
+        let mut background = vec![0u32; w * h];
+        Kept::default().draw(&behind, &mut background, w, h, &res);
+        let mut shown = Vec::new();
+        for label in ["start", "main"] {
+            assert_eq!(a.label(), label);
+            // It opens now (as `draw` does when the screen changes).
+            a.drawn_screen = Some(a.screen);
+            a.menu_opened = a.menu_clock();
+            let mut c = Canvas::new(w, h);
+            let mut drawn = Vec::new();
+            a.draw_menu(&mut c, &mut drawn);
+            // Just opened, nothing has faded in: nothing to `see` yet.
+            assert!(drawn.is_empty(), "{label}: {drawn:?}");
+            // Long after it opened, with every intro over.
+            a.menu_opened = a.menu_clock() - 5.0;
+            a.main_focus = Focus::on(a.main_focus.item, a.menu_opened);
+            assert!(a.menu_settled(), "{label}");
+            a.draw_menu(&mut c, &mut drawn);
+            assert!(c.px.iter().all(|&p| p >> 24 == 0), "{label}");
+            // The screen is drawn over the background, not just it.
+            assert_ne!(c.px, background, "{label}");
+            match label {
+                "start" => assert_eq!(drawn, [screens::PRESS_START]),
+                _ => assert_eq!(drawn, MAIN_ROWS),
+            }
+            shown.push(c.px);
+            a.input(Input::A);
+        }
+        assert_ne!(shown[0], shown[1], "the two screens differ");
+        // The frames are timed once the background is kept, and the log
+        // says so once for the size.
+        let mut c = Canvas::new(w, h);
+        a.screen = Screen::Start;
+        for _ in 0..=MENU_FRAMES {
+            a.draw_menu(&mut c, &mut Vec::new());
+        }
+        assert_eq!(a.menu_times.logged, [((320, 180), 0)]);
+        let timed = |lines: &[String]| {
+            lines
+                .iter()
+                .filter(|l| l.starts_with("menus: 320x180, start screen "))
+                .inspect(|l| assert!(l.contains(" ms a frame on the CPU (background "), "{l}"))
+                .count()
+        };
+        assert_eq!(timed(&lines.lock().unwrap()), 1);
+        for _ in 0..MENU_FRAMES * 2 {
+            a.draw_menu(&mut c, &mut Vec::new());
+        }
+        assert_eq!(timed(&lines.lock().unwrap()), 1);
+        // Through `draw`, when there is a font to draw the rest with.
+        let Ok(mut text) = Text::system() else {
+            return;
+        };
+        a.saved[0] = "CHIEF".into();
+        a.screen = Screen::Main;
+        a.draw(&mut c, &mut text);
+        a.menu_opened -= 5.0;
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().any(|d| d == "XBOX LIVE"));
+        assert!(a.drawn().iter().any(|d| d == "CHIEF"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

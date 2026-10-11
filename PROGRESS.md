@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-10 23:30 UTC. Any assistant that works on the project
+Last updated 2026-10-11 00:50 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -203,9 +203,13 @@ go/no-go; if it fails they are the fallback, and their state is exact:
   reads the UI tags of MCC's and Vista's `mainmenu.map` (`Menus::open`),
   `blam_cache::mcc` reads the format-13 pieces they need
   (`docs/notes/launcher/mcc-maps.md`), and the new `crates/h2ui` draws the
-  start screen and main menu as draw lists on the CPU. Not wired into the
-  lobby yet. Next: run `mcc_ui_probe` and `menu_png` on the owner's PC
-  (commands in menu.md, "What Phase 0 built").
+  start screen and main menu as draw lists on the CPU. Phase 1 is built
+  there too (2026-10-11): the lobby opens on Halo 2's start screen, then
+  the main menu (XBOX LIVE, SETTINGS), drawn by `h2ui` from MCC's
+  mainmenu.map, and signs in only when XBOX LIVE is picked ("What Phase 1
+  built" in menu.md). Next: the owner runs it at 1080p and reads the
+  `menus:` frame-time lines in `lobby.log`; over 16 ms a frame moves the
+  D3D11 backend into phase 2.
 - The owner's PC clone has 3 unpushed controller commits (5301293 on
   `controller-wip`); from there, `git push origin
   5301293:refs/heads/pc-controller-review-fixes` saves them.

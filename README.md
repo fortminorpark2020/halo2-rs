@@ -49,10 +49,16 @@ install. No game files are included in this repository.
   widen, even teams, map choice and host choice).
 - `h2launch`: the launcher (Windows only, work in progress) that starts MCC's
   own classic Halo 2 engine from your Master Chief Collection install,
-  without running MCC. Double-click it to open its lobby: pick a gamertag,
-  form a party (the sign-in screen offers the project's server,
-  h2.mohnjorrow.com, by default), search a playlist, play the match on the real engine, and
-  see the carnage report with your new level afterwards. Custom Game (under
+  without running MCC. Double-click it and it opens on Halo 2's start
+  screen, as on the Xbox: press A or Start (Enter or Space on a keyboard,
+  or click) for the main menu, which has XBOX LIVE and SETTINGS (up and
+  down to pick, A to choose, B to go back). Its pictures and fonts are
+  read from your MCC install; without them it is plain shapes. XBOX LIVE
+  takes you to its lobby: pick a gamertag the first time (after that it
+  signs you in by itself), form a party (the sign-in screen offers the
+  project's server, h2.mohnjorrow.com, by default), search a playlist,
+  play the match on the real engine, and see the carnage report with your
+  new level afterwards. Custom Game (under
   the playlists) lets the party leader pick any game type and map for the
   party, unranked; it works alone too. Y on the playlists opens the party:
   its leader can hand the lead to another member, remove someone, or make
@@ -73,9 +79,9 @@ install. No game files are included in this repository.
   Vista install if MCC's can't be read); without either they are numbers. Friends and service records need the matching
   server: an older launcher signing in to it is told UPDATE YOUR LAUNCHER.
   Its text is in Halo 2's own fonts, read from your MCC install.
-  Settings (the row after Custom Game, or X on a controller at the sign-in
-  screen) holds Halo 2's controller settings, in the order of its
-  CONTROLLER screen: Thumbstick Layout (Default, Southpaw, Legacy, Legacy
+  Settings (SETTINGS on the main menu, the row after Custom Game, or X on
+  a controller at the sign-in screen) holds Halo 2's controller settings,
+  in the order of its CONTROLLER screen: Thumbstick Layout (Default, Southpaw, Legacy, Legacy
   Southpaw), Button Layout (Halo 2's Default, Southpaw, Boxer and Green
   Thumb, plus Halo 3's Bumper Jumper, with jump on LB and melee on RB, and
   MCC's Recon), Look Sensitivity (1 to 10, 3 by default), Look Inversion
@@ -96,16 +102,18 @@ install. No game files are included in this repository.
   click it. While the game is on, the
   lobby window ignores the controller and the keys that could leave the
   game (Esc, Enter, Backspace, letters), so leaving takes a click. In the
-  lobby, Enter or Space is A and Esc or Backspace is B.
+  lobby, Enter or Space is A and Esc or Backspace is B. B on the playlists
+  goes back to the main menu (you stay signed in and in your party), and
+  B on the start screen asks before closing the launcher.
   `--offline` starts
   an offline Slayer match on Lockout instead (with the controls saved in
   Settings, or flags such as `--layout bumper_jumper`). It reads the game's
   `halo2.dll` and never changes any MCC file. It is not part of the game
   above. See `docs/notes/launcher/README.md`.
-- `h2ui`: the original Xbox Halo 2 menus for the launcher (work in progress,
-  not in the lobby yet): the start screen and main menu laid out from your
-  `mainmenu.map`'s menu tags and pictures (MCC's or Halo 2 Vista's), drawn
-  without a graphics card; plain shapes in Halo 2's colours when the files
+- `h2ui`: the original Xbox Halo 2 menus for the launcher (work in
+  progress): the start screen and main menu the launcher opens on, laid
+  out from your `mainmenu.map`'s menu tags and pictures (MCC's or Halo 2
+  Vista's), drawn without a graphics card; plain shapes in Halo 2's colours when the files
   aren't there.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).

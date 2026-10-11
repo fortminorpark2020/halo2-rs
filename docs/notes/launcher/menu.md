@@ -589,7 +589,8 @@ Steps 3 to 6, and the drawing half of phase 1's two screens. Steps 1 and 2
     `screens::background`: it doesn't move, so it is drawn once for a
     window size and copied in under each frame (`cpu::Kept`).
 - Not done: the lobby's `app.rs` doesn't use any of it yet (that waits
-  for the lobby settings branch to merge) and `H2LOBBY_MENU` isn't read.
+  for the lobby settings branch to merge) and `H2LOBBY_MENU` isn't read
+  (both done in phase 1; see "What Phase 1 built").
   On the container's 2.1 GHz Xeon at 1080p, with stand-in pictures of the
   real sizes, a main menu frame takes about 7 ms on the CPU and the kept
   background about 30 ms once (flat: about 2 ms and 8 ms); the owner's
@@ -654,6 +655,63 @@ cargo test --release -p h2ui real_ -- --ignored
 moved aside), at 1080p, without stutter. The log says how long a frame
 takes on the CPU. If it's over 16 ms, the D3D11 backend for the lobby window
 moves into phase 2.
+
+#### What Phase 1 built (2026-10-11)
+
+Steps 1 to 5 under option C, without sound (step 6). Split screen and
+system link aren't offered: the main menu has XBOX LIVE and SETTINGS.
+Two things differ from 1.1 on purpose (the owner's Phase 1 decisions):
+B on the main menu goes to the start screen without asking, and keeps
+the player signed in and in the party; and the gamertag form comes after
+XBOX LIVE, not between the start screen and the main menu.
+
+- `lobby/app.rs`: `Screen::Start` and `Screen::Main` in front of the
+  sign-in screen; the lobby opens on `Start` and no longer signs in at
+  start-up.
+  - Start: A (Enter, Space, the pad's A or Start) or a click anywhere opens
+    the main menu; B opens the Quit popup, the only place it is now
+    reachable. A click straight after one that changed the screen or shut
+    a popup (the second half of a double-click, within 0.4 s) doesn't go
+    on, and on the main menu only focuses a row, so a double-click on
+    PRESS START (which lies over XBOX LIVE) stops on the main menu.
+  - Main: up and down move an `anim::Focus` (clamped) with the skin's
+    fades; a click focuses a row (`screens::main_menu_row_at`), or picks it
+    if it had the focus. The row picked last keeps the focus on return.
+  - XBOX LIVE goes to the playlists when signed in, to the signing-in
+    screen while that goes on, else signs in with the gamertag and server
+    last signed in with (without the form, and whatever was typed there
+    and abandoned), else opens the form. SETTINGS opens the settings
+    screen, which comes back to the main menu. B goes to the start screen.
+  - The small print is the gamertag signed in, else the one saved.
+  - B on the sign-in, signing-in (calling it off), offline and playlists
+    (when not searching) screens now goes to the main menu; on the
+    playlists the player stays signed in with the party kept.
+  - A server lost while on either screen (or in the settings opened from
+    the main menu) leaves the player there, with the reason as a notice.
+    An invitation still pops up over the main menu, and accepting it
+    shows the playlists; a match still opens the pregame lobby.
+- Drawing: on these two screens the lobby's chrome isn't drawn. The still
+  background is kept (`cpu::Kept<u32>`, straight into the canvas's
+  pixels, which are the same 0x00RRGGBB), and the screen is drawn over it
+  with `cpu::draw_u32`. The menus' clock is the seconds since the lobby
+  opened, and each screen's intro plays from when it was opened. Popups
+  and notices are drawn over them with the lobby's own pen.
+- Loading (`lobby/mod.rs`, `menus`): `H2LOBBY_MENU` (a map or its folder,
+  or `off`), else the rank icons' candidates (`ranks::candidates`: MCC's
+  mainmenu.map, then Vista's folders, then `maps` beside the launcher);
+  the first that gives pictures is used, else the first that opened,
+  drawn flat with its layouts, else the flat look. `Shell::open` logs its
+  `menus:` lines to `lobby.log`. The fonts are `Fonts::read` on
+  the lobby's Halo 2 fonts folder, else the built-in font.
+- The log says each screen's CPU time a frame once per window size,
+  averaged over its first 30 frames there, with the background's one-off
+  time: `menus: 1920x1080, start screen 3.4 ms a frame on the CPU
+  (background 20 ms once)`. That answers "Done when" from the owner's log.
+- Headless: the labels `start` and `main`; `see` finds PRESS START, the
+  rows and the small print once they have faded in, and the automatic
+  screenshot of either screen waits for that (on the start screen, until
+  PRESS START is back at the top of its pulse), holding the script. On the container, flat, at 1280x720: about
+  1 ms a frame and 6 ms for the background.
 
 ### Phase 2: the Xbox Live screens over our features, and settings
 
