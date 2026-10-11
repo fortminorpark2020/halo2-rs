@@ -1,0 +1,16 @@
+# (c) The party screen, BRAVO's side: accept, then be removed.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type BRAVO
+0.2 a
+0 wait live 30
+0 wait invite 60
+0.2 a                       # accept
+0 wait live 5
+0 see PARTY (3) 30
+0 see REMOVED FROM THE PARTY 60
+0 see Press X to invite 10  # a party of one again
+1 quit

@@ -1,9 +1,10 @@
 # The launcher's Halo 2 menus
 
-The plan for re-creating the original Xbox Halo 2 menus in the launcher, on
-`launcher-menu` (based on `launcher-friends`). Phase 0's reader and drawing
-pieces are built, and the start screen and main menu draw from the tags;
-the lobby doesn't show them yet ("What Phase 0 built", section 7).
+The plan for re-creating the original Xbox Halo 2 menus in the launcher.
+Phases 0 and 1 were built on `launcher-menu` (based on
+`launcher-friends`): the lobby opens on Halo 2's start screen and main
+menu, drawn from the tags. Phase 2 (widened, section 7) goes on on
+`launcher-menu2`, one sub-phase at a time.
 
 The owner asked (2026-10-10): "I also want to re-create the original halo 2
 menu from the halo 2 xbox version", and "make the main menu a priority". At
@@ -99,7 +100,7 @@ that each one replaces.
 | Select Player (0xC1) and Profile Name keyboard (0xA7) | the gamertags used on this PC, plus a new one typed in | SignIn | 2 |
 | "Please Wait" (0xB6), "SIGNING INTO XBOX LIVE" | while connecting to h2live | Connecting | 2 |
 | XBOX LIVE (0xBA): Quickmatch, Optimatch, Create Party, Content Download | the first three; picture and help line per row, "Latest news" from the server's message of the day (sent with CHALLENGE) | Live (its list half) | 2 |
-| Choose matchmaking playlist (0xDB; 0xED from the lobby) | our launcher playlists: name, your level icon, "N players in this playlist" | Live (playlists) | 2 |
+| Choose matchmaking playlist (0xDB; 0xED from the lobby) | our launcher playlists: name, your level icon, "N players in this playlist" (the icon and the count are our additions) | Live (playlists) | 2 |
 | PREGAME LOBBY (0xE): START GAME, GAME SETUP, mode block, party status, 16-row player list | the party hub | Live (party panel), Party, Custom | 2 |
 | Game Setup (0x17), Party Privacy (0x19), Select New Leader (0xB1), Boot Player (0xB8), Select Map (0xCE), Select Game (0xCF) | as Halo 2, over our party and custom-game messages | Party, Custom | 2 |
 | Y menu players list (0x1A): FRIENDS, CLAN, PLAYERS tabs | FRIENDS and PLAYERS (everyone signed in); level icon and status columns | Friends, Players | 2 |
@@ -158,7 +159,8 @@ stay as PC extras but leave the button legends.
   - After a keyboard key, the legend uses key names instead. Those legends
     are built in code, because Vista's keyboard variants are mangled in the
     tags.
-  - The lobby already tracks whether a pad or the keyboard was used last.
+  - The lobby doesn't yet track whether a pad or the keyboard was used
+    last; 2.6 adds that (section 7, Phase 2's corrections).
 - **Transitions.** Fades of 250 ms. Pieces slide in from the right one after
   another over 180 to 320 ms, and slide out to the left when a screen
   closes.
@@ -340,31 +342,37 @@ Two more things to measure before choosing A:
   - New `Screen` values: `Start`, `Main`, `Settings` and the settings
     sub-screens.
 
-## 3. What comes from MCC and what from Halo 2 Vista
+## 3. What comes from Halo 2 Vista and what from MCC
 
-Other players have MCC only, so MCC comes first everywhere. The owner also
-has Vista (Project Cartographer, `maps\mainmenu.map`), which serves as the
-second source and as a check on the first. The log says which source each
-piece came from, as it does for the rank icons.
+Since Phase 2 (widened, section 7), Halo 2 Vista as Project Cartographer
+installs it comes first, and MCC second: Vista has everything the menus
+use (music, sounds, the scene and the intro too), and MCC's own files
+have the same art, layouts, fonts and rank icons, which is what friends
+without Cartographer get. One finder (`lobby/sources.rs`) picks the
+Vista folder: `H2LOBBY_VISTA` (the folder or its `maps`, or `off`), else
+`vista =` in `lobby.txt`, else the usual folders (`ranks::MAP_DIRS`).
+The log says which source each piece came from.
 
 | What | First | Second | Last |
 |---|---|---|---|
-| Fonts | MCC `halo2\h2_fonts` (done) | Vista `maps\fonts` | a system font (done) |
-| Screen layouts (UI tags) | MCC `mainmenu.map`, format 13 | Vista `mainmenu.map` | numbers in `h2ui::layout` |
-| UI pictures | MCC `textures.dat` | Vista `mainmenu.map` | flat shapes in Halo 2's colours |
-| Rank icons | MCC (done) | Vista (done) | numbers (done) |
-| Map pictures and names | MCC `mainmenu.map` (`matg` UI level data) | Vista | names from `names.rs` |
-| Help and status texts | MCC's string tables | Vista's | our own short words |
+| Fonts | Vista `maps\fonts` (2.1) | MCC `halo2\h2_fonts` (done) | a system font (done) |
+| Screen layouts (UI tags) | Vista `mainmenu.map` | MCC `mainmenu.map`, format 13 | numbers in `h2ui::layout` |
+| UI pictures | Vista `mainmenu.map` | MCC `textures.dat` | flat shapes in Halo 2's colours |
+| Rank icons | Vista (done) | MCC (done) | numbers (done) |
+| Map pictures and names | Vista | MCC `mainmenu.map` (`matg` UI level data) | names from `names.rs` |
+| Help and status texts | Vista's string tables | MCC's | our own short words |
 | Button glyphs | Halo 2's fonts (U+E100 to U+E105) | | a letter in a circle |
-| UI sounds and music | MCC's sound tags (once researched; section 5) | Vista's (menu-preview's decoders) | silent |
-| The flythrough | the engine in UI shell (A) | our renderer on Vista files (B, only if built) | the navy framing (C) |
-| Intro and attract movies | a movie in MCC, if one exists | Vista `movie\intro_60.wmv` (Media Foundation) | skipped |
+| UI sounds and music | Vista's sound tags (menu-preview's decoders; 2.2) | MCC's, once researched (section 5; later) | silent |
+| The flythrough | our renderer on Vista files (2.4, 2.5) | | the still background (C) |
+| Intro movie | Vista `movie\intro_60.wmv` (Media Foundation; 2.3) | | skipped |
 
-Two settings, in the same style as `H2LOBBY_RANKS`:
+Settings in the same style as `H2LOBBY_RANKS`:
 
+- `H2LOBBY_VISTA=<folder>` names the Cartographer folder (or its
+  `maps`), and `off` uses none: menus, fonts and rank icons from MCC.
 - `H2LOBBY_MENU=<map or folder>` points at another `mainmenu.map`, and
   `off` gives the flat look. Tests use the flat look.
-- `H2LOBBY_SOUND=off` silences the menus.
+- `H2LOBBY_SOUND=off` silences the menus (from 2.2).
 
 ### What the format-13 reader still needs
 
@@ -700,7 +708,8 @@ XBOX LIVE, not between the start screen and the main menu.
   and notices are drawn over them with the lobby's own pen.
 - Loading (`lobby/mod.rs`, `menus`): `H2LOBBY_MENU` (a map or its folder,
   or `off`), else the rank icons' candidates (`ranks::candidates`: MCC's
-  mainmenu.map, then Vista's folders, then `maps` beside the launcher);
+  mainmenu.map, then Vista's folders, then `maps` beside the launcher;
+  2.1 puts Vista's first);
   the first that gives pictures is used, else the first that opened,
   drawn flat with its layouts, else the flat look. `Shell::open` logs its
   `menus:` lines to `lobby.log`. The fonts are `Fonts::read` on
@@ -715,88 +724,265 @@ XBOX LIVE, not between the start screen and the main menu.
   PRESS START is back at the top of its pulse), holding the script. On the container, flat, at 1280x720: about
   1 ms a frame and 6 ms for the background.
 
-### Phase 2: the Xbox Live screens over our features, and settings
+### Phase 2 (widened, 2026-10-11)
 
-**1. The shell.** `game_shell_background`, headers, legends, transitions,
-list skins, dialogs and the overlay dimming.
+This replaces the first Phase 2 plan. What was still true of it is kept
+below, under the sub-phase it now belongs to.
 
-**2. Sign in and the Live menu.**
+**The owner's direction.** The menus should look and feel as close to
+the original Xbox Halo 2 as possible; that comes before anything else.
+On the main menu he asked for Cartographer's music, intro movie and look.
+Every screen works with a pad alone. The word is ONLINE, never XBOX LIVE,
+and the Xbox Live logo is never drawn. No campaign, and nothing touches
+halo2.dll.
 
-- Select Player and the gamertag keyboard. An on-screen keyboard is needed
-  for controller-only players; `controller-wip` has one to borrow from.
-- "Please Wait" while connecting, then the XBOX LIVE screen:
-  - **Quickmatch** searches at once. The Xbox code doesn't say which
-    playlist; we take the party's last one, or the one with the most
-    players.
-  - **Optimatch** opens the playlists.
-  - **Create Party** opens the pregame lobby. On h2live you are always in a
-    party, so this only changes the screen.
+**Where Halo 2's files come from** (`lobby/sources.rs`, section 3):
 
-**3. The playlist screen**, with your level icon per playlist and "N players
-in this playlist" from the server's searching and playing counts.
+1. **Cartographer first**: Halo 2 Vista as Project Cartographer installs
+   it gives the art, the layouts, the fonts, the rank icons, the UI
+   sounds, the music, the 3D menu scene and the intro movie.
+2. **MCC second**: its own Halo 2 files give the art, the layouts, the
+   fonts and the rank icons (the same as Vista's: 133 of 133 screens).
+   They give no music, scene or intro yet (format 13's sounds and
+   geometry aren't read, and its movies are Bink 2).
+3. **Then the built-ins**: the flat look, the built-in font, level
+   numbers, silence, the still background and no movie.
 
-**4. The pregame lobby as the party's home.**
+The finder decides once, when the lobby opens: `H2LOBBY_VISTA` (the
+Cartographer folder or its `maps` folder), else `vista =` in
+`lobby.txt`, else the first of `ranks::MAP_DIRS` that holds a
+mainmenu.map. `off` in either place shows what friends without
+Cartographer get: then nothing comes from a Vista folder at all, not even
+through `MAP_DIRS`. Nothing from either install goes into the repository
+or the friends' zip.
 
-- START GAME (leader) searches the playlist, or starts the custom game.
-- GAME SETUP opens:
-  - Change Match Settings, Switch To: Custom Game;
-  - or Change Map, Change Rules, Switch To: Matchmaking.
-- Party Privacy offers Open and Invite Only. Closed needs the server and
-  comes later.
-- Y opens the players list; X changes teams in a custom game.
-- The lines on the left:
-  - "Matchmaking / In <playlist>", or the custom game's type and map with
-    the map picture;
-  - "Party is OPEN / INVITE ONLY";
-  - one status line.
-- On the right:
-  - up to 16 players with their level icon and gamertag;
-  - "N players in party";
-  - "<gamertag> is the party leader".
-- Select New Leader and Boot Player do today's PROMOTE and KICK.
-- B asks, then leaves the party.
+**Decisions.**
 
-**5. The Y menu.**
+- **Drawing.** The lobby keeps its CPU canvas (softbuffer). Only the 3D
+  menu scene uses the GPU: wgpu renders it offscreen on its own thread,
+  and the frame is read back into the canvas, on the start screen and
+  main menu only. Every other screen keeps the still
+  `game_shell_background`, and the scene sleeps there. A GPU presenter
+  for the whole UI waits until some screen takes more than 12 ms at
+  1080p on the owner's PC.
+- **Audio.** A mixer inside h2launch, copied from our
+  `h2viewer/src/audio.rs`, on cpal. `App` only emits cues and says
+  whether music is wanted; the window owns the device, so App's tests
+  need none.
+- **Screens from tags.** `h2ui::tags::screen_layout` reads any wgit by
+  its full path. Each lobby screen binds its slots to
+  `Words::{Tag, TagOr, Ours, Hide}`, and a slot the binding doesn't name
+  is hidden. Format tokens (U+E400 to U+E4FF) take our values; a token we
+  don't know hides its text.
+- **Wording.** `wording()` turns Xbox Live into ONLINE (never XBOX LIVE)
+  and hides Bungie, clan, voice and the other Xbox wording.
+- **Scale**, per catalog entry and pane: Vista's 1:1, or the Xbox's with
+  positions ×2.5 and pictures ×1.25 (checked against the owner's Xbox
+  screenshot and three bitmaps only). The quarter and half dialogs are
+  decided in 2.7 by a header-fit check on the real map; a dialog's header
+  and legend boxes take its pane's scale. `H2LOBBY_SCALE` overrides any
+  entry for tuning.
+- **Code shape.** `App` stays the state machine. Each new screen's
+  binding goes in a child module, `lobby/app/<screen>.rs`, declared in
+  app.rs so it sees App's private fields. Old `draw_*` functions go when
+  their screen is replaced.
+- **Input.** Controller first. The stick counts past 0.9 (H), and a held
+  direction repeats every 250 ms (H; the first delay is an estimate).
+  Legends follow the device used last: A, B, X and Y glyphs after a pad,
+  key names after the keyboard. LB and RB keep their PC shortcuts but
+  stay off the legends (1.2), except as the Y menu's tabs.
+- **Server.** No change: `LIVE_PROTOCOL` stays 3. The leader's lobby
+  mode, map and playlist live on the leader's PC. Other players' emblems
+  and colours come later.
+- **Sign-in.** Its internals belong to `launcher-accounts`, which bumps
+  `LIVE_PROTOCOL` itself; the sign-in restyle waits for it.
 
-- The FRIENDS tab is today's friends list, with requests first.
-- The PLAYERS tab is everyone signed in.
-- Columns: gamertag, level icon, status ("In your Party", "In matchmaking",
-  "Playing custom game", "Offline" and the rest).
-- X opens the options; the player options dialog does today's popups.
-- View Gamer Profile opens the service record, restyled as a Halo 2
-  sub-screen.
+**Sub-phases**, each leaving every flow working (old screens stay
+reachable until their replacements land):
 
-**6. Notices and dialogs.**
+| # | Sub-phase | The owner sees |
+|---|---|---|
+| 2.1 | Sources (Cartographer first), the lobby flows test, per-screen timing, this plan | log lines only |
+| 2.2 | Menu music and UI sounds | music on start/main, button sounds |
+| 2.3 | Intro movie (Media Foundation) | the intro before the start screen, skippable |
+| 2.4 | The menu scene as data (new crate `h2scene`) | nothing |
+| 2.5 | The scene behind start/main (wgpu offscreen) | the darkened flythrough |
+| 2.6 | Halo 2's shell on every lobby screen; legends by device; stick repeat | framing, tracks, header and legend everywhere |
+| 2.7 | h2ui: any screen from its tags (library), catalog, menu_png | nothing |
+| 2.8 | Halo 2's dialogs; the invite notice | every popup and failure as a Halo 2 dialog |
+| 2.9 | The ONLINE menu, OptiMatch's playlists, Please Wait | Halo 2's Live screen, worded ONLINE |
+| 2.10 | The pregame lobby as the party's home | a Cartographer-style PREGAME LOBBY |
+| 2.11 | Game Setup, the Select Game/Variant/Map pickers, map pictures, Party Privacy | Halo 2's custom game setup |
+| 2.12 | Player Options; the back stack | Halo 2's per-player dialog |
+| 2.13 | The Y menu (FRIENDS, PLAYERS) | Halo 2's players list on Y |
+| 2.14 | The service record restyled; an on-screen keyboard | the record as a Halo 2 screen; Add Friend with a pad |
+| 2.15 | SETTINGS and CONTROLLER | Halo 2's settings screens |
+| 2.16 | BUTTON LAYOUT and THUMBSTICK LAYOUT | the controller picture with labels, Bumper Jumper |
 
-- An invite shows Halo 2's lower-left notice, "PARTY INVITE FROM
-  <gamertag>", with `receive_message`.
-- Today's A-accepts, B-declines popup stays, drawn as Halo 2's multiple
-  choice dialog. The invite is also in the Y menu, as on the Xbox.
+Where an open question to the owner has no answer yet, the plan's
+default holds: members see Cartographer's pregame layout with START GAME
+and GAME SETUP dimmed, and its chat box stays empty; no QUIT row on the
+main menu; LB and RB switch the Y menu's tabs; the intro plays on every
+launch, skippable; the scene at 30 fps; Quickmatch with no playlist
+chosen yet opens OptiMatch; MCC music later; emblems and colour bars
+later; the button layouts offered stay as they are.
 
-**7. Settings.**
+**What the first plan said that still holds**, by sub-phase:
 
-- SETTINGS, Edit Player, then CONTROLLER: Thumbstick Layout, Button
-  Layout, Look Sensitivity, Look Inversion, Automatic Look Centering and
-  Controller Vibration.
-- BUTTON LAYOUT is Halo 2's screen (layout below).
-- PC rows: mouse sensitivity, and the server address (which moves here
-  from the sign-in screen).
-- Appearance (model, colours, emblem) only if the profile bytes are shown
-  to work (`USE_ELITE`, the colour fields), and without the 3D model.
+- 2.9: "Please Wait" while connecting, then the ONLINE screen. Optimatch
+  opens the playlists, with your level icon and the player count from
+  the server's searching and playing numbers. Create Party opens the
+  pregame lobby: on h2live you are always in a party, so only the screen
+  changes.
+- 2.10, the pregame lobby: START GAME (leader) searches the playlist or
+  starts the custom game; GAME SETUP opens the setup screens. On the left
+  the mode block ("Matchmaking", the playlist, or the custom game's type
+  and map with its picture), the party's privacy and one status line; on
+  the right up to 16 players with their level icons, the count and who
+  leads. Select New Leader and Boot Player do today's PROMOTE and KICK. B
+  asks, then leaves the party. Y opens the players list; X changes teams
+  in a custom game.
+- 2.11: GAME SETUP offers Change Match Settings and Switch To: Custom
+  Game in matchmaking, or Change Map, Change Rules and Switch To:
+  Matchmaking in a custom game. Party Privacy offers Open and Invite
+  Only; Closed needs the server and comes later.
+- 2.12: the player options do today's popups (Join Party, invite, friend
+  request, Remove Friend, Make Party Leader, Boot From Party), and View
+  Gamer Profile opens our service record.
+- 2.8: an invitation shows Halo 2's lower-left notice with the gamertag
+  and `receive_message`; today's A-accepts, B-declines popup becomes the
+  multiple-choice dialog, and the invitation also shows in the Y menu.
+- 2.13: the FRIENDS tab is today's friends list, requests first; the
+  PLAYERS tab is everyone signed in, with level icons and a status column;
+  X opens the player options.
+- 2.14: the on-screen keyboard (controller-only players need one to
+  type a gamertag; `controller-wip` has one to borrow from).
+- 2.15: SETTINGS, Edit Player, then CONTROLLER (Thumbstick Layout,
+  Button Layout, Look Sensitivity, Look Inversion, Automatic Look
+  Centering, Controller Vibration), plus the PC's rows
+  (mouse sensitivity, and the server address, which moves here from the
+  sign-in screen). Appearance only if the profile bytes are shown to work,
+  and without the 3D model.
+- 2.16, BUTTON LAYOUT (0x28, H tags): the list at the top left, the help
+  text at the top right, the `button_config` controller picture in the
+  middle, and a label beside each button that changes with the focused
+  layout. Bumper Jumper and Recon use the same picture, with labels from
+  our tables.
+- **Done when** (for the whole phase): a whole session (sign in, invite,
+  party, search, custom game, friends, service record, a layout change)
+  works on the owner's PC through the new screens, with keyboard, mouse
+  and a pad.
 
-**8. Sounds and music,** from Vista first, then MCC (section 5).
+**Rules for every sub-phase.**
 
-**BUTTON LAYOUT (0x28)** (H tags):
+- **The gate**, before every commit: `cargo fmt --all`, `cargo clippy
+  --workspace --all-targets -- -D warnings`, `cargo test --workspace
+  --release` (which runs `crates/h2launch/tests/flows.rs`), and `cargo
+  build --release --target x86_64-pc-windows-gnu -p h2launch`.
+- **Docs**: README.md in plain words, "What Phase 2.N built" here,
+  lobby.md (labels, variables, recipes), PROGRESS.md.
+- **Pinned tests** (strings, pixels, positions) are updated to the new
+  truth, never loosened.
+- **Game files**: nothing from them is committed or pasted (maps,
+  pictures, fonts, sounds, movies, the tags' words, screenshots). Names,
+  offsets, positions, sizes and colours in our own words are fine.
+  Real-file tests are `#[ignore]` and read `H2_MAPS` or `H2_MCC_MAPS`.
+  The container's Cartographer copy is for those tests and for
+  scratchpad PNGs only.
+- **New crates** get a stub line in `Dockerfile.live`.
+- **The engine child** is polled every tick on every screen, and
+  `Told::next`, `on_match_over`, LeaveGame and `shutdown` stay wired.
+- **Frame order.** The intro: black, then the movie frame. The start
+  screen and main menu: the scene frame (or the still background), the
+  h2ui screen, then the Pen's popups and notices. Every other screen: the
+  kept shell still layer, the moving tracks (every frame), the h2ui body
+  (or the Pen's, until that screen converts), the header and legend, the
+  overlay and dialog, then the notices.
+- **CPU budget.** Every screen at most about 10 ms a frame at 1080p on
+  the owner's PC; the start screen and main menu with the scene at most
+  about 9 ms on the UI thread. The per-screen timer logs each one; a
+  screen over budget moves its still parts into a kept layer.
 
-- the list at the top left, the help text at the top right;
-- the `button_config` controller picture in the middle;
-- a label beside each button, which changes with the focused layout.
+**The new-screen checklist**, for every screen added or restyled:
 
-Bumper Jumper and Recon use the same picture, with labels from our tables.
+- a `label()`;
+- its music rule (on, off or keep);
+- its focus index in `cue_state`;
+- its name in the per-screen timer (`timer_name`);
+- its strings pushed into `drawn` once its intro is over;
+- `menu_settled` waiting for its intro;
+- `pad_is_the_lobbys` and `keys_are_the_games`, if it can show while the
+  engine runs;
+- `invite()`'s screen list, where invitations should show;
+- the flows scripts (`crates/h2launch/tests/flows/`) and lobby.md's
+  recipes, in the same commit as any label or navigation change;
+- the engine child still polled every tick, with `Told::next`,
+  `on_match_over`, LeaveGame and `shutdown` still wired.
 
-**Done when:** a whole session (sign in, invite, party, search, custom game,
-friends, service record, a layout change) works on the owner's PC through
-the new screens, with keyboard, mouse and a pad.
+**Corrections to the sections above.**
+
+- 1.3 said the lobby tracks whether a pad or the keyboard was used last.
+  It doesn't; 2.6 adds that.
+- Phase 3 said A cancels the countdown for the leader. In the
+  decompilation it is X, which cancels it for the leader and delays it
+  for the others.
+- The first plan had Quickmatch take the party's last playlist or the
+  busiest one. The decompilation shows it uses the playlist chosen last
+  in OptiMatch; with none chosen yet, Quickmatch opens OptiMatch (the
+  default above).
+- The playlist screen's level icon and player counts (1.2) are our
+  additions; Halo 2's playlist list had neither.
+
+#### What Phase 2.1 built (2026-10-11)
+
+No visible change; the log says more.
+
+- `lobby/sources.rs`: `Vista { root, maps }` (`mainmenu()`, `fonts()`
+  when `maps\fonts` holds `font_table.txt`, `movies()`), and `find`, in
+  the order above. A folder named in `H2LOBBY_VISTA` or `lobby.txt` that
+  holds no mainmenu.map (nor its `maps` folder) is passed over, and the
+  log says so. `lobby.txt` gained `vista = <folder>` (`MenuPrefs`, the
+  menus' own lines, written after the controls; later sub-phases add
+  theirs there).
+- The lobby finds the folder once (`Config::vista`) and logs either
+  `lobby: Halo 2 Vista files (Project Cartographer) in <maps>` or `lobby:
+  no Halo 2 Vista folder; menus from MCC, no music, scene or intro`.
+- Vista first, MCC second: `ranks::candidates` lists the Vista
+  mainmenu.map found, then each of `MAP_DIRS` not listed yet (none when
+  Vista is off), then MCC's, then `maps` beside the launcher. The rank
+  icons and the menus both use it. The fonts are `H2LOBBY_H2FONTS`, else
+  Vista's `maps\fonts`, else MCC's `halo2\h2_fonts` (`fonts_choice`);
+  the lobby's text and h2ui both read either through
+  `blam_cache::font::read_table`.
+- The per-screen timer: every screen's CPU time a frame, averaged over
+  its first 30 frames, logged once per screen and window size. The menus
+  keep `menus: 1920x1080, main menu 3.9 ms a frame on the CPU (background
+  20 ms once)`; the others say `lobby: 1920x1080, playlists 2.7 ms a
+  frame on the CPU`. On the lobby's own screens the whole draw is timed.
+- The flows test (`crates/h2launch/tests/flows.rs`, lobby.md "The flows
+  test"): real headless lobbies against an h2live and relay in the test
+  process. In the gate: matchmaking, a custom game, and the party screen
+  with three lobbies (about 15 s in the container). Ignored: friends, a
+  setting kept across runs, a taken gamertag and the quit popup. A party
+  of two can't search any default launcher playlist alone (Head to Head
+  takes parties of one, and Team Snipers wants a third player to even
+  its teams), so in the matchmaking flow BRAVO accepts ALPHA's
+  invitation, then leaves, and both search Head to Head.
+- Scripts may end a line with a `# comment`; the headless lobby runs
+  without any font (its text isn't drawn, but `see` still reads it).
+- On the container, flat, at 1280x720: about 1 ms a frame on the start
+  screen and main menu, 1.5 to 4 ms on the lobby's own screens; with the
+  Cartographer copy's art, about 4 to 5 ms on the start screen and main
+  menu (20 ms for the background once).
+
+**On the owner's PC (P1)**, from `lobby.log`:
+
+- it names the Cartographer folder for the menus (`menus: reading
+  ...mainmenu.map (Halo 2 Vista's)`), the fonts (`lobby: Halo 2's fonts
+  from ...\maps\fonts`) and the rank icons (`lobby: rank icons from ...
+  (Halo 2 Vista's)`);
+- with `H2LOBBY_VISTA=off` it names MCC's for all three;
+- each screen visited logs a ms line at his window size.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 
@@ -815,12 +1001,13 @@ the new screens, with keyboard, mouse and a pad.
 
 **2. The custom game countdown** in the leader's lobby:
 
-- "Game start countdown in progress"; A cancels for the leader.
+- "Game start countdown in progress"; X cancels it for the leader (the
+  decompilation; this said A before).
 - `countdown_for_respawn` at 3, 2, 1 and 0.
 - Then the leader's lobby sends the custom game as today. The server
   doesn't change.
 - The length is unverified. The code passes 10 and 3 (L).
-- X to delay, for the others, needs the server and comes later.
+- X delays it, for the others; that needs the server and comes later.
 
 **3. LOADING... and PLEASE WAIT.**
 

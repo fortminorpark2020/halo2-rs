@@ -1,0 +1,32 @@
+# (d) Friends, ALPHA's side: ask BRAVO from the players list, and once
+# BRAVO has accepted open BRAVO's options, then BRAVO's service record.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type ALPHA
+0.2 a
+0 wait live 30
+0.2 x                       # the players list
+0 wait players 5
+0 see BRAVO 30
+0 pick BRAVO
+0.2 y                       # a friend request
+0.2 b
+0 wait live 5
+0.2 rb                      # the friends list
+0 wait friends 5
+0 see In a lobby 60         # BRAVO accepted: a friend on the launcher
+0 pick BRAVO
+0.2 a                       # the options popup
+0 wait friend 5
+0 see Service record 5
+0.2 b
+0 wait friends 5
+0.2 lb                      # BRAVO's service record
+0 wait record 5
+0 see BRAVO 10
+0.2 b
+0 wait friends 5
+1 quit

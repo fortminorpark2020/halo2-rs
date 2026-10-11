@@ -51,10 +51,24 @@ the launcher doesn't do.
 
 ## Drawing and input
 
+- Halo 2's files come from Halo 2 Vista first, as Project Cartographer
+  installs it, and MCC second (menu.md, "Phase 2 (widened)";
+  `lobby/sources.rs`). The lobby finds the Vista folder once, at start:
+  `H2LOBBY_VISTA` (the Cartographer folder or its `maps` folder), else
+  `vista = <folder>` in `lobby.txt` (the same forms), else the first of
+  the usual folders (`C:\Games\Halo 2 Project Cartographer\maps` and
+  the two Microsoft Games ones) that holds a `mainmenu.map`. `off` in
+  either place uses none, not even the usual folders: what friends
+  without Cartographer get. A folder named there that holds no
+  mainmenu.map is passed over, and the log says so. The log then says
+  `lobby: Halo 2 Vista files (Project Cartographer) in <maps>`, or
+  `lobby: no Halo 2 Vista folder; menus from MCC, no music, scene or
+  intro`.
 - The window is drawn on the CPU into a pixel buffer (`softbuffer`). Text
-  is in Halo 2's own fonts, read at start from the owner's MCC
-  (`halo2\h2_fonts`, the same format as Halo 2 Vista's `maps\fonts`, read
-  by `blam_cache::font`; checked on the owner's PC 2026-10-10): by size,
+  is in Halo 2's own fonts, read at start from Halo 2 Vista's
+  `maps\fonts` (when it holds `font_table.txt`), else the owner's MCC
+  (`halo2\h2_fonts`, the same format, read by `blam_cache::font`; checked
+  on the owner's PC 2026-10-10): by size,
   conduit-9 for small print, Handel Gothic 11 for column headings,
   conduit-13 for text, Handel Gothic 13 (the main menu's font) for names
   and rows, and Handel Gothic 24 for titles; digits always from conduit,
@@ -66,7 +80,9 @@ the launcher doesn't do.
   kerning pairs are code points, in the file's pixels. Characters
   they lack, and everything when MCC isn't found, come from a font
   already on the PC (Bahnschrift, then Segoe UI or Arial on Windows;
-  DejaVu Sans or Liberation Sans on Linux) through `ab_glyph`.
+  DejaVu Sans or Liberation Sans on Linux) through `ab_glyph`; headless,
+  with no font at all, text isn't drawn (the script's `see` still reads
+  it).
   `H2LOBBY_H2FONTS` names another folder of them, or `off` for the system
   font alone. No font or art is shipped. A screen is cheap to draw, and
   the same code writes PNGs for tests without a GPU (with Halo 2's fonts
@@ -111,26 +127,32 @@ the launcher doesn't do.
   background (the navy and the framing; drawn once for a window size and
   copied in under each frame, `cpu::Kept`), then the screen. Their
   layouts and pictures come from the first `mainmenu.map` that gives
-  pictures, looked for where the rank icons are (MCC's first, then the
-  Halo 2 Vista folders, then `maps\mainmenu.map` beside the launcher);
+  pictures, looked for where the rank icons are (Halo 2 Vista's first,
+  then MCC's, then `maps\mainmenu.map` beside the launcher);
   `H2LOBBY_MENU` names one map or its folder instead, or `off` for the
   flat look (plain shapes in Halo 2's colours, which is what Linux and
   the tests get). Their text is in Halo 2's fonts from the same folder
   as the lobby's, else in `h2ui`'s built-in font. The log says where each
-  piece came from (lines starting `menus:`) and, once per window size and
-  screen, how long a frame takes on the CPU averaged over its first 30
-  frames there: `menus: 1920x1080, start screen 3.4 ms a frame on the CPU
-  (background 20 ms once)`. Popups and notices are drawn over them as on
-  every screen.
+  piece came from (lines starting `menus:`). Popups and notices are drawn
+  over them as on every screen.
+- Every screen's CPU time is logged once per window size, averaged over
+  its first 30 frames there (menu.md's CPU budget): the menus as `menus:
+  1920x1080, start screen 3.4 ms a frame on the CPU (background 20 ms
+  once)`, the others as `lobby: 1920x1080, playlists 2.7 ms a frame on
+  the CPU`. The names are start screen, main menu, sign-in, signing in,
+  playlists, searching, players, party, custom game, pregame lobby, in
+  game, carnage report, offline, service record, friends and settings (a
+  popup counts as the screen under it).
 - Levels are drawn with Halo 2's own level icons (the 50 rank icons, big
-  and small) from a `mainmenu.map` (`lobby/ranks.rs`). MCC's own comes
-  first: `halo2\h2_maps_win64_dx11\mainmenu.map` in the MCC folder the
-  launcher finds (as for `h2_fonts`), with its pixels in the
-  `textures.dat` beside it (cache format 13, read by `blam_cache::mcc`;
-  see `mcc-maps.md`). Then the three Halo 2 Vista folders the old h2viewer
-  used, then `maps\mainmenu.map` beside the launcher. The first that reads
-  is used, and the log says which (`lobby: rank icons from <path> (MCC's,
-  cache format 13)` or `(Halo 2 Vista's)`) and why any before it failed.
+  and small) from a `mainmenu.map` (`lobby/ranks.rs`). Halo 2 Vista's
+  comes first (the folder found above, then the usual folders not yet
+  tried, unless Vista is off). Then MCC's own:
+  `halo2\h2_maps_win64_dx11\mainmenu.map` in the MCC folder the launcher
+  finds (as for `h2_fonts`), with its pixels in the `textures.dat` beside
+  it (cache format 13, read by `blam_cache::mcc`; see `mcc-maps.md`).
+  Then `maps\mainmenu.map` beside the launcher. The first that reads is
+  used, and the log says which (`lobby: rank icons from <path> (Halo 2
+  Vista's)` or `(MCC's, cache format 13)`) and why any before it failed.
   `H2LOBBY_RANKS` names one map or its folder instead (either format: the
   version word tells them apart), or `off`. Without icons, levels are
   numbers, as before. The icons are the game's: screenshots with them stay
@@ -139,8 +161,9 @@ the launcher doesn't do.
   `--instance` folder): `lobby.txt` (the server, the gamertag and the
   controller settings: `button_layout`, `thumbstick_layout`,
   `look_sensitivity`, `look_inversion`, `auto_look_centering`, `vibration`,
-  `mouse_sensitivity` and `mouse_inversion`; a file from before them reads
-  with Halo 2's defaults, and unknown lines are skipped), `lobby.log` (the lobby's log, with the
+  `mouse_sensitivity` and `mouse_inversion`; then the menus' own lines,
+  `vista` so far; a file from before them reads with Halo 2's defaults,
+  and unknown lines are skipped), `lobby.log` (the lobby's log, with the
   engine's lines as `engine:`), `live-key.bin` and `live-card.txt` (the same
   account as `--live`), `match-session.txt` (the last match's session),
   and `results\` (the engine's results blocks of the last 30 games,
@@ -336,6 +359,7 @@ line (`--set-option 0x354=i32:60 --pad none`, say). A script line is
 3 quit
 ```
 
+A `#` that starts a line or follows a space starts a comment.
 `see` takes its last word as the seconds when it is a number (so
 `see 12 of 100 120` waits for "12 of 100"; the start screen's and main
 menu's text counts once it has faded in), and fails the run as `wait`
@@ -407,3 +431,66 @@ folder; the lobbies signed in again and the friendship was still there.
 ALPHA invited BRAVO from the options popup (BRAVO joined), then removed
 BRAVO, whose list went empty. Afterwards `accounts.txt` had 11-word `x`
 lines, `games.log` 14-field entries and `friends.txt` nothing.
+
+## The flows test
+
+`crates/h2launch/tests/flows.rs` runs the recipes above as a test:
+real headless lobbies (this launcher, `--lobby` with `H2LOBBY_HEADLESS`)
+against an h2live and its relay running inside the test, each lobby
+driven by a script in `crates/h2launch/tests/flows/`, matches played on
+the stand-in engine for a second. No game files: the lobbies run with
+`H2LOBBY_MENU`, `H2LOBBY_RANKS`, `H2LOBBY_H2FONTS` and `H2LOBBY_VISTA`
+off (and `H2LOBBY_SOUND`, `H2LOBBY_INTRO` and `H2LOBBY_SCENE` off, for
+the phases that add them), each in its own folder under the test's
+(`XDG_DATA_HOME`). It is empty on Windows.
+
+In the gate (`cargo test --workspace --release` runs it; about 15 s in
+the container):
+
+- `matchmaking`: ALPHA and BRAVO sign in; ALPHA invites BRAVO from the
+  players list and BRAVO accepts, then leaves again (no default launcher
+  playlist starts a party of two alone: Head to Head takes parties of
+  one, and Team Snipers wants a third player to even its teams); both
+  search Head to Head, reach the pregame lobby, play, see the carnage
+  report and are back on the playlists (`live`).
+- `custom_game`: ALPHA invites BRAVO, goes down to the Custom Game row,
+  picks Team Slayer on Lockout and starts it; both see the carnage
+  report; ALPHA, the leader, is back on `custom`.
+- `party_admin`, three lobbies: the party screen recipe above (invite
+  two, invite only, remove one, make one leader, leave).
+
+Ignored (`-- --ignored`, slower or less central):
+
+- `friends`: a friend request from the players list, accepted on the
+  friends list; the options popup; the friend's service record.
+- `a_setting_is_kept`: `set` the button layout, quit, start again, see
+  it on the settings screen.
+- `a_taken_gamertag_then_quit`: a gamertag someone has is turned away,
+  another is taken; B back to the start screen and its quit popup.
+
+```
+cargo test --release -p h2launch --test flows
+cargo test --release -p h2launch --test flows -- --include-ignored
+H2FLOWS_SHOTS=/tmp/flow-shots cargo test --release -p h2launch --test flows
+```
+
+`H2FLOWS_SHOTS` keeps each lobby's screenshots in a folder of its own
+there, and the flows' folders (with every `lobby.log`) after they pass.
+A failing flow stops every lobby and prints the end of each one's log;
+its folder (in the system's temporary folder, `h2flows-<flow>-<pid>`)
+is kept.
+
+To add a flow: write one script per lobby in `tests/flows/` (the sign-in
+lines at the top of each are the same), and a `#[test]` that calls
+`Flow::new("<name>").stage(&[("<lobby>", "<script>"), ...])`; each
+`stage` starts its lobbies together and waits for all of them, and a
+second `stage` starts the same instances again with what the first left
+in their folders. Lobbies wait for each other only through their
+scripts: `wait <label>`, `see <text> <seconds>` (with text only the
+moment you wait for draws: a party's "PARTY (2)", not a gamertag a
+notice also shows) and `pick`. Keep the gate's flows under about 90 s
+in the container; put slower ones behind `#[ignore]`.
+
+Every later menu sub-phase keeps these passing: when a screen's label
+or the way to it changes, its scripts (and the recipes above) change in
+the same commit.

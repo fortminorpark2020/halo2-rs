@@ -1,0 +1,17 @@
+# (d) Friends, BRAVO's side: accept ALPHA's request on the friends list.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type BRAVO
+0.2 a
+0 wait live 30
+0.2 rb                      # the friends list
+0 wait friends 5
+0 see ALPHA 60              # ALPHA's request
+0 pick ALPHA
+0.2 a                       # accept
+0 see In a lobby 30
+# Stay signed in while ALPHA opens the options and the record.
+15 quit

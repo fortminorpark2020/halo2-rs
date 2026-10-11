@@ -7,10 +7,11 @@
 //! `H2LOBBY_SCRIPT` (see `Step`), saving a PNG in `H2LOBBY_SHOTS` each
 //! time the screen changes. `H2LOBBY_FAKE=1` plays matches with
 //! `--fake-engine`, as the lobby always does where there is no MCC.
-//! Levels are drawn with Halo 2's icons when a Halo 2 Vista mainmenu.map is
-//! found (`ranks`, `H2LOBBY_RANKS`). The start screen and main menu are
-//! drawn by `h2ui` from MCC's mainmenu.map, or a Halo 2 Vista one
-//! (`H2LOBBY_MENU`), and are plain shapes without either.
+//! Halo 2's files come from Halo 2 Vista (Project Cartographer's folder,
+//! `sources`, `H2LOBBY_VISTA`) first and MCC second: the fonts, the level
+//! icons (`ranks`, `H2LOBBY_RANKS`), and the start screen and main menu,
+//! drawn by `h2ui` from a mainmenu.map (`H2LOBBY_MENU`), and plain shapes
+//! without one.
 
 pub mod app;
 pub mod canvas;
@@ -18,12 +19,15 @@ pub mod child;
 pub mod names;
 pub mod ranks;
 pub mod settings;
+pub mod sources;
 mod window;
 
 use crate::cli::Args;
 use crate::live::Log;
 use app::{App, Config, Input, Menus};
 use canvas::{Canvas, Text};
+use sources::Vista;
+use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -85,10 +89,24 @@ pub fn run(args: &Args) -> i32 {
             return 1;
         }
     };
+    let no_window = std::env::var_os("H2LOBBY_HEADLESS").is_some();
     let (kind, maps) = engine_and_maps(args, &log);
-    let fonts = halo2_fonts(args);
+    // Halo 2 Vista's folder (Project Cartographer's), found once: the
+    // fonts, the rank icons and the menus come from it first.
+    let (vista, vista_off) = find_vista(&folder, &log);
+    let usual = sources::usual_dirs();
+    // The Vista folders the rank icons and menus may also look in.
+    let vista_dirs: &[&Path] = if vista_off { &[] } else { &usual };
+    let vista_mainmenu = vista.as_ref().map(Vista::mainmenu);
+    let fonts = halo2_fonts(args, vista.as_ref());
     let text = match Text::halo2(fonts.as_deref()) {
         Ok(t) => t,
+        // Headless, the text needn't be seen: the script's `see` reads
+        // what was drawn by name.
+        Err(e) if no_window => {
+            log(&format!("lobby: {e}; headless, so text isn't drawn"));
+            Text::none()
+        }
         Err(e) => {
             log(&format!("lobby: {e}"));
             return 1;
@@ -106,8 +124,15 @@ pub fn run(args: &Args) -> i32 {
         )),
         (None, _) => log("lobby: using the system font"),
     }
-    let ranks = ranks::load(mcc_maps(args).as_deref(), &*log).map(Arc::new);
-    let menus = Arc::new(menus(args, fonts.as_deref(), &log));
+    let mcc = mcc_maps(args);
+    let ranks =
+        ranks::load(vista_mainmenu.as_deref(), vista_dirs, mcc.as_deref(), &*log).map(Arc::new);
+    let found = Found {
+        vista_mainmenu: vista_mainmenu.as_deref(),
+        vista_dirs,
+        mcc_maps: mcc.as_deref(),
+    };
+    let menus = Arc::new(menus(&found, fonts.as_deref(), &log));
     let cfg = Config {
         folder,
         exe,
@@ -118,9 +143,10 @@ pub fn run(args: &Args) -> i32 {
         log: log.clone(),
         ranks,
         menus,
+        vista,
     };
     let app = App::new(cfg);
-    if std::env::var_os("H2LOBBY_HEADLESS").is_some() {
+    if no_window {
         return headless(app, text, &log);
     }
     hide_own_console(&log);
@@ -133,24 +159,75 @@ pub fn run(args: &Args) -> i32 {
     }
 }
 
+/// Halo 2 Vista's folder (`sources::find`, with `H2LOBBY_VISTA` and
+/// lobby.txt's `vista` in `folder`), the log saying where or why not; and
+/// whether Vista is switched off, when nothing may come from the folders
+/// it is usually in either.
+fn find_vista(folder: &Path, log: &Log) -> (Option<Vista>, bool) {
+    let saved = settings::Settings::load(&folder.join("lobby.txt")).menu;
+    let saved = saved.vista.as_deref();
+    let env = std::env::var_os(sources::ENV);
+    let env = env.as_deref();
+    let vista = sources::find(env, saved, &sources::usual_dirs());
+    let off = sources::off(env, saved);
+    for (what, dir) in sources::named_but_missing(env, saved) {
+        log(&format!(
+            "lobby: {what} names {}, which holds no mainmenu.map (nor a maps folder with one)",
+            dir.display()
+        ));
+    }
+    match &vista {
+        Some(v) => log(&format!(
+            "lobby: Halo 2 Vista files (Project Cartographer) in {}",
+            v.maps.display()
+        )),
+        None => {
+            if off {
+                let why = match sources::Named::read(env) {
+                    sources::Named::Off => "H2LOBBY_VISTA=off",
+                    _ => "vista = off in lobby.txt",
+                };
+                log(&format!("lobby: Halo 2 Vista files off ({why})"));
+            }
+            log("lobby: no Halo 2 Vista folder; menus from MCC, no music, scene or intro");
+        }
+    }
+    (vista, off)
+}
+
 /// The variable that names the mainmenu.map the start screen and main
 /// menu are read from (a file, or a folder holding one; MCC's or Halo 2
 /// Vista's), or `off` for plain shapes.
 const MENU_ENV: &str = "H2LOBBY_MENU";
 
+/// The mainmenu.maps the lobby found, for `menus`: the Halo 2 Vista one
+/// (`sources::find`), the Vista folders still to look in (none when
+/// Vista is off), and MCC's maps folder.
+struct Found<'a> {
+    vista_mainmenu: Option<&'a Path>,
+    vista_dirs: &'a [&'a Path],
+    mcc_maps: Option<&'a Path>,
+}
+
 /// The start screen's and main menu's layouts and pictures, from the
-/// first mainmenu.map that gives pictures: `H2LOBBY_MENU`'s, else MCC's,
-/// then Halo 2 Vista's where the rank icons are looked for
+/// first mainmenu.map that gives pictures: `H2LOBBY_MENU`'s, else Halo 2
+/// Vista's, then MCC's, where the rank icons are looked for
 /// (`ranks::candidates`); else the plain shapes. Their text is in Halo 2's
 /// fonts from `fonts` (the folder the lobby's text uses), else in the
 /// built-in font. Where each piece came from goes in the log.
-fn menus(args: &Args, fonts: Option<&Path>, log: &Log) -> Menus {
+fn menus(found: &Found, fonts: Option<&Path>, log: &Log) -> Menus {
     let log_line = |line: &str| log(line);
     let env = std::env::var_os(MENU_ENV);
     let exe = std::env::current_exe().ok();
     let exe_dir = exe.as_deref().and_then(Path::parent);
-    let mcc = mcc_maps(args);
-    let shell = match ranks::candidates(env.as_deref(), mcc.as_deref(), exe_dir) {
+    let list = ranks::candidates(
+        env.as_deref(),
+        found.vista_mainmenu,
+        found.vista_dirs,
+        found.mcc_maps,
+        exe_dir,
+    );
+    let shell = match list {
         None => {
             log("menus: off (H2LOBBY_MENU=off): plain shapes");
             h2ui::shell::Shell::from_tags(None, None)
@@ -182,7 +259,7 @@ fn menus(args: &Args, fonts: Option<&Path>, log: &Log) -> Menus {
                     shell
                 }
                 (None, None) => {
-                    log("menus: no mainmenu.map found (MCC's or Halo 2 Vista's): plain shapes");
+                    log("menus: no mainmenu.map found (Halo 2 Vista's or MCC's): plain shapes");
                     h2ui::shell::Shell::from_tags(None, None)
                 }
             }
@@ -233,13 +310,26 @@ fn hide_own_console(log: &Log) {
 #[cfg(not(windows))]
 fn hide_own_console(_: &Log) {}
 
-/// Where Halo 2's fonts are: `H2LOBBY_H2FONTS` (a folder, or `off` for
-/// the system font), else MCC's `halo2\h2_fonts`.
-fn halo2_fonts(args: &Args) -> Option<PathBuf> {
-    match std::env::var_os("H2LOBBY_H2FONTS") {
+/// Where Halo 2's fonts are (`fonts_choice`).
+fn halo2_fonts(args: &Args, vista: Option<&Vista>) -> Option<PathBuf> {
+    let env = std::env::var_os("H2LOBBY_H2FONTS");
+    let vista_fonts = vista.and_then(Vista::fonts);
+    fonts_choice(env.as_deref(), vista_fonts, mcc_fonts(args))
+}
+
+/// Where Halo 2's fonts are: `env` (`H2LOBBY_H2FONTS`: a folder, or `off`
+/// for the system font; empty counts as unset), else Halo 2 Vista's
+/// `maps\fonts` (`vista_fonts`, when it has its table), else MCC's
+/// `halo2\h2_fonts` (`mcc_fonts`).
+fn fonts_choice(
+    env: Option<&OsStr>,
+    vista_fonts: Option<PathBuf>,
+    mcc_fonts: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match env.filter(|v| !v.is_empty()) {
         Some(v) if v == "off" => None,
         Some(v) => Some(PathBuf::from(v)),
-        None => mcc_fonts(args),
+        None => vista_fonts.or(mcc_fonts),
     }
 }
 
@@ -343,7 +433,8 @@ fn file_log(path: &Path) -> Log {
 /// carnage screen; the run fails if there is none), `set <control>
 /// <value>` (change a controller setting by its `lobby.txt` name, as the
 /// settings screen would; the run fails on a bad one), `shot <name>` and
-/// `quit`.
+/// `quit`. A `#` after a space starts a comment, as does one at the start
+/// of a line.
 #[derive(Clone, Debug, PartialEq)]
 enum Step {
     Press(Input),
@@ -367,8 +458,13 @@ enum Want {
 fn parse_script(text: &str) -> Result<Vec<(f64, Step)>, String> {
     let mut steps = Vec::new();
     for (n, line) in text.lines().enumerate() {
+        // A comment: from a `#` that starts the line or follows a space.
+        let line = line
+            .char_indices()
+            .find(|&(at, c)| c == '#' && (at == 0 || line[..at].ends_with(char::is_whitespace)))
+            .map_or(line, |(at, _)| &line[..at]);
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
             continue;
         }
         let bad = |what: &str| format!("script line {}: {what}: {line}", n + 1);
@@ -617,6 +713,19 @@ mod tests {
                 (0.0, Step::Set("look_sensitivity".into(), "5".into())),
             ]
         );
+        // A comment after a space; a # without one is part of the text.
+        let s = parse_script(
+            "0 see Head to Head 10 # until it is drawn\n0.2 a\t# accept\n0 see No#1 5\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s,
+            vec![
+                (0.0, Step::See("Head to Head".into(), 10.0)),
+                (0.2, Step::Press(Input::A)),
+                (0.0, Step::See("No#1".into(), 5.0)),
+            ]
+        );
         assert!(parse_script("1 set layout\n").is_err());
         assert!(parse_script("1 set\n").is_err());
         assert!(parse_script("1 see\n").is_err());
@@ -624,6 +733,27 @@ mod tests {
         assert!(parse_script("a\n").is_err());
         assert!(parse_script("1 jump\n").is_err());
         assert!(parse_script("1 wait\n").is_err());
+    }
+
+    #[test]
+    fn fonts_come_from_the_variable_then_vista_then_mcc() {
+        let (vista, mcc) = (PathBuf::from("vista/fonts"), PathBuf::from("mcc/h2_fonts"));
+        let choose = |env: Option<&str>, v: bool, m: bool| {
+            fonts_choice(
+                env.map(OsStr::new),
+                v.then(|| vista.clone()),
+                m.then(|| mcc.clone()),
+            )
+        };
+        assert_eq!(
+            choose(Some("mine"), true, true),
+            Some(PathBuf::from("mine"))
+        );
+        assert_eq!(choose(Some("off"), true, true), None);
+        assert_eq!(choose(None, true, true), Some(vista.clone()));
+        assert_eq!(choose(Some(""), true, true), Some(vista.clone()));
+        assert_eq!(choose(None, false, true), Some(mcc.clone()));
+        assert_eq!(choose(None, false, false), None);
     }
 
     #[test]

@@ -1,0 +1,10 @@
+# (f) A taken gamertag, first: ALPHA signs in, so the name is taken.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type ALPHA
+0.2 a
+0 wait live 30
+1 quit

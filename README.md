@@ -112,9 +112,11 @@ install. No game files are included in this repository.
   above. See `docs/notes/launcher/README.md`.
 - `h2ui`: the original Xbox Halo 2 menus for the launcher (work in
   progress): the start screen and main menu the launcher opens on, laid
-  out from your `mainmenu.map`'s menu tags and pictures (MCC's or Halo 2
-  Vista's), drawn without a graphics card; plain shapes in Halo 2's colours when the files
-  aren't there.
+  out from your `mainmenu.map`'s menu tags and pictures, drawn without a
+  graphics card; plain shapes in Halo 2's colours when the files aren't
+  there. The menu art, the fonts and the rank icons come from your Halo 2
+  Vista (Project Cartographer) folder if the launcher finds one, otherwise
+  from MCC's own Halo 2 files (`H2LOBBY_VISTA=off` tries it without).
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
 - `h2viewer`: the game: Halo 2 style menus and lobby, Halo 2's maps with their

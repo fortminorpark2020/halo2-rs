@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 02:55 UTC. Any assistant that works on the project
+Last updated 2026-10-11 (menu 2.1). Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -111,9 +111,18 @@ MENUTEST stay on the server. Not yet seen: the owner pressing the pad in the
 real window.
 
 Next, in order:
-1. Menu phase 2, the Xbox Live screens in Halo 2's style
-   (`docs/notes/launcher/menu.md`, Phase 2), on a branch stacked on
-   `launcher-menu`.
+1. Menu phase 2, widened (`docs/notes/launcher/menu.md`, "Phase 2
+   (widened, 2026-10-11)": 16 sub-phases, Cartographer's files first) on
+   `launcher-menu2`, stacked on `launcher-menu`. 2.1 is done
+   (2026-10-11): one finder for the Halo 2 Vista (Cartographer) folder,
+   which the menus, fonts and rank icons now try before MCC
+   (`H2LOBBY_VISTA`, `vista =` in lobby.txt); every screen's frame time
+   in `lobby.log`; and the flows test (`crates/h2launch/tests/flows.rs`),
+   real headless lobbies against an in-process h2live in the gate, which
+   every later sub-phase keeps passing. On the owner's PC (check P1):
+   `lobby.log` should name the Cartographer folder for menus, fonts and
+   rank icons, MCC's with `H2LOBBY_VISTA=off`, and give a ms line for
+   each screen visited. Next: 2.2, menu music and UI sounds.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

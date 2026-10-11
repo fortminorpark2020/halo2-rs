@@ -1,0 +1,28 @@
+# (a) Matchmaking, ALPHA's side: invite BRAVO from the players list;
+# once BRAVO has left again, search Head to Head, play, and come back.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type ALPHA
+0.2 a
+0 wait live 30
+0.2 x                       # the players list
+0 wait players 5
+0 see BRAVO 30
+0 pick BRAVO
+0.2 a                       # invite
+0.2 b                       # back to the playlists
+0 wait live 5
+0 see PARTY (2) 30          # BRAVO accepted
+0 see Press X to invite 30  # and left again
+0.2 down                    # Head to Head
+0 see 2 players 5
+0.2 a                       # search
+0 wait pregame 60
+0 wait ingame 30
+0 wait carnage 60
+0.5 a                       # back to the playlists
+0 wait live 10
+1 quit

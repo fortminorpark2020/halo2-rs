@@ -11,6 +11,7 @@ use super::child::{Kind, Match, Running, Said};
 use super::names;
 use super::ranks::{RankIcons, Size};
 use super::settings::{self, Settings, GAMERTAG_LEN};
+use super::sources::Vista;
 use crate::controls::{self, button, Controls};
 use crate::live::{self, Engine, Log, Told};
 use crate::session::Session;
@@ -87,8 +88,8 @@ const LIST_ROWS: usize = 9;
 const MAIN_ROWS: [&str; 2] = ["ONLINE", "SETTINGS"];
 const LIVE_ROW: usize = 0;
 const MAIN_SETTINGS_ROW: usize = 1;
-/// Frames of a menu screen timed at each window size before the log says
-/// how long one takes.
+/// Frames of a screen timed at each window size before the log says how
+/// long one takes.
 const MENU_FRAMES: u32 = 30;
 /// A click this soon (seconds) after one that changed the screen or shut a
 /// popup is the second half of a double-click: on the start screen it
@@ -134,6 +135,10 @@ pub struct Config {
     pub ranks: Option<Arc<RankIcons>>,
     /// The start screen and main menu (`Menus::flat` without the files).
     pub menus: Arc<Menus>,
+    /// The Halo 2 Vista (Project Cartographer) files, if `sources::find`
+    /// found them: the menus, fonts and rank icons above came from there
+    /// first.
+    pub vista: Option<Vista>,
 }
 
 /// A key, button or typed character.
@@ -366,19 +371,23 @@ pub struct App {
     last_click: Option<(f64, Screen, bool)>,
 }
 
-/// How long the menus take to draw on the CPU, for the log (menu.md phase
-/// 1, "Done when"): the kept background once for each window size, and
-/// each screen's frames, averaged over the first `MENU_FRAMES` at a size.
+/// How long each screen takes to draw on the CPU, for the log (menu.md,
+/// phase 1's "Done when" and phase 2's CPU budget): the menus' kept
+/// background once for each window size, and each screen's frames (by
+/// `App::timer_name`), averaged over the first `MENU_FRAMES` at a size.
 #[derive(Default)]
 struct MenuTimes {
     size: (usize, usize),
-    /// The start screen's frames timed at this size, then the main
-    /// menu's, with their total time (ms).
-    frames: [(u32, f64); 2],
+    /// Each screen's frames timed at this size, by its timer name, with
+    /// their total time (ms).
+    frames: Vec<(&'static str, u32, f64)>,
+    /// The size the menus' still background was last drawn at: a frame
+    /// that draws it again isn't timed.
+    kept: (usize, usize),
     /// Each size's background time (ms), the first time it was drawn.
     backgrounds: Vec<((usize, usize), f64)>,
     /// The sizes and screens already logged.
-    logged: Vec<((usize, usize), usize)>,
+    logged: Vec<((usize, usize), &'static str)>,
 }
 
 impl App {
@@ -2178,8 +2187,11 @@ impl App {
         }
     }
 
-    /// Draw the screen into `c`.
+    /// Draw the screen into `c`. The first frames on each screen at each
+    /// window size are timed for the log (`time_frame`): the whole draw
+    /// here, the start screen's and main menu's in `draw_menu`.
     pub fn draw(&mut self, c: &mut Canvas, t: &mut Text) {
+        let started = Instant::now();
         let (w, h) = (c.w as f32, c.h as f32);
         let s = (w / 1280.0).min(h / 720.0).max(0.01);
         let (ox, oy) = ((w - 1280.0 * s) / 2.0, (h - 720.0 * s) / 2.0);
@@ -2192,7 +2204,8 @@ impl App {
                 self.main_focus = Focus::on(self.main_focus.item, self.menu_opened);
             }
         }
-        if self.on_menus() {
+        let menus = self.on_menus();
+        if menus {
             // Halo 2's own screen in place of the lobby's chrome.
             self.draw_menu(c, &mut drawn);
         } else {
@@ -2217,6 +2230,10 @@ impl App {
         self.areas = areas;
         self.drawn = drawn;
         self.view = (s, ox, oy);
+        if !menus {
+            let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
+            self.time_frame((c.w, c.h), frame_ms, true);
+        }
     }
 
     /// The start screen or the main menu, drawn by `h2ui` over the still
@@ -2235,12 +2252,22 @@ impl App {
         let space = Space::new(w as u32, h as u32);
         let framing = &shell.main.framing;
         let behind = screens::background(clock, Backdrop::Still, framing, art, fonts, space);
+        // Drawn again only at a new size (`Kept`): that frame isn't timed,
+        // and its time is the background's.
+        let fresh = self.menu_times.kept != (w, h);
         self.backdrop.draw(&behind, &mut c.px, w, h, &res);
         let background_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if fresh {
+            let t = &mut self.menu_times;
+            t.kept = (w, h);
+            if !t.backgrounds.iter().any(|b| b.0 == (w, h)) {
+                t.backgrounds.push(((w, h), background_ms));
+            }
+        }
         let small_print = self.small_print();
         // Its text counts as drawn (for `see`) once it has faded in.
         let shown = clock - self.menu_opened >= self.menu_intro();
-        let (list, k) = match self.screen {
+        let list = match self.screen {
             Screen::Start => {
                 let start = Start {
                     layout: &shell.start,
@@ -2251,7 +2278,7 @@ impl App {
                 if shown {
                     drawn.push(screens::PRESS_START.to_string());
                 }
-                (screens::start(clock, &start, art, fonts, space), 0)
+                screens::start(clock, &start, art, fonts, space)
             }
             _ => {
                 let m = self.main_menu(shell, &small_print);
@@ -2261,12 +2288,12 @@ impl App {
                         drawn.push(small_print.clone());
                     }
                 }
-                (screens::main_menu(clock, &m, art, fonts, space), 1)
+                screens::main_menu(clock, &m, art, fonts, space)
             }
         };
         h2ui::cpu::draw_u32(&list, &mut c.px, w, h, &res);
         let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
-        self.time_menu((w, h), k, background_ms, frame_ms);
+        self.time_frame((w, h), frame_ms, !fresh);
     }
 
     /// How long (seconds) the start screen or main menu on show takes to
@@ -2318,38 +2345,72 @@ impl App {
         self.menu_clock() - self.menu_opened >= at
     }
 
-    /// Count a menu frame's time (screen `k`: 0 the start screen, 1 the
-    /// main menu) at window size `size`, and log the average once its
-    /// first `MENU_FRAMES` there are timed. The first frame at a size,
-    /// which draws the background, is timed apart.
-    fn time_menu(&mut self, size: (usize, usize), k: usize, background_ms: f64, frame_ms: f64) {
+    /// The screen's name in the per-screen timer and the log.
+    fn timer_name(&self) -> &'static str {
+        match self.screen {
+            Screen::Start => "start screen",
+            Screen::Main => "main menu",
+            Screen::SignIn => "sign-in",
+            Screen::Connecting => "signing in",
+            Screen::Live if self.searching() => "searching",
+            Screen::Live => "playlists",
+            Screen::Players => "players",
+            Screen::Party => "party",
+            Screen::Custom => "custom game",
+            Screen::Pregame => "pregame lobby",
+            Screen::InGame => "in game",
+            Screen::Carnage => "carnage report",
+            Screen::Failed => "offline",
+            Screen::Record => "service record",
+            Screen::Friends => "friends",
+            Screen::Settings => "settings",
+        }
+    }
+
+    /// Count a frame's time on the screen shown (`timer_name`) at window
+    /// size `size`, unless it isn't `timed`, and log the average once its
+    /// first `MENU_FRAMES` there are timed: once per screen and size. The
+    /// first frame after the size changes isn't timed either.
+    fn time_frame(&mut self, size: (usize, usize), frame_ms: f64, timed: bool) {
+        let name = self.timer_name();
+        let menus = self.on_menus();
         let t = &mut self.menu_times;
         if t.size != size {
             t.size = size;
-            t.frames = [(0, 0.0); 2];
-            if !t.backgrounds.iter().any(|b| b.0 == size) {
-                t.backgrounds.push((size, background_ms));
-            }
+            t.frames.clear();
             return;
         }
-        let (n, total) = &mut t.frames[k];
+        if !timed || t.logged.contains(&(size, name)) {
+            return;
+        }
+        let k = match t.frames.iter().position(|f| f.0 == name) {
+            Some(k) => k,
+            None => {
+                t.frames.push((name, 0, 0.0));
+                t.frames.len() - 1
+            }
+        };
+        let (_, n, total) = &mut t.frames[k];
         *n += 1;
         *total += frame_ms;
-        if *n != MENU_FRAMES || t.logged.contains(&(size, k)) {
+        if *n != MENU_FRAMES {
             return;
         }
-        t.logged.push((size, k));
+        t.logged.push((size, name));
         let average = *total / f64::from(MENU_FRAMES);
-        let background = t
-            .backgrounds
-            .iter()
-            .find(|b| b.0 == size)
-            .map_or(0.0, |b| b.1);
-        let screen = ["start screen", "main menu"][k];
-        let line = format!(
-            "menus: {}x{}, {screen} {average:.1} ms a frame on the CPU (background {background:.0} ms once)",
-            size.0, size.1
-        );
+        let (w, h) = size;
+        let line = if menus {
+            let background = t
+                .backgrounds
+                .iter()
+                .find(|b| b.0 == size)
+                .map_or(0.0, |b| b.1);
+            format!(
+                "menus: {w}x{h}, {name} {average:.1} ms a frame on the CPU (background {background:.0} ms once)"
+            )
+        } else {
+            format!("lobby: {w}x{h}, {name} {average:.1} ms a frame on the CPU")
+        };
         self.log(&line);
     }
 
@@ -4048,6 +4109,7 @@ mod tests {
             log: Arc::new(|_: &str| {}),
             ranks: None,
             menus: Arc::new(Menus::flat()),
+            vista: None,
         })
     }
 
@@ -5644,7 +5706,7 @@ mod tests {
         for _ in 0..=MENU_FRAMES {
             a.draw_menu(&mut c, &mut Vec::new());
         }
-        assert_eq!(a.menu_times.logged, [((320, 180), 0)]);
+        assert_eq!(a.menu_times.logged, [((320, 180), "start screen")]);
         let timed = |lines: &[String]| {
             lines
                 .iter()
@@ -5668,6 +5730,107 @@ mod tests {
         a.draw(&mut c, &mut text);
         assert!(a.drawn().iter().any(|d| d == "ONLINE"));
         assert!(a.drawn().iter().any(|d| d == "CHIEF"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn each_screen_is_timed_once_per_window_size() {
+        let dir = scratch("timer");
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let mut a = App::new(Config {
+            log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
+            ..app(&dir).cfg
+        });
+        let frames = |a: &mut App, screen: Screen, size: (usize, usize), n: u32| {
+            a.screen = screen;
+            for _ in 0..n {
+                a.time_frame(size, 1.0, true);
+            }
+        };
+        let logged = || lines.lock().unwrap().clone();
+        // The first frame at a size isn't timed.
+        frames(&mut a, Screen::Players, (640, 360), MENU_FRAMES);
+        assert!(logged().is_empty(), "{:?}", logged());
+        frames(&mut a, Screen::Players, (640, 360), 1);
+        assert_eq!(
+            logged(),
+            ["lobby: 640x360, players 1.0 ms a frame on the CPU"]
+        );
+        // Once per screen and size.
+        frames(&mut a, Screen::Players, (640, 360), MENU_FRAMES * 2);
+        assert_eq!(logged().len(), 1);
+        // Frames that aren't timed don't count.
+        a.screen = Screen::Party;
+        for _ in 0..MENU_FRAMES {
+            a.time_frame((640, 360), 9.0, false);
+        }
+        frames(&mut a, Screen::Party, (640, 360), MENU_FRAMES - 1);
+        assert_eq!(logged().len(), 1);
+        frames(&mut a, Screen::Party, (640, 360), 1);
+        assert_eq!(
+            logged()[1],
+            "lobby: 640x360, party 1.0 ms a frame on the CPU"
+        );
+        // Another size: once more there; back at the first, nothing new.
+        frames(&mut a, Screen::Players, (1920, 1080), MENU_FRAMES + 1);
+        assert_eq!(
+            logged()[2],
+            "lobby: 1920x1080, players 1.0 ms a frame on the CPU"
+        );
+        frames(&mut a, Screen::Players, (640, 360), MENU_FRAMES * 2);
+        assert_eq!(logged().len(), 3);
+        // The menus keep their line, with the background's time.
+        a.menu_times.backgrounds.push(((640, 360), 20.0));
+        frames(&mut a, Screen::Main, (640, 360), MENU_FRAMES);
+        assert_eq!(
+            logged()[3],
+            "menus: 640x360, main menu 1.0 ms a frame on the CPU (background 20 ms once)"
+        );
+        // Every screen has a name of its own.
+        let screens = [
+            Screen::Start,
+            Screen::Main,
+            Screen::SignIn,
+            Screen::Connecting,
+            Screen::Live,
+            Screen::Players,
+            Screen::Party,
+            Screen::Custom,
+            Screen::Pregame,
+            Screen::InGame,
+            Screen::Carnage,
+            Screen::Failed,
+            Screen::Record,
+            Screen::Friends,
+            Screen::Settings,
+        ];
+        let mut names: Vec<&str> = screens
+            .iter()
+            .map(|&s| {
+                a.screen = s;
+                a.timer_name()
+            })
+            .collect();
+        names.push("searching");
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), screens.len() + 1);
+        // Through `draw` on a lobby screen, when there is a font.
+        let Ok(mut text) = Text::system() else {
+            return;
+        };
+        a.screen = Screen::Settings;
+        let mut c = Canvas::new(320, 180);
+        for _ in 0..=MENU_FRAMES {
+            a.draw(&mut c, &mut text);
+        }
+        let line = logged().pop().unwrap();
+        assert!(
+            line.starts_with("lobby: 320x180, settings ")
+                && line.ends_with(" ms a frame on the CPU"),
+            "{line}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
