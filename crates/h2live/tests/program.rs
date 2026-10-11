@@ -526,13 +526,19 @@ fn accounts_are_made_from_the_command_line_while_the_program_runs() {
 fn a_second_program_on_the_same_folder_stops() {
     let data = TempDir::new("cli-second");
     let mut first = Program::start(&data.0);
+    // (Said once its admin socket is open.)
+    first.wait_for("sign-up: ");
     let second = program(&data.0, &[]).output().unwrap();
     assert!(!second.status.success());
     let said = String::from_utf8(second.stdout).unwrap();
     assert!(said.contains("FAILED: another h2live is using "), "{said}");
-    // The first goes on.
+    // The first goes on, its command line too: the second never touched
+    // its admin socket.
     let health = first.get("/health");
     assert!(health.ends_with("\r\n\r\nOK"), "{health}");
+    assert!(data.0.join("admin.sock").exists());
+    let ran = h2live(&data.0, &["user", "list"], "");
+    assert_eq!(ran.code, 0, "{}", ran.err);
     first.stop();
 }
 

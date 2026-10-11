@@ -343,6 +343,10 @@ pub struct LiveClient {
     seal: Option<([u8; 32], [u8; 32])>,
     /// The number of our last account request.
     account_seq: u32,
+    /// The server's challenge came. A server sends one SEAL_KEY and one
+    /// CHALLENGE on a connection, so another of either after it is someone
+    /// else's (one in between, offering their own key to seal to).
+    challenged: bool,
 }
 
 /// The key this PC signs in with, kept at `path` (identity.key, next to
@@ -435,6 +439,7 @@ impl LiveClient {
             seal_key: None,
             seal: None,
             account_seq: 0,
+            challenged: false,
         }
     }
 
@@ -550,6 +555,18 @@ impl LiveClient {
     }
 
     fn take(&mut self, message: ToPc, now: f64, events: &mut Vec<LiveEvent>) {
+        // One SEAL_KEY, then one CHALLENGE, per connection: anything more
+        // is bad data, and nothing is answered or sealed to it.
+        let again = match message {
+            ToPc::Challenge { .. } => std::mem::replace(&mut self.challenged, true),
+            ToPc::SealKey { .. } => self.challenged || self.seal_key.is_some(),
+            _ => false,
+        };
+        if again {
+            self.gone = true;
+            events.push(LiveEvent::Lost("bad data from the server".into()));
+            return;
+        }
         let view = &mut self.view;
         match message {
             ToPc::Challenge { nonce, motd } => {
@@ -672,11 +689,13 @@ impl LiveClient {
             return;
         }
         self.view.server_key = Some(server);
+        // Any other key this connection is offered must be this one.
+        self.access.pin = Some(server);
         self.seal = Some((key, nonce));
         let me = self.key.verifying_key().to_bytes();
-        let signature = self.key.sign(&live::proof(&nonce, &me)).to_bytes();
         // The password goes once, and isn't kept after it's sealed.
         let Some(typed) = self.access.password.take() else {
+            let signature = self.key.sign(&live::proof(&nonce, &me)).to_bytes();
             return ToServer::Prove(signature).send(&mut self.conn);
         };
         let aad = seal::aad(seal::SIGN_IN, &nonce, &me, self.gamertag.as_bytes());
@@ -687,6 +706,8 @@ impl LiveClient {
             return;
         };
         let computer = cut(&self.access.computer, live::MAX_NAME);
+        let proof = live::password_proof(&nonce, &me, &self.gamertag, &computer, &password);
+        let signature = self.key.sign(&proof).to_bytes();
         let prove = ToServer::ProvePassword {
             signature,
             computer,

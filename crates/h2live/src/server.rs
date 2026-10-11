@@ -647,7 +647,12 @@ impl Server {
                 if login.client.kind() != ClientKind::Launcher {
                     return false;
                 }
-                if signed(&login.key, &nonce, &signature) {
+                // Over this LOGIN's gamertag and this box too, so no one
+                // in between can send their own account's password with
+                // this PC's proof.
+                let proof =
+                    live::password_proof(&nonce, &login.key, &login.gamertag, &computer, &password);
+                if signed_over(&login.key, &proof, &signature) {
                     self.prove_password(k, login, &computer, &password, now);
                 } else {
                     self.refuse(k, live::BAD_SIGNATURE);
@@ -840,11 +845,8 @@ impl Server {
                 changed = true;
             }
         }
-        let path = self.dir.join("accounts.txt");
         if changed {
-            if let Err(e) = store::save(&path, self.accounts.values()) {
-                log(format_args!("live: can't save {}: {e}", path.display()));
-            }
+            self.save_accounts();
         }
         changed
     }

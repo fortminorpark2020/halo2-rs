@@ -8,9 +8,9 @@ use crate::admin::{self, Request};
 use crate::client::{Access, AccountAsk, SERVER_UNPROVEN};
 use crate::password::{self, Cost, Secret};
 use crate::server::accounts::{
-    AN_ADMINS, CANT_SAVE, LAST_ADMIN, NOT_A_HASH, NOT_SAVED, NO_PASSWORD_YET, NO_SUCH_ACCOUNT,
-    ONLY_THE_COMMAND_LINE, PASSWORD_CHANGED, RENAMES, TOO_MANY_CHANGES, WRONG_OLD_PASSWORD,
-    YOUR_OWN,
+    AN_ADMINS, CANT_SAVE, HASHES_PER_MINUTE, LAST_ADMIN, NOT_A_HASH, NOT_SAVED, NO_PASSWORD_YET,
+    NO_SUCH_ACCOUNT, ONLY_THE_COMMAND_LINE, PASSWORD_CHANGED, RENAMES, TOO_MANY_CHANGES,
+    WRONG_OLD_PASSWORD, YOUR_OWN,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use h2net::live::{AccountOp, Accounts, Relation, Sealed, ROW_ADMIN, ROW_ONLINE, ROW_PASSWORD};
@@ -156,12 +156,51 @@ fn signature(n: u8, nonce: &[u8; 32]) -> [u8; 64] {
     key(n).sign(&proof).to_bytes()
 }
 
-/// `password`, sealed by PC `n` to sign in to `gamertag` on the connection
+/// `PASSWORD`, sealed by PC `n` to sign in to `gamertag` on the connection
 /// whose challenge was `nonce` and key `seal_key`.
 fn sealed_sign_in(n: u8, nonce: &[u8; 32], seal_key: &[u8; 32], gamertag: &str) -> Sealed {
+    sealed_for(
+        seal::SIGN_IN,
+        n,
+        nonce,
+        seal_key,
+        gamertag.as_bytes(),
+        &[PASSWORD],
+    )
+}
+
+/// `passwords`, sealed for `purpose` and `target` to `seal_key`, as PC
+/// `n` on the connection whose challenge was `nonce` (or anyone who knows
+/// them: none is secret).
+fn sealed_for(
+    purpose: u8,
+    n: u8,
+    nonce: &[u8; 32],
+    seal_key: &[u8; 32],
+    target: &[u8],
+    passwords: &[&str],
+) -> Sealed {
     let me = key(n).verifying_key().to_bytes();
-    let aad = seal::aad(seal::SIGN_IN, nonce, &me, gamertag.as_bytes());
-    seal::seal(seal_key, &aad, &seal::pad(&[PASSWORD]).unwrap()).unwrap()
+    let aad = seal::aad(purpose, nonce, &me, target);
+    seal::seal(seal_key, &aad, &seal::pad(passwords).unwrap()).unwrap()
+}
+
+/// PROVE_PASSWORD from PC `n`, signed by it, on the connection whose
+/// challenge was `nonce` and whose LOGIN named `gamertag`.
+fn prove_password(
+    n: u8,
+    nonce: &[u8; 32],
+    gamertag: &str,
+    computer: &str,
+    password: Sealed,
+) -> ToServer {
+    let me = key(n).verifying_key().to_bytes();
+    let proof = live::password_proof(nonce, &me, gamertag, computer, &password);
+    ToServer::ProvePassword {
+        signature: key(n).sign(&proof).to_bytes(),
+        computer: computer.into(),
+        password,
+    }
 }
 
 #[test]
@@ -252,9 +291,13 @@ fn a_second_pc_is_added_and_the_sixth_is_refused() {
     let why = launcher_refused(&mut w, 6, "Kat", Some(PASSWORD));
     assert_eq!(why, live::TOO_MANY_PCS);
     assert_eq!(w.server.devices_of(kat).len(), 5);
-    // The five still sign in.
+    // The five still sign in, with the password typed again too (it's no
+    // new PC).
     let i = launcher_in(&mut w, 1, "Kat", None);
     assert_eq!(w.welcome(i).account, kat);
+    let i = launcher_in(&mut w, 3, "Kat", Some(PASSWORD));
+    assert_eq!(w.welcome(i).account, kat);
+    assert_eq!(w.server.devices_of(kat).len(), 5);
     // Signed out of them all, the sixth gets in.
     w.server
         .command(Actor::Console, Command::SignOut { account: kat }, w.now)
@@ -383,11 +426,7 @@ fn a_box_from_another_connection_does_not_open() {
     let password = sealed_sign_in(1, &nonce, &seal_key, "KAT");
     // ...and sent on another, by the same PC.
     let (mut second, nonce, _) = launcher_by_hand(&mut w, 1, "KAT");
-    let prove = ToServer::ProvePassword {
-        signature: signature(1, &nonce),
-        computer: "BY HAND".into(),
-        password,
-    };
+    let prove = prove_password(1, &nonce, "KAT", "BY HAND", password);
     prove.send(&mut second);
     second.flush().unwrap();
     w.step();
@@ -398,16 +437,164 @@ fn a_box_from_another_connection_does_not_open() {
     assert!(w.server.devices_of(kat).is_empty());
     // Sealed for its own connection, it opens.
     let (mut third, nonce, seal_key) = launcher_by_hand(&mut w, 1, "KAT");
-    let prove = ToServer::ProvePassword {
-        signature: signature(1, &nonce),
-        computer: "BY HAND".into(),
-        password: sealed_sign_in(1, &nonce, &seal_key, "KAT"),
-    };
+    let password = sealed_sign_in(1, &nonce, &seal_key, "KAT");
+    let prove = prove_password(1, &nonce, "KAT", "BY HAND", password);
     prove.send(&mut third);
     third.flush().unwrap();
     w.step();
     assert!(matches!(heard(&mut third)[0], ToPc::Welcome(_)));
     assert_eq!(w.server.devices_of(kat)[0].name, "BY HAND");
+}
+
+#[test]
+fn a_password_sign_in_needs_this_pcs_signature_over_its_gamertag_and_box() {
+    let mut w = closed("password-signature");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    let jun = make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let hashes = w.server.hashes.len();
+    let kat_pc = key(1).verifying_key().to_bytes();
+    // Jun knows his own password and sees Kat's PC's key, its LOGIN (with
+    // his gamertag put in) and its signature go by. His box, sealed for
+    // that LOGIN, with...
+    type Signs<'a> = &'a dyn Fn(&[u8; 32], &[u8; 32], &Sealed) -> [u8; 64];
+    let attempts: [Signs; 3] = [
+        // ...another key's signature over what Kat's PC would sign;
+        &|nonce, _, boxed| {
+            let proof = live::password_proof(nonce, &kat_pc, "JUN", "BY HAND", boxed);
+            key(2).sign(&proof).to_bytes()
+        },
+        // ...Kat's PC's PROVE (its signature over the challenge alone);
+        &|nonce, _, _| signature(1, nonce),
+        // ...or Kat's PC's own PROVE_PASSWORD, for its gamertag and box.
+        &|nonce, seal_key, _| {
+            let own = sealed_sign_in(1, nonce, seal_key, "KAT");
+            let proof = live::password_proof(nonce, &kat_pc, "KAT", "BY HAND", &own);
+            key(1).sign(&proof).to_bytes()
+        },
+    ];
+    for signed in attempts {
+        let (mut conn, nonce, seal_key) = launcher_by_hand(&mut w, 1, "JUN");
+        let boxed = sealed_for(
+            seal::SIGN_IN,
+            1,
+            &nonce,
+            &seal_key,
+            b"JUN",
+            &[OTHER_PASSWORD],
+        );
+        let prove = ToServer::ProvePassword {
+            signature: signed(&nonce, &seal_key, &boxed),
+            computer: "BY HAND".into(),
+            password: boxed,
+        };
+        prove.send(&mut conn);
+        conn.flush().unwrap();
+        w.step();
+        assert_eq!(
+            heard(&mut conn),
+            [ToPc::Refused(live::BAD_SIGNATURE.into())]
+        );
+    }
+    // Kat's PC is still hers, and on; no password was even checked.
+    w.run(1.0);
+    assert!(w.pcs[i].signed_in() && w.refused(i).is_none());
+    let devices = w.server.devices_of(kat);
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].key, kat_pc);
+    assert!(w.server.devices_of(jun).is_empty());
+    assert_eq!(w.server.hashes.len(), hashes);
+}
+
+#[test]
+fn an_account_box_that_does_not_open_drops_the_pc() {
+    let mut w = closed("bad-account-box");
+    let kat = make_account(&mut w, "Kat", PASSWORD, true);
+    let jun = make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let hashes = w.server.hashes.len();
+    let (_, earlier, _) = launcher_by_hand(&mut w, 1, "KAT");
+    // A new password for Jun, in a box sealed for another target, for
+    // another purpose, or on another connection.
+    type Seals<'a> = &'a dyn Fn(&[u8; 32], &[u8; 32]) -> Sealed;
+    let boxes: [Seals; 3] = [
+        &|nonce, seal_key| {
+            let target = kat.to_le_bytes();
+            sealed_for(
+                seal::SET_PASSWORD,
+                1,
+                nonce,
+                seal_key,
+                &target,
+                &["NEW-PASSWORD"],
+            )
+        },
+        &|nonce, seal_key| {
+            let target = jun.to_le_bytes();
+            let passwords = ["NEW-PASSWORD"];
+            sealed_for(
+                seal::CHANGE_PASSWORD,
+                1,
+                nonce,
+                seal_key,
+                &target,
+                &passwords,
+            )
+        },
+        &|_, seal_key| {
+            let target = jun.to_le_bytes();
+            let passwords = ["NEW-PASSWORD"];
+            sealed_for(
+                seal::SET_PASSWORD,
+                1,
+                &earlier,
+                seal_key,
+                &target,
+                &passwords,
+            )
+        },
+    ];
+    for boxed in boxes {
+        let (mut conn, nonce, seal_key) = launcher_by_hand(&mut w, 1, "KAT");
+        ToServer::Prove(signature(1, &nonce)).send(&mut conn);
+        conn.flush().unwrap();
+        w.step();
+        assert!(matches!(heard(&mut conn)[0], ToPc::Welcome(_)));
+        let op = AccountOp::SetPassword {
+            account: jun,
+            password: boxed(&nonce, &seal_key),
+        };
+        let sig = key(1).sign(&live::account_proof(&nonce, 1, &op)).to_bytes();
+        ToServer::Account { seq: 1, op, sig }.send(&mut conn);
+        conn.flush().unwrap();
+        w.step();
+        assert_eq!(w.server.pc_of(kat), None);
+        assert!(!heard(&mut conn)
+            .iter()
+            .any(|m| matches!(m, ToPc::Accounts(a) if a.answers == 1)));
+    }
+    // Nothing was hashed, and Jun's password is as it was.
+    assert_eq!(w.server.hashes.len(), hashes);
+    let i = launcher_in(&mut w, 2, "Jun", Some(OTHER_PASSWORD));
+    assert_eq!(w.welcome(i).account, jun);
+}
+
+#[test]
+fn moving_a_pc_ends_only_the_old_accounts_session_on_that_pc() {
+    let mut w = closed("move-one-pc");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    let jun = make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    // Kat is on from her second PC now.
+    let b = launcher_in(&mut w, 2, "Kat", Some(PASSWORD));
+    // Her first PC signs in to Jun: her session on the other stays.
+    let c = launcher_in(&mut w, 1, "Jun", Some(OTHER_PASSWORD));
+    assert_eq!(w.welcome(c).account, jun);
+    w.run(1.0);
+    assert!(w.pcs[b].signed_in() && w.refused(b).is_none());
+    let keys = |id| -> Vec<[u8; 32]> { w.server.devices_of(id).iter().map(|d| d.key).collect() };
+    assert_eq!(keys(kat), [key(2).verifying_key().to_bytes()]);
+    assert_eq!(keys(jun), [key(1).verifying_key().to_bytes()]);
 }
 
 #[test]
@@ -1116,6 +1303,81 @@ fn a_launcher_gives_up_on_a_server_that_does_not_prove_its_key() {
 }
 
 #[test]
+fn a_launcher_takes_one_seal_key_and_one_challenge_a_connection() {
+    let w = World::new("one-challenge");
+    let card = w.card_path(1);
+    // A "server" holding identity key `identity` offers a key to seal to
+    // and a challenge.
+    let offer = |server_end: &mut Connection, identity: u8, nonce: [u8; 32]| {
+        let seal_key = seal::public(&[identity; 32]);
+        let proof = seal::key_proof(&nonce, &seal_key);
+        let sig = key(identity).sign(&proof).to_bytes();
+        let server = key(identity).verifying_key().to_bytes();
+        ToPc::SealKey {
+            key: seal_key,
+            server,
+            sig,
+        }
+        .send(server_end);
+        let motd = String::new();
+        ToPc::Challenge { nonce, motd }.send(server_end);
+        server_end.flush().unwrap();
+    };
+    let kinds = |server_end: &mut Connection| -> Vec<u8> {
+        let sent = server_end.receive().unwrap();
+        sent.into_iter().map(|(kind, _)| kind).collect()
+    };
+    // Signed in to the first server to prove its key (no pin yet: trusted
+    // on first use)...
+    let (mut server_end, pc_end) = Connection::pair();
+    let mut pc = LiveClient::launcher(pc_end, key(1), &profile("Kat"), "test", &card, 0.0);
+    offer(&mut server_end, 8, [5; 32]);
+    assert_eq!(pc.poll(0.1), []);
+    assert_eq!(kinds(&mut server_end), [kind::LOGIN, kind::PROVE]);
+    let welcome = Welcome {
+        account: 7,
+        gamertag: "KAT".into(),
+        card: String::new(),
+        best: 1,
+        levels: Vec::new(),
+    };
+    ToPc::Welcome(welcome).send(&mut server_end);
+    server_end.flush().unwrap();
+    assert_eq!(pc.poll(0.2), [LiveEvent::Welcomed]);
+    let first = key(8).verifying_key().to_bytes();
+    assert_eq!(pc.view.server_key, Some(first));
+    // ...someone in between offers their own key and a challenge: it's bad
+    // data. Nothing is signed for it, and no password is sealed to it.
+    offer(&mut server_end, 9, [6; 32]);
+    let bad = LiveEvent::Lost("bad data from the server".into());
+    assert_eq!(pc.poll(0.3), std::slice::from_ref(&bad));
+    assert_eq!(pc.view.server_key, Some(first));
+    let change = AccountAsk::ChangePassword {
+        old: secret(PASSWORD),
+        new: secret(OTHER_PASSWORD),
+    };
+    assert_eq!(pc.ask_account(change), None);
+    assert_eq!(kinds(&mut server_end), []);
+    // A second key before the challenge is no better.
+    let (mut server_end, pc_end) = Connection::pair();
+    let mut pc = LiveClient::launcher(pc_end, key(1), &profile("Kat"), "test", &card, 0.0);
+    let seal_key = seal::public(&[9; 32]);
+    let sig = key(9)
+        .sign(&seal::key_proof(&[5; 32], &seal_key))
+        .to_bytes();
+    let server = key(9).verifying_key().to_bytes();
+    ToPc::SealKey {
+        key: seal_key,
+        server,
+        sig,
+    }
+    .send(&mut server_end);
+    offer(&mut server_end, 8, [5; 32]);
+    assert_eq!(pc.poll(0.1), [bad]);
+    assert_eq!(kinds(&mut server_end), [kind::LOGIN]);
+}
+
+#[test]
 fn a_login_line_without_an_account_is_dropped_and_an_account_without_one_is_adopted() {
     let mut w = World::with_secret("adopt", Some(SECRET));
     let phc = password::hash(PASSWORD, Cost::Cheap).unwrap();
@@ -1280,6 +1542,121 @@ fn a_removal_the_server_cannot_save_changes_nothing() {
     assert_eq!(w.server.account(kat), None);
     let why = launcher_refused(&mut w, 1, "Kat", None);
     assert_eq!(why, live::PASSWORD_NEEDED);
+}
+
+#[test]
+fn a_new_account_or_name_the_server_cannot_save_is_undone() {
+    let mut w = closed("add-unsaved");
+    let jun = make_account(&mut w, "Jun 1", OTHER_PASSWORD, false);
+    let blocked = unsaveable(&w, "accounts.txt");
+    let console = Actor::Console;
+    let add = || Command::Add {
+        gamertag: "Kat".into(),
+        phc: password::hash(PASSWORD, Cost::Cheap).unwrap(),
+        admin: true,
+    };
+    // Made: undone, its sign-ins too (so it closes nothing).
+    assert_eq!(
+        w.server.command(console, add(), w.now),
+        Err(CANT_SAVE.into())
+    );
+    assert_eq!(w.server.find("Kat"), None);
+    assert_eq!(w.server.logins.admins(), 0);
+    let logins = std::fs::read_to_string(w.data.0.join("logins.txt")).unwrap();
+    let users = logins.lines().filter(|l| l.starts_with("u ")).count();
+    assert_eq!(users, 1, "{logins}");
+    // Renamed: undone.
+    let rename = || Command::Rename {
+        account: jun,
+        gamertag: "Jun".into(),
+    };
+    assert_eq!(
+        w.server.command(console, rename(), w.now),
+        Err(CANT_SAVE.into())
+    );
+    assert_eq!(w.server.account(jun).unwrap().gamertag, "JUN 1");
+    // Nothing of either comes back after a restart, and once it can be
+    // saved, both are done and kept.
+    fixed(blocked);
+    restart_closed(&mut w);
+    assert_eq!(w.server.find("Kat"), None);
+    assert_eq!(w.server.account(jun).unwrap().gamertag, "JUN 1");
+    let done = w.server.command(console, add(), w.now);
+    assert_eq!(done.as_deref(), Ok("CREATED KAT"));
+    let done = w.server.command(console, rename(), w.now);
+    assert_eq!(done.as_deref(), Ok("JUN 1 IS JUN NOW"));
+    restart_closed(&mut w);
+    assert!(w.server.find("Kat").is_some());
+    assert_eq!(w.server.account(jun).unwrap().gamertag, "JUN");
+    let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    assert!(w.server.logins.is_admin(w.welcome(i).account));
+}
+
+#[test]
+fn a_password_change_the_server_cannot_save_holds_and_says_so() {
+    let mut w = closed("change-unsaved");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let blocked = unsaveable(&w, "logins.txt");
+    let change = |old: &str, new: &str| AccountAsk::ChangePassword {
+        old: secret(old),
+        new: secret(new),
+    };
+    let answer = ask(&mut w, i, change(PASSWORD, OTHER_PASSWORD));
+    assert_eq!(
+        (answer.ok, answer.text),
+        (false, format!("{PASSWORD_CHANGED} {NOT_SAVED}"))
+    );
+    // The new one works now, the old one doesn't, and it counted.
+    assert_eq!(w.server.changes_by_account[&kat].len(), 1);
+    let why = launcher_refused(&mut w, 2, "Kat", Some(PASSWORD));
+    assert_eq!(why, live::WRONG_PASSWORD);
+    let j = launcher_in(&mut w, 3, "Kat", Some(OTHER_PASSWORD));
+    assert_eq!(w.welcome(j).account, kat);
+    // Asked again (from the new one) once it can be saved, it holds after a
+    // restart.
+    fixed(blocked);
+    let answer = ask(&mut w, j, change(OTHER_PASSWORD, "THIRD-PASSWORD"));
+    assert_eq!((answer.ok, answer.text.as_str()), (true, PASSWORD_CHANGED));
+    restart_closed(&mut w);
+    let why = launcher_refused(&mut w, 4, "Kat", Some(OTHER_PASSWORD));
+    assert_eq!(why, live::WRONG_PASSWORD);
+    let k = launcher_in(&mut w, 5, "Kat", Some("THIRD-PASSWORD"));
+    assert_eq!(w.welcome(k).account, kat);
+}
+
+#[test]
+fn a_password_change_needs_room_for_both_its_hashes() {
+    let mut w = closed("change-busy");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let change = |old: &str, new: &str| AccountAsk::ChangePassword {
+        old: secret(old),
+        new: secret(new),
+    };
+    // Other passwords took all but one of the minute's hashes: no hash is
+    // spent on the change, and it isn't counted.
+    while w.server.hashes.len() < HASHES_PER_MINUTE - 1 {
+        w.server.hashes.push_back(w.now);
+    }
+    let answer = ask(&mut w, i, change(PASSWORD, OTHER_PASSWORD));
+    assert_eq!(
+        (answer.ok, answer.text.as_str()),
+        (false, live::SERVER_BUSY)
+    );
+    assert_eq!(w.server.hashes.len(), HASHES_PER_MINUTE - 1);
+    assert!(!w.server.changes_by_account.contains_key(&kat));
+    // With two left, it's made, with both.
+    w.server.hashes.pop_back();
+    let answer = ask(&mut w, i, change(PASSWORD, OTHER_PASSWORD));
+    assert_eq!((answer.ok, answer.text.as_str()), (true, PASSWORD_CHANGED));
+    assert_eq!(w.server.hashes.len(), HASHES_PER_MINUTE);
+    // The busy one never counted: two more changes may follow.
+    w.run(61.0);
+    for (old, new) in [(OTHER_PASSWORD, PASSWORD), (PASSWORD, OTHER_PASSWORD)] {
+        let answer = ask(&mut w, i, change(old, new));
+        assert_eq!((answer.ok, answer.text.as_str()), (true, PASSWORD_CHANGED));
+    }
 }
 
 #[test]
@@ -1480,12 +1857,8 @@ fn a_pc_name_is_kept_printable_and_short_so_logins_txt_reads_back() {
     // A name made to add a line to logins.txt, and a long one.
     let named = |w: &mut World, n: u8, computer: &str| {
         let (mut conn, nonce, seal_key) = launcher_by_hand(w, n, "KAT");
-        let prove = ToServer::ProvePassword {
-            signature: signature(n, &nonce),
-            computer: computer.into(),
-            password: sealed_sign_in(n, &nonce, &seal_key, "KAT"),
-        };
-        prove.send(&mut conn);
+        let password = sealed_sign_in(n, &nonce, &seal_key, "KAT");
+        prove_password(n, &nonce, "KAT", computer, password).send(&mut conn);
         conn.flush().unwrap();
         w.step();
         assert!(matches!(heard(&mut conn)[0], ToPc::Welcome(_)));

@@ -844,8 +844,18 @@ impl App {
                     .account_row(who)
                     .map_or("this player".to_string(), |r| r.gamertag.clone());
                 let hints = [(Input::A, action.button()), (Input::B, "Cancel")];
-                p.popup(action.title(), &action.question(&tag), &hints);
-                self.draw_popup_status(p, 436.0, "");
+                // What went wrong takes the question's place, so all of it
+                // shows (whether it was done, and what to do next).
+                if let Some(e) = &self.acc.error {
+                    p.popup(action.title(), "", &hints);
+                    for (k, line) in p.wrap_at_most(18.0, 560.0, e, 4).iter().enumerate() {
+                        let y = 340.0 + k as f32 * 24.0;
+                        p.text(640.0, y, 18.0, ERROR, Align::Center, line);
+                    }
+                } else {
+                    p.popup(action.title(), &action.question(&tag), &hints);
+                    self.draw_popup_status(p, 436.0, 1, "");
+                }
             }
             Popup::ChangePassword => self.draw_change_password(p),
             Popup::KeyChanged => self.draw_key_changed(p),
@@ -853,20 +863,23 @@ impl App {
         }
     }
 
-    /// The open popup's last line, at `y`: what went wrong, else that the
-    /// request is out, else `help`.
-    fn draw_popup_status(&self, p: &mut Pen, y: f32, help: &str) {
+    /// The open popup's status, from `y` down: what went wrong (on up to
+    /// `lines` lines, so the rule it broke or what to do next isn't cut
+    /// off), else that the request is out, else `help`.
+    fn draw_popup_status(&self, p: &mut Pen, y: f32, lines: usize, help: &str) {
         let (text, col) = match (&self.acc.error, &self.acc.pending) {
             (Some(e), _) => (e.as_str(), ERROR),
             (None, Some(_)) => (WORKING, DIM),
             (None, None) => (help, DIM),
         };
-        let text = p.fit(18.0, 580.0, text);
-        p.text(640.0, y, 18.0, col, Align::Center, &text);
+        for (k, line) in p.wrap_at_most(18.0, 580.0, text, lines).iter().enumerate() {
+            let y = y + k as f32 * 22.0;
+            p.text(640.0, y, 18.0, col, Align::Center, line);
+        }
     }
 
     fn draw_new_account(&self, p: &mut Pen) {
-        p.popup_box(320.0, 150.0, 640.0, 370.0);
+        p.popup_box(320.0, 150.0, 640.0, 390.0);
         p.text(640.0, 194.0, 30.0, WHITE, Align::Center, "NEW ACCOUNT");
         let fields = [("GAMERTAG", 228.0), ("PASSWORD", 306.0)];
         for (k, (label, y)) in fields.into_iter().enumerate() {
@@ -920,7 +933,7 @@ impl App {
             NEW_PASSWORD => "Give them this password. A makes another.",
             _ => "They type the gamertag and password once on each PC.",
         };
-        self.draw_popup_status(p, 450.0, help);
+        self.draw_popup_status(p, 448.0, 3, help);
         let a = match self.acc.row {
             NEW_GAMERTAG => "Next",
             NEW_PASSWORD => "Another password",
@@ -928,7 +941,7 @@ impl App {
         };
         let hints = [(Input::A, a), (Input::B, "Cancel")];
         let width = p.hints_width(&hints);
-        p.hint_row(&hints, 640.0 - width / 2.0, 494.0);
+        p.hint_row(&hints, 640.0 - width / 2.0, 520.0);
     }
 
     fn draw_new_password(&self, p: &mut Pen) {
@@ -999,7 +1012,7 @@ impl App {
     }
 
     fn draw_change_password(&self, p: &mut Pen) {
-        p.popup_box(320.0, 130.0, 640.0, 390.0);
+        p.popup_box(320.0, 130.0, 640.0, 410.0);
         p.text(640.0, 174.0, 30.0, WHITE, Align::Center, "CHANGE PASSWORD");
         for (k, label) in CHANGE_FIELDS.iter().enumerate() {
             let y = 206.0 + k as f32 * 80.0;
@@ -1023,10 +1036,11 @@ impl App {
             }
             p.area(380.0, y + 8.0, 520.0, 42.0, Hit::Field(k));
         }
-        self.draw_popup_status(p, 450.0, "Type on the keyboard. Your PCs stay signed in.");
+        let help = "Type on the keyboard. Your PCs stay signed in.";
+        self.draw_popup_status(p, 446.0, 3, help);
         let hints = [(Input::A, "Change"), (Input::B, "Cancel")];
         let width = p.hints_width(&hints);
-        p.hint_row(&hints, 640.0 - width / 2.0, 494.0);
+        p.hint_row(&hints, 640.0 - width / 2.0, 520.0);
     }
 
     fn draw_key_changed(&self, p: &mut Pen) {
@@ -1379,11 +1393,18 @@ mod tests {
             panic!("{heard:?}");
         };
         let ToServer::ProvePassword {
-            password: sealed, ..
+            password: sealed,
+            signature,
+            computer,
         } = prove
         else {
             panic!("{prove:?}");
         };
+        // Signed for this LOGIN's gamertag, this PC's name and this box.
+        let proof = h2net::live::password_proof(&server.nonce, &me, "ALPHA", computer, sealed);
+        let pc = ed25519_dalek::VerifyingKey::from_bytes(&me).unwrap();
+        let signature = ed25519_dalek::Signature::from_bytes(signature);
+        assert!(pc.verify_strict(&proof, &signature).is_ok());
         // Not in the bytes sent, nor in what the log would say of them.
         for f in &forms {
             assert!(!holds(raw, f), "{f}");
@@ -1473,6 +1494,46 @@ mod tests {
             &a,
             "This PC is signed in as ALPHA. To use BRAVO here, type BRAVO's password."
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rename_on_the_servers_command_line_follows_the_lobby() {
+        let mut live = Live::new("renamed");
+        let alpha = live.add("ALPHA", PASSWORD, false);
+        let (mut a, _, dir) = new_pc(&mut live, "renamed", "alpha", PASSWORD);
+        let rename = |gamertag: &str| Command::Rename {
+            account: alpha,
+            gamertag: gamertag.into(),
+        };
+        // Renamed while on the playlists: the lobby, and lobby.txt, follow.
+        let done = live
+            .server
+            .command(Actor::Console, rename("ALPHA TWO"), live.now);
+        assert_eq!(done.as_deref(), Ok("ALPHA IS ALPHA TWO NOW"));
+        live.until(&mut [&mut a], |_, a| a[0].settings.gamertag == "ALPHA TWO");
+        assert_eq!(a.saved[GAMERTAG_FIELD], "ALPHA TWO");
+        assert_eq!(Settings::load(&dir.join("lobby.txt")).gamertag, "ALPHA TWO");
+        drop(a);
+        live.until(&mut [], |s, _| s.players_online() == 0);
+        // Renamed while away: ONLINE (asking for the saved name) signs in
+        // as the new one, with no word of typing the old one's password.
+        let done = live
+            .server
+            .command(Actor::Console, rename("ALPHA 3"), live.now);
+        assert!(done.is_ok());
+        let (mut a, _) = logged(&dir);
+        to_online(&mut a);
+        live.sign_in(&mut a);
+        assert_eq!(a.label(), "live");
+        assert_eq!(a.account(), Some(alpha));
+        assert_eq!(a.settings.gamertag, "ALPHA 3");
+        assert_eq!(Settings::load(&dir.join("lobby.txt")).gamertag, "ALPHA 3");
+        assert!(
+            !a.toasts.iter().any(|t| t.0.contains("To use")),
+            "{:?}",
+            a.toasts
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1924,6 +1985,17 @@ mod tests {
         assert!(a.acc.pending.is_none());
         assert_eq!(a.acc.row, 0);
         assert!(a.acc.error.is_some());
+        // One starting with a number: the rule it breaks is shown in full.
+        type_in(&mut a, "1kat");
+        a.input(Input::A);
+        a.input(Input::A);
+        assert_eq!(a.acc.error.as_deref(), Some(password::GAMERTAG_RULES));
+        if drew(&mut a) {
+            assert!(drawn(&a, "STARTING WITH A LETTER"), "{:?}", a.drawn());
+        }
+        for _ in 0..4 {
+            a.input(Input::Backspace);
+        }
         // BRAVO, then.
         type_in(&mut a, "bravo");
         assert!(a.acc.error.is_none());
@@ -2044,6 +2116,43 @@ mod tests {
         assert!(!a.account_rows().contains(&Row::Account(bravo)));
         assert!(a.acc.sel < 3);
         assert!(!log_has(&said, &given));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    #[test]
+    fn a_new_password_the_server_cannot_save_says_so_in_full() {
+        let mut live = Live::new("unsaved-password");
+        live.add("ROOT", ROOT_PASSWORD, true);
+        live.add("BRAVO", PASSWORD, false);
+        let (mut a, said, dir) = new_pc(&mut live, "unsaved-root", "root", ROOT_PASSWORD);
+        open_accounts_row(&mut a);
+        live.until(&mut [&mut a], |_, a| a[0].account_rows().len() == 4);
+        // The server can't replace logins.txt (a folder is where its
+        // temporary file would go).
+        let blocked = live.dir.join("logins.txt.tmp");
+        std::fs::create_dir(&blocked).unwrap();
+        confirm(&mut a, "bravo", 0);
+        live.until(&mut [&mut a], |_, a| a[0].acc.pending.is_none());
+        // Refused: no password is shown, and all the server said is, its
+        // last words too.
+        assert_eq!(a.label(), "confirmaccount");
+        assert!(a.acc.shown.is_none());
+        let error = a.acc.error.clone().unwrap();
+        assert!(error.starts_with("BRAVO HAS A NEW PASSWORD."), "{error}");
+        assert!(error.ends_with("TRY AGAIN."), "{error}");
+        if drew(&mut a) {
+            assert!(drawn(&a, "BRAVO HAS A NEW PASSWORD."), "{:?}", a.drawn());
+            assert!(drawn(&a, "TRY AGAIN."), "{:?}", a.drawn());
+        }
+        // A again once it can be saved: a new password, shown.
+        std::fs::remove_dir(&blocked).unwrap();
+        a.input(Input::A);
+        live.until(&mut [&mut a], |_, a| a[0].popup == Some(Popup::NewPassword));
+        let given = a.acc.shown.as_ref().unwrap().password.as_str().to_string();
+        assert!(!log_has(&said, &given));
+        let (b, _, dir_b) = new_pc(&mut live, "unsaved-bravo", "bravo", &given);
+        assert_eq!(b.label(), "live");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir_b);
     }

@@ -290,7 +290,9 @@ pub enum ToServer {
     Prove([u8; 64]),
     /// A launcher: PROVE for a PC the account doesn't know yet, with the
     /// account's password sealed to this connection's SEAL_KEY, and the
-    /// PC's name (for the owner's list of the account's PCs).
+    /// PC's name (for the owner's list of the account's PCs). Its signature
+    /// is over `password_proof`, not `proof`, so it holds only for this
+    /// LOGIN's gamertag, this name and this box.
     ProvePassword {
         signature: [u8; 64],
         computer: String,
@@ -1022,6 +1024,25 @@ pub fn is_friend_notice(text: &str) -> bool {
 /// challenge and the key.
 pub fn proof(nonce: &[u8; 32], key: &[u8; 32]) -> Vec<u8> {
     [&b"h2live-login"[..], nonce, key].concat()
+}
+
+/// What a launcher signs to sign in with a password (PROVE_PASSWORD): a
+/// fixed text, the server's challenge, the PC's key, then the gamertag its
+/// LOGIN named (as sent), the PC's name and the sealed password, as
+/// PROVE_PASSWORD writes them. Someone in between can't send their own
+/// account's password with this PC's signature, to make it their PC.
+pub fn password_proof(
+    nonce: &[u8; 32],
+    key: &[u8; 32],
+    gamertag: &str,
+    computer: &str,
+    password: &Sealed,
+) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.str(gamertag);
+    w.str(computer);
+    password.write(&mut w);
+    [&b"h2live-password-4"[..], nonce, key, &w.0].concat()
 }
 
 /// What a launcher signs to make an account request: a fixed text, the
@@ -3395,6 +3416,37 @@ mod tests {
             assert_eq!(boxed, shown.contains("Sealed("), "{shown}");
         }
         assert_eq!(format!("{:?}", sealed(81)), "Sealed(81 bytes)");
+    }
+
+    #[test]
+    fn password_sign_ins_sign_their_gamertag_name_and_box() {
+        let (nonce, key) = ([3; 32], [4; 32]);
+        let boxed = sealed(81);
+        let proof = password_proof(&nonce, &key, "KAT", "PC", &boxed);
+        assert!(proof.starts_with(b"h2live-password-4"));
+        assert_eq!(&proof[17..49], &nonce);
+        assert_eq!(&proof[49..81], &key);
+        // Then the gamertag, the name and the box, as PROVE_PASSWORD writes
+        // them.
+        let mut w = Writer::default();
+        w.str("KAT");
+        w.str("PC");
+        boxed.write(&mut w);
+        assert_eq!(&proof[81..], &w.0[..]);
+        // Not PROVE's, and every part counts.
+        assert!(!proof.starts_with(b"h2live-login"));
+        let mut other = boxed.clone();
+        other.boxed[0] ^= 1;
+        for changed in [
+            password_proof(&[5; 32], &key, "KAT", "PC", &boxed),
+            password_proof(&nonce, &[5; 32], "KAT", "PC", &boxed),
+            password_proof(&nonce, &key, "JUN", "PC", &boxed),
+            password_proof(&nonce, &key, "KAT", "PC 2", &boxed),
+            password_proof(&nonce, &key, "KA", "TPC", &boxed),
+            password_proof(&nonce, &key, "KAT", "PC", &other),
+        ] {
+            assert_ne!(changed, proof);
+        }
     }
 
     #[test]

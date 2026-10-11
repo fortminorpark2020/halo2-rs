@@ -426,6 +426,12 @@ pub struct App {
     password: Secret,
     /// The sign-in under way sent a password.
     with_password: bool,
+    /// The sign-in under way asked for a gamertag or server other than the
+    /// saved ones (typed on the form): if the server signs this PC in as
+    /// someone else, the player is told how to be the one asked for. (Not
+    /// for ONLINE, which asks for the saved gamertag: the server's owner
+    /// may have renamed it.)
+    asked_other: bool,
     /// The servers' identity keys, as last seen (`crate::pins`).
     pins: Pins,
     /// While the KEY CHANGED popup is up: the server, the key pinned for
@@ -550,6 +556,7 @@ impl App {
             form_error: None,
             password: Secret::default(),
             with_password: false,
+            asked_other: false,
             pins,
             key_changed: None,
             key_changed_at: Instant::now(),
@@ -687,6 +694,9 @@ impl App {
         }
         self.form_error = None;
         self.form_after_match = false;
+        let saved = &self.saved;
+        self.asked_other = !gamertag.eq_ignore_ascii_case(&saved[GAMERTAG_FIELD])
+            || !server.eq_ignore_ascii_case(&saved[SERVER_FIELD]);
         self.settings.server = server;
         self.settings.gamertag = gamertag;
         self.with_password = !self.password.is_empty();
@@ -831,6 +841,7 @@ impl App {
         self.sel = 0;
         self.password.clear();
         let with_password = std::mem::take(&mut self.with_password);
+        let asked_other = std::mem::take(&mut self.asked_other);
         let typed = self.settings.gamertag.clone();
         let server = self.settings.server.clone();
         self.keep_gamertag();
@@ -849,7 +860,7 @@ impl App {
         }
         self.log(&format!("lobby: signed in to {server}"));
         let tag = self.settings.gamertag.clone();
-        if !with_password && !tag.eq_ignore_ascii_case(&typed) {
+        if asked_other && !with_password && !tag.eq_ignore_ascii_case(&typed) {
             self.toast(format!(
                 "This PC is signed in as {tag}. To use {typed} here, type {typed}'s password."
             ));
@@ -2914,14 +2925,8 @@ impl App {
             p.area(380.0, y + 18.0, 520.0, 46.0, Hit::Field(f));
         }
         if let Some(e) = &self.form_error {
-            // On two lines if need be (the second cut to fit if there's
-            // more), so what to do next isn't lost.
-            let mut lines = p.wrap(20.0, 580.0, e);
-            if lines.len() > 2 {
-                let rest = lines.split_off(1).join(" ");
-                lines.push(p.fit(20.0, 580.0, &rest));
-            }
-            for (k, line) in lines.iter().enumerate() {
+            // On two lines if need be, so what to do next isn't lost.
+            for (k, line) in p.wrap_at_most(20.0, 580.0, e, 2).iter().enumerate() {
                 let y = 500.0 + k as f32 * 24.0;
                 p.text(640.0, y, 20.0, ERROR, Align::Center, line);
             }
@@ -4274,6 +4279,17 @@ impl Pen<'_> {
         }
         if !line.is_empty() {
             lines.push(line);
+        }
+        lines
+    }
+
+    /// `s` on at most `most` lines no wider than `width`, the last cut to
+    /// fit if there's more (so what to do next isn't lost to one line).
+    fn wrap_at_most(&mut self, size: f32, width: f32, s: &str, most: usize) -> Vec<String> {
+        let mut lines = self.wrap(size, width, s);
+        if lines.len() > most.max(1) {
+            let rest = lines.split_off(most.max(1) - 1).join(" ");
+            lines.push(self.fit(size, width, &rest));
         }
         lines
     }

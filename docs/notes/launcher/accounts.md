@@ -177,6 +177,10 @@ as typed, in lower case, and the key in 64 hex digits).
   with both short codes, and sends nothing until the player says to trust
   the new one. A (taken once the popup has been up a second) then pins the
   new key and signs in again; B goes back to the main menu.
+- A server sends one SEAL_KEY and one CHALLENGE on a connection. Another of
+  either later on (someone in between offering their own key to seal
+  passwords to, or a challenge to sign) ends the connection as bad data,
+  and nothing is signed or sealed for it.
 - A short code is the key's first 8 bytes as `AB12-CD34-EF56-7890`, easy to
   read out. `h2live user key` prints both.
 
@@ -298,8 +302,11 @@ logins.txt and secret.txt can't be rebuilt from stat cards.
 - **The key is unknown and sign-up is open:** a new account, as before
   (or one a stat card brings back), with that key as its first PC.
 
-**When it signs in with a password (PROVE_PASSWORD, the same proof of its
-key plus the sealed password)**, checked in this order:
+**When it signs in with a password (PROVE_PASSWORD: the sealed password,
+and a signature by its key over the challenge, its key, the gamertag its
+LOGIN named, its PC name and the sealed password, so no one in between can
+send their own account's password with this PC's proof and make the PC
+theirs; else "BAD SIGNATURE")**, checked in this order:
 - **More than 30 password checks in the last minute on the whole server:**
   "THE SERVER IS BUSY".
 - **10 wrong tries from one address in 10 minutes:** "TOO MANY WRONG
@@ -353,7 +360,7 @@ never sent the new kinds.
 
 | From | Kind | Name | What it carries |
 |---|---|---|---|
-| PC | 6 | PROVE_PASSWORD | the usual proof (signature), the PC's name, the sealed password; answers CHALLENGE instead of PROVE |
+| PC | 6 | PROVE_PASSWORD | a signature (over "h2live-password-4", the challenge, the PC's key, the LOGIN's gamertag, the PC's name and the sealed password), the PC's name, the sealed password; answers CHALLENGE instead of PROVE |
 | PC | 60 | ACCOUNT | a number, an operation, a signature. Operations: list (0), create {gamertag, sealed password} (1), new password {account, sealed password} (2), sign out of all PCs {account} (3), remove {account} (4), change my password {old and new, sealed} (5) |
 | server | 119 | SEAL_KEY | the connection's X25519 key, the server's identity key, the signature; just before CHALLENGE |
 | server | 120 | ACCOUNTS | admin or not, has a password or not, which request it answers (0 for none), ok and a message, how many accounts there are, and account rows (gamertag, admin, password, online, PCs, best level): all of them for admins (at most 300), only their own for others |
@@ -454,7 +461,10 @@ server has none. Open set by hand while there are admins logs a warning.
 
 - 5 PCs per account.
 - 5 wrong passwords per account, and 10 per address, within 10 minutes.
-- 30 password checks or hashes a minute per server.
+- 30 password checks or hashes a minute per server. A player's own
+  password change needs two (the old one checked, the new one made), so
+  it's refused as busy unless both are free.
+- 3 password changes per account in 10 minutes.
 - Passwords of 8 to 64 characters (not counting spaces and dashes).
 - Gamertags the owner makes: 1 to 15 characters.
 - PC names: 32 characters.

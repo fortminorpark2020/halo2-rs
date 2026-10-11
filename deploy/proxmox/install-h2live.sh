@@ -15,7 +15,8 @@
 # - stops the service, then keeps the program it replaces as
 #   /opt/h2live/h2live.prev and a copy of the data folder as
 #   /var/lib/h2live.backup-<date>-<time> (logins.txt and secret.txt there
-#   can't be rebuilt from anything else);
+#   can't be rebuilt from anything else); if a step fails after the stop (a
+#   full disk, say), it starts the service again before it gives up;
 # - writes /opt/h2live/h2live.txt (the data folder and sign-up closed),
 #   which the server and its command line both read, and sets sign-up
 #   closed in the unit too, so losing one of them doesn't open it;
@@ -39,7 +40,11 @@ install -d -o h2live -g h2live -m 750 /var/lib/h2live
 install -d -m 755 /opt/h2live
 
 # Stopped first, so the backup is of files at rest (it starts again below).
+# Should a step before then fail, the server is started again on the way
+# out rather than left stopped (Restart=always doesn't restart a unit
+# stopped by hand).
 if systemctl is-active --quiet h2live; then
+    trap 'echo "the update failed: starting h2live again" >&2; systemctl start h2live || true' EXIT
     systemctl stop h2live
 fi
 # The program it replaces, unless it's the same one (so running this again
@@ -52,7 +57,11 @@ fi
 # them by hand (rm -r /var/lib/h2live.backup-...) once they're not needed.
 if [ -n "$(ls -A /var/lib/h2live)" ]; then
     backup=/var/lib/h2live.backup-$(date +%Y%m%d-%H%M%S)
-    cp -a /var/lib/h2live "$backup"
+    # (A copy cut short, by a full disk say, isn't left to take up room.)
+    cp -a /var/lib/h2live "$backup" || {
+        rm -rf "$backup"
+        false
+    }
     echo "copied the data folder to $backup"
 fi
 install -m 755 "$here/h2live" /opt/h2live/h2live.new
@@ -120,6 +129,7 @@ mv /usr/local/bin/h2live.new /usr/local/bin/h2live
 
 systemctl daemon-reload
 systemctl enable h2live >/dev/null
+trap - EXIT
 systemctl restart h2live
 sleep 6
 systemctl --no-pager --lines=0 status h2live | head -3

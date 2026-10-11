@@ -330,6 +330,18 @@ impl Server {
         adopted
     }
 
+    /// Save accounts.txt. False (and logged) if it couldn't be.
+    pub(super) fn save_accounts(&self) -> bool {
+        let path = self.dir.join("accounts.txt");
+        match store::save(&path, self.accounts.values()) {
+            Ok(()) => true,
+            Err(e) => {
+                log(format_args!("live: can't save {}: {e}", path.display()));
+                false
+            }
+        }
+    }
+
     /// Save logins.txt. False (and logged) if it couldn't be.
     fn save_logins(&self) -> bool {
         let path = self.dir.join("logins.txt");
@@ -662,9 +674,12 @@ impl Server {
             return Err(TOO_MANY_CHANGES.into());
         }
         password::check(new.as_str()).map_err(String::from)?;
-        if !self.take_hash(now) {
+        // Room for both its hashes (the old password checked, the new one
+        // made), so none is spent on a change that can't be made.
+        if self.hashes_recent(now) + 2 > HASHES_PER_MINUTE {
             return Err(live::SERVER_BUSY.into());
         }
+        self.hashes.push_back(now);
         let gamertag = self.gamertag(me);
         if !password::verify(&phc, old.as_str()) {
             self.wrong_password(Some(me), ip, now);
@@ -675,13 +690,16 @@ impl Server {
             return Err(WRONG_OLD_PASSWORD.into());
         }
         self.wrong_by_account.remove(&me);
-        self.changes_by_account.entry(me).or_default().push(now);
         let phc = self.launcher_hash(new.as_str(), now)?;
+        // Both hashes are spent: it counts, saved or not.
+        self.changes_by_account.entry(me).or_default().push(now);
         self.logins.set_password(me, phc);
-        if !self.save_logins() {
-            return Err(CANT_SAVE.into());
-        }
         log(format_args!("live: {gamertag} changed their password"));
+        if !self.save_logins() {
+            // It shuts the old password out, so it holds (as an admin's
+            // new password does), and says so: the new one works now.
+            return Err(format!("{PASSWORD_CHANGED} {NOT_SAVED}"));
+        }
         Ok(PASSWORD_CHANGED.into())
     }
 
@@ -699,7 +717,9 @@ impl Server {
     /// A change logins.txt can't be saved with is undone and refused
     /// (CANT_SAVE) if it would let anyone in or keep an account; one that
     /// shuts someone out holds until the server next starts, and is
-    /// refused with what it did and NOT_SAVED, so it's asked for again.
+    /// refused with what it did and NOT_SAVED, so it's asked for again. A
+    /// new account or name accounts.txt can't be saved with is undone and
+    /// refused (CANT_SAVE).
     pub fn command(&mut self, by: Actor, cmd: Command, now: f64) -> Result<String, String> {
         let who = self.who(by);
         let mut saved = true;
@@ -727,7 +747,19 @@ impl Server {
                     self.logins.remove(id);
                     return Err(CANT_SAVE.into());
                 }
-                self.update(account);
+                // Then accounts.txt: unsaved, the account would be gone at
+                // the next start, so it's undone (its sign-ins too).
+                let mut account = account;
+                account.seq += 1;
+                self.accounts.insert(id, account);
+                if !self.save_accounts() {
+                    self.accounts.remove(&id);
+                    self.logins.remove(id);
+                    // (Unsaved, its sign-ins are dropped at the next start
+                    // all the same.)
+                    self.save_logins();
+                    return Err(CANT_SAVE.into());
+                }
                 let what = if admin { "admin account" } else { "account" };
                 log(format_args!("live: {who}: made the {what} {name}"));
                 format!("CREATED {name}")
@@ -857,7 +889,17 @@ impl Server {
                 }
                 let mut a = self.accounts[&account].clone();
                 let old = std::mem::replace(&mut a.gamertag, name.clone());
-                if self.update(a) {
+                if self.accounts.get(&account) != Some(&a) {
+                    // Unsaved, the old name would come back at the next
+                    // start: undone, and refused.
+                    a.seq += 1;
+                    let was = self.accounts.insert(account, a);
+                    if !self.save_accounts() {
+                        if let Some(was) = was {
+                            self.accounts.insert(account, was);
+                        }
+                        return Err(CANT_SAVE.into());
+                    }
                     self.welcome(account);
                     if let Some(k) = self.pc_of(account) {
                         self.party_changed(self.pcs[k].party);

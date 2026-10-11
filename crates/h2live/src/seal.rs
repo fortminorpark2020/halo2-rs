@@ -345,6 +345,28 @@ mod tests {
     }
 
     #[test]
+    fn the_identity_key_and_what_it_signs_are_pinned() {
+        // Launchers keep a server's identity key (live-servers.txt, and
+        // H2LAUNCH_SERVER_KEY in the friends' zip): changing how it's made
+        // (the label, say) changes every server's key, and every launcher
+        // then says SERVER KEY CHANGED. (Checked against Python's
+        // cryptography package when it was pinned.)
+        let id = identity(&SigningKey::from_bytes(&[7; 32]));
+        assert_eq!(
+            hex(&id.to_bytes()),
+            "9993a11cb760cf4e70a290bd32d3196d9cae20b17e476adc7f5e4bda898411c7"
+        );
+        assert_eq!(
+            hex(&id.verifying_key().to_bytes()),
+            "fdffcf9be426d5fd074df7ea54f1a353defc3d8ee55093bf7ae391af81cc85ed"
+        );
+        // SEAL_KEY's signature is over its label, the challenge and the key.
+        let key = public(&S);
+        let expected = [&b"h2live-seal-key-4"[..], &NONCE, &key].concat();
+        assert_eq!(key_proof(&NONCE, &key), expected);
+    }
+
+    #[test]
     fn short_codes_are_read_out_in_fours() {
         let mut key = [0; 32];
         key[..8].copy_from_slice(&[0xab, 0x12, 0xcd, 0x34, 0xef, 0x56, 0x78, 0x90]);
