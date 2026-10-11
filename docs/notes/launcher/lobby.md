@@ -31,15 +31,23 @@ the launcher doesn't do.
   match exactly as `--live` does, but tells the lobby what the engine does
   on its standard output (`H2EVENT running`, `maploaded`, `ended
   <players>`, `closing`; from the in-game GAME MENU also `controls
-  <key=value ...>`, which the lobby saves (only what changed from the
-  controls the engine runs with; every one after `controls defaults`,
-  Use Default Settings), `left game` or `left end`, after which the
-  engine closes without `ended` (unless `--end-game-message` ended the
-  game first), and `menu off` when the menu turned itself off, after
-  which the in-game screen stops saying Start opens it)
-  instead of talking to the server. The lobby turns those into HOSTING,
-  JOINED, LAUNCHER_RESULT and LEFT_MATCH with the same rules `--live` uses
-  (`live::Told`), and shows the carnage report when MATCH_OVER comes.
+  <key=value ...>`, once the player leaves CONTROLLER SETTINGS or the
+  menu, a second after the last change, or before a quit, which the
+  lobby saves (only what changed from the controls the engine runs
+  with; every one after `controls defaults`, Use Default Settings);
+  `left game`, after which the engine closes without `ended`; `left
+  end` (End Game, the host's), after which `ended` comes with the result
+  the host's engine gives as it quits; and `menu off` when the menu
+  turned itself off, after which the in-game screen stops saying Start
+  opens it) instead of talking to the server. The lobby turns those into
+  HOSTING, JOINED, LAUNCHER_RESULT and LEFT_MATCH with the same rules
+  `--live` uses (`live::Told`), and shows the carnage report when
+  MATCH_OVER comes. An `ended` after `left end` goes as LAUNCHER_RESULT
+  with `finished` false (the game was cut short), then LEFT_MATCH at
+  once: h2live then takes the host as leaving once the game was over,
+  not as a host who left, so the match ends with no reason, counts for
+  no one (custom games are unranked), and the host gets the carnage
+  report like everyone else.
 - A fresh engine process per match: halo2.dll is loaded once per process,
   as MCC does, and a crash in a match doesn't take the lobby with it.
 - The lobby writes `quit` on the child's standard input to close the
@@ -225,7 +233,11 @@ the launcher doesn't do.
    friend request. A (or B) goes back to the party (the leader of a custom
    game goes back to the custom game screen, to pick the next).
 
-8. Custom game: the row after the playlists, for the party leader. Left
+8. Custom game: the row after the playlists, for the party leader (with
+   the eight launcher playlists of `playlists.txt`, eight downs from the
+   first playlist, where the lobby starts after signing in: a headless
+   run of this build, 2026-10-11; a script counts from the row it is on
+   and the playlists its server sends). Left
    and right pick the game type (one of each kind the launcher playlists
    play, `names::CUSTOM_GAMES`) and the map (those on this PC), A starts
    it. The server (LAUNCHER_CUSTOM, `LIVE_PROTOCOL` 2) checks the game is
@@ -315,10 +327,14 @@ uses it; `H2LOBBY_FAKE=1` makes it do so on Windows too.
 (`1.0 start;1.5 a;2.0 up;2.5 a` opens the menu and leaves the game; the
 keys are `start back a b y up down left right`). It runs the real menu
 (`gamemenu::GameMenu`) for the game `--game-kind` and the session say,
-and says what the real engine's copy would: `H2EVENT controls ...` when
-a setting changes (the lobby saves it; `controls defaults ...` for Use
-Default Settings, when it saves every one), or `H2EVENT left game`
-(`left end` for End Game) and then closes without a result.
+and says what the real engine's copy would: `H2EVENT controls ...` for
+the settings changed, once the player leaves CONTROLLER SETTINGS or the
+menu, a second after the last change, or before the stand-in closes
+(the lobby saves them; `controls defaults ...` for Use Default
+Settings, when it saves every one); `H2EVENT left game`, then closing
+without a result; or `left end` for End Game, then `ended` with its
+made-up results (the host's engine gives its result as it quits), then
+closing.
 
 `--fake-engine`'s results are the same on every PC and plausible: player
 `i` of `n` scores `n - i`, the last one killed themselves once, each one's
@@ -402,7 +418,11 @@ game`, then the engine closed, the notice was "You left the game." and
 the screen went to `live`; ALPHA's game ran on, ended and counted, and
 ALPHA saw the carnage report. When BRAVO hosted, leaving ended the game
 for both: ALPHA got "THE HOST LEFT. THE GAME DIDN'T COUNT." and BRAVO's
-counted as a loss (the server's existing rules).
+counted as a loss (the server's existing rules). (That was Leave Game.
+End Game, since 2026-10-11, sends the host's result first, so a custom
+game ended that way shows both PCs the carnage report with no reason;
+`a_launcher_host_ending_a_custom_game_leaves_at_its_end` in
+`crates/h2live/src/server/tests.rs` covers the server's side.)
 
 The party screen the same way (2026-10-10), with three lobbies: ALPHA
 invited BRAVO and CHARLIE, made the party invite only, removed BRAVO (who

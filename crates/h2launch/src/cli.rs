@@ -96,16 +96,17 @@ Usage: h2launch [flags]
                           offline run get End Game.
   --no-game-menu          No in-game GAME MENU: Start and Esc reach the
                           engine as they did before it.
-  --reload-message <n>    Post engine message n when the GAME MENU closes
-                          having changed the button layout, look
+  --reload-message <n|off>  The engine message posted when the GAME MENU
+                          closes having changed the button layout, look
                           sensitivity or automatic look centering, or
-                          turned vibration on, which the engine may read
-                          only when it loads (an experiment: try an id
-                          offline first; it works in any run).
+                          turned vibration on, so the engine reads its
+                          profile and gamepad mapping again (default 5,
+                          which does that; 0 or off: none, and those
+                          settings wait for the next game).
   --end-game-message <n>  End Game posts engine message n, then quits only
-                          if the game hasn't ended 10 s later (an
-                          experiment: try an id offline first, one id per
-                          run; it works in any run).
+                          if the game hasn't ended 10 s later (research
+                          only: no id has ended the game for everyone;
+                          try an id offline first, one id per run).
   --live-wait <seconds>   How long to search before giving up (default 600).
   --relay-wait <seconds>  How long to wait for the relay to take us in before
                           the engine starts (default 15).
@@ -150,6 +151,13 @@ it is in %LOCALAPPDATA%\\h2launch\\<name>\\ instead.";
 /// The playlist `--live` searches unless told: Head to Head, the launcher
 /// playlist for two (crates/h2live/src/playlists.txt).
 pub const DEFAULT_PLAYLIST: u8 = 11;
+
+/// The engine message the GAME MENU posts after a change to a setting the
+/// engine reads from its profile or gamepad mapping (`--reload-message`):
+/// PC check 8 found 5 makes it ask for both again (host slots 34 and 116),
+/// so Bumper Jumper and a new look sensitivity work mid-match, with no
+/// crash.
+pub const DEFAULT_RELOAD_MESSAGE: u32 = 5;
 
 /// Which controller is player 1's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,12 +226,15 @@ pub struct Args {
     /// `--no-game-menu` clears it: Start and Esc then reach the engine.
     pub game_menu: bool,
     /// `--reload-message N`: the engine message posted when the GAME
-    /// MENU closes having changed a setting the engine reads at load (an
-    /// experiment, tried offline first; not refused in any run).
+    /// MENU closes having changed a setting the engine reads from its
+    /// profile or gamepad mapping, so it reads them again
+    /// (`DEFAULT_RELOAD_MESSAGE` unless given; None with 0 or `off`).
     pub reload_message: Option<u32>,
     /// `--end-game-message N`: the engine message End Game posts before
-    /// quitting (an experiment, tried offline first, one id per run; not
-    /// refused in any run, so check 15 can repeat a working id online).
+    /// quitting, for research: check 15 found 2 ends only the host's game,
+    /// 6 stops rendering, 17 crashes and the others it tried do nothing,
+    /// so End Game quits the host's engine and sends its result instead.
+    /// Not refused in any run.
     pub end_game_message: Option<u32>,
     pub relay_wait: f64,
     pub recv_port: RecvPort,
@@ -277,7 +288,7 @@ impl Default for Args {
             game_kind: GameKind::Offline,
             game_kind_set: false,
             game_menu: true,
-            reload_message: None,
+            reload_message: Some(DEFAULT_RELOAD_MESSAGE),
             end_game_message: None,
             relay_wait: 15.0,
             recv_port: RecvPort::Auto,
@@ -379,7 +390,13 @@ where
                     format!("--game-kind: {v:?} should be offline, ranked, social or custom")
                 })?);
             }
-            "--reload-message" => a.reload_message = Some(message("--reload-message", &value()?)?),
+            "--reload-message" => {
+                let v = value()?;
+                a.reload_message = match v.trim() {
+                    s if s.eq_ignore_ascii_case("off") => None,
+                    _ => Some(message("--reload-message", &v)?).filter(|&n| n != 0),
+                };
+            }
             "--end-game-message" => {
                 a.end_game_message = Some(message("--end-game-message", &value()?)?);
             }
@@ -651,7 +668,8 @@ mod tests {
         assert_eq!(a.game_kind, GameKind::Offline);
         assert!(!a.game_kind_set);
         assert!(a.game_menu);
-        assert_eq!((a.reload_message, a.end_game_message), (None, None));
+        assert_eq!(a.reload_message, Some(DEFAULT_RELOAD_MESSAGE));
+        assert_eq!(a.end_game_message, None);
     }
 
     #[test]
@@ -683,13 +701,21 @@ mod tests {
         let a = parse([
             "--no-game-menu",
             "--reload-message",
-            "5",
+            "7",
             "--end-game-message=0x10",
         ])
         .unwrap();
         assert!(!a.game_menu);
-        assert_eq!(a.reload_message, Some(5));
+        assert_eq!(a.reload_message, Some(7));
         assert_eq!(a.end_game_message, Some(16));
+        // The reload message is 5 unless given; 0 or off turn it off.
+        assert_eq!(parse(Vec::<String>::new()).unwrap().reload_message, Some(5));
+        for off in ["0", "off", "OFF", "0x0"] {
+            let a = parse(["--reload-message", off]).unwrap();
+            assert_eq!(a.reload_message, None, "{off}");
+            let a = parse([format!("--reload-message={off}")]).unwrap();
+            assert_eq!(a.reload_message, None, "{off}");
+        }
         for bad in [
             vec!["--game-kind"],
             vec!["--game-kind", "campaign"],

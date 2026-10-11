@@ -1259,9 +1259,13 @@ impl App {
     }
 
     /// The engine's copy exited: on to the carnage report if its game
-    /// ended, otherwise back where a player lands after a game, with why
-    /// (the server's reason, or that they left or ended it). Either way
-    /// the lobby's window comes to the front.
+    /// ended (End Game's too: its result came as the host's engine quit),
+    /// otherwise back where a player lands after a game, with why (the
+    /// server's reason, or that they left or ended it: a leave from the
+    /// GAME MENU wins over a verdict with no reason, which the server
+    /// gives when the game ended without them, as when the host's engine
+    /// ended a Team Slayer game whose team emptied, PC check 13). Either
+    /// way the lobby's window comes to the front.
     fn on_engine_exit(&mut self) {
         // The lobby's own "leave the game?" has nothing left to ask once
         // the engine is gone (the player left from the GAME MENU, or the
@@ -1294,6 +1298,7 @@ impl App {
             Some(match (g.left, why) {
                 (Some(Leave::End), _) => "You ended the game.".to_string(),
                 (_, Some(w)) if !w.is_empty() => w,
+                (Some(Leave::Game), _) => "You left the game.".into(),
                 (_, Some(_)) => "The match was called off.".into(),
                 (_, None) => "You left the game.".into(),
             })
@@ -6004,6 +6009,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// PC check 13: the host's engine ended a Team Slayer game when the
+    /// guest's team emptied, and the server's verdict (no reason, not
+    /// counted) reached the guest's lobby before its engine closed. The
+    /// guest left from the GAME MENU, and is told so.
+    #[test]
+    fn a_leave_wins_over_a_verdict_with_no_reason() {
+        let dir = scratch("menu-left-verdict");
+        let (mut a, mut server) = live_app(&dir);
+        in_game(&mut a, 13, false, false);
+        a.on_engine_event(&Engine::Left(Leave::Game), a.now);
+        a.game.as_mut().unwrap().over = Some(MatchOver {
+            id: 0x78,
+            counted: false,
+            reason: String::new(),
+            card: String::new(),
+            levels: Vec::new(),
+            players: Vec::new(),
+        });
+        a.on_engine_exit();
+        assert_eq!(a.label(), "live");
+        assert!(a.take_focus());
+        assert_eq!(last_toast(&a).as_deref(), Some("You left the game."));
+        assert!(a.game.is_none());
+        let _ = sent(&mut server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End Game with no result from the engine (one that closed without
+    /// giving it): the host lands on Custom with "You ended the game.".
     #[test]
     fn ending_a_custom_game_from_the_game_menu_lands_on_the_custom_screen() {
         let dir = scratch("menu-end");
@@ -6042,6 +6076,67 @@ mod tests {
         a.on_engine_exit();
         assert_eq!(a.label(), "live");
         assert_eq!(last_toast(&a).as_deref(), Some("You ended the game."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End Game as PC check 14 saw it: `left end`, then the host's result
+    /// as its engine quits, holding every player. It goes to the server as
+    /// a game cut short (finished false), then LEFT_MATCH, so h2live takes
+    /// the host as leaving at the end rather than HOST_LEFT; the engine's
+    /// closing says nothing more, and the host lands on the carnage
+    /// report like the guests, with no "You ended the game.".
+    #[test]
+    fn ending_a_custom_game_with_its_result_shows_the_carnage_report() {
+        let dir = scratch("menu-end-result");
+        let (mut a, mut server) = live_app(&dir);
+        in_game(&mut a, CUSTOM_GAME, false, true);
+        a.on_engine_event(&Engine::Left(Leave::End), a.now);
+        assert!(sent(&mut server).is_empty());
+        let result = |relay_id: u64, place: u8| LauncherPlayerResult {
+            relay_id,
+            team: place,
+            place,
+            score: 5 - i32::from(place),
+            kills: 5 - u16::from(place),
+            assists: 0,
+            deaths: 1,
+            betrayals: 0,
+            suicides: 0,
+            left: false,
+        };
+        let both = vec![result(0x11, 0), result(0x22, 1)];
+        a.on_engine_event(&Engine::Ended(both.clone()), a.now);
+        let out = sent(&mut server);
+        let [ToServer::LauncherResult(r), ToServer::LeftMatch { id, host_lost }] = out.as_slice()
+        else {
+            panic!("{out:?}");
+        };
+        assert_eq!((r.id, r.finished), (0x78, false));
+        assert_eq!(r.players, both);
+        assert_eq!((*id, *host_lost), (0x78, false));
+        a.on_engine_event(&Engine::Closing, a.now);
+        a.on_engine_exit();
+        assert!(sent(&mut server).is_empty());
+        assert_eq!(
+            (a.label().as_str(), a.take_focus()),
+            ("carnage-waiting", true)
+        );
+        assert_eq!(a.csel, 0);
+        assert_ne!(last_toast(&a).as_deref(), Some("You ended the game."));
+        // The server's verdict: no reason, not counted (an unranked
+        // custom game cut short).
+        a.on_match_over(MatchOver {
+            id: 0x78,
+            counted: false,
+            reason: String::new(),
+            card: String::new(),
+            levels: Vec::new(),
+            players: Vec::new(),
+        });
+        assert_eq!(a.label(), "carnage");
+        // A goes on to the custom game screen, as after any custom game.
+        a.input(Input::A);
+        assert_eq!(a.label(), "custom");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

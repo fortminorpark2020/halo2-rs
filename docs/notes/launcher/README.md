@@ -181,16 +181,18 @@ then (`--no-watchdog` turns both off, for a debugger session).
                         get End Game.
 --no-game-menu          No in-game GAME MENU: Start and Esc reach the
                         engine as they did before it.
---reload-message <n>    Post engine message n when the GAME MENU closes
-                        having changed the button layout, look sensitivity
-                        or automatic look centering, or turned vibration
-                        on, which the engine may read only when it loads
-                        (an experiment: try an id offline first; it works
-                        in any run).
+--reload-message <n|off>  The engine message posted when the GAME MENU
+                        closes having changed the button layout, look
+                        sensitivity or automatic look centering, or turned
+                        vibration on, so the engine reads its profile and
+                        gamepad mapping again (default 5, which does that,
+                        menu.md 9.5 check 8; 0 or off: none, and those
+                        settings wait for the next game).
 --end-game-message <n>  End Game posts engine message n, then quits only
-                        if the game hasn't ended 10 s later (an
-                        experiment: try an id offline first, one id per
-                        run; it works in any run).
+                        if the game hasn't ended 10 s later (research
+                        only: check 15 found no id that ends the game for
+                        everyone; try an id offline first, one id per
+                        run).
 --diag                  More detail in the log: dumps of the options, the
                         variant copy's effect, new calling threads, every
                         event-manager slot's first call, the input sent each

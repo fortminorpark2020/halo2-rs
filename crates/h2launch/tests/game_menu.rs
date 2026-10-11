@@ -174,21 +174,24 @@ fn a_social_guest_leaves_the_game() {
 
 #[test]
 fn a_custom_games_host_ends_it() {
+    // End Game's result comes as the host's engine quits, after `left
+    // end` (PC check 14): the lobby sends it as a game cut short.
     let events = play(
         "custom-host",
         "custom",
         0,
         &["start", "down", "down", "a", "up", "a"],
     );
+    assert_eq!(events.len(), 5, "{events:?}");
     assert_eq!(
-        events,
-        [
-            Engine::Running,
-            Engine::MapLoaded,
-            Engine::Left(Leave::End),
-            Engine::Closing
-        ]
+        events[..3],
+        [Engine::Running, Engine::MapLoaded, Engine::Left(Leave::End)]
     );
+    let Engine::Ended(players) = &events[3] else {
+        panic!("{events:?}");
+    };
+    assert_eq!(players.len(), 2, "every player's result: {players:?}");
+    assert_eq!(events[4], Engine::Closing);
 }
 
 #[test]
@@ -214,6 +217,72 @@ fn a_new_button_layout_is_said_and_the_game_ends_normally() {
         .any(|(k, v)| k == "button_layout" && v == "bumper_jumper"));
     assert!(is_ended(&events[3]), "{events:?}");
     assert_eq!(events[4], Engine::Closing);
+}
+
+/// The controls go to the lobby once a visit to CONTROLLER SETTINGS, not
+/// once a step (PC check 6 saved lobby.txt 24 times for 24 steps): here
+/// five steps of Mouse Sensitivity, said when B leaves the page.
+#[test]
+fn many_steps_are_said_once() {
+    // Settings, down six rows to Mouse Sensitivity, right five times,
+    // then B and B out of the menu.
+    let mut keys = vec!["start", "down", "a"];
+    keys.extend(["down"; 6]);
+    keys.extend(["right"; 5]);
+    keys.extend(["b", "b"]);
+    let events = play("steps", "social", 1, &keys);
+    let want = Controls {
+        mouse_sensitivity: 2.1,
+        ..Controls::default()
+    };
+    assert_eq!(events.len(), 5, "{events:?}");
+    assert_eq!(events[..2], [Engine::Running, Engine::MapLoaded]);
+    assert_eq!(events[2], Engine::controls(want, false));
+    assert!(is_ended(&events[3]), "{events:?}");
+    assert_eq!(events[4], Engine::Closing);
+}
+
+/// A change left on CONTROLLER SETTINGS is said a second after it, with
+/// the menu still open, before the game ends.
+#[test]
+fn a_change_left_open_is_said_a_second_later() {
+    // Settings, up twice (the rows wrap) to Mouse Inversion, and A turns
+    // it on at 1.05 s; the game ends at 3 s.
+    let keys = ["start", "down", "a", "up", "up", "a"];
+    let events = play("open", "social", 1, &keys);
+    let want = Controls {
+        mouse_inverted: true,
+        ..Controls::default()
+    };
+    assert_eq!(events.len(), 5, "{events:?}");
+    assert_eq!(events[2], Engine::controls(want, false));
+    assert!(is_ended(&events[3]), "{events:?}");
+}
+
+/// A change goes before the player leaves the game.
+#[test]
+fn a_change_goes_before_leaving() {
+    // Mouse Inversion on (as above), B back to the GAME MENU's Settings,
+    // up to Leave Game, A, up to its answer, A: all within a second of
+    // the change, which goes as B leaves CONTROLLER SETTINGS.
+    let keys = [
+        "start", "down", "a", "up", "up", "a", "b", "up", "a", "up", "a",
+    ];
+    let events = play("leave", "social", 1, &keys);
+    let want = Controls {
+        mouse_inverted: true,
+        ..Controls::default()
+    };
+    assert_eq!(
+        events,
+        [
+            Engine::Running,
+            Engine::MapLoaded,
+            Engine::controls(want, false),
+            Engine::Left(Leave::Game),
+            Engine::Closing
+        ]
+    );
 }
 
 #[test]
@@ -247,6 +316,27 @@ fn a_ranked_guest_who_cancels_plays_on() {
     assert_eq!(events[..2], [Engine::Running, Engine::MapLoaded]);
     assert!(is_ended(&events[2]), "{events:?}");
     assert_eq!(events[3], Engine::Closing);
+}
+
+/// The lobby's quit while a change waits on CONTROLLER SETTINGS: the
+/// change goes before the engine closes.
+#[test]
+fn the_lobbys_quit_says_a_waiting_change_first() {
+    let until = Instant::now() + TIMEOUT;
+    let keys = menu(&["start", "down", "a", "up", "up", "a"]);
+    let mut run = Run::start("quit-change", "social", 1, &keys);
+    assert_eq!(run.next(until), Some(Engine::Running));
+    assert_eq!(run.next(until), Some(Engine::MapLoaded));
+    // Mouse Inversion goes on at 1.05 s; it would be said at 2.05 s.
+    std::thread::sleep(Duration::from_millis(1400));
+    run.quit();
+    let events = run.rest(until);
+    let want = Controls {
+        mouse_inverted: true,
+        ..Controls::default()
+    };
+    assert_eq!(events, [Engine::controls(want, false), Engine::Closing]);
+    assert!(run.child.wait().unwrap().success());
 }
 
 #[test]

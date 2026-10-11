@@ -16,11 +16,15 @@
 //!   the map loading: `1.0 start;1.5 a;2.0 up;2.5 a` opens the menu and
 //!   leaves the game. The keys are `start back a b y up down left right`;
 //!   `start` opens a closed menu. A change of controls is said as the
-//!   real engine says it (`H2EVENT controls ...`), and leaving says
-//!   `H2EVENT left game` (or `left end`) and closes without `ended`.
+//!   real engine says it (`H2EVENT controls ...`, once the player is done
+//!   with CONTROLLER SETTINGS: `gamemenu::save`). Leave Game says
+//!   `H2EVENT left game` and closes without `ended`; End Game says `left
+//!   end`, then `ended` with the results, as the host's real engine does
+//!   as it quits (PC check 14), and closes.
 
 use crate::controls::Controls;
-use crate::gamemenu::{self, Effect, GameKind, GameMenu, Key, Leave, MenuContext};
+use crate::gamemenu::save::Saves;
+use crate::gamemenu::{self, Effect, GameKind, GameMenu, Key, Leave, MenuContext, Pickup};
 use crate::live::{self, Engine};
 use crate::session::Session;
 use h2net::live::{LauncherMatch, LauncherPlayerResult, CUSTOM_GAME};
@@ -476,16 +480,21 @@ pub fn run_fake(raw: &[String]) -> i32 {
     // The GAME MENU as the real engine's copy has it: the game's kind,
     // whether this PC hosts, the controls it was started with (the
     // lobby passes all of them; over the defaults here, as lobby.txt's
-    // would be in the real engine), and the players.
+    // would be in the real engine), when the engine takes a new profile
+    // and mapping (after the reload message, unless it is off), and the
+    // players.
+    let reload = args.reload_message.is_some();
     let ctx = MenuContext {
         kind: args.game_kind,
         host: session.is_host(me),
         launch: args.controls.over(Controls::default()),
-        rereads_profile: false,
-        rereads_mapping: false,
+        profile: Pickup::of(false, reload),
+        mapping: Pickup::of(false, reload),
         players: gamemenu::roster(&session, me, session_has_teams(&session)),
     };
     let mut menu = GameMenu::new(ctx.launch);
+    // The controls changed and not said yet.
+    let mut saves = Saves::new();
     // The lobby's `quit` (the player left), or the lobby gone.
     let left = Arc::new(AtomicBool::new(false));
     let flag = left.clone();
@@ -542,13 +551,14 @@ pub fn run_fake(raw: &[String]) -> i32 {
                 let Some((_, key)) = keys.pop_front() else {
                     break;
                 };
+                let was = menu.live();
                 let effects = if key == Key::Start && !menu.is_open() {
                     menu.open()
                 } else {
                     menu.press(key, false, &ctx)
                 };
                 for e in effects {
-                    leave = leave.or(fake_effect(e));
+                    leave = leave.or(fake_effect(e, was, &mut saves, t));
                 }
                 if leave.is_some() {
                     break;
@@ -557,35 +567,53 @@ pub fn run_fake(raw: &[String]) -> i32 {
             if let Some(k) = leave {
                 break Played::Left(k);
             }
+            if let Some(u) = saves.due(t, menu.page()) {
+                live::tell(Engine::controls(u.to, u.defaults));
+            }
             if t >= length {
                 break if quit { Played::Quit } else { Played::Finished };
             }
             std::thread::sleep(Duration::from_millis(20));
         };
+        let t = loaded.elapsed().as_secs_f64();
         if played == Played::Finished {
             // The game's end closes the menu, as the real one does.
+            let was = menu.live();
             for e in menu.game_over() {
-                fake_effect(e);
+                fake_effect(e, was, &mut saves, t);
             }
-            live::tell(Engine::Ended(fake_results(&session)));
-            // The engine's postgame, before it closes.
-            wait(1.0);
+        }
+        // Whatever is still unsaved goes before the end, as the real
+        // engine's quit and game over send it.
+        if let Some(u) = saves.take() {
+            live::tell(Engine::controls(u.to, u.defaults));
+        }
+        match played {
+            Played::Finished => {
+                live::tell(Engine::Ended(fake_results(&session)));
+                // The engine's postgame, before it closes.
+                wait(1.0);
+            }
+            // The host's engine gives End Game's result as it quits.
+            Played::Left(Leave::End) => live::tell(Engine::Ended(fake_results(&session))),
+            Played::Left(Leave::Game) | Played::Quit => {}
         }
     }
     live::close();
     0
 }
 
-/// What the stand-in does with a GAME MENU effect, as the real engine's
-/// copy would tell the lobby: the controls changed, or the player left
-/// (returned).
-fn fake_effect(e: Effect) -> Option<Leave> {
+/// What the stand-in does with a GAME MENU effect at `t` (`was`: the
+/// controls before it), as the real engine's copy would tell the lobby:
+/// the controls changed (kept in `saves` until it is time to say them),
+/// or the player left (returned; what `saves` kept is said first).
+fn fake_effect(e: Effect, was: Controls, saves: &mut Saves, t: f64) -> Option<Leave> {
     match e {
         Effect::Opened => println!("fake engine: the game menu opened"),
         Effect::Closed => println!("fake engine: the game menu closed"),
         Effect::Controls(c) => {
             println!("fake engine: controls: {}", c.describe());
-            live::tell(Engine::controls(c, false));
+            saves.change(was, c, false, t);
         }
         Effect::Defaults => {
             let c = Controls::default();
@@ -593,7 +621,7 @@ fn fake_effect(e: Effect) -> Option<Leave> {
                 "fake engine: controls: {} (Use Default Settings)",
                 c.describe()
             );
-            live::tell(Engine::controls(c, true));
+            saves.change(was, c, true, t);
         }
         Effect::Leave(k) => {
             println!(
@@ -603,6 +631,9 @@ fn fake_effect(e: Effect) -> Option<Leave> {
                     Leave::End => "ended the game for everyone",
                 }
             );
+            if let Some(u) = saves.take() {
+                live::tell(Engine::controls(u.to, u.defaults));
+            }
             live::tell(Engine::Left(k));
             return Some(k);
         }

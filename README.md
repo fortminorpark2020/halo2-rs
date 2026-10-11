@@ -113,18 +113,20 @@ install. No game files are included in this repository.
   change the two mouse rows. On these pages B, Back, Esc or Backspace goes
   back one page, and Start does nothing. Thumbstick Layout, Look
   Inversion, Controller Vibration and the two mouse settings change at
-  once; Button Layout, Look Sensitivity and Auto Look Centering are saved
-  but marked NEXT GAME, because the game reads them only when a match
-  loads (this may change once it has been tried on a PC), and so is
-  turning vibration on in a game that started with it off. Leave Game asks first, closes the game
+  once; Button Layout, Look Sensitivity and Auto Look Centering change in
+  the game you're in when you close the menu (the launcher asks the game
+  to read them again). Only turning vibration on in a game that started
+  with it off waits for your next game, and is marked NEXT GAME. Your
+  changes are saved for the next match when you leave CONTROLLER
+  SETTINGS or close the menu (or a second after the last one). Leave Game asks first, closes the game
   and takes you back to ONLINE (a custom game's party leader goes back to
   Custom Game); leaving a ranked game still counts toward your level, and
   leaving a game you host ends it for everyone. End Game ends a custom game
-  for everyone; it doesn't count, and there is no carnage report for it
-  yet. If the menu can't be shown on your PC, it turns itself off for the
+  for everyone, and everyone, you too, gets the carnage report; it doesn't
+  count. If the menu can't be shown on your PC, it turns itself off for the
   rest of that game and Start goes back to the game (the lobby window
-  stops saying Start opens it). The menu hasn't been tried on a PC yet;
-  if it misbehaves, setting `H2LOBBY_ENGINE_ARGS=--no-game-menu` before
+  stops saying Start opens it). If it misbehaves, setting
+  `H2LOBBY_ENGINE_ARGS=--no-game-menu` before
   starting the launcher turns it off and gives Start back to the game. While the game is on, the
   lobby window ignores the controller and the keys that could leave the
   game (Esc, Enter, Backspace, letters), so leaving takes a click. In the

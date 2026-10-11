@@ -595,6 +595,9 @@ pub struct Told {
     over: bool,
     /// The server's MATCH_OVER came.
     verdict: bool,
+    /// The player ended the game for everyone from the GAME MENU (End
+    /// Game): the result that follows is a game cut short.
+    ended_from_menu: bool,
 }
 
 impl Told {
@@ -647,10 +650,21 @@ impl Told {
                 // places teams by their players' standings.
                 out.push(ToServer::LauncherResult(LauncherResult {
                     id,
-                    finished: true,
+                    finished: !self.ended_from_menu,
                     team_scores: Vec::new(),
                     players,
                 }));
+                // End Game's result came as the engine quits: the game was
+                // cut short, and this PC has left it. Said in that order,
+                // h2live takes the host as leaving once the game was over
+                // (not HOST_LEFT): the match ends with no reason, and
+                // counts for no one, as an unranked custom game doesn't.
+                if self.ended_from_menu {
+                    out.push(ToServer::LeftMatch {
+                        id,
+                        host_lost: false,
+                    });
+                }
             }
             Some(Engine::Closing) if !self.over => {
                 self.over = true;
@@ -659,11 +673,15 @@ impl Told {
                     host_lost: false,
                 });
             }
+            // End Game: its result follows as the engine quits, and goes
+            // as a game cut short.
+            Some(Engine::Left(Leave::End)) => self.ended_from_menu = true,
             // Nothing new goes to the server: a player who leaves from the
             // game menu is told as LEFT_MATCH when the engine closes, as
-            // before, the controls are the lobby's to save, and the menu
-            // turning off is the lobby's to show.
-            Some(Engine::Left(_) | Engine::Controls { .. } | Engine::MenuOff) => {}
+            // before (or after End Game's result), the controls are the
+            // lobby's to save, and the menu turning off is the lobby's to
+            // show.
+            Some(Engine::Left(Leave::Game) | Engine::Controls { .. } | Engine::MenuOff) => {}
             _ => {}
         }
         if host && self.asked_to_host && self.running && !self.hosting {
@@ -1109,5 +1127,54 @@ mod tests {
             .next(7, true, None, Some(Engine::Ended(Vec::new())))
             .is_empty());
         assert!(t.next(7, true, None, Some(Engine::Closing)).is_empty());
+    }
+
+    /// End Game: the host's result as its engine quits goes as a game cut
+    /// short, then LEFT_MATCH at once, in that order (h2live then takes
+    /// the host as leaving at the end, not HOST_LEFT); the engine's
+    /// closing says nothing more. Leave Game's never goes this way: its
+    /// quit-time result isn't passed on (`gamemenu::result_is_the_games`).
+    #[test]
+    fn end_games_result_goes_cut_short_before_left_match() {
+        let player = |relay_id: u64, score: i32| LauncherPlayerResult {
+            relay_id,
+            team: 0,
+            place: 0,
+            score,
+            kills: score.max(0) as u16,
+            assists: 0,
+            deaths: 0,
+            betrayals: 0,
+            suicides: 0,
+            left: false,
+        };
+        let mut t = Told::default();
+        t.next(7, true, Some(&LiveEvent::HostMatch(7)), None);
+        assert_eq!(
+            t.next(7, true, None, Some(Engine::MapLoaded)),
+            vec![ToServer::Hosting(7)]
+        );
+        assert!(t
+            .next(7, true, None, Some(Engine::Left(Leave::End)))
+            .is_empty());
+        assert!(!t.over());
+        let both = vec![player(0x1111, 4), player(0x2222, 2)];
+        let out = t.next(7, true, None, Some(Engine::Ended(both.clone())));
+        let [ToServer::LauncherResult(r), ToServer::LeftMatch { id, host_lost }] = out.as_slice()
+        else {
+            panic!("{out:?}");
+        };
+        assert_eq!((r.id, r.finished), (7, false));
+        assert_eq!(r.players, both);
+        assert_eq!((*id, *host_lost), (7, false));
+        assert!(t.over() && t.reported());
+        assert!(t.next(7, true, None, Some(Engine::Closing)).is_empty());
+        // A game that ended by itself, with no End Game, still finished.
+        let mut t = Told::default();
+        let out = t.next(7, true, None, Some(Engine::Ended(both)));
+        let [ToServer::LauncherResult(r)] = out.as_slice() else {
+            panic!("{out:?}");
+        };
+        assert!(r.finished);
     }
 }

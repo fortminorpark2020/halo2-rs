@@ -16,6 +16,7 @@
 
 pub mod edges;
 pub mod gate;
+pub mod save;
 pub mod watch;
 
 use crate::controls::{self, ButtonLayout, Controls, StickLayout};
@@ -71,6 +72,51 @@ pub enum Leave {
     End,
 }
 
+/// When the engine takes a new player profile (look sensitivity, auto
+/// look centering, vibration) or gamepad mapping (the button layout).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pickup {
+    /// Only when the next game loads.
+    #[default]
+    NextGame,
+    /// Mid-match, once the launcher posts its reload message after the
+    /// menu closes (`--reload-message`, engine message 5 unless turned
+    /// off). PC check 8: message 5 makes the engine ask for slots 34 and
+    /// 116 again, and Bumper Jumper and a new look sensitivity then work
+    /// mid-match.
+    Reload,
+    /// Mid-match, by itself. PC check 7 found it doesn't.
+    Itself,
+}
+
+impl Pickup {
+    /// The pickup when the engine re-reads by itself (`itself`) or not,
+    /// with the launcher's reload message on (`reload`) or off.
+    pub fn of(itself: bool, reload: bool) -> Pickup {
+        match (itself, reload) {
+            (true, _) => Pickup::Itself,
+            (false, true) => Pickup::Reload,
+            (false, false) => Pickup::NextGame,
+        }
+    }
+
+    /// A change reaches the engine mid-match.
+    pub fn mid_match(self) -> bool {
+        self != Pickup::NextGame
+    }
+}
+
+/// Whether a result the engine hands over (`set_game_result`) is the
+/// game's, to go to the lobby or the server: always, unless the launcher
+/// is quitting the engine (`quitting`). Then only End Game's (`left`):
+/// on the host, the result the engine gives as it quits holds every
+/// player's standing and score (PC check 14), and it goes as a game cut
+/// short. After Leave Game it is our own as a quitter, and the engine's
+/// closing says we left.
+pub fn result_is_the_games(quitting: bool, left: Option<Leave>) -> bool {
+    !quitting || left == Some(Leave::End)
+}
+
 /// What the menu needs to know about the game.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MenuContext {
@@ -79,12 +125,11 @@ pub struct MenuContext {
     pub host: bool,
     /// The controls the engine was started with.
     pub launch: Controls,
-    /// The engine picks up a new profile (look sensitivity, auto
-    /// centering) mid-match. Until a check on the PC shows it, false.
-    pub rereads_profile: bool,
-    /// The engine picks up a new gamepad mapping (the button layout)
-    /// mid-match. Until a check on the PC shows it, false.
-    pub rereads_mapping: bool,
+    /// When the engine takes a new profile (look sensitivity, auto
+    /// centering, vibration).
+    pub profile: Pickup,
+    /// When the engine takes a new gamepad mapping (the button layout).
+    pub mapping: Pickup,
     /// The game's players, for the column beside the GAME MENU's rows.
     pub players: Vec<MenuPlayer>,
 }
@@ -236,16 +281,18 @@ impl Setting {
     }
 
     /// Whether the engine takes a change of it only at the next load (it
-    /// reads it from the profile or the mapping at load, and the context
-    /// says it doesn't re-read them). Vibration is the launcher's to stop
-    /// at once, but not to start: from a launch with it off, the profile
-    /// the engine loaded says off (0x1F) and the launcher can only pass on
-    /// the rumble the engine asks for.
+    /// reads it from the profile or the mapping, and the context says a
+    /// new one doesn't reach it mid-match). Vibration is the launcher's to
+    /// stop at once, but not to start: from a launch with it off, the
+    /// profile the engine loaded says off (0x1F) and the launcher can only
+    /// pass on the rumble the engine asks for. The reload message isn't
+    /// known to change that (check 8 didn't try it), so only an engine
+    /// that re-reads the profile by itself takes it mid-match.
     pub fn next_game_only(self, ctx: &MenuContext) -> bool {
         match self {
-            Setting::Buttons => !ctx.rereads_mapping,
-            Setting::LookSensitivity | Setting::AutoCenter => !ctx.rereads_profile,
-            Setting::Vibration => !ctx.launch.vibration && !ctx.rereads_profile,
+            Setting::Buttons => !ctx.mapping.mid_match(),
+            Setting::LookSensitivity | Setting::AutoCenter => !ctx.profile.mid_match(),
+            Setting::Vibration => !ctx.launch.vibration && ctx.profile != Pickup::Itself,
             Setting::Thumbstick | Setting::LookInversion => false,
         }
     }
@@ -873,6 +920,16 @@ mod tests {
     ];
 
     #[test]
+    fn only_end_games_result_counts_at_a_quit() {
+        for left in [None, Some(Leave::Game), Some(Leave::End)] {
+            assert!(result_is_the_games(false, left), "{left:?}");
+        }
+        assert!(!result_is_the_games(true, None));
+        assert!(!result_is_the_games(true, Some(Leave::Game)));
+        assert!(result_is_the_games(true, Some(Leave::End)));
+    }
+
+    #[test]
     fn game_kinds_read_back() {
         for k in GameKind::ALL {
             assert_eq!(GameKind::from_key(k.key()), Some(k));
@@ -1462,7 +1519,8 @@ mod tests {
             ..launch
         };
         assert!(tags(live, &base).iter().all(|&t| !t));
-        // Once the engine re-reads them, no tags.
+        // Once a new mapping or profile reaches the engine mid-match (by
+        // itself, or after the reload message), no tags.
         let all = Controls {
             buttons: ButtonLayout::Recon,
             look_sensitivity: 1,
@@ -1473,25 +1531,27 @@ mod tests {
             tags(all, &base),
             [false, true, true, false, true, false, false, false, false]
         );
-        let mapping = MenuContext {
-            rereads_mapping: true,
-            ..base.clone()
-        };
-        assert_eq!(
-            tags(all, &mapping),
-            [false, false, true, false, true, false, false, false, false]
-        );
-        let profile = MenuContext {
-            rereads_profile: true,
-            ..base.clone()
-        };
-        assert_eq!(
-            tags(all, &profile),
-            [false, true, false, false, false, false, false, false, false]
-        );
+        for mid in [Pickup::Reload, Pickup::Itself] {
+            let mapping = MenuContext {
+                mapping: mid,
+                ..base.clone()
+            };
+            assert_eq!(
+                tags(all, &mapping),
+                [false, false, true, false, true, false, false, false, false]
+            );
+            let profile = MenuContext {
+                profile: mid,
+                ..base.clone()
+            };
+            assert_eq!(
+                tags(all, &profile),
+                [false, true, false, false, false, false, false, false, false]
+            );
+        }
         let both = MenuContext {
-            rereads_mapping: true,
-            rereads_profile: true,
+            mapping: Pickup::Itself,
+            profile: Pickup::Itself,
             ..base.clone()
         };
         assert!(tags(all, &both).iter().all(|&t| !t));
@@ -1556,11 +1616,75 @@ mod tests {
             Some(words::NEXT_GAME_NOTE)
         );
         let off_rereads = MenuContext {
-            rereads_profile: true,
+            profile: Pickup::Itself,
             ..off.clone()
         };
         assert!(tags(on, &off_rereads).iter().all(|&t| !t));
         assert_eq!(note(page(Setting::Vibration), on, &off_rereads), None);
+        // The reload message isn't known to start the engine's rumble.
+        let off_reload = MenuContext {
+            profile: Pickup::Reload,
+            mapping: Pickup::Reload,
+            ..off.clone()
+        };
+        assert_eq!(tags(on, &off_reload), want);
+    }
+
+    /// The reload message on (the default): the button layout, look
+    /// sensitivity and auto look centering aren't tagged NEXT GAME, and
+    /// their pages have no note; off, they are, as before.
+    #[test]
+    fn the_reload_message_takes_the_next_game_tags_away() {
+        assert_eq!(Pickup::of(false, true), Pickup::Reload);
+        assert_eq!(Pickup::of(false, false), Pickup::NextGame);
+        assert_eq!(Pickup::of(true, false), Pickup::Itself);
+        assert_eq!(Pickup::of(true, true), Pickup::Itself);
+        assert_eq!(Pickup::default(), Pickup::NextGame);
+        let launch = Controls::default();
+        let changed = Controls {
+            buttons: ButtonLayout::BumperJumper,
+            look_sensitivity: 10,
+            auto_center: true,
+            ..launch
+        };
+        let three = [
+            Setting::Buttons,
+            Setting::LookSensitivity,
+            Setting::AutoCenter,
+        ];
+        for reload in [true, false] {
+            let pickup = Pickup::of(false, reload);
+            let c = MenuContext {
+                launch,
+                profile: pickup,
+                mapping: pickup,
+                ..ctx(GameKind::Custom, true)
+            };
+            let m = GameMenu {
+                page: Page::Controller { row: 0 },
+                live: changed,
+                keyboard: false,
+            };
+            let GameMenuView::List { rows, note, .. } = m.frame(&c).view else {
+                panic!("not a list");
+            };
+            for s in three {
+                assert_eq!(rows[s.row()].next_game, !reload, "{s:?} reload {reload}");
+                assert_eq!(s.next_game_only(&c), !reload, "{s:?} reload {reload}");
+                let page = GameMenu {
+                    page: Page::Value { setting: s, row: 0 },
+                    live: changed,
+                    keyboard: false,
+                };
+                let GameMenuView::List { note, .. } = page.frame(&c).view else {
+                    panic!("not a list");
+                };
+                let want = (!reload).then(|| words::NEXT_GAME_NOTE.to_string());
+                assert_eq!(note, want, "{s:?} reload {reload}");
+            }
+            let want = (!reload).then(|| words::NEXT_GAME_ROWS_NOTE.to_string());
+            assert_eq!(note, want, "reload {reload}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 18:20 UTC. Any assistant that works on the project
+Last updated 2026-10-11 18:45 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -192,13 +192,26 @@ step, when the owner says so: one weapon.
   `H2LOBBY_ENGINE_ARGS` is read once into the lobby's `Config`, and the
   engine's start and start failure have tests; `--reload-message` and
   `--end-game-message` are documented as tried offline first, not
-  refused online. Next: the numbered PC checks in
-  menu.md section 9.5 (Remote Control session), then a small commit that
-  sets `ENGINE_REREADS_PROFILE` and `ENGINE_REREADS_MAPPING` in
-  `win/menu.rs` from check 7 (they are false, so Button Layout, Look
-  Sensitivity and Auto Look Centering say NEXT GAME), or makes the
-  reload message the default if check 8 shows it works, and records the
-  results there and here.
+  refused online. PC checks 1 to 15 ran on the owner's PC on 2026-10-11
+  (672bf4a; results in menu.md section 9.5): the menu draws, holds and
+  releases input, applies the live settings, survives resizing and the
+  game's end, and costs about 2 us a frame. The engine doesn't read a new
+  profile or mapping by itself (check 7), but engine message 5 makes it
+  (check 8); no engine message ends the game for everyone (check 15).
+  Follow-ups from those checks (2026-10-11): the reload message 5 is the
+  default (`--reload-message 0` or `off` turns it off), so Button Layout,
+  Look Sensitivity and Auto Look Centering take effect when the menu
+  closes and aren't tagged NEXT GAME; the controls go to the lobby once a
+  visit to CONTROLLER SETTINGS (leaving it or the menu, 1 s after the
+  last change, or before a quit; `gamemenu::save`), not once a step; a
+  guest who left from the menu is told "You left the game." even when
+  the server's verdict with no reason came first; End Game passes the
+  host's quit-time result on, and the lobby sends it as LAUNCHER_RESULT
+  with `finished` false, then LEFT_MATCH, so h2live ends the match with
+  no HOST LEFT wording and the host gets the carnage report too (h2live
+  unchanged; a new server test covers it). Next: check 14 again on the
+  PC with this build (both lobbies on the carnage report), and checks 16
+  and 17.
 - Milestone 1 is done (2026-10-10 02:50 UTC): `h2launch` started MCC's
   halo2.dll on the owner's PC and played offline Slayer on Lockout (HUD,
   60 fps, mouse and controller). Code is on `h2launch-m1`, then

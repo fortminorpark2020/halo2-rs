@@ -9,7 +9,8 @@
 //! 3. applies what it says: the input gate opened or closed
 //!    (`input::open_menu`, `input::close_menu`), the live controls, the
 //!    lobby's events, the quit, and once it closes the engine's profile
-//!    and gamepad mapping for the controls it left;
+//!    and gamepad mapping for the controls it left, with the reload
+//!    message that makes the engine read them again;
 //! 4. draws the panel on the CPU when the page or the back buffer's size
 //!    changed, and publishes it for the render thread (`overlay`);
 //! 5. checks that the panel was drawn: one not drawn within a second
@@ -17,7 +18,10 @@
 //!    input, and three of those, or any overlay failure, turn the menu
 //!    off for the run, giving Start back to the engine and telling the
 //!    lobby (`H2EVENT menu off`). PLEASE WAIT is exempt: it stays until
-//!    the process ends. Those rules are `gamemenu::watch`'s.
+//!    the process ends. Those rules are `gamemenu::watch`'s;
+//! 6. saves the controls changed, once the player leaves CONTROLLER
+//!    SETTINGS or the menu, a second after the last change, or before a
+//!    quit (`gamemenu::save`).
 //!
 //! It opens with Start on player 0's pad or Esc in the game's window,
 //! once the fonts are loaded (`prepare`, at map load), while the game is
@@ -39,17 +43,20 @@ use super::log::log;
 use super::{engine, gfx, input, overlay, Setup};
 use crate::controls::Controls;
 use crate::gamemenu::edges::PadEdges;
+use crate::gamemenu::save::{Saves, Unsaved};
 use crate::gamemenu::watch::{self, Act, Off, Watch, END_GAME_WAIT, HEALTH_CLOSES, HEALTH_WAIT};
-use crate::gamemenu::{self, Effect, GameMenu, GameMenuFrame, Key, Leave, MenuContext};
+use crate::gamemenu::{self, Effect, GameMenu, GameMenuFrame, Key, Leave, MenuContext, Pickup};
 use crate::live::{self, Engine};
 use crate::profile::{pad, InputFrame};
 
 /// Whether the engine picks up a new player profile mid-match (look
-/// sensitivity, automatic look centering). PC check 7 sets it; until
-/// then the menu tags those settings NEXT GAME once changed.
+/// sensitivity, automatic look centering) by itself. PC check 7 found it
+/// doesn't: the call counts of slot 34 stayed flat. The reload message
+/// (`--reload-message`, 5 by default) makes it (check 8); with that off,
+/// the menu tags those settings NEXT GAME once changed.
 pub const ENGINE_REREADS_PROFILE: bool = false;
 /// Whether the engine picks up a new gamepad mapping mid-match (the
-/// button layout). PC check 7 sets it, as above.
+/// button layout) by itself: no (check 7, slot 116), as above.
 pub const ENGINE_REREADS_MAPPING: bool = false;
 
 /// The fonts are loaded and the menu may open; Start and Esc are its own.
@@ -144,6 +151,8 @@ pub struct Driver {
     /// The controls the engine's profile and gamepad mapping were last
     /// built from (`host::publish_controls`).
     engine_controls: Controls,
+    /// The controls changed in the menu and not saved yet.
+    saves: Saves,
 }
 
 impl Driver {
@@ -154,6 +163,7 @@ impl Driver {
             }
             None => gamemenu::offline_roster(&s.args.name),
         };
+        let reload = s.args.reload_message.is_some();
         let ctx = MenuContext {
             kind: s.args.game_kind,
             host: s
@@ -161,8 +171,8 @@ impl Driver {
                 .as_ref()
                 .is_none_or(|(sess, me)| sess.is_host(*me)),
             launch: s.controls,
-            rereads_profile: ENGINE_REREADS_PROFILE,
-            rereads_mapping: ENGINE_REREADS_MAPPING,
+            profile: Pickup::of(ENGINE_REREADS_PROFILE, reload),
+            mapping: Pickup::of(ENGINE_REREADS_MAPPING, reload),
             players,
         };
         Driver {
@@ -176,11 +186,20 @@ impl Driver {
             published: 0,
             watch: Watch::new(),
             engine_controls: s.controls,
+            saves: Saves::new(),
         }
     }
 
-    /// One pass of the window thread's loop (`t`: seconds since start).
+    /// One pass of the window thread's loop (`t`: seconds since start):
+    /// the menu, then the controls it changed saved if it is time.
     pub fn tick(&mut self, t: f64) {
+        self.run(t);
+        if let Some(u) = self.saves.due(t, self.menu.page()) {
+            self.save(u);
+        }
+    }
+
+    fn run(&mut self, t: f64) {
         let off = self.watch.is_off();
         if !off && !ready() {
             // Presses before the menu is ready never open it later.
@@ -298,9 +317,18 @@ impl Driver {
         }
     }
 
-    /// A quit started (from the menu or not): PLEASE WAIT if it is open.
+    /// A quit started (from the menu or not): PLEASE WAIT if it is open,
+    /// and the controls changed in it saved now.
     pub fn quitting(&mut self) {
         self.menu.quitting();
+        self.save_now();
+    }
+
+    /// Saves the controls changed and not saved yet, if any.
+    fn save_now(&mut self) {
+        if let Some(u) = self.saves.take() {
+            self.save(u);
+        }
     }
 
     /// The menu may open: ready, the map loaded, the game on, no quit.
@@ -387,8 +415,8 @@ impl Driver {
                     self.closed(reading);
                     log!("game menu: closed");
                 }
-                Effect::Controls(c) => self.controls(c, false),
-                Effect::Defaults => self.controls(Controls::default(), true),
+                Effect::Controls(c) => self.controls(c, false, t),
+                Effect::Defaults => self.controls(Controls::default(), true, t),
                 Effect::Leave(k) => self.leave(k, t),
             }
         }
@@ -409,8 +437,10 @@ impl Driver {
     /// when it closes: one generation a visit rather than one a step (a
     /// held arrow on Mouse Sensitivity would use the cap up in seconds).
     /// The engine gets neutral input while the menu is open, so it misses
-    /// nothing by the wait. `--reload-message` follows a change to a
-    /// setting the engine may read only at load.
+    /// nothing by the wait. Then, after a change to a setting the engine
+    /// reads only from them, the reload message (`--reload-message`, 5 by
+    /// default) makes it read them again (PC check 8); not once the game
+    /// has ended or a quit has started, as the next game loads them anyway.
     fn publish(&mut self) {
         let c = self.menu.live();
         let old = std::mem::replace(&mut self.engine_controls, c);
@@ -420,22 +450,24 @@ impl Driver {
         let now = super::host::publish_controls(&c);
         // Past a kind's cap the engine keeps an older one: its settings
         // are the next game's from here on, whatever it re-reads.
-        if !now.profile && self.ctx.rereads_profile {
-            self.ctx.rereads_profile = false;
+        if !now.profile && self.ctx.profile.mid_match() {
+            self.ctx.profile = Pickup::NextGame;
             log!("game menu: profile settings take effect in the next game from now on");
         }
-        if !now.mapping && self.ctx.rereads_mapping {
-            self.ctx.rereads_mapping = false;
+        if !now.mapping && self.ctx.mapping.mid_match() {
+            self.ctx.mapping = Pickup::NextGame;
             log!("game menu: the button layout takes effect in the next game from now on");
         }
         let load_only = old.buttons != c.buttons
             || old.look_sensitivity != c.look_sensitivity
             || old.auto_center != c.auto_center
             || (!old.vibration && c.vibration);
-        if let (true, Some(n)) = (
-            load_only,
-            super::setup().and_then(|s| s.args.reload_message),
-        ) {
+        let game_on = !super::GAME_ENDED.load(Ordering::SeqCst)
+            && super::QUIT.load(Ordering::SeqCst) == super::QUIT_NONE;
+        let reload = super::setup().and_then(|s| s.args.reload_message);
+        if let (true, true, true, Some(n)) =
+            (load_only, game_on, now.profile || now.mapping, reload)
+        {
             engine::post_message(n, "--reload-message: the profile or mapping changed");
         }
     }
@@ -511,11 +543,12 @@ impl Driver {
         }
     }
 
-    /// The menu changed the controls: the launcher's own use of them now,
-    /// saved; the engine's profile and mapping follow when the menu
-    /// closes (`publish`). `defaults`: Use Default Settings, which saves
-    /// every one (the lobby is told so).
-    fn controls(&mut self, c: Controls, defaults: bool) {
+    /// The menu changed the controls at `t`: the launcher's own use of
+    /// them now; the engine's profile and mapping follow when the menu
+    /// closes (`publish`), and the saving once the player is done with
+    /// CONTROLLER SETTINGS (`gamemenu::save`). `defaults`: Use Default
+    /// Settings, which saves every one (the lobby is told so).
+    fn controls(&mut self, c: Controls, defaults: bool, t: f64) {
         let old = super::controls();
         super::set_controls(c);
         if old.vibration && !c.vibration {
@@ -523,19 +556,32 @@ impl Driver {
             log!("game menu: rumble stopped (vibration off)");
         }
         log!("game menu: controls now {}", c.describe());
-        let event = Engine::controls(c, defaults);
+        self.saves.change(old, c, defaults, t);
+    }
+
+    /// Saves the controls the menu changed: the lobby is told (it saves
+    /// them; lobby.txt is its file in a match), or with no lobby they go
+    /// into lobby.txt here.
+    fn save(&mut self, u: Unsaved) {
+        let event = Engine::controls(u.to, u.defaults);
         if live::to_lobby() {
-            // The lobby saves them (lobby.txt is its file in a match).
             live::tell(event);
         } else {
             log!("game menu: {}", live::event_line(&event));
-            save_controls(&old, &c, defaults);
+            save_controls(&u.from, &u.to, u.defaults);
         }
     }
 
-    /// Leave Game or End Game confirmed: tell the lobby, quit the engine
-    /// as closing its window does (the menu shows PLEASE WAIT).
+    /// Leave Game or End Game confirmed: save the controls changed, tell
+    /// the lobby, quit the engine as closing its window does (the menu
+    /// shows PLEASE WAIT). End Game's result, which the engine gives as it
+    /// quits, then goes to the lobby as a game cut short
+    /// (`host::game_result`).
     fn leave(&mut self, k: Leave, t: f64) {
+        self.save_now();
+        if k == Leave::End {
+            super::ENDED_FROM_MENU.store(true, Ordering::SeqCst);
+        }
         let event = Engine::Left(k);
         if !live::to_lobby() {
             log!("game menu: {}", live::event_line(&event));

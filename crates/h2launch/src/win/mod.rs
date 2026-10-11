@@ -194,6 +194,10 @@ pub(crate) static CONSOLE_CLOSING: AtomicBool = AtomicBool::new(false);
 /// The game ended by itself (set_game_result while not quitting): the
 /// game menu closes and can't open again.
 pub(crate) static GAME_ENDED: AtomicBool = AtomicBool::new(false);
+/// The host ended the game for everyone from the game menu (End Game):
+/// the result the engine gives as it quits is the game's, cut short
+/// (`gamemenu::result_is_the_games`).
+pub(crate) static ENDED_FROM_MENU: AtomicBool = AtomicBool::new(false);
 /// finish() has started (it runs once), and when.
 static FINISHING: AtomicBool = AtomicBool::new(false);
 static FINISH_AT: AtomicU64 = AtomicU64::new(0);

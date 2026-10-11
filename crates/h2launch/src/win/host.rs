@@ -701,15 +701,26 @@ fn game_result(block: usize) {
     }
     // The game ended (every PC gets this at the end), unless we asked the
     // engine to quit: then it is our own result as a quitter (seen on the
-    // owner's PC), and closing says we left.
+    // owner's PC), and closing says we left. End Game's is the exception:
+    // on the host it holds every player's standing and score (PC check
+    // 14), and goes to the lobby as the game's, which says it was cut
+    // short (`live::Told`).
     let quitting = matches!(
         super::QUIT.load(Ordering::SeqCst),
         super::QUIT_USER | super::QUIT_CONSOLE
     );
+    let left = super::ENDED_FROM_MENU
+        .load(Ordering::SeqCst)
+        .then_some(crate::gamemenu::Leave::End);
+    if quitting && crate::gamemenu::result_is_the_games(quitting, left) {
+        log!("result: End Game's, given as the engine quits: it goes as the game's, cut short");
+    }
     if !quitting {
         // The game menu closes, and can't open again.
         super::GAME_ENDED.store(true, Ordering::SeqCst);
         super::wake();
+    }
+    if crate::gamemenu::result_is_the_games(quitting, left) {
         // Kills reach the server only when this game bore them out (see
         // `results::COUNTS_SEEN`).
         let players = crate::results::players(bytes);

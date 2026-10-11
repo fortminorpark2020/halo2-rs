@@ -868,9 +868,10 @@ screens.
 
 Halo 2's multiplayer GAME MENU (screen 0xC3) over a running match, in three
 stages on `launcher-gamemenu`. Stages 1 and 2 are tested on Linux; the
-engine side (stage 3) is cross-compiled and clippy-clean but hasn't run on
-a PC yet, so everything below about the engine is a plan until the checks
-in section 9.5 pass.
+engine side (stage 3) ran on the owner's PC on 2026-10-11 (section 9.5
+has the results), and the follow-ups from those checks are in: the
+reload message on by default, the controls saved once a visit, End
+Game's result sent as a game cut short, and the leave notice.
 
 - **What the player sees.** Start on the pad, or Esc in the game's window,
   opens one opaque panel; the match keeps running behind it. Rows, in Halo
@@ -888,10 +889,15 @@ in section 9.5 pass.
   MCC's `halo2\h2_fonts`, or the built-in font.
 - **Lobby hand-off** (stage 2): the engine says `H2EVENT controls ...` (the
   eight `lobby.txt` pairs, after the word `defaults` for Use Default
-  Settings) when a setting changes, `H2EVENT left game`
-  or `left end` before it quits, and `H2EVENT menu off` if the menu turns
-  itself off mid-game (the lobby's in-game screen then stops saying Start
-  opens it). The lobby saves, through `App::set_control`, only the
+  Settings) once the player leaves CONTROLLER SETTINGS (its value pages
+  and the defaults question count as part of it) or the menu, a second
+  after the last change, or before a quit, whichever comes first
+  (`gamemenu::save`; check 6 saw 24 saves for 24 steps of Mouse
+  Sensitivity when it went at every change). It says `H2EVENT left game`
+  or `left end` before it quits; after `left end`, `ended` follows with
+  the result the host's engine gives as it quits (see the quit, below).
+  `H2EVENT menu off` comes if the menu turns itself off mid-game (the
+  lobby's in-game screen then stops saying Start opens it). The lobby saves, through `App::set_control`, only the
   controls that changed from those the engine runs with (its own, with
   any control flag in `H2LOBBY_ENGINE_ARGS` over them), so a test's
   one-run flag isn't saved, and every one after `controls defaults`; it
@@ -955,15 +961,30 @@ in section 9.5 pass.
   the engine may keep a pointer (at most 64 of each kind per run; past
   that the menu treats that kind as read only at load). The log says when the engine first gets a
   new one (`profile generation N first served at call #k (t s)`, and the
-  same for the gamepad mapping), which is how check 7 tells whether it
-  asks again mid-match.
+  same for the gamepad mapping). The engine doesn't ask again by itself
+  (check 7), so after a change to Button Layout, Look Sensitivity or
+  Auto Look Centering (or vibration turned on) the driver posts the
+  reload message once the new generations are in place: engine message
+  5 by default (`--reload-message N` picks another, 0 or `off` none),
+  which makes the engine ask for slots 34 and 116 again (check 8). It
+  isn't posted once the game has ended or a quit has started; the next
+  game loads the saved controls anyway.
 - **The quit.** Leave Game tells the lobby, lets the lobby take the
   foreground, and quits the engine by the user-quit path; the run's
   result line says `left from the game menu` or `ended from the game
-  menu`. End Game v1 quits the same way: h2live's existing rule for a
-  host who leaves then ends a custom game for everyone, uncounted, with
-  no carnage report. A real End Game waits for an engine message (check
-  15).
+  menu`. The result the engine gives as it quits is ours as a quitter
+  and isn't passed on. End Game quits the same way, but its quit-time
+  result is passed on (`H2EVENT ended`, `gamemenu::result_is_the_games`):
+  on the host it holds every player's standing and score (check 14). The
+  lobby sends it as LAUNCHER_RESULT with `finished` false, then
+  LEFT_MATCH at once (`live::Told`); h2live then takes the host as
+  leaving once the game was over rather than HOST_LEFT, so the match ends
+  with no reason and counts for no one (custom games are unranked), and
+  the host lands on the carnage report like the guests, whose engines
+  end the game themselves when the host goes (check 14). "You ended the
+  game." is left for an engine that closes without a result. No engine
+  message ends the game for everyone (check 15), so End Game doesn't use
+  one.
 - **Safety** (`gamemenu::watch`, Linux-tested; the driver does what it
   says). A panel not drawn within 1 s while the window isn't minimised
   closes the menu and lets go of the game's input; three of those, or an
@@ -980,23 +1001,24 @@ in section 9.5 pass.
   game). `H2LAUNCH_OVERLAY_FAIL=1` (environment; the same, as a stand-in
   for an overlay failure, for check 11); `=stall` (the panel is never
   copied, as if never drawn) and `=copy` (the first copy fails, as a
-  Direct3D error would) fail at run time instead, for check 17. `--reload-message N` (when the
-  menu closes after a change to Button Layout, Look Sensitivity, Auto Look
-  Centering, or vibration turned on, post engine message N once the new
-  generations are in place; the experiment of check 8).
+  Direct3D error would) fail at run time instead, for check 17.
+  `--reload-message N` (the reload message above: 5 unless given; 0 or
+  `off` turns it off, and Button Layout, Look Sensitivity and Auto Look
+  Centering are then tagged NEXT GAME once changed, as before).
   `--end-game-message N` (End Game posts N and quits 10 s later if the
-  game hasn't ended; the search of check 15). `--game-kind` (the lobby
+  game hasn't ended; kept for research, check 15). `--game-kind` (the lobby
   passes it; it defaults to social with `--session`, to the kind of the
   server's match with `--live`, and to offline otherwise). The lobby
   leaves out its "Start or Esc ... opens the game menu" line when its
   engines run without the menu.
-- **Still to settle on the PC.** `ENGINE_REREADS_PROFILE` and
-  `ENGINE_REREADS_MAPPING` in `win/menu.rs` are false until check 7 says
-  the engine picks up a new profile or mapping mid-match; until then the
-  three settings below that depend on them are tagged NEXT GAME once
-  changed. Whether the engine reads the keyboard by itself while the menu
-  is open is check 5's question: the menu's keys are bound to nothing in
-  the game, so at worst a held W or Space leaks.
+- **Settled on the PC.** `ENGINE_REREADS_PROFILE` and
+  `ENGINE_REREADS_MAPPING` in `win/menu.rs` stay false: the engine
+  doesn't ask for a new profile or mapping by itself (check 7). With the
+  reload message on (the default) the three settings below that depend
+  on them aren't tagged NEXT GAME and their value pages have no note
+  (`gamemenu::Pickup::Reload`); with it off they are, as before. The
+  engine doesn't read the keyboard by itself while the menu is open: W
+  and Space didn't leak (check 5).
 
 **Settings in the GAME MENU** (CONTROLLER SETTINGS, nine rows, the same
 list and `lobby.txt` keys as the lobby's Settings):
@@ -1004,19 +1026,22 @@ list and `lobby.txt` keys as the lobby's Settings):
 | Setting | How a change is applied | Mid-match? | Where |
 |---|---|---|---|
 | Thumbstick Layout | the launcher swaps the sticks before the engine's poll | at once | launcher (`sticks.apply`) |
-| Button Layout | a new gamepad mapping generation | NEXT GAME until check 7 (or 8) | slot 116 |
-| Look Sensitivity | a new profile generation (0x1B5, 0x1B6) | NEXT GAME until check 7 (or 8) | slot 34 |
+| Button Layout | a new gamepad mapping generation, then the reload message | when the menu closes (check 8); NEXT GAME with `--reload-message 0` | slot 116 |
+| Look Sensitivity | a new profile generation (0x1B5, 0x1B6), then the reload message | when the menu closes (check 8); NEXT GAME with `--reload-message 0` | slot 34 |
 | Look Inversion | the launcher flips the look stick's up and down when the live value differs from the launch one; profile 0x1D keeps the launch value, so the engine never flips it twice | at once | launcher (`gate::look_flip`) |
-| Auto Look Centering | a new profile generation (0x23) | NEXT GAME until check 7 (or 8) | slot 34 |
-| Controller Vibration | the launcher's rumble follows it; off stops the motors; also profile 0x1F | off at once; on, from a game started with it off, NEXT GAME until check 7 (the engine's profile says off, and the launcher can only pass on rumble the engine asks for) | launcher (`rumble`), slot 34 |
+| Auto Look Centering | a new profile generation (0x23), then the reload message | when the menu closes (the engine re-read the profile in check 8, though nothing visible changed); NEXT GAME with `--reload-message 0` | slot 34 |
+| Controller Vibration | the launcher's rumble follows it; off stops the motors; also profile 0x1F | off at once; on, from a game started with it off, NEXT GAME (the engine's profile said off, and the launcher can only pass on rumble the engine asks for; check 8 didn't try whether the reload message changes that) | launcher (`rumble`), slot 34 |
 | Mouse Sensitivity | the launcher's mouse-to-look; also profile 0x410 | at once | launcher (`mouse_motion`) |
 | Mouse Inversion | the launcher's mouse-to-look (profile 0x1E stays 0) | at once | launcher (`mouse_motion`) |
 | Use Default Settings | every row above back to Halo 2's defaults | as each row | all of the above |
 
-Every change is saved: through the lobby (`H2EVENT controls`) when the
+Every change is saved, once a visit to CONTROLLER SETTINGS (when the
+player leaves it or the menu, a second after the last change, or before
+a quit): through the lobby (`H2EVENT controls`) when the
 lobby started the engine, or straight into `lobby.txt` in the instance's
 settings folder in `--offline` runs, which also print the same `H2EVENT
-controls ...` line in the log. Those runs save only the settings changed
+controls ...` line in the log. Changes that end where they started save
+nothing. Those runs save only the settings changed
 in the menu, so a control flag given for one run (`--layout`,
 `--no-vibration`, ...) isn't saved with them, even when a change lands
 on Halo 2's defaults; Use Default Settings (said as such by the menu, not
@@ -1303,9 +1328,8 @@ A 2004-era video of the Live flow would settle most of them.
 For the Remote Control session on the owner's PC, in this order. Same rules
 as above, except that the launcher's screenshots are saved: they stay on
 the PC, are described here in words, and are never uploaded or committed.
-Nothing from MCC leaves the PC. Results go in this section; check 7
-(or 8) then sets `ENGINE_REREADS_PROFILE` and `ENGINE_REREADS_MAPPING` in
-`win/menu.rs`, or makes the reload message the default.
+Nothing from MCC leaves the PC. The results of the first run (2026-10-11)
+are after check 17; check 8 made the reload message the default.
 
 Every run, unless a check says otherwise: `target\release\h2launch.exe
 --offline --instance 9 --windowed 1280x720 --diag --input-script
@@ -1373,7 +1397,9 @@ the saved controls away from the owner's own. Each script starts with
      0 for 1` before and after: about 2.5 times the turn.
    - The log has the `H2EVENT controls ...` lines, and
      `%LOCALAPPDATA%\h2launch\9\lobby.txt` has the new values.
-7. **Does the engine read the profile and mapping again?**
+7. **Does the engine read the profile and mapping again?** (By itself:
+   since the reload message became the default, run this with
+   `--reload-message 0`.)
    1. 30 s untouched; note the `34 get_player_profile=N(+M)` and `116
       get_player_gamepad_mapping=N(+M)` summary lines.
    2. Button Layout to Bumper Jumper (`start, down, a, down, a, down x4,
@@ -1389,9 +1415,10 @@ the saved controls away from the owner's own. Each script starts with
    Result: for each setting, whether it took effect mid-match.
 8. **Only if check 7 showed nothing.** Repeat it with `--reload-message 5`
    (message 5 was harmless in UI shell; the owner approved these
-   experiments). Record whether the layout and sensitivity now apply, any
-   other change, and any crash; stop at the first crash and keep the log.
-   If 5 works, the next build makes it the default.
+   experiments; it is the default now, so no flag is needed). Record
+   whether the layout and sensitivity now apply, any other change, and
+   any crash; stop at the first crash and keep the log. If 5 works, the
+   next build makes it the default (it did; see the results).
 9. **The game ends with the menu open.** `--set-option 0x354=i32:60`; `55
    press start`, `56 press down`, `56.5 press a`, `62 screenshot`, `63
    press start`, `66 screenshot`, `80 quit`. Pass: `game menu: closed
@@ -1428,14 +1455,17 @@ the saved controls away from the owner's own. Each script starts with
     guest's next match logs `gamepad mapping: Bumper Jumper`.
 14. **End Game as the custom game's host**, same two lobbies. Host engine
     script: `start, down, down, a, up, a`; the guest's opens the menu,
-    takes a shot and closes it. Pass: the guest's menu has only Leave
-    Game and Settings; the host's engine exits within about 6 s and its
-    lobby lands on Custom with "You ended the game."; the guest gets
-    "THE HOST LEFT. THE GAME DIDN'T COUNT.", its engine closes within the
-    10 s quit wait, and it lands on ONLINE. Record what the guest's engine
-    did before it was asked to quit (result, restart, frozen?) with
-    times, and whether the host's `result:` lines at quit hold every
-    player's score.
+    takes a shot and closes it. Pass (since the follow-ups; the first run
+    passed the earlier rules, see the results): the guest's menu has only
+    Leave Game and Settings; the host's engine exits within about 6 s;
+    the host's log has `result: End Game's, given as the engine quits`,
+    and its lobby's `the engine says H2EVENT left end`, then `H2EVENT
+    ended ...`, then `telling the server match ... ended (finished:
+    false, 2 player results)` and `telling the server we left match ...`
+    in that order; both lobbies show the carnage report with no "THE HOST
+    LEFT" wording and no level change, and the host's A from it goes to
+    Custom. Record what the guest's engine did before it was asked to
+    quit (result, restart, frozen?) with times.
 15. **An engine message for End Game** (offline, one id a run, approved by
     the owner). `--end-game-message N`, script `10 press start`, `10.5
     press down`, `11 press down`, `11.5 press a`, `12 press up`, `12.5
@@ -1478,6 +1508,82 @@ the saved controls away from the owner's own. Each script starts with
       lobby logs `the engine says H2EVENT menu off`, and its in-game
       screen drops "Start or Esc in the game's window opens the game
       menu."
+
+#### Results on the owner's PC (2026-10-11, about 13:00 UTC, 672bf4a)
+
+1. **Build**: pass, 208 unit tests and 5 end-to-end tests.
+2. **A raw Start**: each Start or Esc called host slot 7 (`pause_game`)
+   once, with its first and fourth arguments 0; slot 8 was never called.
+   The engine drew nothing of its own for the pause, and Back showed its
+   scoreboard.
+3. **Pass.** The panel was 696 by 510 at 304,102 in the 1280x720 back
+   buffer, with Leave Game, Settings and End Game, and PLAYERS (1) with
+   Player marked HOST; CONTROLLER SETTINGS had its nine rows, and the
+   frame after the close was clean. The overlay made 210 copies with no
+   failure (mean 1.8 us, longest 11.5 us); a redraw took 0.6 to 1.0 ms;
+   600 frames each 10 s, as without the menu.
+4. **A, B and C pass**: neutral input while open; B held across the close
+   didn't melee, and RT, A and Back held across it did nothing until let
+   go. A stick held while the menu is open repeats Up every 250 ms, which
+   is the menu's repeat, by design. D wasn't reported.
+5. **Pass**: the legend said ENTER SELECT and ESC BACK, and W and Space
+   held with the menu open didn't reach the game.
+6. **Pass** in a running game: Southpaw, look inversion, vibration off
+   (the rumble stopped) and mouse sensitivity all took effect at once.
+   Two small notes: 24 steps of Mouse Sensitivity wrote `lobby.txt` 24
+   times (now once a visit, `gamemenu::save`), and the dual-wield hint's
+   button picture switched between the pad's and the keyboard's as the
+   engine's keyboard-or-pad flag flipped while the script sat idle.
+7. **The engine doesn't read either again by itself**: the call counts of
+   slots 34 and 116 stayed flat after the changes, and Bumper Jumper, a
+   new look sensitivity and auto look centering weren't used mid-match.
+8. **`--reload-message 5` works, with no crash**: after each change the
+   engine called slots 116 and 34 once more; Bumper Jumper took effect
+   (LB jumped and A no longer did) and look sensitivity 3 to 10 turned
+   two to three times faster; auto look centering showed nothing
+   visible. So message 5 is now the default, `ENGINE_REREADS_PROFILE` and
+   `_MAPPING` stay false, and the NEXT GAME tags are gone for those three
+   settings unless the reload message is turned off.
+9. **Pass**: the game's natural end closed the open menu (game over), and
+   Start after it didn't open the menu.
+10. **Pass**: resizing to 1600x900 and to 960x540 each gave one frame
+    whose size didn't match (skipped) and then a redraw; minimising and
+    restoring were fine.
+11. **Pass**: with `H2LAUNCH_OVERLAY_FAIL=1` the menu stayed off and Start
+    reached the engine.
+12. **Pass**: copies took 1.6 to 2.1 us on average, under 21 us at most
+    (once 85 us); a redraw 0.3 to 1.0 ms at 720p and 1.4 to 1.8 ms at
+    1080p; 600 frames each 10 s with the menu open or closed.
+13. **Pass but for the notice.** The guest's Leave Game worked, and Bumper
+    Jumper picked in the game reached `lobby.txt` and the next match; but
+    the guest's lobby said "The match was called off.". The host's engine
+    had ended the Team Slayer game by itself once the guest's team was
+    empty, and the server's verdict (no reason) reached the guest's lobby
+    before its engine closed. Fixed: a leave from the GAME MENU now wins
+    over a verdict with no reason ("You left the game."). The run's notes
+    also said Custom Game was seven downs from the playlists; a headless
+    run of this build from a fresh sign-in needs eight with the eight
+    launcher playlists (`lobby.md`, screen 8).
+14. **The host passed** (the END GAME question, the engine gone in 5.0 s,
+    "You ended the game.", landed on Custom), and the result the host's
+    engine gave as it quit held both players and their scores. The
+    guest's engine gave its own result 0.02 s later (an ordinary GAME
+    OVER), and its lobby showed the carnage report with "THE HOST LEFT.
+    THE GAME DIDN'T COUNT."; its engine stayed up until the lobby asked
+    it to close, 15.5 s after the verdict. Decision: keep the carnage
+    report for the guests (the original showed everyone the end), and
+    send the host's result before it leaves: End Game now passes the
+    host's quit-time result on, and the lobby sends it as LAUNCHER_RESULT
+    with `finished` false, then LEFT_MATCH, so h2live takes the host as
+    leaving at the end. No HOST LEFT wording, nothing counts, and the
+    host gets the carnage report too. To be checked again on the PC.
+15. **No engine message ends the game for everyone**: with
+    `--end-game-message N`, 2 ended the host's game only (repeated in two
+    lobbies, the guest sat about 17 s in a game that had stopped for it);
+    6 stopped the rendering (`set_game_state(3)`); 17 crashed (an access
+    violation); the other ids tried did nothing. End Game doesn't post
+    one; the flag stays for research.
+16. and 17. Not run yet.
 
 ## 10. Tests
 
