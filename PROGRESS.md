@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 12:45 UTC. Any assistant that works on the project
+Last updated 2026-10-11 13:51 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -176,7 +176,15 @@ step, when the owner says so: one weapon.
   a stick held into the menu no longer scrolls it; a pad's first Start
   opens it; `--live` takes the game kind from the server's match; runs
   without the lobby save only the settings changed in the menu; turning
-  vibration on in a game started with it off says NEXT GAME. Next: the numbered PC checks in
+  vibration on in a game started with it off says NEXT GAME. Review
+  fixes, round 2 (2026-10-11): a trigger resting above 30 is let go near
+  its rest; the menu's safety rules moved into `gamemenu::watch` with
+  Linux tests, PLEASE WAIT survives an overlay failure, a failed panel
+  publish turns the overlay off, and `H2LAUNCH_OVERLAY_FAIL=stall|copy`
+  fail at run time for the new check 17; the engine says `H2EVENT menu
+  off` and the lobby drops its hint; Use Default Settings is said
+  explicitly (`Effect::Defaults`); the lobby saves only what the menu
+  changed from the engine's own controls. Next: the numbered PC checks in
   menu.md section 9.5 (Remote Control session), then a small commit that
   sets `ENGINE_REREADS_PROFILE` and `ENGINE_REREADS_MAPPING` in
   `win/menu.rs` from check 7 (they are false, so Button Layout, Look

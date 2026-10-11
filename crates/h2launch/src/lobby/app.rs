@@ -277,8 +277,12 @@ struct Game {
     /// for everyone).
     left: Option<Leave>,
     /// The engine was started with its GAME MENU (not turned off with
-    /// `H2LOBBY_ENGINE_ARGS=--no-game-menu` or `H2LAUNCH_OVERLAY_FAIL=1`).
+    /// `H2LOBBY_ENGINE_ARGS=--no-game-menu` or `H2LAUNCH_OVERLAY_FAIL=1`),
+    /// and hasn't said since that it turned it off (`Engine::MenuOff`).
     menu: bool,
+    /// The controls the engine runs with: those it was started with, then
+    /// the GAME MENU's last; None before it starts.
+    engine_controls: Option<Controls>,
 }
 
 impl Game {
@@ -1014,6 +1018,7 @@ impl App {
             over: None,
             left: None,
             menu: true,
+            engine_controls: None,
         });
         self.popup = None;
         self.asked = None;
@@ -1088,6 +1093,7 @@ impl App {
                         if host { "hosting" } else { "joining" }
                     ));
                     g.menu = c.game_menu();
+                    g.engine_controls = Some(c.launch_controls());
                     g.child = Some(c);
                     self.screen = Screen::InGame;
                 }
@@ -1158,15 +1164,7 @@ impl App {
     fn on_engine_event(&mut self, e: &Engine, now: Instant) {
         self.log(&format!("lobby: the engine says {}", live::event_line(e)));
         if let Engine::Controls(pairs) = e {
-            for (k, v) in pairs {
-                if let Err(why) = self.set_control(k, v) {
-                    self.log(&format!(
-                        "lobby: the game menu's {k} = {v} wasn't taken: {why}"
-                    ));
-                }
-            }
-            let c = self.settings.controls.describe();
-            self.log(&format!("lobby: controls from the game menu: {c}"));
+            self.on_engine_controls(pairs);
         }
         let Some(g) = self.game.as_mut() else {
             return;
@@ -1201,6 +1199,12 @@ impl App {
                     }
                 });
             }
+            Engine::MenuOff => {
+                // Start goes to the game now: the in-game screen stops
+                // saying it opens the game menu.
+                g.menu = false;
+                note = Some("lobby: the engine's game menu is off for the rest of the game");
+            }
             Engine::Closing | Engine::Controls(_) => {}
         }
         let out = g.told.next(id, host, None, Some(e.clone()));
@@ -1208,6 +1212,44 @@ impl App {
             self.log(n);
         }
         self.send_all(out);
+    }
+
+    /// The GAME MENU's controls (`Engine::Controls`), saved through
+    /// `set_control`: only the ones it changed from the controls the
+    /// engine ran with, so a control flag a test gave the engine for one
+    /// run (`H2LOBBY_ENGINE_ARGS`) isn't saved with them. With no engine,
+    /// they are taken from the lobby's own.
+    fn on_engine_controls(&mut self, pairs: &[(String, String)]) {
+        let old = self
+            .game
+            .as_ref()
+            .and_then(|g| g.engine_controls)
+            .unwrap_or(self.settings.controls);
+        let mut new = old;
+        for (k, v) in pairs {
+            let taken = match new.set(k, v) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(format!("no control called {k:?}")),
+                Err(why) => Err(why),
+            };
+            if let Err(why) = taken {
+                self.log(&format!(
+                    "lobby: the game menu's {k} = {v} wasn't taken: {why}"
+                ));
+            }
+        }
+        for ((k, v), (_, was)) in new.pairs().into_iter().zip(old.pairs()) {
+            if v != was {
+                if let Err(why) = self.set_control(&k, &v) {
+                    self.log(&format!("lobby: {k} = {v} wasn't saved: {why}"));
+                }
+            }
+        }
+        if let Some(g) = self.game.as_mut() {
+            g.engine_controls = Some(new);
+        }
+        let c = self.settings.controls.describe();
+        self.log(&format!("lobby: controls from the game menu: {c}"));
     }
 
     /// The engine's copy exited: on to the carnage report if its game
@@ -5152,6 +5194,7 @@ mod tests {
             over: None,
             left: None,
             menu: true,
+            engine_controls: None,
         });
         a.screen = Screen::Carnage;
         a.csel = 1;
@@ -5826,6 +5869,7 @@ mod tests {
             over: None,
             left: None,
             menu: true,
+            engine_controls: None,
         });
         a.screen = Screen::InGame;
         a.focus = false;
@@ -6042,6 +6086,50 @@ mod tests {
     }
 
     #[test]
+    fn a_one_run_control_flag_is_not_saved_with_the_game_menus_changes() {
+        // lobby.txt has vibration on; a test started the engine with
+        // H2LOBBY_ENGINE_ARGS=--no-vibration, so it runs with it off.
+        let dir = scratch("menu-controls-flag");
+        let mut a = app(&dir);
+        in_game(&mut a, 12, false, false);
+        let saved = a.settings.controls;
+        assert!(saved.vibration);
+        let launch = child::launch_controls("--no-vibration", saved);
+        a.game.as_mut().unwrap().engine_controls = Some(launch);
+        // Only Mouse Sensitivity is changed in the game menu; the engine
+        // says all eight, vibration off among them.
+        let live = Controls {
+            mouse_sensitivity: 4.0,
+            ..launch
+        };
+        a.on_engine_event(&Engine::Controls(live.pairs()), a.now);
+        let want = Controls {
+            mouse_sensitivity: 4.0,
+            ..saved
+        };
+        assert_eq!(a.settings.controls, want);
+        assert_eq!(Settings::load(&dir.join("lobby.txt")).controls, want);
+        // Then vibration itself: that is the player's, and saved.
+        let on = Controls {
+            vibration: true,
+            ..live
+        };
+        let off = Controls {
+            vibration: false,
+            ..live
+        };
+        a.on_engine_event(&Engine::Controls(on.pairs()), a.now);
+        a.on_engine_event(&Engine::Controls(off.pairs()), a.now);
+        assert!(!a.settings.controls.vibration);
+        assert_eq!(a.settings.controls.mouse_sensitivity, 4.0);
+        assert_eq!(
+            Settings::load(&dir.join("lobby.txt")).controls,
+            a.settings.controls
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_in_game_screen_says_how_to_open_the_game_menu() {
         let Ok(mut text) = Text::system() else {
             return;
@@ -6064,6 +6152,15 @@ mod tests {
         // fallback): Start goes to the game then.
         in_game(&mut a, 12, false, false);
         a.game.as_mut().unwrap().menu = false;
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().all(|d| d != IN_GAME_MENU_HINT));
+        // Nor once the engine turned its menu off mid-game (its overlay
+        // failed): the line goes.
+        in_game(&mut a, 12, false, false);
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().any(|d| d == IN_GAME_MENU_HINT));
+        a.on_engine_event(&Engine::MenuOff, a.now);
+        assert!(!a.game.as_ref().unwrap().menu);
         a.draw(&mut c, &mut text);
         assert!(a.drawn().iter().all(|d| d != IN_GAME_MENU_HINT));
         let _ = std::fs::remove_dir_all(&dir);

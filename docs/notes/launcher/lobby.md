@@ -31,11 +31,13 @@ the launcher doesn't do.
   match exactly as `--live` does, but tells the lobby what the engine does
   on its standard output (`H2EVENT running`, `maploaded`, `ended
   <players>`, `closing`; from the in-game GAME MENU also `controls
-  <key=value ...>`, which the lobby saves, and `left game` or `left end`,
-  after which the engine closes without `ended`) instead of talking to
-  the server. The lobby turns those into HOSTING, JOINED, LAUNCHER_RESULT
-  and LEFT_MATCH with the same rules `--live` uses (`live::Told`), and
-  shows the carnage report when MATCH_OVER comes.
+  <key=value ...>`, which the lobby saves (only what changed from the
+  controls the engine runs with), `left game` or `left end`, after which
+  the engine closes without `ended`, and `menu off` when the menu turned
+  itself off, after which the in-game screen stops saying Start opens it)
+  instead of talking to the server. The lobby turns those into HOSTING,
+  JOINED, LAUNCHER_RESULT and LEFT_MATCH with the same rules `--live` uses
+  (`live::Told`), and shows the carnage report when MATCH_OVER comes.
 - A fresh engine process per match: halo2.dll is loaded once per process,
   as MCC does, and a crash in a match doesn't take the lobby with it.
 - The lobby writes `quit` on the child's standard input to close the

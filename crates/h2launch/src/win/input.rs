@@ -24,7 +24,7 @@
 
 use std::ffi::c_void;
 use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering,
+    AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering,
 };
 use std::sync::{Mutex, MutexGuard};
 
@@ -42,7 +42,7 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{ClipCursor, GetClientRect, GetForegroundWindow};
 
 use super::log::log;
-use crate::gamemenu::gate::{self, Hold};
+use crate::gamemenu::gate::{self, Hold, Troughs};
 use crate::gamemenu::vk;
 use crate::padpick::{self, Reading, Watch};
 use crate::profile::{mouse, mouse_motion, mouse_to_stick, InputFrame, INPUT_STATE_SIZE};
@@ -427,9 +427,13 @@ pub fn fill(player: i32, out: *mut u8, pad_only: bool) -> bool {
         1..=3 => (read_pad(player as u32), false),
         _ => (None, false),
     };
-    if player == 0 && PAD.load(Ordering::SeqCst) != pad_was && GATE_ACTIVE.load(Ordering::SeqCst) {
-        // Another pad is player 1's: the old one's releases won't be seen.
-        lock_gate().clear_pad();
+    if player == 0 && PAD.load(Ordering::SeqCst) != pad_was {
+        // Another pad is player 1's: its triggers rest where they rest,
+        // and the old one's releases won't be seen.
+        reset_troughs();
+        if GATE_ACTIVE.load(Ordering::SeqCst) {
+            lock_gate().clear_pad();
+        }
     }
     if let Some(g) = &pad {
         f.pad_buttons = g.wButtons.0;
@@ -502,7 +506,11 @@ pub fn fill(player: i32, out: *mut u8, pad_only: bool) -> bool {
     }
     // The game menu's gate. While it is open the frame is neutral (the
     // mouse's motion and the wheel were still taken above, so nothing
-    // builds up), and nothing below applies.
+    // builds up), and nothing below applies. Where the triggers rest is
+    // kept on every poll, open or not.
+    if player == 0 {
+        observe_troughs(&f);
+    }
     let neutral = player == 0 && gate_player0(&mut f, full);
     if !neutral {
         let live = super::controls();
@@ -590,6 +598,32 @@ static GATE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// The menu keys pressed in our window since the menu last took them, in
 /// order (virtual-key codes).
 static MENU_KEYS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// Player 0's triggers' lowest readings since the pad was picked
+/// (`gate::Troughs`: left, right), so the hold lets go of a trigger near
+/// where it rests. Atomics, so a poll with nothing lower only loads them.
+static TROUGHS: [AtomicU16; 2] = [const { AtomicU16::new(gate::NO_TROUGH) }; 2];
+
+fn observe_troughs(f: &InputFrame) {
+    for (t, v) in TROUGHS.iter().zip([f.left_trigger, f.right_trigger]) {
+        let v = u16::from(v);
+        if v < t.load(Ordering::Relaxed) {
+            t.fetch_min(v, Ordering::SeqCst);
+        }
+    }
+}
+
+fn troughs() -> Troughs {
+    Troughs {
+        lt: TROUGHS[0].load(Ordering::SeqCst),
+        rt: TROUGHS[1].load(Ordering::SeqCst),
+    }
+}
+
+fn reset_troughs() {
+    for t in &TROUGHS {
+        t.store(gate::NO_TROUGH, Ordering::SeqCst);
+    }
+}
 
 fn lock_gate() -> MutexGuard<'static, Hold> {
     GATE.lock().unwrap_or_else(|e| e.into_inner())
@@ -617,13 +651,14 @@ fn gate_player0(f: &mut InputFrame, full: bool) -> bool {
     let open = MENU_OPEN.load(Ordering::SeqCst);
     // Slot 37's frames never carry the device mode: left as they were.
     let frozen = if full { km_frozen() } else { None };
+    let troughs = troughs();
     if open || full {
-        gate::gate(f, ready, open, &mut hold, frozen);
+        gate::gate(f, ready, open, &mut hold, frozen, troughs);
     } else {
         // Slot 37 has no keys, mouse or script in its frame: it masks
         // what is held, but can't see those released.
         let mut copy = *hold;
-        gate::gate(f, ready, open, &mut copy, frozen);
+        gate::gate(f, ready, open, &mut copy, frozen, troughs);
     }
     if !open && hold.is_empty() {
         GATE_ACTIVE.store(false, Ordering::SeqCst);
@@ -647,8 +682,9 @@ pub fn open_menu() {
 /// before the menu counts as closed, so any poll that sees it closed also
 /// sees the hold.
 pub fn close_menu(reading: &InputFrame) {
+    observe_troughs(reading);
     let mut hold = lock_gate();
-    hold.add(reading);
+    hold.add(reading, troughs());
     GATE_ACTIVE.store(true, Ordering::SeqCst);
     MENU_OPEN.store(false, Ordering::SeqCst);
 }

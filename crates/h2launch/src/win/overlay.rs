@@ -18,12 +18,18 @@
 //!   size (`gfx::swap_size`), which only our resize changes, so this is a
 //!   safety net: a resize's new panel comes on the menu's next tick.
 //!
-//! A panic or a Direct3D error turns the overlay off for the run
-//! (`failed`); the menu then turns itself off and Start goes back to the
-//! engine, while screenshots and present counting go on.
+//! A panic or a Direct3D error, in the copy or in making the texture
+//! (`fail`), turns the overlay off for the run (`failed`); the menu then
+//! turns itself off and Start goes back to the engine (once PLEASE WAIT,
+//! if it shows, is over), while screenshots and present counting go on.
+//!
+//! `H2LAUNCH_OVERLAY_FAIL` stands in for those failures in the PC checks
+//! (menu.md 9.5, check 17): `stall` never copies the panel, as if it were
+//! never drawn, and `copy` fails the first copy, as a Direct3D error
+//! would. (`1` keeps the menu off from the start: `menu::prepare`.)
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -79,6 +85,23 @@ static MAX_NS: AtomicU64 = AtomicU64::new(0);
 /// Mismatches already logged, of each kind (format, samples, size): a
 /// few each, not every frame.
 static ODD_LOGS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// `H2LAUNCH_OVERLAY_FAIL`'s stand-in for this run (`set_stand_in`).
+static STAND_IN: AtomicU8 = AtomicU8::new(NO_STAND_IN);
+const NO_STAND_IN: u8 = 0;
+const STALL: u8 = 1;
+const COPY_FAILS: u8 = 2;
+
+/// Takes `H2LAUNCH_OVERLAY_FAIL`'s value for a stand-in that fails at run
+/// time (`stall` or `copy`, see the module notes); false for any other.
+pub fn set_stand_in(which: &str) -> bool {
+    let v = match which {
+        "stall" => STALL,
+        "copy" => COPY_FAILS,
+        _ => return false,
+    };
+    STAND_IN.store(v, Ordering::SeqCst);
+    true
+}
 
 /// Shows or hides the panel.
 pub fn show(on: bool) {
@@ -87,6 +110,23 @@ pub fn show(on: bool) {
 
 pub fn failed() -> bool {
     FAILED.load(Ordering::SeqCst)
+}
+
+/// The overlay failed: off for the run, said once. Never blocks (the
+/// render thread calls it).
+fn set_failed(why: &str) {
+    VISIBLE.store(false, Ordering::SeqCst);
+    if !FAILED.swap(true, Ordering::SeqCst) {
+        log!("overlay: {why}; the overlay is off for this run");
+    }
+}
+
+/// The window thread couldn't publish the panel (`publish` failed): the
+/// overlay is off for the run, as for a failed copy, and the last panel
+/// is dropped so an older page is never shown in its place.
+pub fn fail(why: &str) {
+    set_failed(why);
+    clear();
 }
 
 /// The newest generation the render thread copied.
@@ -185,10 +225,7 @@ pub fn draw(context: &ID3D11DeviceContext, swap: &IDXGISwapChain) {
         Err(_) => "a panic in the copy".to_string(),
     };
     FAILURES.fetch_add(1, Ordering::Relaxed);
-    VISIBLE.store(false, Ordering::SeqCst);
-    if !FAILED.swap(true, Ordering::SeqCst) {
-        log!("overlay: {error}; the game menu is off for this run (Start goes back to the game)");
-    }
+    set_failed(&error);
 }
 
 /// One frame's copy: true when it copied.
@@ -210,6 +247,13 @@ fn copy(context: &ID3D11DeviceContext, swap: &IDXGISwapChain) -> Result<bool, St
     let Some(p) = panel else {
         return Ok(false);
     };
+    match STAND_IN.load(Ordering::Relaxed) {
+        STALL => return Ok(false),
+        COPY_FAILS => {
+            return Err("H2LAUNCH_OVERLAY_FAIL=copy (a stand-in for a Direct3D error)".into())
+        }
+        _ => {}
+    }
     // SAFETY: our own swap chain; the reference is dropped when this
     // returns, inside end_frame.
     let back: ID3D11Texture2D =

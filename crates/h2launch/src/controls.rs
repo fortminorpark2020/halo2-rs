@@ -1000,11 +1000,12 @@ impl Controls {
     /// These (the saved settings) with the change from `old` to `new`:
     /// only the settings that differ between the two. A value `old` and
     /// `new` share came from somewhere else, such as a control flag given
-    /// for one run, and isn't the player's to save. `new` being Halo 2's
-    /// defaults when `old` wasn't (Use Default Settings) puts every one
-    /// back.
-    pub fn with_changes(&self, old: &Controls, new: &Controls) -> Controls {
-        if new != old && *new == Controls::default() {
+    /// for one run, and isn't the player's to save. `defaults` (the
+    /// player chose Use Default Settings) saves every one of `new`. It is
+    /// said, not guessed from the values: an ordinary change can land on
+    /// Halo 2's defaults too.
+    pub fn with_changes(&self, old: &Controls, new: &Controls, defaults: bool) -> Controls {
+        if defaults {
             return *new;
         }
         let mut c = *self;
@@ -1659,7 +1660,7 @@ mod tests {
             ..launch
         };
         assert_eq!(
-            saved.with_changes(&launch, &live),
+            saved.with_changes(&launch, &live, false),
             Controls {
                 mouse_sensitivity: 4.0,
                 ..saved
@@ -1670,9 +1671,9 @@ mod tests {
             buttons: ButtonLayout::Recon,
             ..live
         };
-        let saved2 = saved.with_changes(&launch, &live);
+        let saved2 = saved.with_changes(&launch, &live, false);
         assert_eq!(
-            saved2.with_changes(&live, &next),
+            saved2.with_changes(&live, &next, false),
             Controls {
                 buttons: ButtonLayout::Recon,
                 mouse_sensitivity: 4.0,
@@ -1680,19 +1681,53 @@ mod tests {
             }
         );
         // Nothing changed: nothing saved.
-        assert_eq!(saved.with_changes(&launch, &launch), saved);
-        // Use Default Settings puts every one back, the flags' too.
+        assert_eq!(saved.with_changes(&launch, &launch, false), saved);
+        // Use Default Settings puts every one back, the flags' too, even
+        // when the live controls were the defaults already.
         assert_eq!(
-            saved2.with_changes(&next, &Controls::default()),
+            saved2.with_changes(&next, &Controls::default(), true),
             Controls::default()
         );
+        assert_eq!(
+            saved2.with_changes(&Controls::default(), &Controls::default(), true),
+            Controls::default()
+        );
+        // An ordinary change that lands on the defaults is still only
+        // that change. lobby.txt has Look Sensitivity 5; the run was
+        // started with --look-sensitivity 3 (the default), so it runs on
+        // the defaults. Mouse Inversion on, then off again: the saved 5
+        // stays.
+        let saved = Controls {
+            look_sensitivity: 5,
+            ..Controls::default()
+        };
+        let launch = ControlFlags {
+            look_sensitivity: Some(3),
+            ..ControlFlags::default()
+        }
+        .over(saved);
+        assert_eq!(launch, Controls::default());
+        let on = Controls {
+            mouse_inverted: true,
+            ..launch
+        };
+        let s1 = saved.with_changes(&launch, &on, false);
+        assert_eq!(
+            s1,
+            Controls {
+                mouse_inverted: true,
+                ..saved
+            }
+        );
+        let s2 = s1.with_changes(&on, &Controls::default(), false);
+        assert_eq!(s2, saved);
         // With no flags the change is the whole of it, as before.
         let off = Controls {
             vibration: false,
             ..Controls::default()
         };
         assert_eq!(
-            Controls::default().with_changes(&Controls::default(), &off),
+            Controls::default().with_changes(&Controls::default(), &off, false),
             off
         );
     }

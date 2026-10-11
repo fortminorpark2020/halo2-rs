@@ -15,7 +15,9 @@
 //! 5. checks that the panel was drawn: one not drawn within a second
 //!    (window not minimised) closes the menu and lets go of the game's
 //!    input, and three of those, or any overlay failure, turn the menu
-//!    off for the run, giving Start back to the engine.
+//!    off for the run, giving Start back to the engine and telling the
+//!    lobby (`H2EVENT menu off`). PLEASE WAIT is exempt: it stays until
+//!    the process ends. Those rules are `gamemenu::watch`'s.
 //!
 //! It opens with Start on player 0's pad or Esc in the game's window,
 //! once the fonts are loaded (`prepare`, at map load), while the game is
@@ -37,6 +39,7 @@ use super::log::log;
 use super::{engine, gfx, input, overlay, Setup};
 use crate::controls::Controls;
 use crate::gamemenu::edges::PadEdges;
+use crate::gamemenu::watch::{self, Act, Off, Watch, END_GAME_WAIT, HEALTH_CLOSES, HEALTH_WAIT};
 use crate::gamemenu::{self, Effect, GameMenu, GameMenuFrame, Key, Leave, MenuContext};
 use crate::live::{self, Engine};
 use crate::profile::{pad, InputFrame};
@@ -48,14 +51,6 @@ pub const ENGINE_REREADS_PROFILE: bool = false;
 /// Whether the engine picks up a new gamepad mapping mid-match (the
 /// button layout). PC check 7 sets it, as above.
 pub const ENGINE_REREADS_MAPPING: bool = false;
-
-/// How long the panel may go undrawn while the menu shows.
-const HEALTH_WAIT: f64 = 1.0;
-/// How many such closes turn the menu off for the run.
-const HEALTH_CLOSES: u32 = 3;
-/// With `--end-game-message`, how long End Game waits for the game to end
-/// before it quits anyway.
-const END_GAME_WAIT: f64 = 10.0;
 
 /// The fonts are loaded and the menu may open; Start and Esc are its own.
 static READY: AtomicBool = AtomicBool::new(false);
@@ -74,7 +69,8 @@ pub fn is_open() -> bool {
 /// At map load (host slot 3, state 1): loads Halo 2's fonts from MCC's
 /// `halo2\h2_fonts` (or uses the built-in font) on a thread of its own,
 /// then makes the menu ready, unless `--no-game-menu` or
-/// `H2LAUNCH_OVERLAY_FAIL=1` keep it off. Runs once.
+/// `H2LAUNCH_OVERLAY_FAIL=1` keep it off (`stall` and `copy` make the
+/// overlay fail later instead: `overlay::set_stand_in`). Runs once.
 pub fn prepare() {
     if PREPARED.swap(true, Ordering::SeqCst) {
         return;
@@ -84,9 +80,13 @@ pub fn prepare() {
         log!("game menu: off (--no-game-menu): Start and Esc reach the game");
         return;
     }
-    if std::env::var_os("H2LAUNCH_OVERLAY_FAIL").is_some_and(|v| v == "1") {
+    let stand_in = std::env::var("H2LAUNCH_OVERLAY_FAIL").unwrap_or_default();
+    if stand_in == "1" {
         log!("game menu: off (H2LAUNCH_OVERLAY_FAIL=1): Start and Esc reach the game");
         return;
+    }
+    if overlay::set_stand_in(&stand_in) {
+        log!("game menu: H2LAUNCH_OVERLAY_FAIL={stand_in}: the overlay will fail once the menu shows (a stand-in for the safety checks)");
     }
     let dir = crate::mccroot::join(&s.root, r"halo2\h2_fonts");
     let spawned = std::thread::Builder::new()
@@ -109,6 +109,8 @@ pub fn prepare() {
         });
     if let Err(e) = spawned {
         log!("game menu: off (no thread for its fonts: {e})");
+        // The lobby said the menu opens with Start; it won't.
+        live::tell(Engine::MenuOff);
     }
 }
 
@@ -136,14 +138,9 @@ pub struct Driver {
     shown: Option<(GameMenuFrame, (u32, u32))>,
     /// The overlay generation of that panel.
     published: u64,
-    /// Since when the panel has been waiting to be drawn.
-    behind_since: Option<f64>,
-    health_closes: u32,
-    /// Turned off for the run.
-    off: bool,
-    game_over_seen: bool,
-    /// `--end-game-message`: when End Game quits anyway.
-    end_game_at: Option<f64>,
+    /// The safety rules: the panel's health, turning off, the game's end
+    /// and End Game's wait.
+    watch: Watch,
     /// The controls the engine's profile and gamepad mapping were last
     /// built from (`host::publish_controls`).
     engine_controls: Controls,
@@ -177,48 +174,34 @@ impl Driver {
             script_keys: Vec::new(),
             shown: None,
             published: 0,
-            behind_since: None,
-            health_closes: 0,
-            off: false,
-            game_over_seen: false,
-            end_game_at: None,
+            watch: Watch::new(),
             engine_controls: s.controls,
         }
     }
 
     /// One pass of the window thread's loop (`t`: seconds since start).
     pub fn tick(&mut self, t: f64) {
-        if self.off || !ready() {
-            // An End Game confirmed before the menu was turned off still
-            // quits on time.
-            self.end_game_wait(t);
-            if !self.off {
-                // Presses before the menu is ready never open it later.
-                let _ = input::take_menu_keys();
-            }
+        let off = self.watch.is_off();
+        if !off && !ready() {
+            // Presses before the menu is ready never open it later.
+            let _ = input::take_menu_keys();
             return;
         }
-        let (reading, presses) = self.read(t);
-        if overlay::failed() {
-            self.turn_off("the overlay failed", &reading);
-            return;
-        }
+        // Turned off, only End Game's wait goes on (a confirmed End Game
+        // still quits on time).
+        let (reading, presses) = if off {
+            Default::default()
+        } else {
+            self.read(t)
+        };
         let ended = super::GAME_ENDED.load(Ordering::SeqCst);
-        if ended && !self.game_over_seen {
-            self.game_over_seen = true;
-            if self.end_game_at.take().is_some() {
-                // The End Game experiment ended the game: show its end.
-                log!("game menu: the game ended after End Game's engine message");
-                self.force_close(&reading);
-            } else {
-                let fx = self.menu.game_over();
-                if !fx.is_empty() {
-                    log!("game menu: closed (game over)");
-                }
-                self.apply(fx, &reading, t);
-            }
+        let acts = self
+            .watch
+            .start(t, overlay::failed(), self.menu.page(), ended);
+        self.act(acts, &reading, t);
+        if self.watch.is_off() {
+            return;
         }
-        self.end_game_wait(t);
         for p in presses {
             let fx = if self.menu.is_open() {
                 let before = self.menu.page();
@@ -257,32 +240,61 @@ impl Driver {
             };
             self.apply(fx, &reading, t);
         }
-        if self.menu.is_open() && !self.off {
-            self.draw();
-            overlay::show(true);
-            // PLEASE WAIT stays until the process ends (the quit's wait, or
-            // End Game's): a slow panel there must not let go of the
-            // game's input, nor let the menu open again.
-            if self.menu.page() != gamemenu::Page::Wait {
-                self.health(t, &reading);
+        if self.menu.is_open() {
+            // A failed overlay draws nothing more (it shows nothing, and
+            // a failed publish isn't tried again every tick).
+            if !overlay::failed() {
+                self.draw();
             }
+            let failed = overlay::failed();
+            if !failed {
+                overlay::show(true);
+            }
+            // SAFETY: a query on our own window.
+            let iconic = unsafe { IsIconic(super::hwnd()) }.as_bool();
+            let behind = watch::behind(self.shown.is_some(), self.published, overlay::drawn());
+            let acts = self
+                .watch
+                .panel(t, failed, self.menu.page(), behind, iconic);
+            self.act(acts, &reading, t);
         }
     }
 
-    /// `--end-game-message`'s wait: done once the game has ended (the
-    /// game's end shows), or past its time a quit as Leave Game's. It
-    /// runs with the menu off too, so a confirmed End Game is never
-    /// dropped.
-    fn end_game_wait(&mut self, t: f64) {
-        let Some(at) = self.end_game_at else { return };
-        if super::GAME_ENDED.load(Ordering::SeqCst) {
-            self.end_game_at = None;
-            log!("game menu: the game ended after End Game's engine message");
-        } else if t >= at {
-            self.end_game_at = None;
-            log!("game menu: the game didn't end {END_GAME_WAIT} s after End Game's engine message; quitting");
-            super::set_reason("ended from the game menu");
-            super::request_quit(super::QUIT_USER);
+    /// Does what the safety rules say (`gamemenu::watch`).
+    fn act(&mut self, acts: Vec<Act>, reading: &InputFrame, t: f64) {
+        for a in acts {
+            match a {
+                Act::NotDrawn(n) => {
+                    log!(
+                        "game menu: its panel wasn't drawn for {HEALTH_WAIT} s; closed it and let go of the game's input ({n} of {HEALTH_CLOSES})"
+                    );
+                    self.force_close(reading);
+                }
+                Act::EndGameEnded => {
+                    // The End Game experiment ended the game: show its end.
+                    log!("game menu: the game ended after End Game's engine message");
+                    self.force_close(reading);
+                }
+                Act::GameOver => {
+                    let fx = self.menu.game_over();
+                    if !fx.is_empty() {
+                        log!("game menu: closed (game over)");
+                    }
+                    self.apply(fx, reading, t);
+                }
+                Act::TurnOff(why) => self.turn_off(
+                    match why {
+                        Off::Failed => "the overlay failed",
+                        Off::NotDrawn => "its panel didn't show three times",
+                    },
+                    reading,
+                ),
+                Act::Quit => {
+                    log!("game menu: the game didn't end {END_GAME_WAIT} s after End Game's engine message; quitting");
+                    super::set_reason("ended from the game menu");
+                    super::request_quit(super::QUIT_USER);
+                }
+            }
         }
     }
 
@@ -293,7 +305,7 @@ impl Driver {
 
     /// The menu may open: ready, the map loaded, the game on, no quit.
     fn can_open(&self) -> bool {
-        !self.off
+        !self.watch.is_off()
             && ready()
             && super::marked(&super::STATE1_AT).is_some()
             && !super::GAME_ENDED.load(Ordering::SeqCst)
@@ -375,7 +387,8 @@ impl Driver {
                     self.closed(reading);
                     log!("game menu: closed");
                 }
-                Effect::Controls(c) => self.controls(c),
+                Effect::Controls(c) => self.controls(c, false),
+                Effect::Defaults => self.controls(Controls::default(), true),
                 Effect::Leave(k) => self.leave(k, t),
             }
         }
@@ -388,7 +401,7 @@ impl Driver {
         overlay::show(false);
         overlay::clear();
         self.shown = None;
-        self.behind_since = None;
+        self.watch.closed();
         self.publish();
     }
 
@@ -435,14 +448,17 @@ impl Driver {
         }
     }
 
+    /// The safety rules turned the menu off for the run (`Watch` keeps
+    /// that, and a pending End Game still quits): closed, Start and Esc
+    /// given back to the engine, and the lobby told, so its in-game
+    /// screen stops saying Start opens the menu.
     fn turn_off(&mut self, why: &str, reading: &InputFrame) {
         self.force_close(reading);
-        self.off = true;
-        // A pending End Game (`end_game_at`) is kept: `tick` still quits.
         READY.store(false, Ordering::SeqCst);
         overlay::show(false);
         overlay::clear();
         log!("game menu: off for this run ({why}); Start and Esc reach the game again");
+        live::tell(Engine::MenuOff);
     }
 
     /// Draws and publishes the panel if its page or the back buffer's
@@ -485,40 +501,21 @@ impl Driver {
                 self.shown = Some((frame, size));
             }
             Err(e) => {
+                // Off for the run, as a failed copy is: retried every tick
+                // it would redraw the panel and log each 5 ms, while the
+                // render thread copied an older page.
                 log!("game menu: the panel wasn't published: {e}");
+                overlay::fail(&format!("the panel wasn't published ({e})"));
                 self.shown = None;
             }
         }
     }
 
-    /// The panel must reach the screen: see the module notes.
-    fn health(&mut self, t: f64, reading: &InputFrame) {
-        // SAFETY: a query on our own window.
-        let iconic = unsafe { IsIconic(super::hwnd()) }.as_bool();
-        let behind = self.shown.is_none() || overlay::drawn() < self.published;
-        if !behind || iconic {
-            self.behind_since = None;
-            return;
-        }
-        let since = *self.behind_since.get_or_insert(t);
-        if t - since < HEALTH_WAIT {
-            return;
-        }
-        self.health_closes += 1;
-        log!(
-            "game menu: its panel wasn't drawn for {HEALTH_WAIT} s; closed it and let go of the game's input ({} of {HEALTH_CLOSES})",
-            self.health_closes
-        );
-        self.force_close(reading);
-        if self.health_closes >= HEALTH_CLOSES {
-            self.turn_off("its panel didn't show three times", reading);
-        }
-    }
-
     /// The menu changed the controls: the launcher's own use of them now,
     /// saved; the engine's profile and mapping follow when the menu
-    /// closes (`publish`).
-    fn controls(&mut self, c: Controls) {
+    /// closes (`publish`). `defaults`: Use Default Settings, which saves
+    /// every one.
+    fn controls(&mut self, c: Controls, defaults: bool) {
         let old = super::controls();
         super::set_controls(c);
         if old.vibration && !c.vibration {
@@ -532,7 +529,7 @@ impl Driver {
             live::tell(event);
         } else {
             log!("game menu: {}", live::event_line(&event));
-            save_controls(&old, &c);
+            save_controls(&old, &c, defaults);
         }
     }
 
@@ -560,7 +557,7 @@ impl Driver {
             Some(n) => {
                 log!("game menu: End Game: posting engine message {n} (--end-game-message); quitting in {END_GAME_WAIT} s unless the game ends");
                 engine::post_message(n, "--end-game-message");
-                self.end_game_at = Some(t + END_GAME_WAIT);
+                self.watch.end_game(t);
             }
             None => {
                 log!("game menu: {reason}");
@@ -574,13 +571,13 @@ impl Driver {
 /// Saves the change from `old` to `c` in `lobby.txt` in the launcher's
 /// folder (with `--instance`, its own), for runs with no lobby
 /// (`--offline`, `--live`): only the settings the player changed, so a
-/// control flag given for this run isn't saved with them
-/// (`Controls::with_changes`).
-fn save_controls(old: &Controls, c: &Controls) {
+/// control flag given for this run isn't saved with them, or every one
+/// for Use Default Settings (`defaults`; `Controls::with_changes`).
+fn save_controls(old: &Controls, c: &Controls, defaults: bool) {
     let dir = crate::lobby::settings::folder(super::instance());
     let path = dir.join("lobby.txt");
     let mut s = crate::lobby::settings::Settings::load(&path);
-    s.controls = s.controls.with_changes(old, c);
+    s.controls = s.controls.with_changes(old, c, defaults);
     let saved = std::fs::create_dir_all(&dir)
         .map_err(|e| format!("{}: {e}", dir.display()))
         .and_then(|_| s.save(&path));

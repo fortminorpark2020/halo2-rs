@@ -151,6 +151,8 @@ pub struct Running {
     asked: Option<Instant>,
     /// It was started with its GAME MENU (`game_menu_on`).
     game_menu: bool,
+    /// The controls it was started with (`launch_controls`).
+    controls: Controls,
 }
 
 /// Whether an engine started with these extra words
@@ -161,6 +163,18 @@ pub struct Running {
 pub fn game_menu_on(extra: &str, overlay_fail: Option<&std::ffi::OsStr>) -> bool {
     !extra.split_whitespace().any(|w| w == "--no-game-menu")
         && overlay_fail.is_none_or(|v| v != "1")
+}
+
+/// The controls an engine started for a match with these extra words
+/// (`H2LOBBY_ENGINE_ARGS`) runs with: the match's (the lobby's
+/// Settings), with any control flag among the words put over them (the
+/// last flag given wins, and the extra words come last). The lobby
+/// keeps them so a test's one-run flag (`--no-vibration`, say) isn't
+/// taken for a change the player made in the GAME MENU.
+pub fn launch_controls(extra: &str, base: Controls) -> Controls {
+    crate::cli::parse(extra.split_whitespace())
+        .map(|a| a.controls.over(base))
+        .unwrap_or(base)
 }
 
 impl Running {
@@ -232,12 +246,18 @@ impl Running {
             done: false,
             asked: None,
             game_menu: game_menu_on(&extra, std::env::var_os("H2LAUNCH_OVERLAY_FAIL").as_deref()),
+            controls: launch_controls(&extra, m.controls),
         })
     }
 
     /// It was started with its in-game GAME MENU.
     pub fn game_menu(&self) -> bool {
         self.game_menu
+    }
+
+    /// The controls it was started with (`launch_controls`).
+    pub fn launch_controls(&self) -> Controls {
+        self.controls
     }
 
     /// Let its window come to the front (again: the engine's window
@@ -567,6 +587,14 @@ fn fake_effect(e: Effect) -> Option<Leave> {
             println!("fake engine: controls: {}", c.describe());
             live::tell(Engine::Controls(c.pairs()));
         }
+        Effect::Defaults => {
+            let c = Controls::default();
+            println!(
+                "fake engine: controls: {} (Use Default Settings)",
+                c.describe()
+            );
+            live::tell(Engine::Controls(c.pairs()));
+        }
         Effect::Leave(k) => {
             println!(
                 "fake engine: {} from the game menu",
@@ -620,6 +648,30 @@ mod tests {
             text += &format!("player = {:#x} machine={i} team={t} name=P{i}\n", 0x100 + i);
         }
         Session::parse(&text).unwrap()
+    }
+
+    #[test]
+    fn launch_controls_put_the_extra_flags_over_the_lobbys() {
+        let base = Controls {
+            look_sensitivity: 7,
+            ..Controls::default()
+        };
+        assert_eq!(launch_controls("", base), base);
+        assert_eq!(launch_controls("--pad 1 --no-game-menu", base), base);
+        assert_eq!(
+            launch_controls("--no-vibration --layout boxer --look-sensitivity 2", base),
+            Controls {
+                vibration: false,
+                buttons: crate::controls::ButtonLayout::Boxer,
+                look_sensitivity: 2,
+                ..base
+            }
+        );
+        // The last flag given wins, as the engine's own parse has it.
+        assert!(launch_controls("--no-vibration --vibration", base).vibration);
+        // Words the engine wouldn't take: the lobby's (the engine doesn't
+        // start then).
+        assert_eq!(launch_controls("--layout claw", base), base);
     }
 
     #[test]

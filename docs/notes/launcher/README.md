@@ -204,7 +204,9 @@ each packet (default 16, at most 4096). The log stays on the owner's PC.
 
 `H2LAUNCH_OVERLAY_FAIL=1` turns the in-game GAME MENU off, as an overlay
 failure would (a stand-in for testing): Start and Esc then reach the
-engine.
+engine. `H2LAUNCH_OVERLAY_FAIL=stall` (the panel is never copied) and
+`=copy` (the first copy fails) make the overlay fail once the menu shows
+instead, to try the menu's safety rules (menu.md 9.5, check 17).
 
 `--set-option` and `--set-profile` take `<offset>=<type>:<value>`, where the
 offset is decimal or `0x...` and the type is one of `u8 i8 u16 i16 u32 i32

@@ -887,11 +887,15 @@ in section 9.5 pass.
   (`crates/h2ui/src/gamemenu.rs`): drawn on the CPU in Halo 2's fonts from
   MCC's `halo2\h2_fonts`, or the built-in font.
 - **Lobby hand-off** (stage 2): the engine says `H2EVENT controls ...` (the
-  eight `lobby.txt` pairs) when a setting changes and `H2EVENT left game`
-  or `left end` before it quits; the lobby saves the controls through
-  `App::set_control`, lands a player who left on ONLINE (a custom game's
-  leader on Custom) and passes `--game-kind`. `PROTOCOL` and
-  `LIVE_PROTOCOL` are unchanged.
+  eight `lobby.txt` pairs) when a setting changes, `H2EVENT left game`
+  or `left end` before it quits, and `H2EVENT menu off` if the menu turns
+  itself off mid-game (the lobby's in-game screen then stops saying Start
+  opens it). The lobby saves, through `App::set_control`, only the
+  controls that changed from those the engine runs with (its own, with
+  any control flag in `H2LOBBY_ENGINE_ARGS` over them), so a test's
+  one-run flag isn't saved; it lands a player who left on ONLINE (a
+  custom game's leader on Custom) and passes `--game-kind`. `PROTOCOL`
+  and `LIVE_PROTOCOL` are unchanged.
 - **The driver** (`win/menu.rs`) runs on the window thread, which ticks at
   least every 5 ms. It reads the pad the engine's polls picked (without
   disturbing their bookkeeping), the input script, and the menu keys our
@@ -922,7 +926,10 @@ in section 9.5 pass.
     triggers, sticks or keys), keeping the cursor and the keyboard-or-pad
     flag it had when the menu opened, so the HUD's prompts don't switch.
   - Whatever is held when it closes stays masked until released
-    (a trigger counts as released at 30 of 255 or below), so closing with B doesn't
+    (a trigger counts as released at 30 of 255 or below, or, on a pad
+    whose trigger rests higher, 16 above its lowest reading since the pad
+    was picked, at most 80; a trigger resting where it rests is never
+    held), so closing with B doesn't
     melee and A on the last value doesn't jump. Closing adds the driver's
     last reading to that hold before clearing the open flag, so no poll
     can see a held button in between.
@@ -955,17 +962,23 @@ in section 9.5 pass.
   host who leaves then ends a custom game for everyone, uncounted, with
   no carnage report. A real End Game waits for an engine message (check
   15).
-- **Safety.** A panel not drawn within 1 s while the window isn't
-  minimised closes the menu and lets go of the game's input; three of
-  those, or an overlay failure, turn the menu off for the run and Start
-  goes back to the engine. PLEASE WAIT is exempt (it lasts until the
-  process ends), and an End Game waiting on `--end-game-message` still
+- **Safety** (`gamemenu::watch`, Linux-tested; the driver does what it
+  says). A panel not drawn within 1 s while the window isn't minimised
+  closes the menu and lets go of the game's input; three of those, or an
+  overlay failure (a failed copy, or a texture that can't be made for the
+  panel), turn the menu off for the run, Start goes back to the engine,
+  and the lobby is told (`H2EVENT menu off`). PLEASE WAIT is exempt from
+  both (it lasts until the process ends, input neutral and Start the
+  menu's): a failure seen under it hides the panel, and turns the menu off
+  only once it closes. An End Game waiting on `--end-game-message` still
   quits on time if the menu is turned off meanwhile. A natural end while the menu is open closes it
   (`game menu: closed (game over)`), so the scoreboard shows, and it can't
   be opened again after the game has ended.
 - **Flags.** `--no-game-menu` (the menu off; Start and Esc reach the
   game). `H2LAUNCH_OVERLAY_FAIL=1` (environment; the same, as a stand-in
-  for an overlay failure, for check 11). `--reload-message N` (when the
+  for an overlay failure, for check 11); `=stall` (the panel is never
+  copied, as if never drawn) and `=copy` (the first copy fails, as a
+  Direct3D error would) fail at run time instead, for check 17. `--reload-message N` (when the
   menu closes after a change to Button Layout, Look Sensitivity, Auto Look
   Centering, or vibration turned on, post engine message N once the new
   generations are in place; the experiment of check 8).
@@ -1003,8 +1016,10 @@ lobby started the engine, or straight into `lobby.txt` in the instance's
 settings folder in `--offline` runs, which also print the same `H2EVENT
 controls ...` line in the log. Those runs save only the settings changed
 in the menu, so a control flag given for one run (`--layout`,
-`--no-vibration`, ...) isn't saved with them; Use Default Settings saves
-every one. The PC checks are in section 9.5.
+`--no-vibration`, ...) isn't saved with them, even when a change lands
+on Halo 2's defaults; Use Default Settings (said as such by the menu, not
+guessed from the values) saves every one. The PC checks are in section
+9.5.
 
 ## 8. Option A's work, if it is chosen
 
@@ -1329,6 +1344,9 @@ the saved controls away from the owner's own. Each script starts with
      LEAVE GAME dialog, so the Start at 6 would have done nothing.)
    - C: `5 press start`, `6 press back for 1.5`, `9 quit`. Pass: no
      scoreboard while Back stays held after the close.
+   - D, only with a pad whose trigger rests above 30 (the `--diag`
+     `input:` lines show it at rest): open and close the menu without
+     touching the trigger, then pull it. Pass: it fires.
 5. **Keyboard.** `5 key esc`, `5.5 screenshot`, `6 key down`, `6.5 key
    enter`, `7 screenshot`, `8 key backspace`, `9 key esc`, `9.5
    screenshot`, `11 key esc`, `11.5 key w for 2`, `11.6 key space for
@@ -1430,6 +1448,32 @@ the saved controls away from the owner's own. Each script starts with
     with Back doesn't flash the scoreboard; Bumper Jumper behaves as the
     menu says; the panel's size, colours and words against his memory or
     a video.
+17. **Safety at run time** (offline; `H2LAUNCH_OVERLAY_FAIL` makes the
+    overlay fail once the menu shows, as check 11 can't: there the menu
+    is never ready).
+    - A, the panel never drawn: `H2LAUNCH_OVERLAY_FAIL=stall`, `5 press
+      start`, `8 press start`, `11 press start`, `14 press start`, `20
+      quit`. Pass: about 1 s after each of the first three Starts, `its
+      panel wasn't drawn for 1 s; closed it and let go of the game's
+      input (n of 3)`, and the `input:` lines are neutral only in those
+      seconds; after the third, `game menu: off for this run (its panel
+      didn't show three times)`; the Start at 14 reaches the engine
+      (check 2's slot 7 and 8 lines).
+    - B, PLEASE WAIT holds: `H2LAUNCH_OVERLAY_FAIL=stall`, `5 press
+      start`, `5.2 press a`, `5.4 press up`, `5.6 press a`, `20 quit`
+      (Leave Game confirmed within the first second). Pass: no `closed
+      it` line; `input:` lines neutral until the process ends about 5 s
+      later; no slot 7 or 8 call.
+    - C, a Direct3D error: `H2LAUNCH_OVERLAY_FAIL=copy`, `5 press start`,
+      `8 press start`, `12 quit`. Pass: `overlay: H2LAUNCH_OVERLAY_FAIL=copy
+      ...; the overlay is off for this run`, then `game menu: off for this
+      run (the overlay failed)` on the next tick; the Start at 8 reaches
+      the engine.
+    - D, the lobby told: A again in a lobby match, with
+      `H2LAUNCH_OVERLAY_FAIL=stall` set where the lobby starts. Pass: the
+      lobby logs `the engine says H2EVENT menu off`, and its in-game
+      screen drops "Start or Esc in the game's window opens the game
+      menu."
 
 ## 10. Tests
 

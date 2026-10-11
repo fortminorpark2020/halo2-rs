@@ -8,13 +8,15 @@
 //!
 //! Everything here is plain Rust with no Windows code, so Linux tests
 //! cover it: the pages and keys (`GameMenu`), the pad's presses
-//! (`edges`), and what the engine's input polls get while the menu is
-//! open and after it closes (`gate`). The panel is drawn by
+//! (`edges`), what the engine's input polls get while the menu is open
+//! and after it closes (`gate`), and the safety rules that close it or
+//! turn it off (`watch`). The panel is drawn by
 //! `h2ui::gamemenu` from the `GameMenuFrame` that `GameMenu::frame`
 //! builds. The wording is ours; see `words`.
 
 pub mod edges;
 pub mod gate;
+pub mod watch;
 
 use crate::controls::{self, ButtonLayout, Controls, StickLayout};
 use crate::session::Session;
@@ -382,8 +384,13 @@ pub enum Effect {
     Opened,
     /// The menu closed: release it.
     Closed,
-    /// The live controls changed: apply and save them.
+    /// The live controls changed: apply them, and save the settings that
+    /// changed.
     Controls(Controls),
+    /// Use Default Settings: the live controls are now Halo 2's defaults;
+    /// apply them and save every one, even those already at the default
+    /// (a control flag given for one run may have put them there).
+    Defaults,
     /// Leave the game (or end it): quit the engine.
     Leave(Leave),
 }
@@ -580,7 +587,8 @@ impl GameMenu {
                     }
                     Ask::Defaults => {
                         self.page = Page::Controller { row: DEFAULTS_ROW };
-                        self.change(Controls::default())
+                        self.live = Controls::default();
+                        vec![Effect::Defaults]
                     }
                 },
                 Key::A | Key::B | Key::Back => match ask {
@@ -1588,17 +1596,33 @@ mod tests {
             assert_eq!(m.page(), Page::Controller { row: DEFAULTS_ROW });
             assert_eq!(m.live(), changed);
         }
-        // Use Defaults: Halo 2's defaults, back on the row.
+        // Use Defaults: Halo 2's defaults, back on the row, said as Use
+        // Default Settings (every one is saved), not as a change.
         let mut m = GameMenu::new(changed);
         m.open();
         press(&mut m, &to_defaults, &c);
         let fx = press(&mut m, &[Key::Up, Key::A], &c);
-        assert_eq!(fx, [Effect::Controls(Controls::default())]);
+        assert_eq!(fx, [Effect::Defaults]);
         assert_eq!(m.live(), Controls::default());
         assert_eq!(m.page(), Page::Controller { row: DEFAULTS_ROW });
-        // Already the defaults: nothing to save.
+        // Already the defaults: said again, since lobby.txt may still
+        // differ (a control flag for one run set the live ones).
         press(&mut m, &[Key::A], &c);
-        assert!(press(&mut m, &[Key::Up, Key::A], &c).is_empty());
+        assert_eq!(press(&mut m, &[Key::Up, Key::A], &c), [Effect::Defaults]);
+        // A change that lands on the defaults is an ordinary change.
+        let mut m = GameMenu::new(Controls {
+            mouse_inverted: true,
+            ..Controls::default()
+        });
+        m.open();
+        press(&mut m, &[Key::Down, Key::A], &c);
+        for _ in 0..MOUSE_INVERSION_ROW {
+            press(&mut m, &[Key::Down], &c);
+        }
+        assert_eq!(
+            press(&mut m, &[Key::A], &c),
+            [Effect::Controls(Controls::default())]
+        );
     }
 
     #[test]

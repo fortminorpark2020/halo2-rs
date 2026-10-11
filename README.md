@@ -121,9 +121,11 @@ install. No game files are included in this repository.
   Custom Game); leaving a ranked game still counts toward your level, and
   leaving a game you host ends it for everyone. End Game ends a custom game
   for everyone; it doesn't count, and there is no carnage report for it
-  yet. The menu hasn't been tried on a PC yet; if it misbehaves, setting
-  `H2LOBBY_ENGINE_ARGS=--no-game-menu` before starting the launcher turns
-  it off and gives Start back to the game. While the game is on, the
+  yet. If the menu can't be shown on your PC, it turns itself off for the
+  rest of that game and Start goes back to the game (the lobby window
+  stops saying Start opens it). The menu hasn't been tried on a PC yet;
+  if it misbehaves, setting `H2LOBBY_ENGINE_ARGS=--no-game-menu` before
+  starting the launcher turns it off and gives Start back to the game. While the game is on, the
   lobby window ignores the controller and the keys that could leave the
   game (Esc, Enter, Backspace, letters), so leaving takes a click. In the
   lobby, Enter or Space is A and Esc or Backspace is B. B on the playlists

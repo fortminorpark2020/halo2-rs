@@ -364,11 +364,15 @@ pub enum Engine {
     /// save. Text, not `Controls`, as `Engine` is `Eq` and the mouse
     /// sensitivity is an f32.
     Controls(Vec<(String, String)>),
+    /// The GAME MENU turned itself off for the rest of the run (its
+    /// overlay failed, or its panel wasn't drawn three times): Start and
+    /// Esc reach the game again.
+    MenuOff,
 }
 
 /// How an engine event is written on the standard output with
 /// `--events`, for the lobby that started this launcher: `H2EVENT running`,
-/// `maploaded`, `closing`, `left game`, `left end`; `controls` and then
+/// `maploaded`, `closing`, `left game`, `left end`, `menu off`; `controls` and then
 /// the eight controls as `key=value` in `KEYS` order (`lobby.txt`'s names
 /// and values); or `ended` and then each player as
 /// `<relay id>,<team>,<place>,<score>,<kills>,<assists>,<deaths>,<betrayals>,<suicides>,<left>`
@@ -380,6 +384,7 @@ pub fn event_line(e: &Engine) -> String {
         Engine::Closing => format!("{EVENT} closing"),
         Engine::Left(Leave::Game) => format!("{EVENT} left game"),
         Engine::Left(Leave::End) => format!("{EVENT} left end"),
+        Engine::MenuOff => format!("{EVENT} menu off"),
         Engine::Controls(pairs) => {
             let mut line = format!("{EVENT} controls");
             for (k, v) in pairs {
@@ -429,6 +434,10 @@ pub fn parse_event_line(line: &str) -> Option<Engine> {
         "left" => match words.next()? {
             "game" => Engine::Left(Leave::Game),
             "end" => Engine::Left(Leave::End),
+            _ => return None,
+        },
+        "menu" => match words.next()? {
+            "off" => Engine::MenuOff,
             _ => return None,
         },
         "controls" => {
@@ -630,8 +639,9 @@ impl Told {
             }
             // Nothing new goes to the server: a player who leaves from the
             // game menu is told as LEFT_MATCH when the engine closes, as
-            // before, and the controls are the lobby's to save.
-            Some(Engine::Left(_) | Engine::Controls(_)) => {}
+            // before, the controls are the lobby's to save, and the menu
+            // turning off is the lobby's to show.
+            Some(Engine::Left(_) | Engine::Controls(_) | Engine::MenuOff) => {}
             _ => {}
         }
         if host && self.asked_to_host && self.running && !self.hosting {
@@ -652,8 +662,8 @@ fn run(mut lobby: Lobby, id: u64, host: bool, rx: Receiver<Engine>, done: Sender
             log_event(&lobby.log, &e);
             out.extend(told.next(id, host, Some(&e), None));
         }
-        // The game menu's Left and Controls change nothing here: a
-        // player who leaves is told as LEFT_MATCH when the launcher
+        // The game menu's Left, Controls and MenuOff change nothing here:
+        // a player who leaves is told as LEFT_MATCH when the launcher
         // closes, and the controls were saved by the engine's copy.
         while let Ok(what) = rx.try_recv() {
             closing |= what == Engine::Closing;
@@ -888,6 +898,7 @@ mod tests {
             ended,
             Engine::Left(Leave::Game),
             Engine::Left(Leave::End),
+            Engine::MenuOff,
             Engine::Controls(Controls::default().pairs()),
             Engine::Controls(changed.pairs()),
         ] {
@@ -897,6 +908,7 @@ mod tests {
         }
         assert_eq!(event_line(&Engine::Left(Leave::Game)), "H2EVENT left game");
         assert_eq!(event_line(&Engine::Left(Leave::End)), "H2EVENT left end");
+        assert_eq!(event_line(&Engine::MenuOff), "H2EVENT menu off");
         assert_eq!(
             event_line(&Engine::Controls(changed.pairs())),
             "H2EVENT controls button_layout=bumper_jumper thumbstick_layout=legacy_southpaw \
@@ -939,6 +951,10 @@ mod tests {
             "H2EVENT left now",
             "H2EVENT left game now",
             "H2EVENT left Game",
+            // The menu turning off: exactly two words.
+            "H2EVENT menu",
+            "H2EVENT menu on",
+            "H2EVENT menu off now",
         ] {
             assert_eq!(parse_event_line(other), None, "{other:?}");
         }
@@ -1001,6 +1017,7 @@ mod tests {
             for e in [
                 Engine::Left(Leave::Game),
                 Engine::Left(Leave::End),
+                Engine::MenuOff,
                 Engine::Controls(Controls::default().pairs()),
             ] {
                 assert!(t.next(7, host, None, Some(e.clone())).is_empty(), "{e:?}");

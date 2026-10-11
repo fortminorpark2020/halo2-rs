@@ -9,7 +9,9 @@
 //! - `Hold`: what was held when the menu closed stays away from the
 //!   engine until it is released, one button, key or trigger at a time,
 //!   so the press that closed the menu (or one held through it) doesn't
-//!   act in the game. A hold only ever removes input;
+//!   act in the game. A hold only ever removes input. A trigger counts as
+//!   released near where it rests (`Troughs`), so a worn pad's trigger
+//!   resting above XInput's 30 isn't held for good;
 //! - `look_flip`: look inversion changed in the menu, applied by flipping
 //!   the look stick, since the profile keeps its launch value (the engine
 //!   would flip it a second time);
@@ -19,8 +21,20 @@
 use crate::controls::Controls;
 use crate::profile::{pad, InputFrame};
 
-/// A held trigger stops being held once it reads this or less.
+/// A held trigger stops being held once it reads this or less, on a pad
+/// whose triggers rest at 0 as XInput's should (XInput's own threshold).
 pub const TRIGGER_RELEASE: u8 = 30;
+/// For a trigger that rests higher (a worn or third-party pad): how far
+/// above its trough, its lowest reading since the pad was picked, it
+/// counts as pulled. An estimate.
+pub const TRIGGER_REST_MARGIN: u8 = 16;
+/// The highest trough taken as where a trigger rests: one higher is more
+/// likely a pull held since the pad was picked. So a trigger pulled past
+/// `TRIGGER_REST_MAX + TRIGGER_REST_MARGIN` (80) is always held. An
+/// estimate.
+pub const TRIGGER_REST_MAX: u8 = 64;
+/// A trough with no reading yet (above any reading, so `min` works).
+pub const NO_TROUGH: u16 = 0x100;
 /// Windows' virtual-key code for Esc.
 pub const VK_ESCAPE: usize = 0x1B;
 
@@ -51,6 +65,52 @@ pub fn look_flip(f: &mut InputFrame, live: &Controls, launch: &Controls) {
     }
 }
 
+/// The level at or below which a trigger counts as let go, for a trigger
+/// whose trough (lowest reading since its pad was picked) is `trough`
+/// (`NO_TROUGH`: none yet): `TRIGGER_RELEASE`, or for a trigger that
+/// rests higher, `TRIGGER_REST_MARGIN` above where it rests.
+pub fn trigger_release(trough: u16) -> u8 {
+    match u8::try_from(trough) {
+        Ok(rest) => TRIGGER_RELEASE.max(rest.min(TRIGGER_REST_MAX) + TRIGGER_REST_MARGIN),
+        Err(_) => TRIGGER_RELEASE,
+    }
+}
+
+/// Each trigger's lowest reading since player 0's pad was picked: where
+/// it rests, for `Hold`. The input polls keep it (in atomics) and start
+/// it again when another pad is picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Troughs {
+    pub lt: u16,
+    pub rt: u16,
+}
+
+impl Troughs {
+    /// No reading yet: the triggers count as released at
+    /// `TRIGGER_RELEASE`.
+    pub const NONE: Troughs = Troughs {
+        lt: NO_TROUGH,
+        rt: NO_TROUGH,
+    };
+
+    /// Takes the triggers' readings in `f`.
+    pub fn observe(&mut self, f: &InputFrame) {
+        self.lt = self.lt.min(u16::from(f.left_trigger));
+        self.rt = self.rt.min(u16::from(f.right_trigger));
+    }
+
+    /// Each trigger's release level (`trigger_release`): left, right.
+    pub fn release(&self) -> [u8; 2] {
+        [trigger_release(self.lt), trigger_release(self.rt)]
+    }
+}
+
+impl Default for Troughs {
+    fn default() -> Troughs {
+        Troughs::NONE
+    }
+}
+
 /// Player 0's frame through the menu's gate, after the pad, keys, mouse
 /// and script are merged and before the mouse's scaling, the thumbstick
 /// layout, the look flip and mouse-to-stick (the game menu's design,
@@ -65,18 +125,26 @@ pub fn look_flip(f: &mut InputFrame, live: &Controls, launch: &Controls) {
 ///    unfreezes it once `hold` is empty).
 ///
 /// `frozen_km` is `is_km` as it was when the menu opened, while the menu
-/// is open or a hold from it is pending.
-pub fn gate(f: &mut InputFrame, ready: bool, open: bool, hold: &mut Hold, frozen_km: Option<bool>) {
+/// is open or a hold from it is pending. `troughs` say where the
+/// triggers rest.
+pub fn gate(
+    f: &mut InputFrame,
+    ready: bool,
+    open: bool,
+    hold: &mut Hold,
+    frozen_km: Option<bool>,
+    troughs: Troughs,
+) {
     if ready {
         strip(f);
     }
     if open {
-        hold.add(f);
+        hold.add(f, troughs);
         *f = neutral(frozen_km.unwrap_or(f.is_km), (f.cursor_x, f.cursor_y));
         return;
     }
     if !hold.is_empty() {
-        hold.apply(f);
+        hold.apply(f, troughs);
     }
     if let Some(km) = frozen_km {
         f.is_km = km;
@@ -88,7 +156,8 @@ pub fn gate(f: &mut InputFrame, ready: bool, open: bool, hold: &mut Hold, frozen
 pub struct Hold {
     /// Pad buttons (XInput bits).
     pad: u16,
-    /// The triggers, held while above `TRIGGER_RELEASE`.
+    /// The triggers, held while above their release level
+    /// (`trigger_release`).
     lt: bool,
     rt: bool,
     /// Mouse buttons (`profile::mouse` bits).
@@ -109,11 +178,13 @@ impl Hold {
         }
     }
 
-    /// Adds everything held in `f`.
-    pub fn add(&mut self, f: &InputFrame) {
+    /// Adds everything held in `f`: a trigger only when pulled past its
+    /// release level, not for resting where it rests.
+    pub fn add(&mut self, f: &InputFrame, troughs: Troughs) {
+        let [lt, rt] = troughs.release();
         self.pad |= f.pad_buttons;
-        self.lt |= f.left_trigger > TRIGGER_RELEASE;
-        self.rt |= f.right_trigger > TRIGGER_RELEASE;
+        self.lt |= f.left_trigger > lt;
+        self.rt |= f.right_trigger > rt;
         self.mouse |= f.mouse_buttons;
         for (code, _) in f.keys.iter().enumerate().filter(|(_, &k)| k) {
             self.keys[code / 64] |= 1 << (code % 64);
@@ -122,17 +193,18 @@ impl Hold {
 
     /// Takes what is still held out of `f`, and lets go of what `f` shows
     /// released: a held button, key or mouse button reads up until it is
-    /// up, and a held trigger reads 0 until it is at `TRIGGER_RELEASE` or
+    /// up, and a held trigger reads 0 until it is at its release level or
     /// less (then it reads what it is). Never adds anything to `f`.
-    pub fn apply(&mut self, f: &mut InputFrame) {
+    pub fn apply(&mut self, f: &mut InputFrame, troughs: Troughs) {
         self.pad &= f.pad_buttons;
         f.pad_buttons &= !self.pad;
-        for (held, value) in [
-            (&mut self.lt, &mut f.left_trigger),
-            (&mut self.rt, &mut f.right_trigger),
+        let [lt, rt] = troughs.release();
+        for (held, value, release) in [
+            (&mut self.lt, &mut f.left_trigger, lt),
+            (&mut self.rt, &mut f.right_trigger, rt),
         ] {
             if *held {
-                if *value <= TRIGGER_RELEASE {
+                if *value <= release {
                     *held = false;
                 } else {
                     *value = 0;
@@ -246,12 +318,12 @@ mod tests {
         let mut h = Hold::default();
         assert!(h.is_empty());
         assert_eq!(Hold::new(), h);
-        h.add(&busy());
+        h.add(&busy(), Troughs::NONE);
         assert!(!h.is_empty());
         // Everything still held: none of it reaches the engine, but the
         // sticks and the mouse's motion do.
         let mut f = busy();
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert_eq!(f.pad_buttons, 0);
         assert_eq!(f.mouse_buttons, 0);
         assert!(f.keys.iter().all(|&k| !k));
@@ -262,36 +334,36 @@ mod tests {
         // then reaches the engine.
         let mut f = busy();
         f.pad_buttons &= !pad::A;
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert_eq!(f.pad_buttons, 0);
         let mut f = busy();
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert_eq!(f.pad_buttons, pad::A);
         // W released, then pressed again: through. Left Ctrl still held.
         let mut f = busy();
         f.keys[0x57] = false;
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         let mut f = busy();
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert!(f.keys[0x57] && !f.keys[0xA2] && !f.keys[VK_ESCAPE]);
         // The left mouse button released: X2 still held.
         let mut f = busy();
         f.mouse_buttons = mouse::X2;
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert_eq!(f.mouse_buttons, 0);
         let mut f = busy();
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert_eq!(f.mouse_buttons, mouse::LEFT);
         // Everything released once: empty.
         let mut f = InputFrame::default();
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert!(h.is_empty(), "{h:?}");
         assert_eq!(f, InputFrame::default());
         // Cleared by part.
-        h.add(&busy());
+        h.add(&busy(), Troughs::NONE);
         h.clear_pad();
         let mut f = busy();
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert_eq!(f.pad_buttons, busy().pad_buttons);
         assert_eq!(f.left_trigger, 200);
         assert_eq!(f.mouse_buttons, 0);
@@ -302,32 +374,35 @@ mod tests {
     #[test]
     fn a_held_trigger_clears_at_30() {
         let mut h = Hold::default();
-        h.add(&InputFrame {
-            left_trigger: 255,
-            right_trigger: TRIGGER_RELEASE,
-            ..InputFrame::default()
-        });
+        h.add(
+            &InputFrame {
+                left_trigger: 255,
+                right_trigger: TRIGGER_RELEASE,
+                ..InputFrame::default()
+            },
+            Troughs::NONE,
+        );
         // The right trigger at 30 wasn't held at all.
         let mut f = InputFrame {
             left_trigger: 120,
             right_trigger: 200,
             ..InputFrame::default()
         };
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert_eq!((f.left_trigger, f.right_trigger), (0, 200));
         // Down to 31: still held. At 30: let go, and it reads 30.
         let mut f = InputFrame {
             left_trigger: 31,
             ..InputFrame::default()
         };
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert_eq!(f.left_trigger, 0);
         assert!(!h.is_empty());
         let mut f = InputFrame {
             left_trigger: 30,
             ..InputFrame::default()
         };
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert_eq!(f.left_trigger, 30);
         assert!(h.is_empty());
         // Pulled again: through.
@@ -335,8 +410,136 @@ mod tests {
             left_trigger: 255,
             ..InputFrame::default()
         };
-        h.apply(&mut f);
+        h.apply(&mut f, Troughs::NONE);
         assert_eq!(f.left_trigger, 255);
+    }
+
+    /// A trough from a random word: none one time in eight.
+    fn n_trough(w: u64) -> Option<u8> {
+        (w & 7 != 0).then_some((w >> 8) as u8)
+    }
+
+    #[test]
+    fn trigger_release_levels() {
+        // No reading yet, or a pad that rests low: XInput's 30.
+        assert_eq!(trigger_release(NO_TROUGH), TRIGGER_RELEASE);
+        for rest in [0, 1, 14] {
+            assert_eq!(trigger_release(rest), TRIGGER_RELEASE, "{rest}");
+        }
+        // Resting higher: 16 above it, up to 80 for a trough of 64 or
+        // more (more likely a pull held since the pad was picked).
+        assert_eq!(trigger_release(20), 36);
+        assert_eq!(trigger_release(40), 56);
+        for rest in [64, 65, 200, 255] {
+            assert_eq!(trigger_release(rest), 80, "{rest}");
+        }
+        // The troughs follow the lowest reading.
+        let mut t = Troughs::default();
+        assert_eq!(t, Troughs::NONE);
+        assert_eq!(t.release(), [TRIGGER_RELEASE; 2]);
+        for (lt, rt) in [(200, 45), (40, 60), (90, 255)] {
+            t.observe(&InputFrame {
+                left_trigger: lt,
+                right_trigger: rt,
+                ..InputFrame::default()
+            });
+        }
+        assert_eq!(t, Troughs { lt: 40, rt: 45 });
+        assert_eq!(t.release(), [56, 61]);
+    }
+
+    /// The gate for one poll of a pad whose triggers rest where `troughs`
+    /// say, the troughs taking the poll's reading first as the input
+    /// polls do.
+    fn poll(f: &InputFrame, open: bool, h: &mut Hold, troughs: &mut Troughs) -> InputFrame {
+        troughs.observe(f);
+        let mut f = f.clone();
+        gate(&mut f, true, open, h, Some(false), *troughs);
+        f
+    }
+
+    #[test]
+    fn a_trigger_that_rests_above_30_is_not_held_for_good() {
+        // A worn pad's right trigger rests at 40, and the game had it
+        // there before the menu opened.
+        let rest = InputFrame {
+            right_trigger: 40,
+            ..InputFrame::default()
+        };
+        let pulled = InputFrame {
+            right_trigger: 255,
+            ..InputFrame::default()
+        };
+        let mut troughs = Troughs::NONE;
+        let mut h = Hold::default();
+        assert_eq!(poll(&rest, false, &mut h, &mut troughs), rest);
+        // Opened and closed with the trigger at rest: nothing is held.
+        assert_eq!(poll(&rest, true, &mut h, &mut troughs).right_trigger, 0);
+        h.add(&rest, troughs);
+        assert!(h.is_empty(), "{h:?}");
+        assert_eq!(poll(&rest, false, &mut h, &mut troughs), rest);
+        assert_eq!(poll(&pulled, false, &mut h, &mut troughs), pulled);
+        // Closed with it pulled: held until it is back near its rest,
+        // then the next pull reaches the engine.
+        assert_eq!(poll(&rest, true, &mut h, &mut troughs).right_trigger, 0);
+        h.add(&pulled, troughs);
+        assert_eq!(poll(&pulled, false, &mut h, &mut troughs).right_trigger, 0);
+        assert_eq!(poll(&rest, false, &mut h, &mut troughs), rest);
+        assert!(h.is_empty(), "{h:?}");
+        assert_eq!(poll(&pulled, false, &mut h, &mut troughs), pulled);
+        // A pad that rests at 0 keeps XInput's 30: 31 is still held.
+        let mut troughs = Troughs::NONE;
+        let mut h = Hold::default();
+        poll(&InputFrame::default(), false, &mut h, &mut troughs);
+        h.add(&pulled, troughs);
+        let mut f = InputFrame {
+            right_trigger: 31,
+            ..InputFrame::default()
+        };
+        assert_eq!(poll(&f, false, &mut h, &mut troughs).right_trigger, 0);
+        f.right_trigger = 30;
+        assert_eq!(poll(&f, false, &mut h, &mut troughs).right_trigger, 30);
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn a_trigger_pulled_as_the_menu_opens_stays_held_until_let_go() {
+        // Firing (rest 40) when Start was pressed: held through the menu
+        // and after it closes, until let go.
+        let mut troughs = Troughs::NONE;
+        let mut h = Hold::default();
+        let at = |v: u8| InputFrame {
+            left_trigger: v,
+            ..InputFrame::default()
+        };
+        poll(&at(40), false, &mut h, &mut troughs);
+        for v in [255, 255, 200] {
+            assert_eq!(poll(&at(v), true, &mut h, &mut troughs).left_trigger, 0);
+        }
+        h.add(&at(255), troughs);
+        for v in [255, 120, 57] {
+            assert_eq!(
+                poll(&at(v), false, &mut h, &mut troughs).left_trigger,
+                0,
+                "{v}"
+            );
+        }
+        assert_eq!(poll(&at(56), false, &mut h, &mut troughs).left_trigger, 56);
+        assert!(h.is_empty());
+        // A pad picked while its trigger was pulled (its lowest reading
+        // so far is the pull): a pull past 80 is still held.
+        let mut troughs = Troughs::NONE;
+        let mut h = Hold::default();
+        poll(&at(250), true, &mut h, &mut troughs);
+        h.add(&at(250), troughs);
+        assert_eq!(poll(&at(250), false, &mut h, &mut troughs).left_trigger, 0);
+        assert_eq!(poll(&at(81), false, &mut h, &mut troughs).left_trigger, 0);
+        assert_eq!(poll(&at(0), false, &mut h, &mut troughs).left_trigger, 0);
+        assert!(h.is_empty());
+        assert_eq!(
+            poll(&at(250), false, &mut h, &mut troughs).left_trigger,
+            250
+        );
     }
 
     #[test]
@@ -366,12 +569,21 @@ mod tests {
                 }
                 f
             };
+            // Troughs anywhere, or none yet.
+            let mut trough = || match n_trough(next()) {
+                Some(t) => u16::from(t),
+                None => NO_TROUGH,
+            };
+            let troughs = Troughs {
+                lt: trough(),
+                rt: trough(),
+            };
             let mut h = Hold::default();
-            h.add(&make(&mut next));
+            h.add(&make(&mut next), troughs);
             for _ in 0..4 {
                 let before = make(&mut next);
                 let mut after = before.clone();
-                h.apply(&mut after);
+                h.apply(&mut after, troughs);
                 assert_eq!(after.pad_buttons & !before.pad_buttons, 0);
                 assert_eq!(after.mouse_buttons & !before.mouse_buttons, 0);
                 assert!(after.left_trigger <= before.left_trigger);
@@ -392,12 +604,12 @@ mod tests {
     fn the_gate_before_the_menu_is_ready_changes_nothing() {
         let mut h = Hold::default();
         let mut f = busy();
-        gate(&mut f, false, false, &mut h, None);
+        gate(&mut f, false, false, &mut h, None, Troughs::NONE);
         assert_eq!(f, busy());
         assert!(h.is_empty());
         // Ready, closed, nothing held: only Start and Esc go.
         let mut f = busy();
-        gate(&mut f, true, false, &mut h, None);
+        gate(&mut f, true, false, &mut h, None, Troughs::NONE);
         let mut want = busy();
         strip(&mut want);
         assert_eq!(f, want);
@@ -411,25 +623,32 @@ mod tests {
         // the raw frame says pad mode: the frozen mode wins.
         let mut f = busy();
         f.is_km = false;
-        gate(&mut f, true, true, &mut h, Some(true));
+        gate(&mut f, true, true, &mut h, Some(true), Troughs::NONE);
         assert_eq!(f, neutral(true, (100.0, 50.0)));
         // Everything but Start and Esc (taken first) went into the hold.
         let mut want = Hold::default();
         let mut stripped = busy();
         strip(&mut stripped);
-        want.add(&stripped);
+        want.add(&stripped, Troughs::NONE);
         assert_eq!(h, want);
         assert_eq!(h.pad & pad::START, 0);
         assert_eq!(h.keys[0] & (1 << VK_ESCAPE), 0);
         // With no frozen mode, the frame's own.
         let mut f = busy();
-        gate(&mut f, true, true, &mut Hold::default(), None);
+        gate(
+            &mut f,
+            true,
+            true,
+            &mut Hold::default(),
+            None,
+            Troughs::NONE,
+        );
         assert!(f.is_km);
         // Even before the menu is ready (it can't be open then, but the
         // order holds): Start stays in the hold's view.
         let mut h = Hold::default();
         let mut f = busy();
-        gate(&mut f, false, true, &mut h, None);
+        gate(&mut f, false, true, &mut h, None, Troughs::NONE);
         assert_ne!(h.pad & pad::START, 0);
     }
 
@@ -442,12 +661,12 @@ mod tests {
             right_trigger: 255,
             ..InputFrame::default()
         };
-        h.add(&closing);
+        h.add(&closing, Troughs::NONE);
         // Still held: masked; the frozen mode stays; the sticks pass.
         closing.thumb_lx = 9000;
         closing.is_km = true;
         let mut f = closing.clone();
-        gate(&mut f, true, false, &mut h, Some(false));
+        gate(&mut f, true, false, &mut h, Some(false), Troughs::NONE);
         assert_eq!((f.pad_buttons, f.right_trigger, f.thumb_lx), (0, 0, 9000));
         assert!(!f.is_km, "frozen until the hold empties");
         // Start pressed meanwhile is the menu's, never the engine's.
@@ -456,19 +675,19 @@ mod tests {
             right_trigger: 255,
             ..InputFrame::default()
         };
-        gate(&mut f, true, false, &mut h, Some(false));
+        gate(&mut f, true, false, &mut h, Some(false), Troughs::NONE);
         assert_eq!(f.pad_buttons, 0);
         // Both released: the hold is empty and the frame passes whole.
         let mut f = InputFrame {
             right_trigger: 20,
             ..InputFrame::default()
         };
-        gate(&mut f, true, false, &mut h, Some(false));
+        gate(&mut f, true, false, &mut h, Some(false), Troughs::NONE);
         assert!(h.is_empty());
         assert_eq!(f.right_trigger, 20);
         // Pressed again (the caller has unfrozen the mode): through.
         let mut f = busy();
-        gate(&mut f, true, false, &mut h, None);
+        gate(&mut f, true, false, &mut h, None, Troughs::NONE);
         let mut want = busy();
         strip(&mut want);
         assert_eq!(f, want);
