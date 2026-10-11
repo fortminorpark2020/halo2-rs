@@ -514,7 +514,7 @@ impl Driver {
     /// The menu changed the controls: the launcher's own use of them now,
     /// saved; the engine's profile and mapping follow when the menu
     /// closes (`publish`). `defaults`: Use Default Settings, which saves
-    /// every one.
+    /// every one (the lobby is told so).
     fn controls(&mut self, c: Controls, defaults: bool) {
         let old = super::controls();
         super::set_controls(c);
@@ -523,7 +523,7 @@ impl Driver {
             log!("game menu: rumble stopped (vibration off)");
         }
         log!("game menu: controls now {}", c.describe());
-        let event = Engine::Controls(c.pairs());
+        let event = Engine::controls(c, defaults);
         if live::to_lobby() {
             // The lobby saves them (lobby.txt is its file in a match).
             live::tell(event);

@@ -32,9 +32,11 @@ the launcher doesn't do.
   on its standard output (`H2EVENT running`, `maploaded`, `ended
   <players>`, `closing`; from the in-game GAME MENU also `controls
   <key=value ...>`, which the lobby saves (only what changed from the
-  controls the engine runs with), `left game` or `left end`, after which
-  the engine closes without `ended`, and `menu off` when the menu turned
-  itself off, after which the in-game screen stops saying Start opens it)
+  controls the engine runs with; every one after `controls defaults`,
+  Use Default Settings), `left game` or `left end`, after which the
+  engine closes without `ended` (unless `--end-game-message` ended the
+  game first), and `menu off` when the menu turned itself off, after
+  which the in-game screen stops saying Start opens it)
   instead of talking to the server. The lobby turns those into HOSTING,
   JOINED, LAUNCHER_RESULT and LEFT_MATCH with the same rules `--live` uses
   (`live::Told`), and shows the carnage report when MATCH_OVER comes.
@@ -314,8 +316,9 @@ uses it; `H2LOBBY_FAKE=1` makes it do so on Windows too.
 keys are `start back a b y up down left right`). It runs the real menu
 (`gamemenu::GameMenu`) for the game `--game-kind` and the session say,
 and says what the real engine's copy would: `H2EVENT controls ...` when
-a setting changes (the lobby saves it), or `H2EVENT left game` (`left
-end` for End Game) and then closes without a result.
+a setting changes (the lobby saves it; `controls defaults ...` for Use
+Default Settings, when it saves every one), or `H2EVENT left game`
+(`left end` for End Game) and then closes without a result.
 
 `--fake-engine`'s results are the same on every PC and plausible: player
 `i` of `n` scores `n - i`, the last one killed themselves once, each one's

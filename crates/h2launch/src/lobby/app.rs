@@ -137,6 +137,10 @@ pub struct Config {
     pub ranks: Option<Arc<RankIcons>>,
     /// The start screen and main menu (`Menus::flat` without the files).
     pub menus: Arc<Menus>,
+    /// For tests: more words for each match's engine
+    /// (`H2LOBBY_ENGINE_ARGS`: `--set-option`, `--pad`, a control flag),
+    /// read once when the lobby starts.
+    pub engine_args: String,
 }
 
 /// A key, button or typed character.
@@ -1084,7 +1088,7 @@ impl App {
                 controls: self.settings.controls,
                 game_kind: child::game_kind(&g.m),
             };
-            match Running::start(&self.cfg.exe, &self.cfg.folder, &m) {
+            match Running::start(&self.cfg.exe, &self.cfg.folder, &m, &self.cfg.engine_args) {
                 Ok(c) => {
                     notes.push(format!(
                         "lobby: engine started for match {id:016x} ({} on {}, {})",
@@ -1163,8 +1167,8 @@ impl App {
     /// them, for the next match.
     fn on_engine_event(&mut self, e: &Engine, now: Instant) {
         self.log(&format!("lobby: the engine says {}", live::event_line(e)));
-        if let Engine::Controls(pairs) = e {
-            self.on_engine_controls(pairs);
+        if let Engine::Controls { pairs, defaults } = e {
+            self.on_engine_controls(pairs, *defaults);
         }
         let Some(g) = self.game.as_mut() else {
             return;
@@ -1205,7 +1209,7 @@ impl App {
                 g.menu = false;
                 note = Some("lobby: the engine's game menu is off for the rest of the game");
             }
-            Engine::Closing | Engine::Controls(_) => {}
+            Engine::Closing | Engine::Controls { .. } => {}
         }
         let out = g.told.next(id, host, None, Some(e.clone()));
         if let Some(n) = note {
@@ -1217,9 +1221,11 @@ impl App {
     /// The GAME MENU's controls (`Engine::Controls`), saved through
     /// `set_control`: only the ones it changed from the controls the
     /// engine ran with, so a control flag a test gave the engine for one
-    /// run (`H2LOBBY_ENGINE_ARGS`) isn't saved with them. With no engine,
-    /// they are taken from the lobby's own.
-    fn on_engine_controls(&mut self, pairs: &[(String, String)]) {
+    /// run (`H2LOBBY_ENGINE_ARGS`) isn't saved with them; every one for
+    /// Use Default Settings (`defaults`), even those that flag already
+    /// put at the default. With no engine, they are taken from the
+    /// lobby's own.
+    fn on_engine_controls(&mut self, pairs: &[(String, String)], defaults: bool) {
         let old = self
             .game
             .as_ref()
@@ -1239,7 +1245,7 @@ impl App {
             }
         }
         for ((k, v), (_, was)) in new.pairs().into_iter().zip(old.pairs()) {
-            if v != was {
+            if defaults || v != was {
                 if let Err(why) = self.set_control(&k, &v) {
                     self.log(&format!("lobby: {k} = {v} wasn't saved: {why}"));
                 }
@@ -4185,6 +4191,7 @@ mod tests {
             log: Arc::new(|_: &str| {}),
             ranks: None,
             menus: Arc::new(Menus::flat()),
+            engine_args: String::new(),
         })
     }
 
@@ -5891,17 +5898,17 @@ mod tests {
             ..Controls::default()
         };
         // With a match on or not, they are taken and saved.
-        a.on_engine_event(&Engine::Controls(changed.pairs()), a.now);
+        a.on_engine_event(&Engine::controls(changed, false), a.now);
         assert_eq!(a.settings.controls, changed);
         let saved = Settings::load(&dir.join("lobby.txt"));
         assert_eq!(saved.controls, changed);
         in_game(&mut a, 12, false, false);
         let back = Controls::default();
-        a.on_engine_event(&Engine::Controls(back.pairs()), a.now);
+        a.on_engine_event(&Engine::controls(back, false), a.now);
         assert_eq!(a.settings.controls, back);
         assert_eq!(Settings::load(&dir.join("lobby.txt")).controls, back);
         // The next engine is started with them.
-        a.on_engine_event(&Engine::Controls(changed.pairs()), a.now);
+        a.on_engine_event(&Engine::controls(changed, false), a.now);
         let g = a.game.as_ref().unwrap();
         let m = Match {
             kind: Kind::Fake,
@@ -5920,7 +5927,13 @@ mod tests {
         let mut pairs = Controls::default().pairs();
         pairs[0].1 = "claw".into();
         pairs[1].0 = "rumble".into();
-        a.on_engine_event(&Engine::Controls(pairs), a.now);
+        a.on_engine_event(
+            &Engine::Controls {
+                pairs,
+                defaults: false,
+            },
+            a.now,
+        );
         assert_eq!(
             a.settings.controls,
             Controls {
@@ -6102,7 +6115,7 @@ mod tests {
             mouse_sensitivity: 4.0,
             ..launch
         };
-        a.on_engine_event(&Engine::Controls(live.pairs()), a.now);
+        a.on_engine_event(&Engine::controls(live, false), a.now);
         let want = Controls {
             mouse_sensitivity: 4.0,
             ..saved
@@ -6118,13 +6131,144 @@ mod tests {
             vibration: false,
             ..live
         };
-        a.on_engine_event(&Engine::Controls(on.pairs()), a.now);
-        a.on_engine_event(&Engine::Controls(off.pairs()), a.now);
+        a.on_engine_event(&Engine::controls(on, false), a.now);
+        a.on_engine_event(&Engine::controls(off, false), a.now);
         assert!(!a.settings.controls.vibration);
         assert_eq!(a.settings.controls.mouse_sensitivity, 4.0);
         assert_eq!(
             Settings::load(&dir.join("lobby.txt")).controls,
             a.settings.controls
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn use_default_settings_in_the_game_menu_saves_every_one() {
+        // lobby.txt has look sensitivity 7 and vibration off; a test
+        // started the engine with H2LOBBY_ENGINE_ARGS=--look-sensitivity 3
+        // --vibration, so it ran on Halo 2's defaults already.
+        let dir = scratch("menu-controls-defaults");
+        let mut a = app(&dir);
+        in_game(&mut a, 12, false, false);
+        for (k, v) in [("look_sensitivity", "7"), ("vibration", "off")] {
+            a.set_control(k, v).unwrap();
+        }
+        let saved = a.settings.controls;
+        let launch = child::launch_controls("--look-sensitivity 3 --vibration", saved);
+        assert_eq!(launch, Controls::default());
+        a.game.as_mut().unwrap().engine_controls = Some(launch);
+        // The same eight as an ordinary change: nothing differs from what
+        // the engine ran with, so lobby.txt keeps the player's.
+        a.on_engine_event(&Engine::controls(Controls::default(), false), a.now);
+        assert_eq!(a.settings.controls, saved);
+        assert_eq!(Settings::load(&dir.join("lobby.txt")).controls, saved);
+        // Said as Use Default Settings: every one is saved.
+        a.on_engine_event(&Engine::controls(Controls::default(), true), a.now);
+        assert_eq!(a.settings.controls, Controls::default());
+        assert_eq!(
+            Settings::load(&dir.join("lobby.txt")).controls,
+            Controls::default()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The match `in_game` sets up, before its engine is started.
+    fn about_to_start(a: &mut App, playlist: u8, host: bool) {
+        in_game(a, playlist, false, host);
+        let g = a.game.as_mut().unwrap();
+        (g.launch, g.running, g.loaded, g.start_at) = (true, false, false, a.now);
+    }
+
+    /// A stand-in for the engine's launcher that takes any words and stays
+    /// up (until it is killed). A shell of its own writes it, so no handle
+    /// of this process to the file is inherited by another test's child,
+    /// which would make starting it fail as "text file busy".
+    #[cfg(unix)]
+    fn sleeper(dir: &std::path::Path) -> PathBuf {
+        let exe = dir.join("engine.sh");
+        let made = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf '#!/bin/sh\\nexec sleep 30\\n' > \"$1\" && chmod +x \"$1\"",
+            ])
+            .arg("sh")
+            .arg(&exe)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        exe
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_started_engine_keeps_its_one_run_flags_apart_from_the_players() {
+        // H2LOBBY_ENGINE_ARGS (read once into the lobby's Config) turns
+        // vibration off for this run and the game menu off.
+        let dir = scratch("engine-start");
+        let mut a = app(&dir);
+        a.cfg.exe = sleeper(&dir);
+        a.cfg.engine_args = "--no-vibration --no-game-menu".into();
+        let saved = a.settings.controls;
+        assert!(saved.vibration);
+        about_to_start(&mut a, 12, false);
+        a.poll_game();
+        let g = a.game.as_mut().unwrap();
+        assert!(g.child.is_some(), "the stand-in started");
+        assert_eq!(a.screen, Screen::InGame);
+        // The in-game screen won't say Start opens the game menu, and the
+        // GAME MENU's changes are told apart from the flag's.
+        assert!(!g.menu);
+        let launch = Controls {
+            vibration: false,
+            ..saved
+        };
+        assert_eq!(g.engine_controls, Some(launch));
+        a.on_engine_event(&Engine::controls(launch, false), a.now);
+        assert_eq!(Settings::load(&dir.join("lobby.txt")).controls, saved);
+        assert!(a.settings.controls.vibration);
+        // Without the words, the engine has its menu and the lobby's
+        // controls.
+        a.game.as_mut().unwrap().child.as_mut().unwrap().kill();
+        a.cfg.engine_args.clear();
+        about_to_start(&mut a, 12, false);
+        a.poll_game();
+        let g = a.game.as_mut().unwrap();
+        assert!(g.menu);
+        assert_eq!(g.engine_controls, Some(saved));
+        g.child.as_mut().unwrap().kill();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_engine_that_does_not_start_lands_as_after_a_game() {
+        let dir = scratch("engine-no-start");
+        let (mut a, mut server) = live_app(&dir);
+        a.cfg.exe = dir.join("no-such-engine");
+        // A custom game's leader: back on the custom game screen.
+        about_to_start(&mut a, CUSTOM_GAME, true);
+        a.poll_game();
+        assert_eq!(a.label(), "custom");
+        assert!(a.game.is_none());
+        let toast = last_toast(&a).unwrap();
+        assert!(toast.starts_with("The engine didn't start: "), "{toast}");
+        assert_eq!(
+            sent(&mut server),
+            [ToServer::LeftMatch {
+                id: 0x78,
+                host_lost: false
+            }]
+        );
+        // A playlist's game: the playlists.
+        about_to_start(&mut a, 12, false);
+        a.poll_game();
+        assert_eq!(a.label(), "live");
+        assert!(a.game.is_none());
+        assert_eq!(
+            sent(&mut server),
+            [ToServer::LeftMatch {
+                id: 0x78,
+                host_lost: false
+            }]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

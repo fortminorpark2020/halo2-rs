@@ -181,6 +181,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_in_game_menu_draws_the_lobbys_team_colours() {
+        // Both follow the mulg Team Colors block's order, so a player's bar
+        // is the same colour in the roster and the GAME MENU.
+        for (team, rgb) in h2ui::gamemenu::TEAM_COLOURS.iter().enumerate() {
+            let c = team_color(team as i32);
+            let ours = rgb.map(|v| (v * 255.0).round() as u8);
+            assert_eq!(ours, [c.r, c.g, c.b], "{}", TEAM_NAMES[team]);
+        }
+    }
+
+    #[test]
     fn every_launcher_variant_has_a_name() {
         let playlists = include_str!("../../../h2live/src/playlists.txt");
         let mut seen = 0;

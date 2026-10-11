@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 13:51 UTC. Any assistant that works on the project
+Last updated 2026-10-11 18:20 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -184,7 +184,15 @@ step, when the owner says so: one weapon.
   fail at run time for the new check 17; the engine says `H2EVENT menu
   off` and the lobby drops its hint; Use Default Settings is said
   explicitly (`Effect::Defaults`); the lobby saves only what the menu
-  changed from the engine's own controls. Next: the numbered PC checks in
+  changed from the engine's own controls. Review fixes, round 3
+  (2026-10-11): the players column's team colours follow Halo 2's tag
+  order (red, blue, yellow, green, purple, orange, brown, pink) in the
+  lobby roster's shades; Use Default Settings reaches the lobby as
+  `H2EVENT controls defaults ...`, so a lobby match saves every one too;
+  `H2LOBBY_ENGINE_ARGS` is read once into the lobby's `Config`, and the
+  engine's start and start failure have tests; `--reload-message` and
+  `--end-game-message` are documented as tried offline first, not
+  refused online. Next: the numbered PC checks in
   menu.md section 9.5 (Remote Control session), then a small commit that
   sets `ENGINE_REREADS_PROFILE` and `ENGINE_REREADS_MAPPING` in
   `win/menu.rs` from check 7 (they are false, so Button Layout, Look

@@ -45,19 +45,30 @@ pub const NEXT_GAME: &str = "NEXT GAME";
 pub const PLAYERS: &str = "PLAYERS";
 /// What the host's row says at its right end.
 pub const HOST: &str = "HOST";
-/// Halo 2's multiplayer team colours in its order: red, blue, green,
-/// orange, purple, gold, brown and pink. The order is Halo 2's; the
-/// shades are our estimates.
+/// Halo 2's team colours, indexed by the engine's team number, in the
+/// order of the multiplayer globals' Team Colors block (blam-cache
+/// `colors.rs`): red, blue, yellow, green, purple, orange, brown and pink.
+/// The shades are estimates, the same ones the lobby's roster uses
+/// (h2launch `lobby/names.rs`), so both screens agree.
 pub const TEAM_COLOURS: [[f32; 3]; 8] = [
-    [0.80, 0.20, 0.18],
-    [0.22, 0.42, 0.85],
-    [0.30, 0.68, 0.25],
-    [0.95, 0.55, 0.15],
-    [0.55, 0.30, 0.75],
-    [0.90, 0.75, 0.20],
-    [0.55, 0.38, 0.22],
-    [0.95, 0.55, 0.70],
+    hex(0xC8_372D),
+    hex(0x2F_62C8),
+    hex(0xD9_C02A),
+    hex(0x3A_9E3A),
+    hex(0x8A_3EC2),
+    hex(0xE0_7A22),
+    hex(0x8A_5A2B),
+    hex(0xE0_6AA8),
 ];
+
+/// `0xRRGGBB` as 0 to 1 channels.
+const fn hex(c: u32) -> [f32; 3] {
+    [
+        ((c >> 16) & 0xFF) as f32 / 255.0,
+        ((c >> 8) & 0xFF) as f32 / 255.0,
+        (c & 0xFF) as f32 / 255.0,
+    ]
+}
 
 /// How far a row's band reaches above and below its baseline, and past
 /// its label and value (estimates: the bands of two rows stay apart).
@@ -888,7 +899,18 @@ mod tests {
 
     #[test]
     fn team_colours_by_index_and_the_local_player_lit() {
-        assert_eq!(team_colour(0), [0.80, 0.20, 0.18, 1.0]);
+        assert_eq!(team_colour(0), rgba(hex(0xC8_372D), 1.0));
+        // Halo 2's order (the mulg Team Colors block), not Halo 3's: team
+        // 2 is yellow, 3 green and 5 orange.
+        let [r, g, b] = TEAM_COLOURS[2];
+        assert!(r > 0.8 && g > 0.7 && b < 0.2, "yellow: {r} {g} {b}");
+        let [r, g, b] = TEAM_COLOURS[3];
+        assert!(g > r + 0.3 && g > b + 0.3, "green: {r} {g} {b}");
+        let [r, g, b] = TEAM_COLOURS[5];
+        assert!(
+            r > 0.8 && g > 0.4 && g < 0.6 && b < 0.2,
+            "orange: {r} {g} {b}"
+        );
         assert_eq!(team_colour(1), rgba(TEAM_COLOURS[1], 1.0));
         assert_eq!(team_colour(7), rgba(TEAM_COLOURS[7], 1.0));
         // Free-for-all and past the eighth: the list's colour.

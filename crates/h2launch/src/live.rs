@@ -362,19 +362,37 @@ pub enum Engine {
     /// The player changed their controls in the GAME MENU: every control
     /// as `(lobby.txt's name, value)`, in `KEYS` order, for the lobby to
     /// save. Text, not `Controls`, as `Engine` is `Eq` and the mouse
-    /// sensitivity is an f32.
-    Controls(Vec<(String, String)>),
+    /// sensitivity is an f32. `defaults`: they are Use Default Settings',
+    /// so every one is saved, even those the engine already ran with (a
+    /// control flag given for one run may have put them there); the
+    /// values alone can't say so, as an ordinary change can land on them.
+    Controls {
+        pairs: Vec<(String, String)>,
+        defaults: bool,
+    },
     /// The GAME MENU turned itself off for the rest of the run (its
     /// overlay failed, or its panel wasn't drawn three times): Start and
     /// Esc reach the game again.
     MenuOff,
 }
 
+impl Engine {
+    /// The GAME MENU's controls `c` as the event says them (`defaults`:
+    /// Use Default Settings).
+    pub fn controls(c: Controls, defaults: bool) -> Engine {
+        Engine::Controls {
+            pairs: c.pairs(),
+            defaults,
+        }
+    }
+}
+
 /// How an engine event is written on the standard output with
 /// `--events`, for the lobby that started this launcher: `H2EVENT running`,
-/// `maploaded`, `closing`, `left game`, `left end`, `menu off`; `controls` and then
-/// the eight controls as `key=value` in `KEYS` order (`lobby.txt`'s names
-/// and values); or `ended` and then each player as
+/// `maploaded`, `closing`, `left game`, `left end`, `menu off`; `controls`,
+/// `defaults` for Use Default Settings, and then the eight controls as
+/// `key=value` in `KEYS` order (`lobby.txt`'s names and values); or
+/// `ended` and then each player as
 /// `<relay id>,<team>,<place>,<score>,<kills>,<assists>,<deaths>,<betrayals>,<suicides>,<left>`
 /// (LAUNCHER_RESULT's order).
 pub fn event_line(e: &Engine) -> String {
@@ -385,8 +403,11 @@ pub fn event_line(e: &Engine) -> String {
         Engine::Left(Leave::Game) => format!("{EVENT} left game"),
         Engine::Left(Leave::End) => format!("{EVENT} left end"),
         Engine::MenuOff => format!("{EVENT} menu off"),
-        Engine::Controls(pairs) => {
+        Engine::Controls { pairs, defaults } => {
             let mut line = format!("{EVENT} controls");
+            if *defaults {
+                line += " defaults";
+            }
             for (k, v) in pairs {
                 line += &format!(" {k}={v}");
             }
@@ -421,9 +442,9 @@ pub const EVENT: &str = "H2EVENT";
 /// goes to the same output). The lobby and the engine's copy are the same
 /// build, so only the 10-field form of `ended` is read, and `controls`
 /// only with all eight controls in `KEYS` order, each with a value
-/// `Controls::set` takes.
+/// `Controls::set` takes (after `defaults`, for Use Default Settings).
 pub fn parse_event_line(line: &str) -> Option<Engine> {
-    let mut words = line.split_whitespace();
+    let mut words = line.split_whitespace().peekable();
     if words.next()? != EVENT {
         return None;
     }
@@ -441,6 +462,7 @@ pub fn parse_event_line(line: &str) -> Option<Engine> {
             _ => return None,
         },
         "controls" => {
+            let defaults = words.next_if_eq(&"defaults").is_some();
             let mut check = Controls::default();
             let mut pairs = Vec::new();
             for key in KEYS {
@@ -450,7 +472,7 @@ pub fn parse_event_line(line: &str) -> Option<Engine> {
                 }
                 pairs.push((k.to_string(), v.to_string()));
             }
-            Engine::Controls(pairs)
+            Engine::Controls { pairs, defaults }
         }
         "ended" => {
             let mut players = Vec::new();
@@ -641,7 +663,7 @@ impl Told {
             // game menu is told as LEFT_MATCH when the engine closes, as
             // before, the controls are the lobby's to save, and the menu
             // turning off is the lobby's to show.
-            Some(Engine::Left(_) | Engine::Controls(_) | Engine::MenuOff) => {}
+            Some(Engine::Left(_) | Engine::Controls { .. } | Engine::MenuOff) => {}
             _ => {}
         }
         if host && self.asked_to_host && self.running && !self.hosting {
@@ -899,8 +921,9 @@ mod tests {
             Engine::Left(Leave::Game),
             Engine::Left(Leave::End),
             Engine::MenuOff,
-            Engine::Controls(Controls::default().pairs()),
-            Engine::Controls(changed.pairs()),
+            Engine::controls(Controls::default(), false),
+            Engine::controls(changed, false),
+            Engine::controls(Controls::default(), true),
         ] {
             let line = event_line(&e);
             assert!(line.starts_with("H2EVENT "), "{line}");
@@ -910,14 +933,19 @@ mod tests {
         assert_eq!(event_line(&Engine::Left(Leave::End)), "H2EVENT left end");
         assert_eq!(event_line(&Engine::MenuOff), "H2EVENT menu off");
         assert_eq!(
-            event_line(&Engine::Controls(changed.pairs())),
+            event_line(&Engine::controls(changed, false)),
             "H2EVENT controls button_layout=bumper_jumper thumbstick_layout=legacy_southpaw \
              look_sensitivity=10 look_inversion=on auto_look_centering=on vibration=off \
              mouse_sensitivity=0.1 mouse_inversion=on"
         );
+        // Use Default Settings says so before the eight.
+        assert!(event_line(&Engine::controls(Controls::default(), true))
+            .starts_with("H2EVENT controls defaults button_layout=default "));
         // The pairs read back as the same controls.
-        let Some(Engine::Controls(pairs)) =
-            parse_event_line(&event_line(&Engine::Controls(changed.pairs())))
+        let Some(Engine::Controls {
+            pairs,
+            defaults: false,
+        }) = parse_event_line(&event_line(&Engine::controls(changed, false)))
         else {
             panic!("no controls");
         };
@@ -967,6 +995,26 @@ mod tests {
             .collect();
         let line = |words: &[String]| format!("H2EVENT controls {}", words.join(" "));
         assert!(parse_event_line(&line(&good)).is_some());
+        let with = |word: &str, at: usize| {
+            let mut w = good.clone();
+            w.insert(at, word.into());
+            line(&w)
+        };
+        assert_eq!(
+            parse_event_line(&with("defaults", 0)),
+            Some(Engine::controls(Controls::default(), true))
+        );
+        // `defaults` only once, only first, and only that word.
+        for l in [
+            with("defaults", 8),
+            with("defaults", 3),
+            format!("H2EVENT controls defaults defaults {}", good.join(" ")),
+            with("default", 0),
+            with("Defaults", 0),
+            "H2EVENT controls defaults".into(),
+        ] {
+            assert_eq!(parse_event_line(&l), None, "{l:?}");
+        }
         let mut bad: Vec<Vec<String>> = Vec::new();
         // Too few, too many, none.
         bad.push(good[..7].to_vec());
@@ -1018,7 +1066,8 @@ mod tests {
                 Engine::Left(Leave::Game),
                 Engine::Left(Leave::End),
                 Engine::MenuOff,
-                Engine::Controls(Controls::default().pairs()),
+                Engine::controls(Controls::default(), false),
+                Engine::controls(Controls::default(), true),
             ] {
                 assert!(t.next(7, host, None, Some(e.clone())).is_empty(), "{e:?}");
             }

@@ -887,13 +887,15 @@ in section 9.5 pass.
   (`crates/h2ui/src/gamemenu.rs`): drawn on the CPU in Halo 2's fonts from
   MCC's `halo2\h2_fonts`, or the built-in font.
 - **Lobby hand-off** (stage 2): the engine says `H2EVENT controls ...` (the
-  eight `lobby.txt` pairs) when a setting changes, `H2EVENT left game`
+  eight `lobby.txt` pairs, after the word `defaults` for Use Default
+  Settings) when a setting changes, `H2EVENT left game`
   or `left end` before it quits, and `H2EVENT menu off` if the menu turns
   itself off mid-game (the lobby's in-game screen then stops saying Start
   opens it). The lobby saves, through `App::set_control`, only the
   controls that changed from those the engine runs with (its own, with
   any control flag in `H2LOBBY_ENGINE_ARGS` over them), so a test's
-  one-run flag isn't saved; it lands a player who left on ONLINE (a
+  one-run flag isn't saved, and every one after `controls defaults`; it
+  lands a player who left on ONLINE (a
   custom game's leader on Custom) and passes `--game-kind`. `PROTOCOL`
   and `LIVE_PROTOCOL` are unchanged.
 - **The driver** (`win/menu.rs`) runs on the window thread, which ticks at
@@ -1018,8 +1020,10 @@ controls ...` line in the log. Those runs save only the settings changed
 in the menu, so a control flag given for one run (`--layout`,
 `--no-vibration`, ...) isn't saved with them, even when a change lands
 on Halo 2's defaults; Use Default Settings (said as such by the menu, not
-guessed from the values) saves every one. The PC checks are in section
-9.5.
+guessed from the values) saves every one. The lobby does the same with
+the engine's events: only what changed from the controls the engine runs
+with, and every one after `H2EVENT controls defaults ...`. The PC checks
+are in section 9.5.
 
 ## 8. Option A's work, if it is chosen
 

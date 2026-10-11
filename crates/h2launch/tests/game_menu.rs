@@ -205,13 +205,26 @@ fn a_new_button_layout_is_said_and_the_game_ends_normally() {
     };
     assert_eq!(events.len(), 5, "{events:?}");
     assert_eq!(events[..2], [Engine::Running, Engine::MapLoaded]);
-    assert_eq!(events[2], Engine::Controls(want.pairs()));
-    let Engine::Controls(pairs) = &events[2] else {
+    assert_eq!(events[2], Engine::controls(want, false));
+    let Engine::Controls { pairs, .. } = &events[2] else {
         unreachable!();
     };
     assert!(pairs
         .iter()
         .any(|(k, v)| k == "button_layout" && v == "bumper_jumper"));
+    assert!(is_ended(&events[3]), "{events:?}");
+    assert_eq!(events[4], Engine::Closing);
+}
+
+#[test]
+fn use_default_settings_is_said_as_such() {
+    // Settings, up to Use Default Settings (the list wraps), A, up to Use
+    // Defaults, A; then B and B out of the menu.
+    let keys = ["start", "down", "a", "up", "a", "up", "a", "b", "b"];
+    let events = play("defaults", "social", 1, &keys);
+    assert_eq!(events.len(), 5, "{events:?}");
+    assert_eq!(events[..2], [Engine::Running, Engine::MapLoaded]);
+    assert_eq!(events[2], Engine::controls(Controls::default(), true));
     assert!(is_ended(&events[3]), "{events:?}");
     assert_eq!(events[4], Engine::Closing);
 }

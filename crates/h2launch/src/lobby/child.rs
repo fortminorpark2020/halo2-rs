@@ -179,14 +179,14 @@ pub fn launch_controls(extra: &str, base: Controls) -> Controls {
 
 impl Running {
     /// Write the session into `folder` and start `exe` (this launcher) on
-    /// the match.
-    pub fn start(exe: &Path, folder: &Path, m: &Match) -> Result<Running, String> {
+    /// the match, with the words `extra` after the match's own (for tests:
+    /// `H2LOBBY_ENGINE_ARGS`, as `--set-option`, `--pad` or a control
+    /// flag).
+    pub fn start(exe: &Path, folder: &Path, m: &Match, extra: &str) -> Result<Running, String> {
         let file: PathBuf = folder.join("match-session.txt");
         let mut session = m.session.clone();
         session.me = Some(m.me);
         std::fs::write(&file, session.to_text()).map_err(|e| format!("{}: {e}", file.display()))?;
-        // For tests: more flags for the engine (`--set-option`, `--pad`).
-        let extra = std::env::var("H2LOBBY_ENGINE_ARGS").unwrap_or_default();
         let mut cmd = Command::new(exe);
         // The engine's results blocks are kept in the launcher's folder
         // (the newest few), so their layout can be worked out further
@@ -245,8 +245,8 @@ impl Running {
             said: rx,
             done: false,
             asked: None,
-            game_menu: game_menu_on(&extra, std::env::var_os("H2LAUNCH_OVERLAY_FAIL").as_deref()),
-            controls: launch_controls(&extra, m.controls),
+            game_menu: game_menu_on(extra, std::env::var_os("H2LAUNCH_OVERLAY_FAIL").as_deref()),
+            controls: launch_controls(extra, m.controls),
         })
     }
 
@@ -585,7 +585,7 @@ fn fake_effect(e: Effect) -> Option<Leave> {
         Effect::Closed => println!("fake engine: the game menu closed"),
         Effect::Controls(c) => {
             println!("fake engine: controls: {}", c.describe());
-            live::tell(Engine::Controls(c.pairs()));
+            live::tell(Engine::controls(c, false));
         }
         Effect::Defaults => {
             let c = Controls::default();
@@ -593,7 +593,7 @@ fn fake_effect(e: Effect) -> Option<Leave> {
                 "fake engine: controls: {} (Use Default Settings)",
                 c.describe()
             );
-            live::tell(Engine::Controls(c.pairs()));
+            live::tell(Engine::controls(c, true));
         }
         Effect::Leave(k) => {
             println!(

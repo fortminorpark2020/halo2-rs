@@ -185,10 +185,12 @@ then (`--no-watchdog` turns both off, for a debugger session).
                         having changed the button layout, look sensitivity
                         or automatic look centering, or turned vibration
                         on, which the engine may read only when it loads
-                        (an experiment; offline only).
+                        (an experiment: try an id offline first; it works
+                        in any run).
 --end-game-message <n>  End Game posts engine message n, then quits only
                         if the game hasn't ended 10 s later (an
-                        experiment; offline only, one id per run).
+                        experiment: try an id offline first, one id per
+                        run; it works in any run).
 --diag                  More detail in the log: dumps of the options, the
                         variant copy's effect, new calling threads, every
                         event-manager slot's first call, the input sent each

@@ -100,10 +100,12 @@ Usage: h2launch [flags]
                           having changed the button layout, look
                           sensitivity or automatic look centering, or
                           turned vibration on, which the engine may read
-                          only when it loads (an experiment; offline only).
+                          only when it loads (an experiment: try an id
+                          offline first; it works in any run).
   --end-game-message <n>  End Game posts engine message n, then quits only
                           if the game hasn't ended 10 s later (an
-                          experiment; offline only, one id per run).
+                          experiment: try an id offline first, one id per
+                          run; it works in any run).
   --live-wait <seconds>   How long to search before giving up (default 600).
   --relay-wait <seconds>  How long to wait for the relay to take us in before
                           the engine starts (default 15).
@@ -217,10 +219,11 @@ pub struct Args {
     pub game_menu: bool,
     /// `--reload-message N`: the engine message posted when the GAME
     /// MENU closes having changed a setting the engine reads at load (an
-    /// experiment).
+    /// experiment, tried offline first; not refused in any run).
     pub reload_message: Option<u32>,
     /// `--end-game-message N`: the engine message End Game posts before
-    /// quitting (an experiment, offline only).
+    /// quitting (an experiment, tried offline first, one id per run; not
+    /// refused in any run, so check 15 can repeat a working id online).
     pub end_game_message: Option<u32>,
     pub relay_wait: f64,
     pub recv_port: RecvPort,
