@@ -8,7 +8,9 @@
 //! time the screen changes. `H2LOBBY_FAKE=1` plays matches with
 //! `--fake-engine`, as the lobby always does where there is no MCC.
 //! Levels are drawn with Halo 2's icons when a Halo 2 Vista mainmenu.map is
-//! found (`ranks`, `H2LOBBY_RANKS`).
+//! found (`ranks`, `H2LOBBY_RANKS`). The start screen and main menu are
+//! drawn by `h2ui` from MCC's mainmenu.map, or a Halo 2 Vista one
+//! (`H2LOBBY_MENU`), and are plain shapes without either.
 
 pub mod app;
 pub mod canvas;
@@ -20,7 +22,7 @@ mod window;
 
 use crate::cli::Args;
 use crate::live::Log;
-use app::{App, Config, Input};
+use app::{App, Config, Input, Menus};
 use canvas::{Canvas, Text};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -105,6 +107,7 @@ pub fn run(args: &Args) -> i32 {
         (None, _) => log("lobby: using the system font"),
     }
     let ranks = ranks::load(mcc_maps(args).as_deref(), &*log).map(Arc::new);
+    let menus = Arc::new(menus(args, fonts.as_deref(), &log));
     let cfg = Config {
         folder,
         exe,
@@ -114,6 +117,7 @@ pub fn run(args: &Args) -> i32 {
         instance: args.instance.clone(),
         log: log.clone(),
         ranks,
+        menus,
     };
     let app = App::new(cfg);
     if std::env::var_os("H2LOBBY_HEADLESS").is_some() {
@@ -127,6 +131,71 @@ pub fn run(args: &Args) -> i32 {
             1
         }
     }
+}
+
+/// The variable that names the mainmenu.map the start screen and main
+/// menu are read from (a file, or a folder holding one; MCC's or Halo 2
+/// Vista's), or `off` for plain shapes.
+const MENU_ENV: &str = "H2LOBBY_MENU";
+
+/// The start screen's and main menu's layouts and pictures, from the
+/// first mainmenu.map that gives pictures: `H2LOBBY_MENU`'s, else MCC's,
+/// then Halo 2 Vista's where the rank icons are looked for
+/// (`ranks::candidates`); else the plain shapes. Their text is in Halo 2's
+/// fonts from `fonts` (the folder the lobby's text uses), else in the
+/// built-in font. Where each piece came from goes in the log.
+fn menus(args: &Args, fonts: Option<&Path>, log: &Log) -> Menus {
+    let log_line = |line: &str| log(line);
+    let env = std::env::var_os(MENU_ENV);
+    let exe = std::env::current_exe().ok();
+    let exe_dir = exe.as_deref().and_then(Path::parent);
+    let mcc = mcc_maps(args);
+    let shell = match ranks::candidates(env.as_deref(), mcc.as_deref(), exe_dir) {
+        None => {
+            log("menus: off (H2LOBBY_MENU=off): plain shapes");
+            h2ui::shell::Shell::from_tags(None, None)
+        }
+        Some(list) => {
+            let maps = ranks::existing(&list);
+            if maps.is_empty() {
+                log("menus: no mainmenu.map found (MCC's or Halo 2 Vista's)");
+            }
+            let mut found = None;
+            for map in maps {
+                let shell = h2ui::shell::Shell::open(&map, &log_line);
+                if !shell.art.is_empty() {
+                    found = Some(shell);
+                    break;
+                }
+                log(&format!("menus: no pictures from {}", map.display()));
+            }
+            found.unwrap_or_else(|| {
+                log("menus: no mainmenu.map gave pictures: plain shapes");
+                h2ui::shell::Shell::from_tags(None, None)
+            })
+        }
+    };
+    let fonts = match fonts {
+        Some(dir) => {
+            let f = h2ui::text::Fonts::read(dir);
+            let loaded = f.loaded();
+            if loaded.is_empty() {
+                log(&format!(
+                    "menus: no Halo 2 fonts in {}; the built-in font",
+                    dir.display()
+                ));
+            } else {
+                log(&format!(
+                    "menus: Halo 2's fonts from {} ({})",
+                    dir.display(),
+                    loaded.join(", ")
+                ));
+            }
+            f
+        }
+        None => h2ui::text::Fonts::fallback(),
+    };
+    Menus { shell, fonts }
 }
 
 /// Started by a double-click, the launcher has a console window of its own
@@ -469,12 +538,17 @@ mod tests {
     #[test]
     fn scripts_read() {
         let s = parse_script(
-            "# sign in\n0 type alpha one\n0.5 a\n0 wait live 30\n1 down\n0 wait carnage\n0 shot end\n2 quit\n",
+            "0 wait start 5\n0.3 a\n0 wait main\n0 a\n\
+             # sign in\n0 type alpha one\n0.5 a\n0 wait live 30\n1 down\n0 wait carnage\n0 shot end\n2 quit\n",
         )
         .unwrap();
         assert_eq!(
             s,
             vec![
+                (0.0, Step::Wait("start".into(), 5.0)),
+                (0.3, Step::Press(Input::A)),
+                (0.0, Step::Wait("main".into(), 120.0)),
+                (0.0, Step::Press(Input::A)),
                 (0.0, Step::Type("alpha one".into())),
                 (0.5, Step::Press(Input::A)),
                 (0.0, Step::Wait("live".into(), 30.0)),
