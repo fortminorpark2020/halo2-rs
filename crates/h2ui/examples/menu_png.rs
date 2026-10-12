@@ -413,10 +413,12 @@ fn write_frames(map: &Path, name: &str, out: &Path) -> Result<(), String> {
 /// The frame pieces of Halo 2's dialogs, by their tags' last names.
 const FRAME_PIECES: [&str; 4] = ["ul_07", "br_07", "dialog1", "dialog2"];
 
-/// A screen to draw: its name for the files, and its layout.
+/// A screen to draw: its name for the files, its layout, and its own
+/// pictures when it isn't a catalog screen (the shell's art has those).
 struct Target {
     name: String,
     layout: ScreenLayout,
+    art: Option<MemoryArt>,
 }
 
 /// `--screen`'s and `--all`'s screens, from each map given.
@@ -444,13 +446,13 @@ fn draw_screens(args: &Args, fonts: &Fonts) {
             shell.screens.len()
         );
         let mut targets: Vec<Target> = Vec::new();
-        let mut extra = MemoryArt::new();
         if args.all {
             for id in ScreenId::ALL {
                 match shell.screen(id) {
                     Some(l) => targets.push(Target {
                         name: id.name().to_string(),
                         layout: l.clone(),
+                        art: None,
                     }),
                     None => println!("{look}: {} not found", id.name()),
                 }
@@ -462,6 +464,7 @@ fn draw_screens(args: &Args, fonts: &Fonts) {
                     Some(l) => targets.push(Target {
                         name: id.name().to_string(),
                         layout: l.clone(),
+                        art: None,
                     }),
                     None => println!("{look}: {} not found", id.name()),
                 }
@@ -469,21 +472,18 @@ fn draw_screens(args: &Args, fonts: &Fonts) {
             }
             // Any other screen by its whole tag name, with its pictures.
             match screen_by_path(map, want, args.scale.unwrap_or_default()) {
-                Ok((layout, art)) => {
-                    extra = art;
-                    targets.push(Target {
-                        name: tags_last(want).to_string(),
-                        layout,
-                    });
-                }
+                Ok((layout, art)) => targets.push(Target {
+                    name: tags_last(want).to_string(),
+                    layout,
+                    art: Some(art),
+                }),
                 Err(e) => println!("{look}: {want}: {e}"),
             }
         }
         for t in &targets {
-            let art: &dyn ArtSource = if t.layout.id.is_some() {
-                shell.art()
-            } else {
-                &extra
+            let art: &dyn ArtSource = match &t.art {
+                Some(own) => own,
+                None => shell.art(),
             };
             draw_target(args, fonts, &shell.chrome, t, look, art);
         }
@@ -510,8 +510,13 @@ fn screen_by_path(
     let ui = m.ui.as_ref().map_err(|e| e.to_string())?;
     let mut notes = Vec::new();
     let first = tags::screen_layout_at(ui, path, &[scale], &FlatArt, &mut notes)?;
-    let (wanted, extra) = tags::screen_wanted(&first);
-    let loaded = art::read_some(m.pictures.as_mut(), &wanted, &extra);
+    let wants = tags::screen_wanted(&first);
+    let loaded = art::read_some(
+        m.pictures.as_mut(),
+        &wants.needed,
+        &wants.extra,
+        &wants.every,
+    );
     let layout = tags::screen_layout_at(ui, path, &[scale], &loaded.art, &mut notes)?;
     for n in notes {
         eprintln!("{n}");
@@ -676,6 +681,7 @@ fn draw_target(
             lists: &lists,
             button_focus: (!has_list).then_some(args.focus),
             disabled_buttons: &[],
+            hidden_buttons: &[],
             header,
             legend: &legend,
             keyboard: false,

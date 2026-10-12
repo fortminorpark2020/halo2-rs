@@ -45,7 +45,14 @@ impl Shell {
     /// built-in numbers and flat shapes. The catalog's scales take
     /// `H2LOBBY_SCALE`'s overrides.
     pub fn open(path: &Path, log: &dyn Fn(&str)) -> Shell {
-        let (overrides, unread) = catalog::env_overrides();
+        let scale = std::env::var("H2LOBBY_SCALE").unwrap_or_default();
+        Shell::open_scaled(path, log, &scale)
+    }
+
+    /// As `open`, with `scale` in place of `H2LOBBY_SCALE`'s value (what
+    /// it can't read logged first, then how many overrides it gave).
+    pub fn open_scaled(path: &Path, log: &dyn Fn(&str), scale: &str) -> Shell {
+        let (overrides, unread) = catalog::overrides(scale);
         let mut early = Vec::new();
         if !unread.is_empty() {
             let unread = unread.join(", ");
@@ -129,18 +136,18 @@ impl Shell {
         let mut main = tags::main_menu_layout(ui, &FlatArt, &mut scratch);
         main.framing = tags::framing(ui, &mut scratch);
         let chrome = tags::chrome(ui, &mut scratch);
-        let mut wanted = tags::wanted(&start, &main, &chrome);
-        let mut extra = Vec::new();
+        let mut wants = tags::Wants {
+            needed: tags::wanted(&start, &main, &chrome),
+            ..tags::Wants::default()
+        };
         let screens = catalog_screens(ui, overrides, &FlatArt, &mut scratch);
         for s in screens.values() {
-            let (more, maybe) = tags::screen_wanted(s);
-            wanted.extend(more);
-            extra.extend(maybe);
+            wants.add(tags::screen_wanted(s));
         }
         let mut found = Vec::new();
         let art = match pictures {
             Some(p) => {
-                let loaded = art::read_some(p, &wanted, &extra);
+                let loaded = art::read_some(p, &wants.needed, &wants.extra, &wants.every);
                 note_pictures(&loaded, &mut found);
                 loaded.art
             }
@@ -421,10 +428,17 @@ mod tests {
         dir
     }
 
-    /// Opens `dir`'s mainmenu.map, giving the shell and what it logged.
+    /// Opens `dir`'s mainmenu.map, giving the shell and what it logged
+    /// (without `H2LOBBY_SCALE`, whatever the environment has).
     fn open(dir: &Path) -> (Shell, Vec<String>) {
+        open_scaled(dir, "")
+    }
+
+    /// As `open`, with `scale` as `H2LOBBY_SCALE`'s value.
+    fn open_scaled(dir: &Path, scale: &str) -> (Shell, Vec<String>) {
         let lines = RefCell::new(Vec::new());
-        let shell = Shell::open(dir, &|l: &str| lines.borrow_mut().push(l.to_string()));
+        let log = |l: &str| lines.borrow_mut().push(l.to_string());
+        let shell = Shell::open_scaled(dir, &log, scale);
         (shell, lines.into_inner())
     }
 
@@ -834,6 +848,7 @@ mod tests {
             lists: &lists,
             button_focus: Some(0),
             disabled_buttons: &[],
+            hidden_buttons: &[],
             header: screens::Words::Tag,
             legend: &[],
             keyboard: false,
@@ -854,6 +869,32 @@ mod tests {
                 list.texts
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scale_overrides_reach_the_shells_catalog_screens() {
+        let dir = folder("overrides");
+        let mut dat = TexturesDat::default();
+        let map = mainmenu_with_a_dialog(&mut dat).build();
+        std::fs::write(dir.join("mainmenu.map"), map).unwrap();
+        std::fs::write(dir.join("textures.dat"), &dat.bytes).unwrap();
+        let (shell, log) = open_scaled(&dir, "please_wait=vista, bogus");
+        // What it couldn't read, then how many, first in the log.
+        assert_eq!(log[0], "menus: H2LOBBY_SCALE: left out bogus");
+        assert_eq!(log[1], "menus: H2LOBBY_SCALE: 1 overrides");
+        assert_eq!(log, shell.sources);
+        // Please Wait at Vista's scale: its plate at its tag's own corner
+        // (the Xbox's would be (-300, 225)), its pictures still read.
+        let got = shell.screen(ScreenId::PleaseWait).unwrap();
+        assert_eq!(got.panes[0].scale, crate::layout::Scale::Vista);
+        assert_eq!(got.panes[0].bitmaps[0].corner, [-120.0, 90.0]);
+        assert!(shell.art.picture(PLATE, 0).is_some());
+        let line = format!(
+            "menus: screen {}: 1 panes (vista), 1 parked widgets left out, list skins main_menu",
+            ScreenId::PleaseWait.path()
+        );
+        assert!(log.contains(&line), "{log:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -922,7 +963,9 @@ mod tests {
     /// Checks a real map's catalog screens: every one is in the tags, and
     /// every picture they draw decoded, or the reason is a frame the tag
     /// asks for that its bitmap hasn't (menu.md 9.2 lists them) or names
-    /// the format this crate can't decode.
+    /// the format this crate can't decode. Vista's are pinned exactly
+    /// (`check_vista_pictures`); MCC's keep this looser check until P5
+    /// gives their numbers.
     fn check_catalog(shell: &Shell) {
         let log = shell.sources.join("\n");
         assert_eq!(shell.screens.len(), ScreenId::ALL.len(), "{log}");
@@ -938,6 +981,59 @@ mod tests {
         // Vista's lobby pane: START GAME's picture where Cartographer's is.
         let start = lobby.panes[0].buttons[0].bitmap.as_ref().unwrap();
         assert_eq!(start.corner, [-705.0, 492.0]);
+    }
+
+    /// Vista's pictures exactly as menu.md 9.2 measured them on
+    /// Cartographer's mainmenu.map: 87 of 94 bitmaps, drawn flat only for
+    /// these frames the tags ask for that their bitmaps haven't; both of
+    /// the pregame lobby button's frames (resting and lit); and both
+    /// arrows of every catalog list's skin.
+    fn check_vista_pictures(shell: &Shell) {
+        let log = shell.sources.join("\n");
+        assert!(
+            log.contains("menus: pictures for 87 of 94 bitmaps"),
+            "{log}"
+        );
+        let mut flat = Vec::new();
+        for line in shell.sources.iter().filter(|l| l.contains("drawn flat")) {
+            let (why, names) = line.split_once("): ").unwrap_or_else(|| panic!("{line}"));
+            let frame = why
+                .strip_prefix("menus: drawn flat (it has no frame ")
+                .unwrap_or_else(|| panic!("{line}"));
+            flat.extend(names.split(", ").map(|name| format!("{name} {frame}")));
+        }
+        flat.sort();
+        let known = [
+            "beeper 6",
+            "myhack 1",
+            "tabs 1",
+            "tabs 2",
+            "unknown 2",
+            "xbox_live 8",
+            "xbox_live_menu 7",
+            "y_callout 5",
+        ];
+        assert_eq!(flat, known, "{log}");
+        // Names from the layouts: a short name could match another bitmap.
+        let lobby = shell.screen(ScreenId::Lobby).unwrap();
+        let button = &lobby.panes[0].buttons[0].bitmap.as_ref().unwrap().name;
+        for frame in tags::BUTTON_FRAMES {
+            assert!(
+                shell.art.picture(button, frame).is_some(),
+                "{button} {frame}"
+            );
+        }
+        let mut arrows = 0;
+        for p in shell.screens.values().flat_map(|s| &s.panes) {
+            for a in p.lists.iter().filter_map(|l| l.skin.arrows.as_ref()) {
+                for frame in [0, 1] {
+                    let found = shell.art.picture(&a.bitmap, frame).is_some();
+                    assert!(found, "{} {frame}", a.bitmap);
+                }
+                arrows += 1;
+            }
+        }
+        assert!(arrows > 0);
     }
 
     /// Every catalog screen's places, boxes and pictures, as lines.
@@ -998,6 +1094,7 @@ mod tests {
         assert!(log[0].contains("Vista's"), "{log:?}");
         check_real(&shell);
         check_catalog(&shell);
+        check_vista_pictures(&shell);
     }
 
     /// Both maps (`H2_MAPS` and `H2_MCC_MAPS`): every catalog screen is

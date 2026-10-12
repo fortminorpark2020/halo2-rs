@@ -1,6 +1,10 @@
 # Progress and handoff
 
-Last updated 2026-10-12 (menu 2.7: `h2ui` lays out and draws any
+Last updated 2026-10-12 (menu 2.7's review fixes, round 1: hidden
+buttons, list skins' pictures read whole, Xbox panes' text 1.25 times
+bigger, "the online service" after into/to/of/from/with/by, intro ends
+counting skin pictures, Vista's pictures pinned exactly; before it menu
+2.7: `h2ui` lays out and draws any
 screen of mainmenu.map from its tags, a catalog of the 27 the lobby
 will use, checked on Cartographer's map; before it menu 2.6's review
 fixes, round 2: Halo 2's
@@ -330,7 +334,7 @@ Next, in order:
    Bungie, clans and voice refused), rows, buttons, header and legend,
    returning where clicks land. `h2ui::catalog` names the 27 screens the
    lobby will draw and each pane's scale (`H2LOBBY_SCALE` overrides);
-   `Shell` lays them all out when it opens (62.7 MB of pictures, about
+   `Shell` lays them all out when it opens (63.5 MB of pictures, about
    150 ms in the container). Checked with `menu_png --all` on
    Cartographer's map: every screen found; error_dialog_ok's family of
    dialogs at 1:1, task_progress's (Please Wait, Boot) and Player
@@ -343,7 +347,15 @@ Next, in order:
    full-screen pickers slowest), over the 10 ms budget there; P5 on the
    owner's PC (menu.md, after "What Phase 2.7 built") runs `menu_png
    --all` on MCC's mainmenu.map for the real times and the ignored
-   tests on both maps. Next: 2.8, Halo 2's dialogs.
+   tests on both maps. Review round 1 (menu.md "Review fixes, round
+   1"): a binding can hide a button whole, rows can show any frame of
+   their skin's pictures, Xbox panes' words are 1.25 times bigger,
+   `wording` says "the online service" after into, to, of, from, with
+   and by, and 9.2's xbox_live_menu frames are corrected (the
+   bungie.net picture is frame 4, which no catalog screen draws). Left
+   for later: all our menu text is about two thirds of Halo 2's size
+   (9.4), and Please Wait's wrapped body meets its header (2.9). Next:
+   2.8, Halo 2's dialogs.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

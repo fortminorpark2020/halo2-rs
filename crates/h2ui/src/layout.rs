@@ -632,7 +632,12 @@ pub enum Scale {
 /// pane's places and sizes; and how much bigger its pictures are drawn
 /// than their own scale says (the pictures Vista and MCC have are twice
 /// the Xbox's size: 2.5 / 2). Both are checked against the owner's
-/// screenshot of the Xbox's pregame lobby and three bitmaps only.
+/// screenshot of the Xbox's pregame lobby and three bitmaps only. An Xbox
+/// pane's text is drawn `XBOX_BITMAP` times bigger too (Vista's fonts are
+/// about twice the Xbox's, as its pictures are): the same body font
+/// measured on the Xbox screenshot (a 415-pixel JPEG) and on
+/// Cartographer's lobby gives about 1.15 to 1.27, so 1.25 is an estimate
+/// within that.
 pub const XBOX_POSITION: f32 = 2.5;
 pub const XBOX_BITMAP: f32 = 1.25;
 
@@ -645,7 +650,8 @@ impl Scale {
         }
     }
 
-    /// How much a pane's pictures grow beyond their own scale.
+    /// How much a pane's pictures (and its texts' glyphs) grow beyond
+    /// their own scale.
     pub fn bitmap(self) -> f32 {
         match self {
             Scale::Vista => 1.0,
@@ -686,12 +692,15 @@ impl Scale {
 /// `#<n>` for the `n`th text of its pane when it names none), the words
 /// the screen's string list has for it, and where and how it is drawn.
 /// Which words it shows is the screen's binding's choice
-/// (`screens::Words`).
+/// (`screens::Words`). Its glyphs are drawn `glyphs` times its font's
+/// size, and wrap at that size: its pane's `Scale::bitmap` (1.25 on an
+/// Xbox pane).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlotText {
     pub key: String,
     pub words: Option<String>,
     pub widget: TextWidget,
+    pub glyphs: f32,
 }
 
 /// A button of a screen (the pregame lobby's START GAME): its text slot,
@@ -754,8 +763,8 @@ pub struct PaneLayout {
 
 impl PaneLayout {
     /// The same pane at another scale: every place and box moved out or
-    /// in, its pictures grown or shrunk (its lists' skins stay as they
-    /// are, as at either scale).
+    /// in, its pictures and texts' glyphs grown or shrunk (its lists'
+    /// skins stay as they are, as at either scale).
     pub fn at_scale(&self, to: Scale) -> PaneLayout {
         let from = self.scale;
         let k = to.position() / from.position();
@@ -779,6 +788,7 @@ impl PaneLayout {
         let text = |t: &SlotText| {
             let mut t = t.clone();
             t.widget.bounds = t.widget.bounds.map(|v| v * k);
+            t.glyphs *= pk;
             t
         };
         PaneLayout {

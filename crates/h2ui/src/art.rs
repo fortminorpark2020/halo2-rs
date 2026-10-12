@@ -231,34 +231,75 @@ pub struct Loaded {
 /// empty, and its sequences, a sprite's part of its image as
 /// `blam_cache::ui::BitmapInfo::frame` cuts it.
 pub fn read(pictures: &mut dyn Pictures, wanted: &[(String, usize)]) -> Loaded {
-    read_some(pictures, wanted, &[])
+    read_some(pictures, wanted, &[], &[])
+}
+
+/// A bitmap `read_some` reads: its frames, whether each must be there,
+/// and whether its every image is read.
+struct Asked<'a> {
+    name: &'a str,
+    frames: Vec<(usize, bool)>,
+    all_images: bool,
+}
+
+/// One image of a bitmap, decoded.
+fn decode(pictures: &mut dyn Pictures, name: &str, image: usize) -> Result<ArtImage, String> {
+    match pictures.image(name, image) {
+        Ok(im) => Ok(ArtImage {
+            width: im.width as usize,
+            height: im.height as usize,
+            rgba: im.rgba,
+        }),
+        Err(e) => Err(format!("image {image}: {e}")),
+    }
 }
 
 /// As `read`, with the `extra` frames read too where their bitmaps have
 /// them: one a bitmap hasn't isn't missing (a button with one picture
-/// shows it when focused too, `screens::button_frame`).
+/// shows it when focused too, `screens::button_frame`). Each bitmap named
+/// in `every` has every image read (a list skin's pictures, which a row
+/// may show at another frame: `screens::Row::frames`).
 pub fn read_some(
     pictures: &mut dyn Pictures,
     wanted: &[(String, usize)],
     extra: &[(String, usize)],
+    every: &[String],
 ) -> Loaded {
-    // Each bitmap's frames, and whether each must be there.
-    let mut names: Vec<(&str, Vec<(usize, bool)>)> = Vec::new();
+    let mut names: Vec<Asked> = Vec::new();
     let all = wanted.iter().map(|w| (w, true));
     for ((name, frame), needed) in all.chain(extra.iter().map(|w| (w, false))) {
-        match names.iter_mut().find(|n| n.0.eq_ignore_ascii_case(name)) {
-            Some(n) => match n.1.iter_mut().find(|f| f.0 == *frame) {
+        match names.iter_mut().find(|n| n.name.eq_ignore_ascii_case(name)) {
+            Some(n) => match n.frames.iter_mut().find(|f| f.0 == *frame) {
                 Some(f) => f.1 |= needed,
-                None => n.1.push((*frame, needed)),
+                None => n.frames.push((*frame, needed)),
             },
-            None => names.push((name, vec![(*frame, needed)])),
+            None => names.push(Asked {
+                name,
+                frames: vec![(*frame, needed)],
+                all_images: false,
+            }),
+        }
+    }
+    for name in every {
+        match names.iter_mut().find(|n| n.name.eq_ignore_ascii_case(name)) {
+            Some(n) => n.all_images = true,
+            None => names.push(Asked {
+                name,
+                frames: Vec::new(),
+                all_images: true,
+            }),
         }
     }
     let mut out = Loaded {
         wanted: names.len(),
         ..Loaded::default()
     };
-    for (name, frames) in names {
+    for Asked {
+        name,
+        frames,
+        all_images,
+    } in names
+    {
         let info = match pictures.bitmap(name) {
             Ok(info) => info,
             Err(e) => {
@@ -281,18 +322,23 @@ pub fn read_some(
             if images[shown.image].width > 0 {
                 continue;
             }
-            match pictures.image(name, shown.image) {
-                Ok(im) => {
-                    images[shown.image] = ArtImage {
-                        width: im.width as usize,
-                        height: im.height as usize,
-                        rgba: im.rgba,
-                    };
-                }
-                Err(e) => {
-                    let why = format!("image {}: {e}", shown.image);
+            match decode(pictures, name, shown.image) {
+                Ok(image) => images[shown.image] = image,
+                Err(why) => {
                     out.missing.push((name.to_string(), why));
                     whole = false;
+                }
+            }
+        }
+        if all_images {
+            let left = images.iter_mut().enumerate().filter(|(_, i)| i.width == 0);
+            for (k, image) in left {
+                match decode(pictures, name, k) {
+                    Ok(read) => *image = read,
+                    Err(why) => {
+                        out.missing.push((name.to_string(), why));
+                        whole = false;
+                    }
                 }
             }
         }
@@ -449,16 +495,42 @@ mod tests {
         let wanted = [("ui\\brace".to_string(), 0)];
         // Frame 1 exists, frame 7 doesn't: neither is missing.
         let extra = [("ui\\brace".to_string(), 1), ("ui\\brace".to_string(), 7)];
-        let loaded = read_some(&mut fake, &wanted, &extra);
+        let loaded = read_some(&mut fake, &wanted, &extra, &[]);
         assert!(loaded.missing.is_empty(), "{:?}", loaded.missing);
         assert_eq!((loaded.found, loaded.wanted), (1, 1));
         assert!(loaded.art.picture("brace", 0).is_some());
         assert!(loaded.art.picture("brace", 1).is_some());
         // Wanted as well, a frame it hasn't is missing.
         let both = [("ui\\brace".to_string(), 7)];
-        let loaded = read_some(&mut fake, &both, &extra);
+        let loaded = read_some(&mut fake, &both, &extra, &[]);
         assert_eq!(loaded.missing.len(), 1);
         assert_eq!(loaded.found, 0);
+    }
+
+    #[test]
+    fn a_bitmap_read_whole_has_every_image() {
+        let mut fake = Fake {
+            decoded: Vec::new(),
+        };
+        // Frame 0 wanted, and every image: image 1 too, each read once.
+        let wanted = [("ui\\brace".to_string(), 0)];
+        let every = ["UI\\Brace".to_string()];
+        let loaded = read_some(&mut fake, &wanted, &[], &every);
+        let brace = |k| ("ui\\brace".to_string(), k);
+        assert_eq!(fake.decoded, [brace(0), brace(1)]);
+        assert_eq!((loaded.found, loaded.wanted), (1, 1));
+        assert!(loaded.missing.is_empty(), "{:?}", loaded.missing);
+        assert!(loaded.art.picture("brace", 0).is_some());
+        assert!(loaded.art.picture("brace", 1).is_some());
+        // Named only to be read whole, it is read; one that won't decode
+        // says why.
+        fake.decoded.clear();
+        let every = ["ui\\brace".to_string(), "ui\\broken".to_string()];
+        let loaded = read_some(&mut fake, &[], &[], &every);
+        assert_eq!(fake.decoded, [brace(0), brace(1)]);
+        assert_eq!((loaded.found, loaded.wanted), (1, 2));
+        assert_eq!(loaded.missing.len(), 1);
+        assert!(loaded.missing[0].1.contains("a format of its own"));
     }
 
     #[test]

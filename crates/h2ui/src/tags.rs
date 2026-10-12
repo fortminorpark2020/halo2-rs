@@ -620,7 +620,8 @@ fn scaled_flat(flat: Flat, [sx, sy]: [f32; 2]) -> Flat {
     }
 }
 
-/// A text slot of a pane at `scale`, `k`th of its kind.
+/// A text slot of a pane at `scale`, `k`th of its kind: its box moved
+/// out, its glyphs grown as the pane's pictures are.
 fn slot(t: &ui::Text, k: usize, g: &Globals, scale: Scale) -> SlotText {
     let mut widget = text(t, g);
     widget.bounds = scale.rect(widget.bounds);
@@ -632,6 +633,7 @@ fn slot(t: &ui::Text, k: usize, g: &Globals, scale: Scale) -> SlotText {
         },
         words: t.text.clone(),
         widget,
+        glyphs: scale.bitmap(),
     }
 }
 
@@ -844,26 +846,61 @@ pub fn screen_layout_at(
 /// Bitmaps by their whole names, each with a frame drawn.
 pub type Wanted = Vec<(String, usize)>;
 
-/// Every bitmap (name and frame) a screen draws: its panes' pictures, its
-/// buttons' resting look, its lists' skins' and their arrows (both
-/// frames); then the frames drawn only where a bitmap has them (a
-/// button's focused look, `art::read_some`).
-pub fn screen_wanted(screen: &ScreenLayout) -> (Wanted, Wanted) {
-    let (mut out, mut extra) = (Vec::new(), Vec::new());
-    for p in &screen.panes {
-        out.extend(p.bitmaps.iter().map(|w| (w.name.clone(), w.frame)));
-        for b in p.buttons.iter().filter_map(|b| b.bitmap.as_ref()) {
-            out.push((b.name.clone(), BUTTON_FRAMES[0]));
-            extra.push((b.name.clone(), BUTTON_FRAMES[1]));
-        }
-        for l in &p.lists {
-            out.extend(l.skin.bitmaps.iter().map(|w| (w.name.clone(), w.frame)));
-            if let Some(a) = &l.skin.arrows {
-                out.extend([0, 1].map(|f| (a.bitmap.clone(), f)));
+/// What screens draw, for `art::read_some`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Wants {
+    /// Each bitmap and frame drawn: one missing is logged (drawn flat).
+    pub needed: Wanted,
+    /// Frames read only where their bitmaps have them (a button's focused
+    /// look).
+    pub extra: Wanted,
+    /// Bitmaps read whole, every image: list skins' pictures, which a row
+    /// may show at any frame (`screens::Row::frames`, the Y menu's status
+    /// icons).
+    pub every: Vec<String>,
+}
+
+impl Wants {
+    /// These and `more`'s (a bitmap read whole named once).
+    pub fn add(&mut self, more: Wants) {
+        self.needed.extend(more.needed);
+        self.extra.extend(more.extra);
+        for name in more.every {
+            if !self.every.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                self.every.push(name);
             }
         }
     }
-    (out, extra)
+}
+
+/// Every bitmap (name and frame) a screen draws: its panes' pictures, its
+/// buttons' resting look, its lists' skins' and their arrows (both
+/// frames); then the frames drawn only where a bitmap has them (a
+/// button's focused look, `art::read_some`); then its skins' pictures
+/// again, to be read whole.
+pub fn screen_wanted(screen: &ScreenLayout) -> Wants {
+    let mut out = Wants::default();
+    for p in &screen.panes {
+        out.needed
+            .extend(p.bitmaps.iter().map(|w| (w.name.clone(), w.frame)));
+        for b in p.buttons.iter().filter_map(|b| b.bitmap.as_ref()) {
+            out.needed.push((b.name.clone(), BUTTON_FRAMES[0]));
+            out.extra.push((b.name.clone(), BUTTON_FRAMES[1]));
+        }
+        for l in &p.lists {
+            let skin = &l.skin.bitmaps;
+            out.needed
+                .extend(skin.iter().map(|w| (w.name.clone(), w.frame)));
+            if let Some(a) = &l.skin.arrows {
+                out.needed.extend([0, 1].map(|f| (a.bitmap.clone(), f)));
+            }
+            out.add(Wants {
+                every: skin.iter().map(|w| w.name.clone()).collect(),
+                ..Wants::default()
+            });
+        }
+    }
+    out
 }
 
 /// The frames of a button's picture drawn: when it hasn't focus, and when
@@ -1393,6 +1430,7 @@ mod tests {
         assert_eq!(p.texts[0].key, "quarter_body");
         assert_eq!(p.texts[0].words.as_deref(), Some("SOME WORDS"));
         assert_eq!(p.texts[0].widget.bounds, [-200.0, 100.0, 200.0, 0.0]);
+        assert_eq!(p.texts[0].glyphs, 1.25);
         // A list's corner moves out; its skin, shared, stays in Vista's
         // units, with its arrows.
         let l = &p.lists[0];
@@ -1408,6 +1446,7 @@ mod tests {
         let b = &p.buttons[0];
         assert_eq!(b.key(), "quarter_button");
         assert_eq!(b.text.widget.bounds, [-175.0, -100.0, 25.0, -140.0]);
+        assert_eq!(b.text.glyphs, 1.25);
         let picture = b.bitmap.as_ref().unwrap();
         assert_eq!(picture.corner, [-195.0, -90.0]);
         assert_eq!(picture.depth, b.text.widget.depth - 1);
@@ -1439,9 +1478,10 @@ mod tests {
         );
         // What it draws: the button's focused look only where its bitmap
         // has it.
-        let (wanted, extra) = screen_wanted(&s);
+        let wants = screen_wanted(&s);
         let has = |name: &str, frame: usize| {
-            wanted
+            wants
+                .needed
                 .iter()
                 .any(|(n, f)| last_part(n) == name && *f == frame)
         };
@@ -1449,12 +1489,114 @@ mod tests {
         assert!(has("arrows", 0) && has("arrows", 1));
         assert!(!has("button", 1) && !has("ul_07", 0));
         assert_eq!(
-            extra,
+            wants.extra,
             [(
                 "ui\\screens\\game_shell\\pregame_lobby\\button".to_string(),
                 1
             )]
         );
+        // The skin's pictures read whole (a row may show any frame).
+        assert_eq!(wants.every, ["ui\\list_skins\\default\\item_background"]);
+    }
+
+    /// A map's pictures where every bitmap has three separate 4 by 4
+    /// images (no sequences: frame k is image k), noting each image read.
+    struct ThreeEach {
+        read: Vec<(String, usize)>,
+    }
+
+    impl blam_cache::ui::Pictures for ThreeEach {
+        fn bitmap(&mut self, name: &str) -> blam_cache::Result<ui::BitmapInfo> {
+            let image = blam_cache::bitmap::ImageInfo {
+                width: 4,
+                height: 4,
+                format: blam_cache::bitmap::Format::A8R8G8B8,
+            };
+            Ok(ui::BitmapInfo {
+                name: name.to_string(),
+                images: vec![image; 3],
+                sequences: Vec::new(),
+            })
+        }
+
+        fn image(
+            &mut self,
+            name: &str,
+            index: usize,
+        ) -> blam_cache::Result<blam_cache::bitmap::Image> {
+            self.read.push((last_part(name).to_string(), index));
+            Ok(blam_cache::bitmap::Image {
+                width: 4,
+                height: 4,
+                rgba: vec![60 * index as u8 + 30; 64],
+            })
+        }
+    }
+
+    #[test]
+    fn a_shell_reads_its_list_skins_pictures_whole_for_their_rows() {
+        let ui = dialog_menus(&crate::catalog::ScreenId::Lobby.path());
+        let mut pictures = ThreeEach { read: Vec::new() };
+        let shell = crate::shell::Shell::with_scales(Some(&ui), Some(&mut pictures), &[]);
+        // The skin's picture has every frame; a pane's picture only the
+        // one its tag names.
+        let icon = "ui\\list_skins\\default\\item_background";
+        for frame in 0..3 {
+            assert!(shell.art.picture(icon, frame).is_some(), "{frame}");
+        }
+        let plate = "ui\\global_bitmaps\\dialog1";
+        assert!(shell.art.picture(plate, 0).is_some());
+        assert!(shell.art.picture(plate, 2).is_none());
+        let reads = |name: &str| pictures.read.iter().filter(|r| r.0 == name).count();
+        assert_eq!((reads("item_background"), reads("dialog1")), (3, 1));
+        assert!(
+            shell.sources.iter().all(|l| !l.contains("drawn flat")),
+            "{:?}",
+            shell.sources
+        );
+        // Drawn, a row asking for frame 2 shows it; the others their own.
+        let layout = shell.screen(crate::catalog::ScreenId::Lobby).unwrap();
+        let rows: Vec<crate::screens::Row> = (0..3)
+            .map(|k| crate::screens::Row {
+                frames: if k == 1 {
+                    vec![("item_background", 2)]
+                } else {
+                    Vec::new()
+                },
+                ..crate::screens::Row::new("ROW")
+            })
+            .collect();
+        let lists = [crate::screens::ListState {
+            rows: &rows,
+            focus: None,
+            first: 0,
+        }];
+        let state = crate::screens::ScreenState {
+            pane: 0,
+            opened: 0.0,
+            chrome: &shell.chrome,
+            words: &|_| crate::screens::Words::Hide,
+            tokens: &|_| None,
+            lists: &lists,
+            button_focus: None,
+            disabled_buttons: &[],
+            hidden_buttons: &[],
+            header: crate::screens::Words::Hide,
+            legend: &[],
+            keyboard: false,
+            pictures: &|_| crate::screens::Show::Keep,
+        };
+        let fonts = crate::text::Fonts::fallback();
+        let space = layout::Space::new(640, 360);
+        let (list, _) = crate::screens::screen(5.0, layout, &state, shell.art(), &fonts, space);
+        let texture = |frame| shell.art.picture(icon, frame).unwrap().texture;
+        let count = |frame| {
+            list.quads
+                .iter()
+                .filter(|q| q.texture == texture(frame))
+                .count()
+        };
+        assert_eq!((count(0), count(1), count(2)), (2, 0, 1));
     }
 
     #[test]
@@ -1476,6 +1618,7 @@ mod tests {
             }
         ));
         assert_eq!(p.texts[0].widget.bounds, [-80.0, 40.0, 80.0, 0.0]);
+        assert_eq!((p.texts[0].glyphs, p.buttons[0].text.glyphs), (1.0, 1.0));
         assert_eq!(p.lists[0].corner, [-60.0, -10.0]);
         assert_eq!(p.buttons[0].bitmap.as_ref().unwrap().corner, [-78.0, -36.0]);
         assert_eq!(p.players[0].row_height, 22.0);
@@ -1491,6 +1634,7 @@ mod tests {
         assert!(near(back.bitmaps[0].scale(), [1.0, 1.0]));
         assert!(near(back.lists[0].corner, p.lists[0].corner));
         assert!((back.players[0].row_height - 22.0).abs() < 1e-3);
+        assert!((back.texts[0].glyphs - 1.0).abs() < 1e-6);
         // A flag clear shows no header; one set keeps what is under it
         // undimmed; another makes its panes follow its list.
         let screen = ui.screens.last_mut().unwrap();
