@@ -1741,6 +1741,79 @@ fn a_removal_the_server_cannot_save_changes_nothing() {
 }
 
 #[test]
+fn a_removal_whose_friendships_cannot_be_saved_changes_nothing() {
+    let mut w = closed("remove-friends-unsaved");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    let jun = make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    let a = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let b = launcher_in(&mut w, 2, "Jun", Some(OTHER_PASSWORD));
+    w.send(a, ToServer::FriendRequest("JUN".into()));
+    w.until(|w| w.pcs[b].view.friends.iter().any(|f| f.account == kat));
+    w.send(b, ToServer::FriendAccept(kat));
+    let friends = |w: &World| {
+        let list = &w.pcs[a].view.friends;
+        list.iter()
+            .any(|f| f.account == jun && f.relation == Relation::Friend)
+    };
+    w.until(friends);
+    let blocked = unsaveable(&w, "friends.txt");
+    let remove = || Command::Remove { account: jun };
+    let done = w.server.command(Actor::Console, remove(), w.now);
+    assert_eq!(done, Err(CANT_SAVE.into()));
+    // Still there, signed in, Kat's friend, and in every file.
+    w.run(1.0);
+    assert!(w.pcs[b].signed_in());
+    assert!(w.server.account(jun).is_some());
+    assert!(friends(&w));
+    assert!(w.server.friends.are_friends(kat, jun));
+    let id = format!("{jun:016x}");
+    for file in ["accounts.txt", "friends.txt", "logins.txt"] {
+        let text = std::fs::read_to_string(w.data.0.join(file)).unwrap();
+        assert!(text.contains(&id), "{file}: {text}");
+    }
+    // Once it can be saved, it's removed, and after a restart the
+    // friendship doesn't come back (in Kat's list or count).
+    fixed(blocked);
+    let done = w.server.command(Actor::Console, remove(), w.now);
+    assert_eq!(done.as_deref(), Ok("REMOVED JUN"));
+    w.until(|w| w.pcs[a].view.friends.is_empty());
+    restart_closed(&mut w);
+    let text = std::fs::read_to_string(w.data.0.join("friends.txt")).unwrap_or_default();
+    assert!(!text.contains(&id), "{text}");
+    assert_eq!(w.server.friends.count(kat), 0);
+    assert!(w.server.friends.friends_of(kat).is_empty());
+    let a = launcher_in(&mut w, 1, "Kat", None);
+    w.run(1.0);
+    assert!(w.pcs[a].view.friends.is_empty());
+}
+
+#[test]
+fn a_removal_whose_accounts_txt_cannot_be_saved_keeps_its_friendships_on_disk() {
+    let mut w = closed("remove-accounts-unsaved-friends");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    let jun = make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    let a = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let b = launcher_in(&mut w, 2, "Jun", Some(OTHER_PASSWORD));
+    w.send(a, ToServer::FriendRequest("JUN".into()));
+    w.until(|w| w.pcs[b].view.friends.iter().any(|f| f.account == kat));
+    w.send(b, ToServer::FriendAccept(kat));
+    w.until(|w| w.server.friends.are_friends(kat, jun));
+    let before = std::fs::read_to_string(w.data.0.join("friends.txt")).unwrap();
+    let blocked = unsaveable(&w, "accounts.txt");
+    let done = w
+        .server
+        .command(Actor::Console, Command::Remove { account: jun }, w.now);
+    assert_eq!(done, Err(CANT_SAVE.into()));
+    // friends.txt was written without Jun first, then put back.
+    let after = std::fs::read_to_string(w.data.0.join("friends.txt")).unwrap();
+    assert_eq!(after, before);
+    fixed(blocked);
+    restart_closed(&mut w);
+    assert!(w.server.account(jun).is_some());
+    assert!(w.server.friends.are_friends(kat, jun));
+}
+
+#[test]
 fn a_new_account_or_name_the_server_cannot_save_is_undone() {
     let mut w = closed("add-unsaved");
     let jun = make_account(&mut w, "Jun 1", OTHER_PASSWORD, false);

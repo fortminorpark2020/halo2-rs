@@ -227,8 +227,12 @@ signed with the PC's key over the connection's challenge and a number that
 only goes up on that connection. Someone who takes over the unencrypted
 link can't make up a request or replay one. Passwords inside requests are
 sealed as above. One request is asked at a time; with no answer in 10
-seconds the launcher says "No answer from the server. Check the list." and
-asks for the list again.
+seconds the launcher says "No answer from the server yet." (to an admin it
+adds "Check the list." and asks for the list again), and A may send the
+request again. The server may still have
+done it, so an answer that comes later, while the link lasts, is acted on
+as if it had come in time: a password made up for the request is shown,
+and CHANGE PASSWORD closes ("Password changed.").
 
 A launcher admin can:
 - list accounts (done each time the Accounts screen opens);
@@ -337,9 +341,12 @@ command line uses this lock to tell whether the server is running.
 **Write order**, so a crash never lets anyone in:
 - A new account's logins line is written before its accounts.txt line (a
   logins line with no account is dropped at the next start).
-- A removed account leaves accounts.txt (and friends.txt) before
-  logins.txt (an account without a logins line would be adopted, its name
-  key signing in again).
+- A removed account leaves friends.txt, then accounts.txt, before
+  logins.txt (a friendship left in friends.txt would come back at the next
+  start; an account without a logins line would be adopted, its name key
+  signing in again). If friends.txt or accounts.txt can't be written, the
+  removal is refused ("THE SERVER COULDN'T SAVE ITS FILES") and nothing
+  changes: friends.txt is put back if accounts.txt is what failed.
 
 An ordinary sign-in writes nothing new. Back up the whole folder.
 logins.txt and secret.txt can't be rebuilt from stat cards.
@@ -426,7 +433,8 @@ applies, and every try is a new connection.
   lists);
 - frees the gamertag.
 
-On a closed server the account can't come back: an account the owner
+On a closed server the account can't come back (unless the server is
+rolled back to version 3: see "Deploy and rollback"): an account the owner
 made has a random id that is never reused, an account a PC's key made
 (open sign-up, or a server from before accounts) is refused that key
 because sign-up is closed, and its card is ignored. With sign-up open, an
@@ -609,14 +617,41 @@ program before the latest install: after a second install, an accounts
 build too, which turns version 3 launchers away.) The version 3 server
 reads the folder and ignores the new files and the `signup=`
 line, but it is open sign-up again. Accounts the owner made can't sign in
-under it, though they are kept for later. It has no command line either:
-the wrapper says so (`h2live user ...` does nothing) until the newer
-program is back. To roll forward, run `install-h2live.sh` again with the
+under it, though they are kept for later. It also knows nothing of
+sign-outs or removals. An account named by a PC's key (one from before
+accounts, or one open sign-up made; not one the owner made) signs in again
+from that PC, launcher or game, even after "Sign out of all PCs" or
+`h2live user revoke`, with its levels and friends. A removed one comes back
+when its PC signs in, its stat card bringing back its gamertag and levels.
+So don't roll back while a lost or stolen PC holds such an account's key.
+The version 3 server has no command line either: the wrapper says so
+(`h2live user ...` does nothing) until the newer program is back. To roll
+forward, run `install-h2live.sh` again with the
 accounts build of h2live beside it: after a rollback no accounts build is
 left in `/opt/h2live` (after one install, h2live.prev is the version 3
 program too), and the version 4 launchers go back into use. Rolling
 forward adopts any accounts the version 3 server made meanwhile, so check
-`h2live user list`. For an exact earlier state, restore the dated copy.
+`h2live user list`. Sign-outs hold again then, but a removed account that
+came back is adopted with its PC (as OLD PC): remove it again with
+`h2live user remove <GAMERTAG> --yes`.
+
+For an exact earlier state, put the dated copy in place of the data
+folder, not over it: files the copy doesn't have must go too. The copy
+from before accounts has no logins.txt. A newer one left beside it would
+keep the old accounts' sign-ins as they were at the next roll forward,
+instead of every account being adopted again with its own PC: a friend
+whose PC had moved to an account the owner made would then be asked for a
+password their old account doesn't have. As root, with `systemctl stop
+h2live` first:
+
+```
+mv /var/lib/h2live /var/lib/h2live.replaced-$(date +%Y%m%d-%H%M%S)
+cp -a /var/lib/h2live.backup-<date>-<time> /var/lib/h2live
+```
+
+then install the program and start it. `cp -a` keeps the h2live owner and
+the private modes; the folder replaced is kept beside it, to delete by
+hand.
 
 ## What it doesn't protect
 
@@ -641,6 +676,10 @@ forward adopts any accounts the version 3 server made meanwhile, so check
   stat cards. Past boxes stay closed.
 - **Windows key files.** On Windows, live-key.bin is protected only by the
   user's own folder.
+- **Rolling back to version 3.** The version 3 server ignores logins.txt,
+  so PCs signed out of accounts their keys named sign in again, and
+  removed accounts of that kind come back when their PCs sign in (see
+  "Deploy and rollback").
 - **Lost logins.txt.** If logins.txt is lost but accounts.txt isn't, the
   next start adopts every account again with its own key, so PCs that had
   been signed out sign in again, and admin flags are lost (sign-up stays

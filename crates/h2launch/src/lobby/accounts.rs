@@ -37,6 +37,10 @@ const COMMAND_LINE: &str = "Use the server's command line for that.";
 /// What A on Change my password says to an account without one.
 const NO_PASSWORD: &str = "Ask the server's owner for a password first.";
 const WORKING: &str = "Working...";
+/// What an account request unanswered for `ASK_WAIT` says (to an admin,
+/// whose list is asked for again; and to a player).
+const NO_ANSWER_ADMIN: &str = "No answer from the server yet. Check the list.";
+const NO_ANSWER: &str = "No answer from the server yet.";
 
 /// What an admin may do to an account, in the order the options popup
 /// shows them.
@@ -113,8 +117,8 @@ enum Row {
 pub(super) enum Asked {
     Create { gamertag: String, password: Secret },
     SetPassword { gamertag: String, password: Secret },
-    SignOut,
-    Remove,
+    SignOut { account: u64 },
+    Remove { account: u64 },
     ChangePassword,
 }
 
@@ -151,6 +155,10 @@ pub(super) struct AccountScreen {
     /// What went wrong, shown in the open popup.
     pub(super) error: Option<String>,
     pub(super) pending: Option<Pending>,
+    /// The last request given up on after `ASK_WAIT`: the server may still
+    /// have done it, so an answer that comes later (before the link goes)
+    /// is acted on all the same, a password made up for it shown.
+    pub(super) late: Option<Pending>,
     pub(super) shown: Option<Shown>,
 }
 
@@ -445,11 +453,13 @@ impl App {
                     }
                     AccountAction::SignOut => {
                         let what = format!("sign {tag} out of all PCs");
-                        self.ask(AccountAsk::SignOut { account: who }, Asked::SignOut, &what);
+                        let asked = Asked::SignOut { account: who };
+                        self.ask(AccountAsk::SignOut { account: who }, asked, &what);
                     }
                     AccountAction::Remove => {
                         let what = format!("remove account {tag}");
-                        self.ask(AccountAsk::Remove { account: who }, Asked::Remove, &what);
+                        let asked = Asked::Remove { account: who };
+                        self.ask(AccountAsk::Remove { account: who }, asked, &what);
                     }
                 }
             }
@@ -577,15 +587,20 @@ impl App {
     }
 
     /// New accounts came (`View::accounts`, the newest): if that message
-    /// answered the request in flight (`answers`, with `ok` and `text`),
-    /// act on the answer. (The screen draws from the view, and the
-    /// selection follows its account at the end of the tick.)
+    /// answered the request in flight, or the one given up on
+    /// (`answers`, with `ok` and `text`), act on the answer. (The screen
+    /// draws from the view, and the selection follows its account at the
+    /// end of the tick.)
     pub(super) fn on_accounts(&mut self, answers: u32, ok: bool, text: String) {
         let answered = |p: &Pending| answers != 0 && p.seq == answers;
-        if !self.acc.pending.as_ref().is_some_and(answered) {
-            return;
-        }
-        let Some(p) = self.acc.pending.take() else {
+        let p = if self.acc.pending.as_ref().is_some_and(answered) {
+            self.acc.pending.take()
+        } else if self.acc.late.as_ref().is_some_and(answered) {
+            self.acc.late.take()
+        } else {
+            None
+        };
+        let Some(p) = p else {
             return;
         };
         if !ok {
@@ -638,8 +653,10 @@ impl App {
                 self.log(&format!("lobby: {gamertag} has a new password"));
                 self.show_password(gamertag, password, true);
             }
-            Asked::SignOut | Asked::Remove => {
-                if matches!(self.popup, Some(Popup::ConfirmAccount(..))) {
+            Asked::SignOut { account } | Asked::Remove { account } => {
+                // Its question is answered (not another account's, asked
+                // while a late answer was on its way).
+                if matches!(self.popup, Some(Popup::ConfirmAccount(who, _)) if who == account) {
                     self.popup = None;
                 }
                 self.toast(text);
@@ -672,18 +689,25 @@ impl App {
         shown.is_some_and(|s| self.now.saturating_duration_since(s.at) < TRUST_WAIT)
     }
 
-    /// Each tick: a request unanswered for too long is given up on (and
-    /// the list asked for again), the selection follows its account, and a
-    /// popup about an account that's gone (or an admin's popup, for an
-    /// account that's no longer one) closes.
+    /// Each tick: a request unanswered for too long is given up on (A
+    /// may send it again, an admin's list is asked for again, and its
+    /// answer is still acted on if it comes), the selection follows its
+    /// account, and a popup about an account that's gone (or an admin's
+    /// popup, for an account that's no longer one) closes.
     pub(super) fn tick_accounts(&mut self) {
         if self.client.is_none() {
             self.acc.pending = None;
+            self.acc.late = None;
         }
         let late = |p: &Pending| self.now.saturating_duration_since(p.at) >= ASK_WAIT;
         if self.acc.pending.as_ref().is_some_and(late) {
-            self.acc.pending = None;
-            self.toast("No answer from the server. Check the list.".into());
+            self.acc.late = self.acc.pending.take();
+            let text = if self.admin() {
+                NO_ANSWER_ADMIN
+            } else {
+                NO_ANSWER
+            };
+            self.toast(text.into());
             self.ask_list();
         }
         let keys: Vec<Option<u64>> = self
@@ -2500,7 +2524,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_unanswered_for_ten_seconds_is_given_up_and_the_list_asked_for() {
+    fn a_request_unanswered_for_ten_seconds_is_given_up_but_its_late_answer_kept() {
         let mut live = Live::new("unanswered");
         live.add("ROOT", ROOT_PASSWORD, true);
         let bravo = live.add("BRAVO", PASSWORD, false);
@@ -2522,25 +2546,87 @@ mod tests {
         confirm(&mut a, "bravo", 1);
         a.tick(Instant::now() + ASK_WAIT + Duration::from_secs(1));
         assert!(a.acc.pending.is_none());
-        assert!(toasted(&a, "No answer from the server. Check the list."));
+        assert!(a.acc.late.is_some());
+        assert!(toasted(&a, NO_ANSWER_ADMIN));
         assert_eq!(lines(&said, "lobby: asked for the accounts"), lists + 1);
-        // The late answers (to it, and to the list) change nothing.
+        // The confirmation is still up, and A would send it again.
+        assert_eq!(a.label(), "confirmaccount");
+        assert!(!a.toasts.iter().any(|t| t.0.contains("SIGNED OUT")));
+        // The answer comes after all (and the list's): the server did it,
+        // so it's acted on as if it had come in time.
         for _ in 0..5 {
             live.step(&mut [&mut a]);
         }
         let now = lines(&said, "live: accounts (answering ")
             - lines(&said, "live: accounts (answering 0");
         assert_eq!(now, answers + 2);
-        assert!(!a.toasts.iter().any(|t| t.0.contains("SIGNED OUT")));
-        // The confirmation is still up, and may be sent again.
-        assert_eq!(a.label(), "confirmaccount");
-        a.input(Input::A);
-        assert!(a.acc.pending.is_some());
-        live.until(&mut [&mut a], |_, a| a[0].acc.pending.is_none());
+        assert!(a.acc.late.is_none());
         assert!(a.popup.is_none());
         assert!(toasted(&a, "BRAVO IS SIGNED OUT OF ALL PCS."));
         assert!(live.server.devices_of(bravo).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_late_answer_to_another_accounts_question_leaves_this_one_up() {
+        let mut live = Live::new("late-other");
+        live.add("ROOT", ROOT_PASSWORD, true);
+        live.add("BRAVO", PASSWORD, false);
+        live.add("CHARLIE", PASSWORD, false);
+        let (mut a, _, dir) = new_pc(&mut live, "late-other-root", "root", ROOT_PASSWORD);
+        open_accounts_row(&mut a);
+        live.until(&mut [&mut a], |_, a| a[0].account_rows().len() == 5);
+        // Sign BRAVO out; no answer in ten seconds; on to CHARLIE's
+        // question (not sent yet) as BRAVO's answer comes.
+        confirm(&mut a, "bravo", 1);
+        a.tick(Instant::now() + ASK_WAIT + Duration::from_secs(1));
+        assert!(a.acc.late.is_some());
+        a.input(Input::B);
+        a.input(Input::B);
+        assert_eq!(a.label(), "accounts");
+        assert!(a.pick("charlie"));
+        a.input(Input::A);
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "confirmaccount");
+        live.until(&mut [&mut a], |_, a| a[0].acc.late.is_none());
+        assert!(toasted(&a, "BRAVO IS SIGNED OUT OF ALL PCS."));
+        let charlie = live.server.find("CHARLIE").unwrap();
+        assert!(
+            matches!(a.popup, Some(Popup::ConfirmAccount(who, AccountAction::SignOut)) if who == charlie)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_account_created_after_ten_seconds_still_shows_its_password() {
+        let mut live = Live::new("late-create");
+        live.add("ROOT", ROOT_PASSWORD, true);
+        let (mut a, said, dir) = new_pc(&mut live, "late-create-root", "root", ROOT_PASSWORD);
+        open_accounts_row(&mut a);
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "newaccount");
+        let made = a.acc.password.as_str().to_string();
+        type_in(&mut a, "bravo");
+        a.input(Input::A);
+        a.input(Input::A);
+        assert!(log_has(&said, "lobby: asked to create account BRAVO"));
+        // No answer in ten seconds.
+        a.tick(Instant::now() + ASK_WAIT + Duration::from_secs(1));
+        assert!(a.acc.pending.is_none());
+        assert!(toasted(&a, NO_ANSWER_ADMIN));
+        assert_eq!(a.label(), "newaccount");
+        // Then it comes: made, so its password is shown, the one time.
+        live.until(&mut [&mut a], |_, a| a[0].popup == Some(Popup::NewPassword));
+        let shown = a.acc.shown.as_ref().unwrap();
+        assert_eq!(shown.gamertag, "BRAVO");
+        assert_eq!(shown.password.as_str(), made);
+        assert!(!log_has(&said, &made));
+        let (b, _, dir_b) = new_pc(&mut live, "late-create-bravo", "bravo", &made);
+        assert_eq!(b.account(), live.server.find("BRAVO"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 
     #[test]
@@ -2705,6 +2791,68 @@ mod tests {
         for d in [dir, dir_b, dir_c] {
             let _ = std::fs::remove_dir_all(d);
         }
+    }
+
+    #[test]
+    fn a_password_change_answered_after_ten_seconds_still_closes_the_popup() {
+        let mut live = Live::new("change-late");
+        let alpha = live.add("ALPHA", PASSWORD, false);
+        let (mut a, said, dir) = new_pc(&mut live, "change-late-alpha", "alpha", PASSWORD);
+        open_accounts_row(&mut a);
+        a.input(Input::A);
+        assert_eq!(a.label(), "changepassword");
+        let new = "NEW-PASS-4471";
+        type_in(&mut a, PASSWORD);
+        a.input(Input::Tab);
+        type_in(&mut a, new);
+        a.input(Input::Tab);
+        type_in(&mut a, new);
+        a.input(Input::A);
+        assert!(a.acc.pending.is_some());
+        // The link stalls past ten seconds: given up on, said so (a
+        // player has no list to check, so none is asked for), and the
+        // popup stays up as it was.
+        a.tick(Instant::now() + ASK_WAIT + Duration::from_secs(1));
+        assert!(a.acc.pending.is_none());
+        assert!(a.acc.late.is_some());
+        assert!(toasted(&a, NO_ANSWER));
+        assert!(!log_has(&said, "lobby: asked for the accounts"));
+        assert_eq!(a.label(), "changepassword");
+        assert_eq!(a.acc.change[0].as_str(), PASSWORD);
+        // Then the server's answer comes: changed, so the popup closes and
+        // says so (A again would have sent a password that's no longer
+        // the current one).
+        live.until(&mut [&mut a], |_, a| a[0].acc.late.is_none());
+        assert!(a.popup.is_none(), "{:?}", a.acc.error);
+        assert!(toasted(&a, "Password changed."));
+        assert!(a.acc.change.iter().all(Secret::is_empty));
+        assert_eq!(a.label(), "accounts");
+        assert_eq!(live.server.devices_of(alpha).len(), 1);
+        for typed in [new, PASSWORD] {
+            assert!(!log_has(&said, typed), "{typed}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_late_answer_is_forgotten_when_the_link_goes() {
+        let mut live = Live::new("late-gone");
+        live.add("ALPHA", PASSWORD, false);
+        let (mut a, _, dir) = new_pc(&mut live, "late-gone-alpha", "alpha", PASSWORD);
+        open_accounts_row(&mut a);
+        a.input(Input::A);
+        type_in(&mut a, PASSWORD);
+        a.input(Input::Tab);
+        type_in(&mut a, "NEW-PASS-4471");
+        a.input(Input::Tab);
+        type_in(&mut a, "NEW-PASS-4471");
+        a.input(Input::A);
+        a.tick(Instant::now() + ASK_WAIT + Duration::from_secs(1));
+        assert!(a.acc.late.is_some());
+        a.client = None;
+        a.tick(Instant::now());
+        assert!(a.acc.late.is_none() && a.acc.pending.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

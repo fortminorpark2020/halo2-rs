@@ -359,9 +359,12 @@ the launcher doesn't do.
    your own account or another admin's they are greyed ("Use the server's
    command line for that."). A new password is shown once (NEW PASSWORD;
    A or B closes it only after it has been up a second) and forgotten. One request is out at a time ("Working..."); with no
-   answer in 10 s the lobby says "No answer from the server. Check the
-   list." and asks for it again. The server's answers come as notices or
-   in the popup. B goes back to the playlists. The gamertag and password
+   answer in 10 s the lobby says "No answer from the server yet." (to an
+   admin it adds "Check the list." and asks for the list again), and A may
+   send the request again. An answer that comes later
+   is still acted on (the password made up shown, CHANGE PASSWORD closed),
+   until the link goes. The server's answers come as notices or in the
+   popup. B goes back to the playlists. The gamertag and password
    fields need a keyboard until menu Phase 2's on-screen keyboard.
 
 ## Testing without MCC

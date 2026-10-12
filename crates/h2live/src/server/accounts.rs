@@ -910,14 +910,39 @@ impl Server {
                     return Err(LAST_ADMIN.into());
                 }
                 let name = self.gamertag(account);
-                // accounts.txt without it before anything else: an account
-                // left there without sign-ins would be adopted at the next
-                // start, its name key signing in again. Unsaved, nothing
-                // changes.
+                // friends.txt and accounts.txt without it before anything
+                // else. friends.txt first: a friendship left there would
+                // come back at the next start (counted against the friend's
+                // limit, and the account's again if open sign-up brings it
+                // back). And an account left in accounts.txt without
+                // sign-ins would be adopted at the next start, its name key
+                // signing in again. Unsaved, nothing changes.
+                let mut friends = self.friends.clone();
+                let others = friends.forget(account);
+                let friends_path = self.dir.join("friends.txt");
+                if !others.is_empty() {
+                    if let Err(e) = friends.save(&friends_path) {
+                        log(format_args!(
+                            "live: can't save {}: {e}",
+                            friends_path.display()
+                        ));
+                        return Err(CANT_SAVE.into());
+                    }
+                }
                 let path = self.dir.join("accounts.txt");
                 let kept = self.accounts.values().filter(|a| a.id != account);
                 if let Err(e) = store::save(&path, kept) {
                     log(format_args!("live: can't save {}: {e}", path.display()));
+                    if !others.is_empty() {
+                        // Its friendships back on disk, as they still are
+                        // here.
+                        if let Err(e) = self.friends.save(&friends_path) {
+                            log(format_args!(
+                                "live: can't save {}: {e}",
+                                friends_path.display()
+                            ));
+                        }
+                    }
                     return Err(CANT_SAVE.into());
                 }
                 // Out of its party, the matchmaker and its matches.
@@ -925,15 +950,9 @@ impl Server {
                     self.refuse(j, live::ACCOUNT_REMOVED);
                 }
                 self.accounts.remove(&account);
-                let friends = self.friends.forget(account);
-                if !friends.is_empty() {
-                    let path = self.dir.join("friends.txt");
-                    if let Err(e) = self.friends.save(&path) {
-                        log(format_args!("live: can't save {}: {e}", path.display()));
-                    }
-                    for other in friends {
-                        self.friends_changed_now(other);
-                    }
+                self.friends = friends;
+                for other in others {
+                    self.friends_changed_now(other);
                 }
                 self.logins.remove(account);
                 self.wrong_by_account.remove(&account);

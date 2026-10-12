@@ -152,11 +152,19 @@ it from your PC.
   /opt/h2live/h2live.prev /opt/h2live/h2live && systemctl restart h2live`.
   To go back to the server from before accounts, whatever was installed
   since, use `/opt/h2live/h2live.before-accounts` in place of
-  `h2live.prev`. For the data as it was too, stop the service and copy that
-  update's backup folder back over `/var/lib/h2live` first. A server from
+  `h2live.prev`. For the data as it was too, first stop the service and
+  put that update's backup in place of the folder, not over it (files the
+  backup doesn't have, such as `logins.txt` in the one from before
+  accounts, must go too): `mv /var/lib/h2live
+  /var/lib/h2live.replaced-$(date +%Y%m%d-%H%M%S)`, then `cp -a
+  /var/lib/h2live.backup-<date>-<time> /var/lib/h2live`. A server from
   before accounts (live protocol 3) ignores `logins.txt` and `signup=`, so it is
-  open sign-up again, and accounts made by hand can't sign in to it until
-  the newer one is back. It has no command line either: until then,
+  open sign-up again, PCs signed out with `h2live user revoke` (or Sign out
+  of all PCs) get back in to accounts their own keys made, removed accounts
+  of that kind come back when their PCs sign in, and accounts made by hand
+  can't sign in to it until the newer one is back. So don't go back to it
+  while a lost or stolen PC matters (see `docs/notes/launcher/accounts.md`,
+  "Deploy and rollback"). It has no command line either: until then,
   `h2live user ...` says so and does nothing.
 - `journalctl -u h2live` shows its log, with the `relay on UDP port 47050`
   line and the READY, FORWARD or CGNAT line described in option B. FORWARD

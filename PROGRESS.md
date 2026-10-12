@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-12 09:45 UTC. Any assistant that works on the project
+Last updated 2026-10-12 10:45 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -145,7 +145,7 @@ assists and the team offset aren't. The PC's own log of the day is
 Owner-made accounts (2026-10-11) are built and tested on
 `launcher-accounts` (on `launcher-menu` f0b718b: stage 1 16e80d5, h2live
 and `LIVE_PROTOCOL` 4; stage 2 3323850, the launcher; stage 3, docs and
-the install script; then six rounds of review fixes. The fourth
+the install script; then seven rounds of review fixes. The fourth
 (2026-10-12): a wrong password costs the same hash and locks the same way
 whatever gamertag it names, launchers take nothing from a server before it
 proves its key, pins are kept by the address dialled, `--live` stops on a
@@ -167,7 +167,14 @@ second; a malformed `H2LAUNCH_SERVER_KEY` fails the build; the sign-in log
 and notice never repeat the gamertag typed; Sign out and Remove say a
 host's game ends for everyone; the docs give the order for a leaked
 password (a new one first, then sign out) and keep the version 3
-launchers for a rollback), pushed, not deployed.
+launchers for a rollback. The seventh (2026-10-12): an account request the
+launcher gave up on after 10 s is still acted on if its answer comes (a
+password made up for it shown, CHANGE PASSWORD closed), and a player isn't
+told to check a list they don't have; a removal whose friends.txt can't be
+written is refused and changes nothing; the rollback docs say the version
+3 server lets signed-out PCs and removed accounts back in, and that a
+backup goes in place of the data folder, not over it), pushed, not
+deployed.
 `launcher-menu` with the in-game GAME MENU (PR #9, below) is merged into
 it up to 18279ad (the lobby's console echo fix, merged 2026-10-12), so its
 builds carry both; the GAME MENU changes neither protocol, and
@@ -213,9 +220,15 @@ friends go back to the version 3 launchers kept in step 2 (`Halo 2 Live
 v3`, `H2-Live-friends-v3.zip`). (h2live.prev is only the program before
 the latest install, so after a second install it's an accounts build too.
 The program from before accounts has no command line: `h2live user ...`
-says so until the newer one is back.) To roll forward, run
-`install-h2live.sh` again with the accounts build beside it: a rollback
-leaves none in `/opt/h2live`.
+says so until the newer one is back.) The version 3 server ignores
+logins.txt: PCs signed out (revoke, or Sign out of all PCs) get back in to
+accounts their own keys made, and removed accounts of that kind come back
+when their PCs sign in, so don't roll back while a lost or stolen PC
+matters. To roll forward, run `install-h2live.sh` again with the accounts
+build beside it: a rollback leaves none in `/opt/h2live`. Signed-out PCs
+stay out then, but a removed account that came back is adopted: check
+`h2live user list`. A dated backup goes in place of `/var/lib/h2live`, not
+over it (accounts.md, "Deploy and rollback").
 
 After the MVP: clans, keyboard and mouse, the other layouts, and the
 owner's idea (2026-10-11) of Halo 2 Anniversary weapon and Spartan models

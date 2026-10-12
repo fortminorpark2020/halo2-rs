@@ -36,10 +36,21 @@
 # To go back to the server from before accounts (live protocol 3, for the
 # old launcher zip), whatever was installed since:
 #   install -m755 /opt/h2live/h2live.before-accounts /opt/h2live/h2live && systemctl restart h2live
-# For the exact data from before an update too, stop h2live and copy that
-# update's backup folder back over /var/lib/h2live first. A program from
-# before accounts has no command line: until the newer one is back,
-# "h2live user ..." says so and does nothing.
+# For the exact data from before an update too, first stop h2live and put
+# that update's backup in place of /var/lib/h2live, not over it (files the
+# backup doesn't have, such as logins.txt in the one from before accounts,
+# must go too):
+#   mv /var/lib/h2live /var/lib/h2live.replaced-$(date +%Y%m%d-%H%M%S)
+#   cp -a /var/lib/h2live.backup-<date>-<time> /var/lib/h2live
+# A program from before accounts ignores logins.txt and signup=: sign-up is
+# open, PCs signed out (revoke, or Sign out of all PCs) get back in to
+# accounts their own keys made, removed accounts of that kind come back when
+# their PCs sign in, and accounts made by hand can't sign in. So don't go
+# back to it while a lost or stolen PC matters. It has no command line
+# either: until the newer one is back, "h2live user ..." says so and does
+# nothing. Rolling forward again (this script, with an accounts build of
+# h2live) keeps those PCs signed out, but adopts a removed account that came
+# back: check "h2live user list" and remove it again.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 [ "$(id -u)" = 0 ] || { echo "run this as root"; exit 1; }
