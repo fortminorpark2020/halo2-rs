@@ -950,8 +950,13 @@ later; the button layouts offered stay as they are.
   its pane's scale. 2.7's pictures showed they don't: the globals' boxes
   are already in Vista's units, and grown with an Xbox pane the quarter
   header lands above and left of the dialog's frame, while as they are
-  it sits in the plate's top (9.2, "Phase 2.7's checks"). They stay as
-  the globals have them for every pane.
+  it sits in the plate's top (9.2, "Phase 2.7's checks"). The legend
+  stays as the globals have it for every pane, and so does the header on
+  a full screen or a Vista pane. 2.7's second review found the globals'
+  header box, kept as it is, also lands on the Xbox dialogs' body text
+  or list, so a dialog at the Xbox's scale has its header in a box of our
+  own in its frame's top band (`layout::xbox_dialog_header`, estimates
+  for P6).
 
 #### What Phase 2.1 built (2026-10-11)
 
@@ -2103,9 +2108,12 @@ the pad moves as in Halo 2's menus.
   units left of the middle, which puts it at x 190 there and the
   screenshot's at about 200; the legend ends 730 units right of the
   middle, x 1621 there, and the screenshot's at about 1655 (its Halo 2
-  font is bigger than the built-in one); the framing's bands and the
-  strips match; the navy between them is (9, 21, 42) against the
-  screenshot's (10, 22, 43). The container has no Halo 2 fonts, so
+  font is bigger than the built-in one). (2.7's second review: that
+  screenshot is a crop of a 1920x1200 window, our pixel being its pixel
+  plus (28, -4); drawn at 1920x1200, the header starts at x 230, about
+  202 in the screenshot's pixels against its 200.) The framing's bands
+  and the strips match; the navy between them is (9, 21, 42) against
+  the screenshot's (10, 22, 43). The container has no Halo 2 fonts, so
   its header and legend are in the built-in font, smaller than the
   screenshot's. Missing: the shell's slide-in and the screen
   transitions, the overlay (used by 2.8's dialogs), and the bodies in
@@ -2368,8 +2376,9 @@ catalog screen.
     frame), its lists (each shown row's pictures, then its cells; the
     arrows while rows are hidden above or below), its texts and buttons'
     texts by depth, the header in the globals' box for the screen's size
-    and the legend. It returns where clicks land (`HitArea`: a row, a
-    button with its picture, or a legend item).
+    (on a dialog at the Xbox's scale, our own box in its frame's top
+    band, review round 2) and the legend. It returns where clicks land
+    (`HitArea`: a row, a button with its picture, or a legend item).
   - `overlay` (the dim under a dialog, drawn by the caller) and
     `intro_end` (when a pane's last piece has come in, for the lobby's
     `menu_settled`; it counts each list's skin pictures and its focused
@@ -2405,9 +2414,10 @@ catalog screen.
   screens with the same last name apart; the catalog's scales and the
   overrides; `wording`, `Words` and the tokens; a drawn dialog shows the
   reworded and our own words and hides the refused and unknown ones,
-  fills each row's cells, puts its header in the globals' unscaled box,
-  dims the disabled row, and its hit areas hold the rows' labels, the
-  button's text and picture and each legend item's glyphs; rows take
+  fills each row's cells, puts its header in the frame's top band (the
+  globals' box at Vista's scale; review round 2), dims the disabled
+  row, and its hit areas hold the rows' labels, the button's text and
+  picture and each legend item's glyphs; rows take
   their own frames, the focused button its second frame (or its only
   one), the arrows both, and a picture can be swapped or hidden;
   `intro_end` and the overlay; and a made-up format-13 map's please-wait
@@ -2421,9 +2431,10 @@ catalog screen.
   frames of 9.2 and no others, both of the lobby button's frames and
   both arrows of every catalog list.
 - **Departures from the brief.**
-  - The header and legend boxes keep the globals' Vista units at both
-    scales (the brief had them grow with an Xbox pane; Corrections and
-    9.2).
+  - The legend box keeps the globals' Vista units at both scales, and so
+    does the header box on a full screen or a Vista pane (the brief had
+    them grow with an Xbox pane; Corrections and 9.2). A dialog at the
+    Xbox's scale has its header in our own box (review round 2).
   - `flat_for`'s sizes are the pictures' real ones, read with
     `--frames` (256 by 256 for the frame corners, 512 by 512 for the
     plates, 358 by 64 for the button, 400 by 42 for the backing, 56 by
@@ -2487,6 +2498,60 @@ catalog screen.
   too, so it is left for its own step, checked against both references
   (9.4).
 
+**Review fixes, round 2** (2026-10-12):
+
+- A bitmap is found by its whole tag name in any case, or by its last
+  part only where the name asked for or the one held has no folder (the
+  built-in short names). Before, a catalog bitmap that didn't load
+  (`pregame_lobby\item_background`) drew another folder's picture with
+  the same last name (the default skin's) instead of its flat shape.
+- **The Xbox dialogs' header.** The globals' header boxes, kept as they
+  are, fall on the Xbox dialogs' body: Please Wait's text (from 178
+  down), Player Options' rows and help, the playlists' first row. A
+  dialog at the Xbox's scale now has its header in our own box in its
+  frame's top band (`layout::XBOX_DIALOG_HEADER_BOUNDS`: large (-640,
+  482) to (55, 410), half (-611, 244) to (-20, 204), quarter (-319, 242)
+  to (350, 202)), placed from the frame's visible edges as Vista's
+  dialog_ok and large_error place theirs (about 16 to 18 units under the
+  top, 28 to 39 in). They are estimates, for P6's dialog screenshots. A
+  full screen and a Vista pane keep the globals' box; the legend keeps
+  it everywhere. `screens::header_widget` gives the box a pane uses.
+- **Drop shadow.** Halo 2's menu text has a hard black shadow down and
+  to the right. The decompilation draws it under every text, black at
+  the text's alpha, except a typed one behind a cursor (the tag's text
+  flag 8, `TextWidget::cursor`). `TextStyle::shadowed` adds it
+  (`paint::TEXT_SHADOW`, 2 units across and 2 down, an estimate: 2
+  pixels on Cartographer's lobby at 1920x1200, about one Xbox pixel at
+  an Xbox pane's 1.25), put on whole pixels and at least one. Pane
+  texts, buttons' words, list cells, the header and the legend have it;
+  the start screen and main menu are unchanged (their quads stay
+  pinned), which leaves them without it for now.
+- **The focused button's words** take the globals' header colour (the
+  Xbox code's: a button in focus draws its text in the interface
+  globals' title colour, ours `WIGL_TEXT_COLOR`), on every pane. A
+  resting button keeps its tag's colour: Cartographer's lobby shows
+  resting words grey (173), but the code gives a resting button its
+  definition's colour, and the legend already keeps the Xbox's white
+  (2.6), so that grey is not adopted.
+- Tests: a whole name never finds another folder's bitmap; a dialog's
+  header box goes with its pane's scale; the scroll arrows show only
+  towards hidden rows; a header is hidden on a screen without one or
+  with a token unknown; the focused button's words take the header
+  colour; texts, rows, the header and the legend have the shadow (2
+  pixels for 1.25 slots and 1 for the others at 1280x720, none under a
+  typed text); a focused button whose bitmap has one frame shows it; an
+  Xbox dialog's skin keeps its own corner, scale and 49-unit row step,
+  the same as at Vista's scale. The ignored real-map tests check, on
+  every catalog dialog with a header, that the header box starts inside
+  the frame drawn and ends above its bottom, and, at the Xbox's scale,
+  that it overlaps no text, row or picture of the pane (23 pane boxes,
+  4 of them Xbox).
+- `menu_png`'s usage names `--frames <bitmap>` (one map), and each
+  dialog prints the box its header is drawn in.
+- 9.2's lobby pane 0 comparison is corrected: the Cartographer
+  screenshot is a crop of a 1920x1200 window, and drawn at that size
+  pane 0 matches it to the pixel. The chat box was never off.
+
 **On the owner's PC (P5)**, from the clone, read-only (the PNGs stay on
 the PC; only the printed lines come back):
 
@@ -2513,8 +2578,10 @@ the PC; only the printed lines come back):
    `real_catalog_screens_are_placed_alike_in_both_maps` pass.
 5. Look at `online-0-mcc-1920x1080.png`, `please_wait-0-...`,
    `player_options-0-...`, `lobby-0-...` and `lobby-2-...`: each dialog's
-   frame should look whole, with its header inside it, and no Xbox Live
-   logo anywhere. Say what looks wrong; don't send the pictures.
+   frame should look whole, with its header in the frame's top band,
+   clear of the body text and rows (`p5.txt`'s `header drawn in` lines
+   give each box), and no Xbox Live logo anywhere. Say what looks wrong;
+   don't send the pictures.
 6. The lobby is unchanged; its `lobby.log` has the 27 catalog lines and
    the `menus: 27 catalog screens, ...` line, and the time it took to
    open.
@@ -3033,7 +3100,9 @@ PNGs stayed in the scratchpad):
   task_progress_dialog's (PleaseWait, Boot) is **the Xbox's**: at 1:1
   its pieces don't meet; at 2.5 the top-left corner, the plate and the
   bottom-right corner make one dialog, (-360, 383) to (505, -403), with
-  the same quarter header box in the plate's top. PlayerOptions (half)
+  the same quarter header box in the plate's top (which there covers the
+  body text's first line; review round 2 gave the Xbox dialogs a header
+  box of their own, below). PlayerOptions (half)
   is **the Xbox's** too: at 2.5 its frame holds its list and the legend;
   at 1:1 the corners cut across the list. `menu_png`'s printed fit (the
   header box in the top quarter of the pieces' bounding box) agrees for
@@ -3044,8 +3113,16 @@ PNGs stayed in the scratchpad):
 - **The header and legend boxes don't scale.** Grown with an Xbox pane,
   the quarter header box lands at (-630, 455) to (875, 355), above and
   left of the task_progress frame; as the globals have it, it sits in
-  the plate's top, and the legend in the frame's bottom right. So they
-  keep Vista's units on every pane (a correction to the plan).
+  the plate's top, and the legend in the frame's bottom right. So the
+  legend keeps Vista's units on every pane (a correction to the plan).
+  The header did too until review round 2, which found the globals'
+  boxes on the Xbox dialogs' body: Please Wait's text, Player Options'
+  rows and help, the playlists' first row. A dialog at the Xbox's scale
+  now has its header in our own box in its frame's top band (large
+  (-640, 482) to (55, 410), half (-611, 244) to (-20, 204), quarter
+  (-319, 242) to (350, 202)), placed from the frame's visible edges as
+  dialog_ok and large_error place theirs at 1:1; estimates, for P6. Drawn
+  on Cartographer's map, each header now sits in its frame's top band.
 - **List skins don't scale either.** In the Xbox screens (ONLINE, the
   playlists, Player Options, Please Wait) the rows' backing and text at
   the skin's own numbers fit the frames drawn at 2.5; at 2.5 they would
@@ -3085,18 +3162,30 @@ PNGs stayed in the scratchpad):
 - **Please Wait after review round 1.** Its body (the tag's words, now
   "...into the online service...", at 1.25) wraps to two lines, which
   start at its box's top, level with the header box: the two overlap.
-  One line used to sit centred under the header. Where the header goes
-  on the Xbox's task_progress frame, or which words the binding shows,
-  is 2.9's to settle (P6's dialog screenshot helps).
-- **The pregame lobby's pane 0 at 1:1**, drawn at 1812 by 1177 next to
-  the Cartographer lobby screenshot: the header, START GAME and GAME
-  SETUP boxes are within about 8 units (START GAME's left edge -689
-  against -681); the mode block (`lobby_display`) at (-705, 350) and the
-  map picture's place match (its visible part starts about -332 in both;
-  its corner is -448). Cartographer hides FIND GAMES and GAME DETAILS and
-  shows a speaker icon only on filled rows: the binding's job (2.10).
-  The chat box is about 27 units right and 16 down of Cartographer's,
-  unexplained; noted for 2.10.
+  One line used to sit centred under the header. Since review round 2
+  the header is in the frame's top band, (-319, 242) to (350, 202), clear
+  of the body from 178 down. Which words the binding shows is 2.9's to
+  settle (P6's dialog screenshot checks the header's place).
+- **The pregame lobby's pane 0 at 1:1** against the Cartographer lobby
+  screenshot. That screenshot (1812 by 1177) is a crop of a 1920x1200
+  window: its top rows are the window's border and its left and right
+  edges cut Cartographer's own notices. Drawn at 1920x1200, our pixel is
+  the screenshot's plus (28, -4), and at that one shift every part
+  matches to the pixel: the chat box and its arrows differ by under 1
+  grey level on average, the START GAME and GAME SETUP frames' ends by
+  about 0.4 to 0.6, the panels and the framing by 0.4 to 3 (more only
+  where the fonts differ). A pixel off either way raises the button
+  ends to 8 to 14. (Review round 2. The first comparison drew at 1812
+  by 1177, which shifts each part differently, and found the boxes
+  "within about 8 units" and the chat box 27 units right and 16 down;
+  both came from that size.) The mode block (`lobby_display`) at (-705,
+  350) and the map picture's place match too (its corner is -448).
+  Cartographer hides FIND GAMES and GAME DETAILS and shows a speaker
+  icon only on filled rows: the binding's job (2.10). 2.10's shot
+  against this reference must be drawn at 1920x1200 and cropped at (28,
+  -4). The same comparison shows the focused START GAME's words in the
+  header's colour and a drop shadow under the text, as round 2 draws
+  them.
 - **Pane 2 at 2.5 against the Xbox screenshot**, drawn at 1024x768 and
   set beside the reference at the same height (415 pixels): the same
   layout (header, START GAME and GAME SETUP at the top left, the panel,

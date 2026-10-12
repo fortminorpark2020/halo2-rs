@@ -158,6 +158,34 @@ pub fn legend_box(size: DialogSize) -> [f32; 4] {
     LEGEND_BOUNDS[size as usize]
 }
 
+/// Where a dialog whose pane is at the Xbox's scale has its header, large,
+/// half and quarter. The globals' boxes are for Vista's own dialogs, whose
+/// frames are drawn 1:1; on the Xbox's frames, drawn at 2.5, they land on
+/// the dialog's list or text (menu.md 9.2). These sit in the frame's top
+/// band, placed from its visible edges as Vista's dialog_ok and
+/// large_error place theirs (about 16 to 18 units under the top, 28 to
+/// 39 in from the left), drawn on Cartographer's map. Estimates, for P6's
+/// screenshots of the Xbox's dialogs to confirm. Each keeps clear of what
+/// is under it: the quarter dialogs' text from 178 down, Player Options'
+/// rows from 110 down and its help from x -2 right, the playlists' first
+/// row's bracket from 406 down.
+pub const XBOX_DIALOG_HEADER_BOUNDS: [[f32; 4]; 3] = [
+    [-640.0, 482.0, 55.0, 410.0],
+    [-611.0, 244.0, -20.0, 204.0],
+    [-319.0, 242.0, 350.0, 202.0],
+];
+
+/// The header box of a screen of `size` whose pane is at `scale`, when it
+/// isn't the globals' own: a dialog at the Xbox's scale
+/// (`XBOX_DIALOG_HEADER_BOUNDS`). A full screen keeps the globals' box at
+/// either scale, and so does every legend.
+pub fn xbox_dialog_header(size: DialogSize, scale: Scale) -> Option<[f32; 4]> {
+    match (size, scale) {
+        (DialogSize::Full, _) | (_, Scale::Vista) => None,
+        (size, Scale::Xbox) => Some(XBOX_DIALOG_HEADER_BOUNDS[size as usize - 1]),
+    }
+}
+
 /// The globals' header and button legend boxes, full, large, half and
 /// quarter.
 pub const HEADER_BOUNDS: [[f32; 4]; 4] = [
@@ -553,6 +581,9 @@ pub struct TextWidget {
     pub depth: i16,
     pub intro: Option<Animation>,
     pub delay_ms: f32,
+    /// Typed out behind a cursor (an editable text, the tag's text flag
+    /// 8): the Xbox draws no drop shadow under it (`paint::TEXT_SHADOW`).
+    pub cursor: bool,
 }
 
 impl TextWidget {
@@ -566,6 +597,7 @@ impl TextWidget {
             depth: 0,
             intro: None,
             delay_ms: 0.0,
+            cursor: false,
         }
     }
 }

@@ -38,7 +38,18 @@
 //! slot's string id instead (what a lobby binding names), `hide` none.
 //! For each it prints the quads, how much of the window they cover, the
 //! CPU time of a frame over 30 draws, and for a dialog which scale puts
-//! its header box in the top quarter of its frame pieces.
+//! its header box in the top quarter of its frame pieces, and the box its
+//! header is drawn in.
+//!
+//! A bitmap's frames are written instead with `--frames` (several may be
+//! given; give one map, as both write the same file names):
+//!
+//! ```text
+//! menu_png <out dir> --vista <mainmenu.map> --frames <bitmap>
+//! ```
+//!
+//! It prints the bitmap's images and sequences and writes each frame, over
+//! a mid grey, to `frame-<last name>-<k>.png`.
 
 use h2ui::anim::Focus;
 use h2ui::art::{self, ArtImage, ArtSource, Bitmap, FlatArt, MemoryArt, Sequence};
@@ -64,7 +75,8 @@ const FRAMES: u32 = 30;
 /// a while in, so the art has scrolled.
 const CLOCK: f64 = 7.3;
 const USAGE: &str = "usage: menu_png <out dir> [<fonts dir>] [--mcc <MCC mainmenu.map>] \
-                     [--vista <Vista mainmenu.map>] [--screen <id or path> | --all] \
+                     [--vista <Vista mainmenu.map>] \
+                     [--screen <id or path> | --all | --frames <bitmap>] \
                      [--pane <n>] [--words tag|ids|hide] [--scale xbox|vista] [--focus <n>] \
                      [--size <w>x<h>]";
 
@@ -610,7 +622,9 @@ fn draw_target(
         let scales: Vec<&str> = layout.panes.iter().map(|p| p.scale.name()).collect();
         if layout.size != DialogSize::Full {
             // The header-fit check, at both scales: the globals' header
-            // box (Vista's units) against the frame pieces.
+            // box (Vista's units) against the frame pieces; then the box
+            // the header is drawn in (`screens::header_widget`: ours on a
+            // dialog at the Xbox's scale).
             for scale in [Scale::Vista, Scale::Xbox] {
                 let at = pane.at_scale(scale);
                 let Some(frame) = frame_box(&at, art) else {
@@ -639,6 +653,12 @@ fn draw_target(
                     },
                 );
             }
+            let drawn = screens::header_widget(layout, pane_k, chrome_layout).bounds;
+            println!(
+                "{look} {}#{pane_k} header drawn in {drawn:?} ({} pane)",
+                t.name,
+                pane.scale.name()
+            );
         }
         let made: Vec<Vec<Row>> = pane
             .lists

@@ -18,6 +18,7 @@
 use crate::art::{last_part, ArtSource};
 use crate::layout::{
     self, colour, key_name, BitmapWidget, ChromeLayout, DialogSize, Face, LegendItem, Space,
+    TextWidget,
 };
 use crate::paint::{Anchor, DrawList, Painter, TextStyle};
 use crate::text::{Fonts, Justify};
@@ -91,10 +92,15 @@ fn settled(p: &mut Painter, widgets: &[BitmapWidget]) {
 
 /// The header of a screen of `size`: one line in its box, cut to fit it.
 pub fn header(p: &mut Painter, c: &ChromeLayout, size: DialogSize, text: &str) {
-    let w = c.header(size);
+    header_in(p, c.header(size), text);
+}
+
+/// A header as `w` places and colours it (the globals' header of a size,
+/// or one moved to another box: `screens::header_widget`).
+pub fn header_in(p: &mut Painter, w: &TextWidget, text: &str) {
     let [l, _, r, _] = w.bounds;
     let line = p.fonts.fit(w.font, text, r - l);
-    p.text(w.bounds, TextStyle::of(w, 1.0), &line);
+    p.text(w.bounds, TextStyle::of(w, 1.0).shadowed(), &line);
 }
 
 /// A legend item's first part: the glyph or key (none for a `keyless`
@@ -162,7 +168,8 @@ pub fn legend(
         scale,
         justify: Justify::Left,
         ..TextStyle::of(w, 1.0)
-    };
+    }
+    .shadowed();
     let mut boxes = Vec::with_capacity(items.len());
     for ((item, k), (kw, between, lw)) in items.iter().zip(&keys).zip(widths) {
         let start = x;
@@ -183,7 +190,7 @@ mod tests {
     use super::*;
     use crate::art::{ArtImage, FlatArt, MemoryArt};
     use crate::layout::{self, header_box, legend_box};
-    use crate::paint::{Resources, Texture};
+    use crate::paint::{Quad, Resources, Texture};
 
     fn items() -> Vec<LegendItem> {
         vec![
@@ -209,19 +216,28 @@ mod tests {
             let list = p.finish();
             assert_eq!(list.texts, ["PREGAME LOBBY"]);
             let [x0, y0, x1, y1] = space.rect(header_box(size));
-            assert!(!list.quads.is_empty());
-            for q in &list.quads {
+            // Halo 2's black shadow under each glyph, drawn first, two
+            // pixels down and right (2 units at 0.9 pixels each), at the
+            // glyph's alpha.
+            let (shadows, lit): (Vec<&Quad>, Vec<&Quad>) =
+                list.quads.iter().partition(|q| q.color[0][..3] == [0.0; 3]);
+            assert!(!lit.is_empty());
+            assert_eq!(shadows.len(), lit.len());
+            assert!(list.quads[..shadows.len()]
+                .iter()
+                .all(|q| q.color[0][..3] == [0.0; 3]));
+            for (s, q) in shadows.iter().zip(&lit) {
+                assert_eq!(s.rect, q.rect.map(|v| v + 2.0), "{size:?}");
+                assert_eq!((s.uv, s.color[1][3]), (q.uv, q.color[1][3]));
+            }
+            for q in &lit {
                 let [l, t, r, b] = q.rect;
                 assert!(l >= x0 - 1.0 && r <= x1 + 1.0, "{size:?} {q:?}");
                 assert!(t >= y0 - 1.0 && b <= y1 + 1.0, "{size:?} {q:?}");
                 assert_eq!(q.color[0][..3], colour::HEADER);
             }
             // Left justified: it starts at the box's left.
-            let first = list
-                .quads
-                .iter()
-                .map(|q| q.rect[0])
-                .fold(f32::MAX, f32::min);
+            let first = lit.iter().map(|q| q.rect[0]).fold(f32::MAX, f32::min);
             assert!((first - x0).abs() <= 1.0, "{size:?}: {first} {x0}");
         }
         // Too long for the quarter box: cut with "...".
@@ -231,7 +247,8 @@ mod tests {
         let list = p.finish();
         assert!(list.texts[0].ends_with("..."), "{:?}", list.texts);
         let [_, _, x1, _] = space.rect(header_box(DialogSize::Quarter));
-        assert!(list.quads.iter().all(|q| q.rect[2] <= x1 + 1.0));
+        let mut lit = list.quads.iter().filter(|q| q.color[0][..3] != [0.0; 3]);
+        assert!(lit.all(|q| q.rect[2] <= x1 + 1.0));
     }
 
     #[test]
@@ -255,9 +272,15 @@ mod tests {
                 }
             }
             let list = p.finish();
-            // Every glyph quad is inside the boxes' span.
-            for q in &list.quads {
+            // Every glyph quad is inside the boxes' span, each over its
+            // black shadow a pixel down and right (2 units at 0.6).
+            let (shadows, lit): (Vec<&Quad>, Vec<&Quad>) =
+                list.quads.iter().partition(|q| q.color[0][..3] == [0.0; 3]);
+            assert_eq!(shadows.len(), lit.len());
+            for q in &lit {
                 assert!(q.rect[0] >= boxes[0].0[0] - 1.0 && q.rect[2] <= x1 + 1.0);
+                let under = |s: &&Quad| s.rect == q.rect.map(|v| v + 1.0) && s.uv == q.uv;
+                assert!(shadows.iter().any(under), "{q:?}");
             }
             // The words in the legend's own colour, not the header's.
             let words = |c: [f32; 3]| list.quads.iter().any(|q| q.color[0][..3] == c);

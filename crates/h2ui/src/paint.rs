@@ -122,7 +122,19 @@ pub struct TextStyle {
     /// Shaded to this colour at the baseline, from `color` at the top of
     /// its capitals.
     pub bottom: Option<Rgba>,
+    /// Halo 2's hard drop shadow: the same glyphs in black at the text's
+    /// alpha, this far from it (UI units, +y up), drawn under it.
+    pub shadow: Option<[f32; 2]>,
 }
+
+/// Where Halo 2 drops the black shadow under its menus' text (UI units,
+/// +y up, at a font's own size: `TextStyle::shadowed` grows it with the
+/// glyphs). Black at the text's alpha is the Xbox code's (every text but a
+/// typed one, `TextWidget::cursor`); how far is an estimate from the two
+/// references: 2 pixels down and right on Cartographer's lobby at
+/// 1920x1200 (2 units), about one Xbox pixel (2.5 units, this times an
+/// Xbox pane's 1.25) on the owner's Xbox screenshot.
+pub const TEXT_SHADOW: [f32; 2] = [2.0, -2.0];
 
 impl TextStyle {
     pub fn new(font: Font, color: Rgba, justify: Justify) -> TextStyle {
@@ -132,12 +144,21 @@ impl TextStyle {
             justify,
             scale: 1.0,
             bottom: None,
+            shadow: None,
         }
     }
 
-    /// A text widget's look, at `alpha`.
+    /// A text widget's look, at `alpha` (no shadow: `shadowed`).
     pub fn of(t: &TextWidget, alpha: f32) -> TextStyle {
         TextStyle::new(t.font, crate::rgba(t.color, alpha), t.justify)
+    }
+
+    /// With Halo 2's drop shadow (`TEXT_SHADOW`, grown with its scale).
+    pub fn shadowed(self) -> TextStyle {
+        TextStyle {
+            shadow: Some(TEXT_SHADOW.map(|v| v * self.scale)),
+            ..self
+        }
     }
 
     /// Faded by `alpha`.
@@ -487,37 +508,55 @@ impl<'a> Painter<'a> {
     }
 
     /// A line laid out, starting at `at` on its baseline (UI units). The
-    /// start is put on a whole pixel, so glyphs keep their edges.
+    /// start is put on a whole pixel, so glyphs keep their edges; so is
+    /// its shadow's offset (at least a pixel), drawn first.
     pub fn line(&mut self, line: &Line, at: [f32; 2], style: TextStyle) {
         let [px, py] = self.space.at(at).map(f32::round);
         let k = self.space.k;
         let caps = line.caps.max(f32::MIN_POSITIVE);
-        for g in &line.glyphs {
-            let rect = [
-                px + g.rect[0] * k,
-                py + g.rect[1] * k,
-                px + g.rect[2] * k,
-                py + g.rect[3] * k,
-            ];
-            let color = match (g.color, style.bottom) {
-                (Some([r, gr, b]), _) => [[r, gr, b, style.color[3]]; 2],
-                (None, Some(bottom)) => {
-                    let at = |y: f32| ((y + caps) / caps).clamp(0.0, 1.0);
-                    [
-                        mix(style.color, bottom, at(g.rect[1])),
-                        mix(style.color, bottom, at(g.rect[3])),
-                    ]
+        let color = |g: &crate::text::PlacedGlyph| match (g.color, style.bottom) {
+            (Some([r, gr, b]), _) => [[r, gr, b, style.color[3]]; 2],
+            (None, Some(bottom)) => {
+                let at = |y: f32| ((y + caps) / caps).clamp(0.0, 1.0);
+                [
+                    mix(style.color, bottom, at(g.rect[1])),
+                    mix(style.color, bottom, at(g.rect[3])),
+                ]
+            }
+            (None, None) => [style.color; 2],
+        };
+        let whole = |v: f32| {
+            if v == 0.0 {
+                0.0
+            } else {
+                (v * k).abs().round().max(1.0).copysign(v)
+            }
+        };
+        // Black at each glyph's alpha, down (+y in pixels) and across.
+        let shadow = style.shadow.map(|[dx, dy]| [whole(dx), -whole(dy)]);
+        let passes = shadow.into_iter().map(Some).chain([None]);
+        for pass in passes {
+            let [ox, oy] = pass.unwrap_or([0.0, 0.0]);
+            for g in &line.glyphs {
+                let rect = [
+                    px + ox + g.rect[0] * k,
+                    py + oy + g.rect[1] * k,
+                    px + ox + g.rect[2] * k,
+                    py + oy + g.rect[3] * k,
+                ];
+                let mut color = color(g);
+                if pass.is_some() {
+                    color = color.map(|c| [0.0, 0.0, 0.0, c[3]]);
                 }
-                (None, None) => [style.color; 2],
-            };
-            self.push(Quad {
-                texture: g.texture,
-                rect,
-                uv: g.uv,
-                color,
-                blend: Blend::Plain,
-                wrap: [false; 2],
-            });
+                self.push(Quad {
+                    texture: g.texture,
+                    rect,
+                    uv: g.uv,
+                    color,
+                    blend: Blend::Plain,
+                    wrap: [false; 2],
+                });
+            }
         }
     }
 }

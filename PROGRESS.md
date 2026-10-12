@@ -1,6 +1,11 @@
 # Progress and handoff
 
-Last updated 2026-10-12 (menu 2.7's review fixes, round 1: hidden
+Last updated 2026-10-12 (menu 2.7's review fixes, round 2: the Xbox
+dialogs' header in their frame's top band, Halo 2's drop shadow under
+menu text, the focused button's words in the header's colour, no
+bitmap found by another folder's last name, the lobby screenshot
+comparison redone at 1920x1200 (pane 0 matches to the pixel), more
+tests; round 1: hidden
 buttons, list skins' pictures read whole, Xbox panes' text 1.25 times
 bigger, "the online service" after into/to/of/from/with/by, intro ends
 counting skin pictures, Vista's pictures pinned exactly; before it menu
@@ -338,12 +343,14 @@ Next, in order:
    150 ms in the container). Checked with `menu_png --all` on
    Cartographer's map: every screen found; error_dialog_ok's family of
    dialogs at 1:1, task_progress's (Please Wait, Boot) and Player
-   Options at the Xbox's scale; the header and legend boxes stay in
-   Vista's units on every pane (a departure from the plan, whose
-   "scaled" put the header outside the frame); no Xbox Live logo in any
-   frame; the pregame lobby's pane 0 matches Cartographer's within
-   about 8 units and pane 2 the Xbox screenshot's rows (55 units
-   apart). Frames take 5 to 33 ms at 1080p in the container (the
+   Options at the Xbox's scale; the legend box stays in Vista's units
+   on every pane (a departure from the plan, whose "scaled" put the
+   header outside the frame), and so does the header box except on a
+   dialog at the Xbox's scale, which has its own in the frame's top
+   band (review round 2); no Xbox Live logo in any frame; the pregame
+   lobby's pane 0 matches Cartographer's to the pixel (drawn at
+   1920x1200, the window the screenshot was cropped from; review round
+   2) and pane 2 the Xbox screenshot's rows (55 units apart). Frames take 5 to 33 ms at 1080p in the container (the
    full-screen pickers slowest), over the 10 ms budget there; P5 on the
    owner's PC (menu.md, after "What Phase 2.7 built") runs `menu_png
    --all` on MCC's mainmenu.map for the real times and the ignored
@@ -354,7 +361,13 @@ Next, in order:
    and by, and 9.2's xbox_live_menu frames are corrected (the
    bungie.net picture is frame 4, which no catalog screen draws). Left
    for later: all our menu text is about two thirds of Halo 2's size
-   (9.4), and Please Wait's wrapped body meets its header (2.9). Next:
+   (9.4). Review round 2 (menu.md "Review fixes, round 2"): a dialog
+   at the Xbox's scale has its header in its frame's top band (our own
+   boxes, estimates for P6), so Please Wait's body no longer meets it;
+   menu text has Halo 2's drop shadow (the lobby's header and legend
+   too; the start screen and main menu not yet); a focused button's
+   words take the header's colour; a bitmap that didn't load draws flat
+   instead of another folder's picture with the same last name. Next:
    2.8, Halo 2's dialogs.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through

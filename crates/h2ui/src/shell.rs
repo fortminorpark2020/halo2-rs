@@ -237,7 +237,7 @@ fn note_pictures(loaded: &art::Loaded, sources: &mut Vec<String>) {
 mod tests {
     use super::*;
     use crate::anim::Focus;
-    use crate::layout::Space;
+    use crate::layout::{PaneLayout, Space};
     use crate::paint::{Resources, Texture};
     use crate::screens::{self, MainMenu};
     use crate::text::Fonts;
@@ -856,12 +856,15 @@ mod tests {
         };
         let (list, _) =
             screens::screen(5.0, got, &state, shell.art(), &fonts, Space::new(640, 360));
-        let arts = list
+        let arts: Vec<Texture> = list
             .quads
             .iter()
-            .filter(|q| matches!(q.texture, Texture::Art(_)))
-            .count();
-        assert_eq!(arts, 2);
+            .map(|q| q.texture)
+            .filter(|t| matches!(t, Texture::Art(_)))
+            .collect();
+        let plate = shell.art.picture(PLATE, 0).unwrap().texture;
+        let lit = shell.art.picture(BUTTON, 1).unwrap().texture;
+        assert_eq!(arts, [plate, lit]);
         for words in ["MADE UP", "SOME WORDS", "PRESS", "ROW"] {
             assert!(
                 list.texts.iter().any(|t| t == words),
@@ -983,6 +986,110 @@ mod tests {
         assert_eq!(start.corner, [-705.0, 492.0]);
     }
 
+    /// Whether two boxes (`[l, t, r, b]`, +y up) share some area.
+    fn overlap(a: [f32; 4], b: [f32; 4]) -> bool {
+        a[0] < b[2] && b[0] < a[2] && a[3] < b[1] && b[3] < a[1]
+    }
+
+    /// Where a pane's pictures show (UI units): the pixels of each that
+    /// are more than a quarter opaque, at its place and scale. A frame's
+    /// pictures are mostly clear around it, so their boxes say little.
+    fn visible_box(pane: &PaneLayout, art: &dyn ArtSource) -> Option<[f32; 4]> {
+        let mut out: Option<[f32; 4]> = None;
+        for w in &pane.bitmaps {
+            let Some(p) = art.picture(&w.name, w.frame) else {
+                continue;
+            };
+            let (Texture::Art(id), [sx, sy]) = (p.texture, w.scale()) else {
+                continue;
+            };
+            let Some(img) = art.image(id) else { continue };
+            let [u0, v0, u1, v1] = p.uv;
+            let at = |v: f32, n: usize| ((v * n as f32) as usize).min(n);
+            let (x0, x1) = (at(u0, img.width), at(u1, img.width));
+            let (y0, y1) = (at(v0, img.height), at(v1, img.height));
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if img.rgba[(y * img.width + x) * 4 + 3] <= 64 {
+                        continue;
+                    }
+                    let ux = w.corner[0] + (x - x0) as f32 * sx;
+                    let uy = w.corner[1] - (y - y0) as f32 * sy;
+                    let px = [ux, uy, ux + sx, uy - sy];
+                    out = Some(out.map_or(px, |o| {
+                        [
+                            o[0].min(px[0]),
+                            o[1].max(px[1]),
+                            o[2].max(px[2]),
+                            o[3].min(px[3]),
+                        ]
+                    }));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every catalog dialog's header box (as `screens::screen` draws it)
+    /// on each of its panes: inside what its frame's pictures show, and
+    /// on the Xbox's dialogs over none of its text boxes or shown rows
+    /// (menu.md 9.2: the globals' boxes landed on their lists and text).
+    fn check_dialog_headers(shell: &Shell) {
+        let (mut checked, mut xbox) = (0, 0);
+        for (id, s) in &shell.screens {
+            if !s.has_header || s.size == crate::layout::DialogSize::Full {
+                continue;
+            }
+            for (k, pane) in s.panes.iter().enumerate() {
+                let name = format!("{}#{k} at {}", id.name(), pane.scale.name());
+                let h = screens::header_widget(s, k, &shell.chrome).bounds;
+                let shown = visible_box(pane, shell.art()).unwrap_or_else(|| panic!("{name}"));
+                // Its top left inside, and its bottom above the frame's
+                // (a left-justified line; the globals' boxes reach past
+                // the right of Vista's own dialogs).
+                let inside = h[0] >= shown[0] && h[1] <= shown[1];
+                let inside = inside && h[0] < shown[2] && h[3] >= shown[3];
+                assert!(inside, "{name}: header {h:?}, frame shows {shown:?}");
+                checked += 1;
+                // Vista's own dialogs keep the globals' boxes as Vista
+                // draws them (large_error's reaches its help's box and its
+                // first row, select_map's its first row's bracket); the
+                // Xbox's take ours, which must clear what is under them.
+                if pane.scale == crate::layout::Scale::Vista {
+                    continue;
+                }
+                for t in &pane.texts {
+                    let b = t.widget.bounds;
+                    assert!(!overlap(h, b), "{name}: header {h:?}, {} {b:?}", t.key);
+                }
+                for (n, l) in pane.lists.iter().enumerate() {
+                    for slot in 0..l.visible {
+                        let at = l.corner(slot);
+                        let texts = l.skin.texts.iter().map(|t| t.bounds);
+                        let pictures = l.skin.bitmaps.iter().filter_map(|w| {
+                            let [bw, bh] = shell
+                                .art
+                                .picture(&w.name, w.frame)
+                                .map(|p| [p.size[0] * w.scale()[0], p.size[1] * w.scale()[1]])
+                                .or_else(|| w.flat_size())?;
+                            Some([w.corner[0], w.corner[1] + bh, w.corner[0] + bw, w.corner[1]])
+                        });
+                        for b in texts.chain(pictures) {
+                            let b = crate::layout::offset(b, at);
+                            let clear = !overlap(h, b);
+                            assert!(clear, "{name}: header {h:?}, list {n} row {slot} {b:?}");
+                        }
+                    }
+                }
+                xbox += 1;
+            }
+        }
+        // 19 at Vista's scale (Select Game's seven panes among them), and
+        // Please Wait, Boot, Player Options and the playlists' lobby at
+        // the Xbox's.
+        assert_eq!((checked, xbox), (23, 4));
+    }
+
     /// Vista's pictures exactly as menu.md 9.2 measured them on
     /// Cartographer's mainmenu.map: 87 of 94 bitmaps, drawn flat only for
     /// these frames the tags ask for that their bitmaps haven't; both of
@@ -1083,6 +1190,7 @@ mod tests {
         assert!(log[0].contains("MCC's"), "{log:?}");
         check_real(&shell);
         check_catalog(&shell);
+        check_dialog_headers(&shell);
     }
 
     /// Halo 2 Vista's mainmenu.map in `H2_MAPS`.
@@ -1095,6 +1203,7 @@ mod tests {
         check_real(&shell);
         check_catalog(&shell);
         check_vista_pictures(&shell);
+        check_dialog_headers(&shell);
     }
 
     /// Both maps (`H2_MAPS` and `H2_MCC_MAPS`): every catalog screen is

@@ -105,7 +105,8 @@ install. No game files are included in this repository.
   bottom (a lighter grey-navy above and below them) and thin lines
   scrolling slowly across it, the screen's name at
   the top left, and the buttons it takes at the bottom right (such as
-  A SELECT and B BACK). Those show the controller's buttons after you
+  A SELECT and B BACK), both with Halo 2's small dark shadow under the
+  letters. Those show the controller's buttons after you
   used a controller (how it starts) and the keys, such as ENTER and ESC,
   after you used the keyboard or the mouse; click one to press it. LB
   and RB still open the service record and the friends list but aren't

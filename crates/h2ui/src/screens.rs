@@ -502,14 +502,13 @@ pub fn screen(
             draw_list(&mut p, list, k, state, age, clock, &mut hits);
         }
     }
-    words(&mut p, pane, s, age, since_open, &mut hits);
-    // The header and legend boxes stay as the globals have them, in
-    // Vista's units, whatever the pane's scale (menu.md 9.2: scaled with
-    // an Xbox pane, they land outside its frame).
+    let focus_colour = s.chrome.header(layout.size).color;
+    words(&mut p, pane, s, focus_colour, age, since_open, &mut hits);
     if layout.has_header {
         let header = s.header.resolve(layout.header_words.as_deref());
         if let Some(text) = header.and_then(|h| fill_tokens(&h, s.tokens)) {
-            chrome::header(&mut p, s.chrome, layout.size, &text);
+            let w = header_widget(layout, s.pane, s.chrome);
+            chrome::header_in(&mut p, &w, &text);
         }
     }
     let legend = chrome::legend(&mut p, s.chrome, layout.size, s.legend, s.keyboard);
@@ -518,6 +517,21 @@ pub fn screen(
         hit: UiHit::Legend(face),
     }));
     (p.finish(), hits)
+}
+
+/// Where and how a screen's header is drawn on pane `pane`: the globals'
+/// header for its size, in Vista's units whatever the pane's scale (grown
+/// with an Xbox pane it would land outside the frame), except on a dialog
+/// at the Xbox's scale, whose frame's top band is elsewhere
+/// (`layout::xbox_dialog_header`; menu.md 9.2). The legend keeps the
+/// globals' box on every pane.
+pub fn header_widget(layout: &ScreenLayout, pane: usize, chrome: &ChromeLayout) -> TextWidget {
+    let mut w = chrome.header(layout.size).clone();
+    let scale = layout.pane(pane).map_or(layout::Scale::Vista, |p| p.scale);
+    if let Some(bounds) = layout::xbox_dialog_header(layout.size, scale) {
+        w.bounds = bounds;
+    }
+    w
 }
 
 /// A pane's pictures and its buttons' pictures, by depth.
@@ -618,10 +632,11 @@ fn draw_list(
     }
     for &(k, corner, alpha) in &shown {
         let row = &rows[k];
-        // A shadow is listed after its label, and drawn under it.
+        // A shadow is listed after its label, and drawn under it; each
+        // text has Halo 2's drop shadow too.
         for (t, cell) in list.skin.texts.iter().zip(&row.cells).rev() {
             let bounds = layout::offset(t.bounds, corner);
-            p.text_box(bounds, TextStyle::of(t, alpha), cell);
+            p.text_box(bounds, shadowed(t, TextStyle::of(t, alpha)), cell);
         }
         if let Some(rect) = row_box(p, list, corner) {
             hits.push(HitArea {
@@ -672,18 +687,31 @@ fn row_box(p: &Painter, list: &ListLayout, corner: [f32; 2]) -> Option<[f32; 4]>
     Some(layout::offset(union, corner))
 }
 
+/// A text's look with Halo 2's drop shadow under it, unless it is typed
+/// out behind a cursor (`TextWidget::cursor`).
+fn shadowed(t: &TextWidget, style: TextStyle) -> TextStyle {
+    if t.cursor {
+        style
+    } else {
+        style.shadowed()
+    }
+}
+
 /// A pane's texts and its buttons' texts by depth, and where each button
 /// is for clicks (its text's box and its picture's; a hidden one has
-/// none).
+/// none). The focused button's words are in the header's colour (the
+/// globals' text colour), as the Xbox code draws a button in the focus.
 fn words(
     p: &mut Painter,
     pane: &PaneLayout,
     s: &ScreenState,
+    focus_colour: [f32; 3],
     age: f32,
     since_open: f64,
     hits: &mut Vec<HitArea>,
 ) {
-    let mut texts: Vec<(&SlotText, f32)> = pane.texts.iter().map(|t| (t, 1.0)).collect();
+    let mut texts: Vec<(&SlotText, f32, bool)> =
+        pane.texts.iter().map(|t| (t, 1.0, false)).collect();
     for (k, b) in pane.buttons.iter().enumerate() {
         if s.hidden_buttons.contains(&k) {
             continue;
@@ -693,7 +721,7 @@ fn words(
         } else {
             1.0
         };
-        texts.push((&b.text, dim));
+        texts.push((&b.text, dim, s.button_focus == Some(k)));
         let mut rect = b.text.widget.bounds;
         if let Some([bw, bh]) = b.bitmap.as_ref().and_then(|w| p.size(w)) {
             let [x, y] = b.bitmap.as_ref().map_or([0.0; 2], |w| w.corner);
@@ -709,18 +737,21 @@ fn words(
             hit: UiHit::Button(k),
         });
     }
-    texts.sort_by_key(|(t, _)| t.widget.depth);
-    for (t, dim) in texts {
+    texts.sort_by_key(|(t, _, _)| t.widget.depth);
+    for (t, dim, focused) in texts {
         let Some(words) = slot_words(t, s) else {
             continue;
         };
         let (a, offset) = text_alpha(&t.widget, age, since_open);
         let bounds = layout::offset(t.widget.bounds, offset);
-        let style = TextStyle {
+        let mut style = TextStyle {
             scale: t.glyphs,
             ..TextStyle::of(&t.widget, a * dim)
         };
-        p.text_box(bounds, style, &words);
+        if focused {
+            style.color = crate::rgba(focus_colour, a * dim);
+        }
+        p.text_box(bounds, shadowed(&t.widget, style), &words);
     }
 }
 
@@ -729,7 +760,7 @@ mod tests {
     use super::*;
     use crate::art::{ArtImage, FlatArt, MemoryArt};
     use crate::layout::ButtonLayout;
-    use crate::paint::{Resources, Texture};
+    use crate::paint::{Resources, Texture, TEXT_SHADOW};
     use crate::Font;
 
     const SIZES: [(u32, u32); 8] = [
@@ -1312,13 +1343,25 @@ mod tests {
         buttons: Buttons,
         pictures: &dyn Fn(&BitmapWidget) -> Show,
     ) -> (DrawList, Vec<HitArea>, ScreenLayout, Space) {
+        draw_rows(layout, art, buttons, pictures, &dialog_rows(), 1)
+    }
+
+    /// As `draw_screen`, its list holding `rows` from the one at `first`
+    /// (the second focused).
+    fn draw_rows(
+        layout: ScreenLayout,
+        art: &dyn ArtSource,
+        buttons: Buttons,
+        pictures: &dyn Fn(&BitmapWidget) -> Show,
+        rows: &[Row],
+        first: usize,
+    ) -> (DrawList, Vec<HitArea>, ScreenLayout, Space) {
         let fonts = Fonts::fallback();
         let chrome = ChromeLayout::default();
-        let rows = dialog_rows();
         let lists = [ListState {
-            rows: &rows,
+            rows,
             focus: Some(Focus::on(1, 0.0)),
-            first: 1,
+            first,
         }];
         let words = |t: &SlotText| match t.key.as_str() {
             "dialog_button" => Words::Ours(Cow::Borrowed("OURS")),
@@ -1347,6 +1390,80 @@ mod tests {
         let space = Space::new(1280, 720);
         let (list, hits) = screen(10.0, &layout, &s, art, &fonts, space);
         (list, hits, layout, space)
+    }
+
+    /// The chrome's header colour (the globals' text colour).
+    fn header_colour() -> [f32; 3] {
+        ChromeLayout::default()
+            .header(layout::DialogSize::Quarter)
+            .color
+    }
+
+    /// That the header's six glyphs ("MADE UP", in the header colour) are
+    /// in the box `bounds` (UI units), and `others` more glyphs of that
+    /// colour elsewhere (a focused button's words).
+    fn assert_header_in(list: &DrawList, space: Space, bounds: [f32; 4], others: usize) {
+        let [x0, y0, x1, y1] = space.rect(bounds);
+        let glyphs = list
+            .quads
+            .iter()
+            .filter(|q| q.texture == Texture::Fallback && q.color[0][..3] == header_colour());
+        let (mut inside, mut outside) = (0, 0);
+        for q in glyphs {
+            let [cx, cy] = [(q.rect[0] + q.rect[2]) * 0.5, (q.rect[1] + q.rect[3]) * 0.5];
+            if cx >= x0 && cx <= x1 && cy >= y0 - 2.0 && cy <= y1 + 2.0 {
+                inside += 1;
+            } else {
+                outside += 1;
+            }
+        }
+        assert_eq!((inside, outside), ("MADEUP".len(), others), "{bounds:?}");
+    }
+
+    #[test]
+    fn a_dialogs_header_box_goes_with_its_panes_scale() {
+        let chrome = ChromeLayout::default();
+        let keep = |_: &BitmapWidget| Show::Keep;
+        // At Vista's scale, and on a full screen at either scale, the
+        // globals' box.
+        for (size, scale) in [
+            (layout::DialogSize::Quarter, layout::Scale::Vista),
+            (layout::DialogSize::Full, layout::Scale::Xbox),
+            (layout::DialogSize::Full, layout::Scale::Vista),
+        ] {
+            let mut l = dialog();
+            l.size = size;
+            l.panes[0].scale = scale;
+            assert_eq!(
+                header_widget(&l, 0, &chrome).bounds,
+                layout::header_box(size)
+            );
+            let (list, _, _, space) = draw_screen(l, &FlatArt, Buttons::default(), &keep);
+            assert_header_in(&list, space, layout::header_box(size), 0);
+        }
+        // An Xbox dialog of each size: its own box, and the globals'
+        // font and colour.
+        for (k, size) in [
+            layout::DialogSize::Large,
+            layout::DialogSize::Half,
+            layout::DialogSize::Quarter,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut l = dialog();
+            l.size = size;
+            let w = header_widget(&l, 0, &chrome);
+            assert_eq!(w.bounds, layout::XBOX_DIALOG_HEADER_BOUNDS[k]);
+            assert_eq!(
+                (w.font, w.color),
+                (chrome.header(size).font, chrome.header(size).color)
+            );
+            // The pane asked for past the last is the last's.
+            assert_eq!(header_widget(&l, 9, &chrome).bounds, w.bounds);
+            let (list, _, _, space) = draw_screen(l, &FlatArt, Buttons::default(), &keep);
+            assert_header_in(&list, space, w.bounds, 0);
+        }
     }
 
     /// The middle of a box (UI units).
@@ -1423,24 +1540,13 @@ mod tests {
             );
         }
         assert_eq!(legend[0].hit, UiHit::Legend(Face::A));
-        // The header stays in the globals' quarter box (Vista's units),
-        // though the pane is the Xbox's.
+        // A dialog at the Xbox's scale has its header in its frame's top
+        // band, not in the globals' quarter box.
         let chrome = ChromeLayout::default();
-        let header = chrome.header(layout::DialogSize::Quarter);
-        let [x0, y0, x1, y1] = space.rect(header.bounds);
-        let glyphs: Vec<&Quad> = list
-            .quads
-            .iter()
-            .filter(|q| q.texture == Texture::Fallback && q.color[0][..3] == header.color)
-            .collect();
-        assert_eq!(glyphs.len(), "MADEUP".len());
-        for q in glyphs {
-            let [cx, cy] = [(q.rect[0] + q.rect[2]) * 0.5, (q.rect[1] + q.rect[3]) * 0.5];
-            assert!(
-                cx >= x0 && cx <= x1 && cy >= y0 - 2.0 && cy <= y1 + 2.0,
-                "{q:?}"
-            );
-        }
+        let xbox = layout::XBOX_DIALOG_HEADER_BOUNDS[2];
+        assert_eq!(header_widget(&layout, 0, &chrome).bounds, xbox);
+        // (and the focused button's "OURS" in the header's colour too)
+        assert_header_in(&list, space, xbox, "OURS".len());
         // The disabled row is dimmed: the focused row's labels at its
         // focused alpha times DISABLED, the others resting.
         let alphas: Vec<f32> = list
@@ -1534,10 +1640,170 @@ mod tests {
             (up.rect[0] - x).abs() < 1e-3 && (up.rect[3] - y).abs() < 1e-3,
             "{up:?}"
         );
+        // So is the down arrow's, from the corner too (not under the last
+        // row shown).
+        let down = list
+            .quads
+            .iter()
+            .find(|q| q.texture == Texture::Art(7))
+            .unwrap();
+        let [x, y] = space.at([l.corner[0] + arrows.down[0], l.corner[1] + arrows.down[1]]);
+        assert!(
+            (down.rect[0] - x).abs() < 1e-3 && (down.rect[3] - y).abs() < 1e-3,
+            "{down:?}"
+        );
         // Unfocused, the button rests.
         let (list, ..) = draw_dialog(&art, None, &pictures);
         let ids = art_ids(&list);
         assert!(ids.contains(&3) && !ids.contains(&4));
+        // Focused, the button with one picture shows that picture (not a
+        // flat panel where its second would be), and the other rests.
+        let (list, _, layout, space) = draw_dialog(&art, Some(1), &pictures);
+        let ids = art_ids(&list);
+        let count = |id: u32| ids.iter().filter(|&&k| k == id).count();
+        assert_eq!((count(3), count(4), count(5)), (1, 0, 1));
+        let single = layout.panes[0].buttons[1].bitmap.as_ref().unwrap().corner;
+        let flat = |q: &Quad| q.texture == Texture::White && q.rect[0] == space.at(single)[0];
+        assert!(!list.quads.iter().any(flat));
+    }
+
+    #[test]
+    fn scroll_arrows_show_only_towards_hidden_rows() {
+        let mut art = MemoryArt::new();
+        frames(&mut art, "made_up_arrows", 2); // ids 0 (up) and 1 (down)
+        let five = dialog_rows();
+        let keep = |_: &BitmapWidget| Show::Keep;
+        // Three rows show at once. The first asked for is kept so they
+        // fill the list (9 is 2).
+        for (rows, first, arrows) in [
+            (&five[..], 0, (0, 1)),
+            (&five[..], 1, (1, 1)),
+            (&five[..], 2, (1, 0)),
+            (&five[..], 9, (1, 0)),
+            (&five[..3], 0, (0, 0)),
+            (&five[..3], 2, (0, 0)),
+        ] {
+            let buttons = Buttons::default();
+            let (list, ..) = draw_rows(dialog(), &art, buttons, &keep, rows, first);
+            let ids = art_ids(&list);
+            let count = |id: u32| ids.iter().filter(|&&k| k == id).count();
+            let shown = list.texts.iter().filter(|t| t.starts_with("ROW ")).count();
+            assert_eq!(shown, 3);
+            assert_eq!(
+                (count(0), count(1)),
+                arrows,
+                "{} rows from {first}",
+                rows.len()
+            );
+        }
+    }
+
+    /// How many glyphs are in the header's colour.
+    fn header_glyphs(list: &DrawList) -> usize {
+        let colour = header_colour();
+        let header = |q: &&Quad| q.texture == Texture::Fallback && q.color[0][..3] == colour;
+        list.quads.iter().filter(header).count()
+    }
+
+    #[test]
+    fn a_header_is_hidden_on_a_screen_without_one_or_with_a_token_unknown() {
+        let keep = |_: &BitmapWidget| Show::Keep;
+        // The tag's NO_HEADER: none, though the binding has words for it.
+        let mut l = dialog();
+        l.has_header = false;
+        let (list, ..) = draw_screen(l, &FlatArt, Buttons::default(), &keep);
+        assert!(!list.texts.iter().any(|t| t.contains("MADE UP")));
+        assert_eq!(header_glyphs(&list), 0);
+        // A token with no value hides it; one with a value is filled in.
+        let mut l = dialog();
+        l.header_words = Some("\u{e402} MADE UP".into());
+        let (list, ..) = draw_screen(l, &FlatArt, Buttons::default(), &keep);
+        assert!(!list.texts.iter().any(|t| t.contains("MADE UP")));
+        assert_eq!(header_glyphs(&list), 0);
+        let mut l = dialog();
+        l.header_words = Some("\u{e401} MADE UP".into());
+        let (list, ..) = draw_screen(l, &FlatArt, Buttons::default(), &keep);
+        assert!(list.texts.iter().any(|t| t == "JOHN MADE UP"));
+        assert_eq!(header_glyphs(&list), "JOHNMADEUP".len());
+    }
+
+    #[test]
+    fn the_focused_buttons_words_take_the_headers_colour() {
+        let keep = |_: &BitmapWidget| Show::Keep;
+        let glyphs = ["OURS".len(), "SINGLE".len()];
+        for focus in [None, Some(0), Some(1)] {
+            let buttons = Buttons {
+                focus,
+                ..Buttons::default()
+            };
+            let (list, _, layout, space) = draw_screen(dialog(), &FlatArt, buttons, &keep);
+            for (k, b) in layout.panes[0].buttons.iter().enumerate() {
+                let bounds = b.text.widget.bounds;
+                let lit = glyphs_in(&list, space, bounds, header_colour()).len();
+                let resting = glyphs_in(&list, space, bounds, SLOT).len();
+                let want = match focus == Some(k) {
+                    true => (glyphs[k], 0),
+                    false => (0, glyphs[k]),
+                };
+                assert_eq!((lit, resting), want, "{focus:?} {k}");
+            }
+        }
+    }
+
+    /// How many glyphs of colour `rgb` (their middles in the window
+    /// pixels `within`) there are, and how many have the black shadow
+    /// drawn before them `d` pixels down and right at their alpha.
+    fn shadowed(list: &DrawList, rgb: [f32; 3], d: f32, within: [f32; 4]) -> (usize, usize) {
+        let (mut lit, mut under) = (0, 0);
+        for (k, q) in list.quads.iter().enumerate() {
+            let [cx, cy] = [(q.rect[0] + q.rect[2]) * 0.5, (q.rect[1] + q.rect[3]) * 0.5];
+            let inside = cx >= within[0] && cx <= within[2] && cy >= within[1] && cy <= within[3];
+            if q.texture != Texture::Fallback || q.color[0][..3] != rgb || !inside {
+                continue;
+            }
+            lit += 1;
+            let black = [0.0, 0.0, 0.0, q.color[0][3]];
+            let twin =
+                |s: &Quad| s.color[0] == black && s.uv == q.uv && s.rect == q.rect.map(|v| v + d);
+            under += usize::from(list.quads[..k].iter().any(twin));
+        }
+        (lit, under)
+    }
+
+    #[test]
+    fn texts_rows_header_and_legend_have_halo_2s_drop_shadow() {
+        let keep = |_: &BitmapWidget| Show::Keep;
+        let (list, _, layout, space) = draw_screen(dialog(), &FlatArt, Buttons::default(), &keep);
+        let window = [0.0, 0.0, 1280.0, 720.0];
+        // 2 units, times the glyphs' scale, in whole pixels at 0.6 a unit:
+        // a slot's text at the Xbox's 1.25 drops 2 pixels (1.5 rounded),
+        // the rows' cells, the header and the legend 1 (1.2).
+        let drop = |scale: f32| (TEXT_SHADOW[0] * scale * space.k).round();
+        let legend = ChromeLayout::default()
+            .legend(layout::DialogSize::Quarter)
+            .color;
+        for (rgb, d) in [
+            (SLOT, drop(layout::XBOX_BITMAP)),
+            (LABEL, drop(1.0)),
+            ([0.8, 0.8, 0.8], drop(1.0)),
+            (header_colour(), drop(1.0)),
+            (legend, drop(1.0)),
+        ] {
+            let (lit, under) = shadowed(&list, rgb, d, window);
+            assert!(lit > 0 && under == lit, "{rgb:?}: {under} of {lit}");
+        }
+        assert_eq!((drop(layout::XBOX_BITMAP), drop(1.0)), (2.0, 1.0));
+        // A text typed behind a cursor has none; the others keep theirs.
+        let mut typed = dialog();
+        typed.panes[0].texts[0].widget.cursor = true;
+        let (list, ..) = draw_screen(typed, &FlatArt, Buttons::default(), &keep);
+        let body = space.rect(layout.panes[0].texts[0].widget.bounds);
+        let (lit, under) = shadowed(&list, SLOT, 2.0, body);
+        assert!(lit > 0 && under == 0, "{under} of {lit}");
+        let (lit, under) = shadowed(&list, SLOT, 2.0, window);
+        assert!(under > 0 && under < lit, "{under} of {lit}");
+        // (The start screen and the main menu keep their looks, the main
+        // menu's rows their skin's own shadow text: `PINNED` holds them.)
     }
 
     /// Every glyph quad of colour `rgb` whose middle is in `bounds` (UI
@@ -1632,12 +1898,13 @@ mod tests {
                 .find(|q| q.texture == Texture::Art(id))
                 .map(|q| q.color[0][3])
         };
-        // Its picture (lit: it has the focus) and its words at DISABLED,
-        // the other button's whole.
+        // Its picture (lit: it has the focus) and its words (in the
+        // header's colour: it has the focus) at DISABLED, the other
+        // button's whole.
         assert!((alpha(1).unwrap() - DISABLED).abs() < 1e-4);
         assert!((alpha(2).unwrap() - 1.0).abs() < 1e-4);
         let buttons = &layout.panes[0].buttons;
-        let dimmed = glyphs_in(&list, space, buttons[0].text.widget.bounds, SLOT);
+        let dimmed = glyphs_in(&list, space, buttons[0].text.widget.bounds, header_colour());
         let whole = glyphs_in(&list, space, buttons[1].text.widget.bounds, SLOT);
         assert_eq!((dimmed.len(), whole.len()), (4, 6), "OURS, SINGLE");
         assert!(dimmed.iter().all(|g| (g[0] - DISABLED).abs() < 1e-4));

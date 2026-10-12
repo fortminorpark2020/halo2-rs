@@ -141,8 +141,13 @@ pub fn text(t: &ui::Text, g: &Globals) -> TextWidget {
         depth: t.depth,
         intro: intro(g, t.animation),
         delay_ms: f32::from(t.delay_ms),
+        cursor: t.flags & CURSOR_TEXT != 0,
     }
 }
+
+/// Text flag 8: the text is typed out behind a cursor, in the first font,
+/// with no drop shadow (as the Xbox code sets a text up).
+const CURSOR_TEXT: u32 = 8;
 
 /// A pane's bitmaps as widgets, flat shapes from `built_in`.
 fn bitmaps(p: &Pane, g: &Globals, built_in: &[BitmapWidget]) -> Vec<BitmapWidget> {
@@ -1337,7 +1342,7 @@ mod tests {
         skin.texts = vec![tag_text(ui::LEFT_JUSTIFY, "", [20, 10, -10, 300])];
         skin.bitmaps = vec![tag_bitmap(
             "ui\\list_skins\\default\\item_background",
-            [0, 0],
+            [5, -3],
         )];
         skin.arrows = tag("ui\\list_skins\\default\\arrows");
         skin.arrow_up = [-30, 40];
@@ -1432,12 +1437,22 @@ mod tests {
         assert_eq!(p.texts[0].widget.bounds, [-200.0, 100.0, 200.0, 0.0]);
         assert_eq!(p.texts[0].glyphs, 1.25);
         // A list's corner moves out; its skin, shared, stays in Vista's
-        // units, with its arrows.
+        // units, with its arrows: its pictures' places and sizes and the
+        // step between rows are the same as on a Vista pane.
         let l = &p.lists[0];
         assert_eq!(l.corner, [-150.0, -25.0]);
         assert_eq!(l.visible, 3);
         assert_eq!(l.skin.texts[0].bounds, [10.0, 20.0, 300.0, -10.0]);
-        assert_eq!(l.skin.bitmaps[0].corner, [0.0, 0.0]);
+        assert_eq!(l.skin.bitmaps[0].corner, [5.0, -3.0]);
+        assert_eq!(l.skin.bitmaps[0].scale(), [1.0, 1.0]);
+        let vista = screen_layout_at(&ui, DIALOG, &[Scale::Vista], &FlatArt, &mut Vec::new());
+        let vista = vista.unwrap();
+        let v = &vista.panes[0].lists[0];
+        assert_eq!(v.corner, [-60.0, -10.0]);
+        assert_eq!((&l.skin, l.step), (&v.skin, v.step));
+        assert_eq!(l.skin.bitmaps[0].flat_size(), v.skin.bitmaps[0].flat_size());
+        // The backing from -3 to 39 (flat, 42 high) and the text from -10.
+        assert_eq!(l.step, 49.0);
         let arrows = l.skin.arrows.as_ref().unwrap();
         assert_eq!(arrows.bitmap, "ui\\list_skins\\default\\arrows");
         assert_eq!((arrows.up, arrows.down), ([-30.0, 40.0], [-30.0, -120.0]));

@@ -39,9 +39,12 @@ pub struct Picture {
 
 /// A source of pictures.
 pub trait ArtSource {
-    /// The picture of a bitmap tag (by its whole name, or by the last part
-    /// of it) at `frame`: its sequence `frame`'s first sprite, or without
-    /// sequences its image `frame`.
+    /// The picture of a bitmap tag at `frame`: its sequence `frame`'s first
+    /// sprite, or without sequences its image `frame`. The tag is found by
+    /// its whole name (in any case), or by its last part where the name
+    /// asked for or the one held has no folder (the built-in short names,
+    /// `list_bkd`); never a bitmap of another folder with the same last
+    /// name.
     fn picture(&self, name: &str, frame: usize) -> Option<Picture>;
 
     /// The pixels behind a `Texture::Art` id this source gave.
@@ -151,14 +154,21 @@ impl MemoryArt {
             .sum()
     }
 
-    /// A bitmap's place, by its whole name, else by the last part of it.
+    /// A bitmap's place, by its whole name, else by the last part of it
+    /// where one of the two names has no folder. Two whole tag names never
+    /// match by their last parts: a catalog screen's bitmap that didn't
+    /// load (`pregame_lobby\item_background`) must draw its flat shape,
+    /// not another folder's (`list_skins\default\item_background`).
     fn find(&self, name: &str) -> Option<usize> {
+        let short = last_part(name);
+        let bare = |n: &str| last_part(n).len() == n.len();
         self.bitmaps
             .iter()
-            .position(|(n, _)| n == name)
+            .position(|(n, _)| n.eq_ignore_ascii_case(name))
             .or_else(|| {
-                let short = last_part(name);
-                self.bitmaps.iter().position(|(n, _)| last_part(n) == short)
+                self.bitmaps.iter().position(|(n, _)| {
+                    (bare(name) || bare(n)) && last_part(n).eq_ignore_ascii_case(short)
+                })
             })
     }
 }
@@ -531,6 +541,23 @@ mod tests {
         assert_eq!((loaded.found, loaded.wanted), (1, 2));
         assert_eq!(loaded.missing.len(), 1);
         assert!(loaded.missing[0].1.contains("a format of its own"));
+    }
+
+    #[test]
+    fn a_whole_name_never_finds_another_folders_bitmap() {
+        let mut art = MemoryArt::new();
+        art.add_image("ui\\list_skins\\default\\item_background", image(4, 2, 1));
+        art.add_image("list_bkd", image(8, 2, 2));
+        // The lobby's item_background didn't load: it isn't the skin's.
+        let lobby = "ui\\screens\\pregame_lobby\\item_background";
+        assert!(art.picture(lobby, 0).is_none());
+        // Its whole name in another case, and its last part alone, find it.
+        let skin = art.picture("UI\\List_Skins\\Default\\Item_Background", 0);
+        assert_eq!(skin.unwrap().texture, Texture::Art(0));
+        assert_eq!(art.picture("item_background", 0).unwrap().size, [4.0, 2.0]);
+        // A short name held is found from a whole one.
+        let bkd = art.picture("ui\\global_bitmaps\\list_bkd", 0).unwrap();
+        assert_eq!(bkd.texture, Texture::Art(1));
     }
 
     #[test]

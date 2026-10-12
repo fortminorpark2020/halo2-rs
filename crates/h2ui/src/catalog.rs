@@ -9,10 +9,12 @@
 //! where the globals' quarter header box (in Vista's units) sits inside
 //! the frame's top at 1:1; task_progress_dialog's family has them about
 //! 2.5 times closer to the middle, and its pieces only meet once drawn at
-//! the Xbox's scale, with that header box (kept in Vista's units) in the
-//! plate's top. Which scale each dialog takes was settled by drawing each
-//! at both scales on the real map (`examples/menu_png.rs`, which also
-//! prints the header box's fit; menu.md 9.2 has the results).
+//! the Xbox's scale. There the globals' header boxes land on the dialog's
+//! text or list, so a dialog at the Xbox's scale has its header in a box
+//! of our own in its frame's top band (`layout::xbox_dialog_header`).
+//! Which scale each dialog takes was settled by drawing each at both
+//! scales on the real map (`examples/menu_png.rs`, which also prints the
+//! header box's fit; menu.md 9.2 has the results).
 //!
 //! `H2LOBBY_SCALE` overrides any entry for tuning on the owner's PC:
 //! `<id>=xbox|vista` for all of a screen's panes, or `<id>:<pane>=...`
@@ -112,8 +114,8 @@ impl ScreenId {
                 "online",
                 &[Xbox],
             ),
-            // task_progress_dialog's family: the header box fits its
-            // frame only at the Xbox's scale (menu.md 9.2).
+            // task_progress_dialog's family: its frame's pieces meet only
+            // at the Xbox's scale (menu.md 9.2).
             ScreenId::PleaseWait => (
                 "game_shell\\xbox_live\\task_progress_dialog\\task_progress_dialog",
                 "please_wait",
