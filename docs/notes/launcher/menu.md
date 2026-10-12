@@ -887,7 +887,12 @@ later; the button layouts offered stay as they are.
 - **The gate**, before every commit: `cargo fmt --all`, `cargo clippy
   --workspace --all-targets -- -D warnings`, `cargo test --workspace
   --release` (which runs `crates/h2launch/tests/flows.rs`), and `cargo
-  build --release --target x86_64-pc-windows-gnu -p h2launch`.
+  build --release --target x86_64-pc-windows-gnu -p h2launch`, whose
+  exe must import neither of Media Foundation's DLLs (2.3's review: the
+  intro loads them when it plays, so an N edition without them still
+  starts the launcher): `x86_64-w64-mingw32-objdump -p
+  target/x86_64-pc-windows-gnu/release/h2launch.exe | grep -iE
+  'mfplat|mfreadwrite'` must print nothing.
 - **Docs**: README.md in plain words, "What Phase 2.N built" here,
   lobby.md (labels, variables, recipes), PROGRESS.md.
 - **Pinned tests** (strings, pixels, positions) are updated to the new
@@ -1221,8 +1226,11 @@ Halo 2's intro movie before the start screen, from Cartographer's
   order (`Decoded::Picture`: its time, size and pixels), or why it
   failed (`Decoded::Failed`, its last word). `MfSource` (Windows only)
   is a close port of `menu-preview`'s `h2viewer/src/intro.rs` Media
-  Foundation code (not its ffmpeg path): COM and `MFStartup` on the
-  thread, a source reader per stream from `MFCreateSourceReaderFromURL`
+  Foundation code (not its ffmpeg path): Media Foundation's five
+  functions looked up in System32's `mfplat.dll` and `mfreadwrite.dll`
+  when it first plays (`LoadLibraryExW` with
+  `LOAD_LIBRARY_SEARCH_SYSTEM32`, then `GetProcAddress`; kept loaded),
+  never linked, COM and `MFStartup` on the thread, a source reader per stream from `MFCreateSourceReaderFromURL`
   with `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING`, the sound read whole
   as 16-bit PCM, the pictures as RGB32 through `IMF2DBuffer::Lock2D`
   row by row at its pitch, then `MFShutdown`. Its blue, green, red,
@@ -1258,24 +1266,31 @@ Halo 2's intro movie before the start screen, from Cartographer's
   (`intro::letterbox`), as one h2ui quad drawn by `h2ui::cpu` from a
   small `Textures` (`MovieFrame`), through a `Kept` that draws again only
   for a new picture or size.
-- **Skipping.** Any button: A, B, X, Y, LB, RB (the pad's Start and Back
-  are A and B), Enter, Esc, Backspace, Space, a letter, or a click
-  anywhere. A direction (stick, d-pad, arrows) and Tab don't, as in
-  Halo 2. Leaving it sounds nothing (`cue_for`: the press is no list
+- **Skipping.** Any button: A, B, X, Y, LB, RB, LT, RT (the pad's Start
+  and Back are A and B), Enter, Esc, Backspace, Space, a letter, or a
+  click anywhere. A direction (stick, d-pad, arrows) and Tab don't, as
+  in Halo 2 (0x156ab0 skips on every button but the d-pad and the stick
+  clicks). The triggers (`Input::Lt`, `Input::Rt`, gilrs's
+  `LeftTrigger2` and `RightTrigger2`) do nothing on any other screen. Leaving it sounds nothing (`cue_for`: the press is no list
   item's or button's, and the start screen's load plays no `advance`).
   The second click of a double-click doesn't go on from the start
   screen (the existing guard).
 - **The end.** At its end, on a skip, on a stall, or when it fails
   (`intro: <why>; skipped`; Windows N without the Media Feature Pack
-  lands here), the start screen comes in: its intro animations start at
+  lands here, as `intro: Media Foundation isn't installed (...);
+  skipped`), the start screen comes in: its intro animations start at
   its first draw, and its music starts (music rule on).
 - **Sound.** `App::take_cues` became `take_sound() -> Vec<SoundOut>`:
   `Movie(clip)` when the soundtrack comes, `StopMovie` when the intro is
   left, then the cues as `Cue(c)`. `MenuSound` opens the output when
   the soundtrack comes (even before the menu sounds have loaded), plays
-  it once as music (never dropped for room) at the music's gain (-10 dB
-  from the tags; -10 dB too when the music didn't load), and on
-  `StopMovie` fades it out in 50 ms (our choice, to avoid a click).
+  it once as music (never dropped for room) at its own level (gain 1:
+  Halo 2 plays its movies through Bink straight to the sound card at
+  Bink's full volume, 0x8000 on the front left and right in 0x156090,
+  with no sound class or track gain), and on `StopMovie` fades it out
+  in 50 ms (our choice, to avoid a click). With the menus' sound off
+  (`H2LOBBY_SOUND=off`, `menu_sound = off`) no device opens and the
+  movie plays silent.
 - **Frames.** `App::frame_interval()`: 16 ms while the intro plays (its
   pictures come 60 a second), else 33 ms; `window.rs`'s `next_wake`
   takes it.
@@ -1289,15 +1304,30 @@ Halo 2's intro movie before the start screen, from Cartographer's
   no cue, the music after); every button and a click skip it and a
   direction doesn't; a stall and a failure reach the start screen.
   `mod.rs`: only with a window, a player and a movie. `sound.rs`: the
-  soundtrack once at the music's gain until skipped. `settings.rs`: the
+  soundtrack once at its own level until skipped. `settings.rs`: the
   `intro` line.
-- **Measured** in the container (release): one picture of 1280x720
+- **Measured** in the container (release, by itself, not the timer's
+  line, since the container plays no movie): one picture of 1280x720
   drawn into the window takes about 12 ms at 1280x720, 25 ms at
   1920x1080 and 32 ms at 2560x1440 on the CPU. The owner's PC is
   faster; the timer's `lobby: 1920x1080, intro <n> ms a frame on the
-  CPU` and the end line's late count say how it does there. Pictures
-  that come due while one is drawn are passed over, so the movie keeps
-  time with its sound either way.
+  CPU` (the average of the first 30 new pictures' draws, so it needs
+  about half a second of pictures before a skip) and the end line's
+  late count say how it does there. Pictures that come due while one is
+  drawn are passed over, so the movie keeps time with its sound either
+  way.
+- **Review fixes (round 1).** Media Foundation is loaded at run time
+  (above): linked, its DLLs were load-time imports, and Windows refused
+  to start the whole exe (the lobby and each match's engine) on an N
+  edition without them; the gate now checks the cross-built exe imports
+  neither. The soundtrack plays at gain 1, not the music's 0.32. The
+  triggers skip the intro. The timer counts only draws of a new picture
+  (black frames while Media Foundation reads the soundtrack, and a
+  picture drawn again, made it read far too low). New tests: the
+  timer, the triggers, the movie chosen by the window's height (not its
+  width) through `App`, the mix at the tags' gains with nothing taken
+  off, and a sound's own and class decibels (`sound_db`); the stall
+  test waits for the last picture before moving the clock.
 - Not here: the attract movie after idling, the credits, the scene.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report

@@ -180,6 +180,11 @@ pub enum Input {
     /// buttons): LB is always a service record, RB the friends list.
     Lb,
     Rb,
+    /// The pad's triggers: only the intro takes them (they skip it, as
+    /// every button but the d-pad and the stick clicks does in Halo 2,
+    /// 0x156ab0); every other screen leaves them alone.
+    Lt,
+    Rt,
     Tab,
     Backspace,
     Char(char),
@@ -1506,17 +1511,19 @@ impl App {
 
     /// Draw the intro: black, then the picture showing, as large as fits
     /// (`intro::letterbox`). Its first draw starts it, with the file for
-    /// the window's height (`Plan::file`). False when it couldn't start
-    /// (the start screen is drawn instead).
-    fn draw_intro(&mut self, c: &mut Canvas) -> bool {
+    /// the window's height (`Plan::file`). Whether this draw drew a new
+    /// picture (only those are timed: black while none has come, and a
+    /// picture drawn again, cost next to nothing), or `None` when it
+    /// couldn't start (the start screen is drawn instead).
+    fn draw_intro(&mut self, c: &mut Canvas) -> Option<bool> {
         if self.intro.is_none() {
             let Some(plan) = self.cfg.intro.clone() else {
                 self.leave_intro(Some(End::Failed("no movie".into())));
-                return false;
+                return None;
             };
             let Some(path) = plan.file(c.h) else {
                 self.leave_intro(Some(End::Failed("no movie file".into())));
-                return false;
+                return None;
             };
             let name = path.file_name().unwrap_or(path.as_os_str());
             self.log(&format!(
@@ -1530,7 +1537,7 @@ impl App {
                 Ok(i) => self.intro = Some(i),
                 Err(e) => {
                     self.leave_intro(Some(End::Failed(e)));
-                    return false;
+                    return None;
                 }
             }
         }
@@ -1538,9 +1545,10 @@ impl App {
         let shown = self.intro.as_ref().and_then(Intro::showing);
         let Some((p, serial)) = shown else {
             c.px.fill(0);
-            return true;
+            return Some(false);
         };
-        if serial != self.intro_serial {
+        let new = serial != self.intro_serial;
+        if new {
             self.intro_serial = serial;
             self.intro_kept.forget();
         }
@@ -1556,7 +1564,7 @@ impl App {
             }],
         };
         self.intro_kept.draw(&list, &mut c.px, w, h, &MovieFrame(p));
-        true
+        Some(new)
     }
 
     /// What the engine's launcher said about the engine: kept on the
@@ -1892,6 +1900,10 @@ impl App {
             if !direction && i != Input::Tab {
                 self.leave_intro(None);
             }
+            return;
+        }
+        // The triggers do nothing anywhere else: no press, no sound.
+        if matches!(i, Input::Lt | Input::Rt) {
             return;
         }
         // Letters are buttons, except where a name is typed; Backspace is
@@ -2814,12 +2826,17 @@ impl App {
     /// here, the start screen's and main menu's in `draw_menu`.
     pub fn draw(&mut self, c: &mut Canvas, t: &mut Text) {
         let started = Instant::now();
-        if self.screen == Screen::Intro && self.draw_intro(c) {
+        let intro = match self.screen {
+            Screen::Intro => self.draw_intro(c),
+            _ => None,
+        };
+        if let Some(new_picture) = intro {
             self.areas.clear();
             self.drawn.clear();
             self.drawn_screen = Some(Screen::Intro);
             let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
-            self.time_frame((c.w, c.h), frame_ms, true);
+            // Only a new picture's draw is timed (`draw_intro`).
+            self.time_frame((c.w, c.h), frame_ms, new_picture);
             return;
         }
         let (w, h) = (c.w as f32, c.h as f32);
@@ -7071,6 +7088,15 @@ mod tests {
         dir: &std::path::Path,
         source: intro::FakeSource,
     ) -> (App, Arc<Mutex<Vec<String>>>) {
+        intro_app_with(dir, source, None)
+    }
+
+    /// `intro_app`, with the small movie too when `low` names it.
+    fn intro_app_with(
+        dir: &std::path::Path,
+        source: intro::FakeSource,
+        low: Option<&str>,
+    ) -> (App, Arc<Mutex<Vec<String>>>) {
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let kept = lines.clone();
         let slot = Mutex::new(Some(source));
@@ -7082,7 +7108,7 @@ mod tests {
             log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
             intro: Some(Plan {
                 full: Some(PathBuf::from("intro_60.wmv")),
-                low: None,
+                low: low.map(PathBuf::from),
                 open,
             }),
             ..app(dir).cfg
@@ -7184,6 +7210,8 @@ mod tests {
             Input::Y,
             Input::Lb,
             Input::Rb,
+            Input::Lt,
+            Input::Rt,
             Input::Backspace,
             Input::Char(' '),
             Input::Char('z'),
@@ -7240,6 +7268,110 @@ mod tests {
         assert_eq!(a.label(), "start");
         assert!(a.music_on());
         assert_eq!(a.frame_interval(), FRAME);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_triggers_do_nothing_but_skip_the_intro() {
+        // Halo 2 skips its movies on any button but the d-pad and the
+        // stick clicks, the triggers too (0x156ab0, above); elsewhere the
+        // lobby gives them nothing to do, so they change nothing and
+        // sound nothing.
+        let dir = scratch("triggers");
+        let mut a = app(&dir);
+        let mut text = Text::none();
+        let mut c = Canvas::new(320, 180);
+        a.draw(&mut c, &mut text);
+        for t in [Input::Lt, Input::Rt] {
+            a.input(t);
+            assert_eq!(a.label(), "start", "{t:?}");
+        }
+        a.input(Input::A);
+        assert_eq!(a.label(), "main");
+        a.take_sound();
+        a.draw(&mut c, &mut text);
+        let row = a.main_focus.item;
+        for t in [Input::Lt, Input::Rt] {
+            a.input(t);
+            assert_eq!(a.label(), "main", "{t:?}");
+            assert_eq!(a.main_focus.item, row);
+            assert_eq!(a.popup, None);
+        }
+        assert!(a.take_sound().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_windows_height_at_the_first_draw_picks_the_movie() {
+        // Width and height on opposite sides of 720: only the height
+        // counts (`Plan::file`).
+        let dir = scratch("intro-low");
+        for ((w, h), file) in [
+            ((1280, 700), "intro_low_60.wmv"),
+            ((640, 720), "intro_60.wmv"),
+        ] {
+            let source = intro::FakeSource::second();
+            let (mut a, lines) = intro_app_with(&dir, source, Some("intro_low_60.wmv"));
+            a.tick(Instant::now());
+            a.draw(&mut Canvas::new(w, h), &mut Text::none());
+            assert_eq!(
+                lines.lock().unwrap()[0],
+                format!("intro: playing {file} ({w}x{h} window)")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_intros_new_pictures_are_timed() {
+        // The decoder says nothing for a while (Media Foundation reads
+        // the whole soundtrack first): those black frames cost next to
+        // nothing and aren't timed, nor is a picture drawn again, so the
+        // log's `intro` time is a new picture's.
+        let dir = scratch("intro-timer");
+        let (go, wait) = std::sync::mpsc::channel();
+        let source = intro::FakeSource {
+            wait: Some(wait),
+            ..intro::FakeSource::second()
+        };
+        let (mut a, lines) = intro_app(&dir, source);
+        let mut text = Text::none();
+        let mut c = Canvas::new(64, 36);
+        let t0 = Instant::now();
+        a.tick(t0);
+        let timed = |a: &App| {
+            let f = a.menu_times.frames.iter().find(|f| f.0 == "intro");
+            f.map_or(0, |f| f.1)
+        };
+        let logged = |lines: &Mutex<Vec<String>>| {
+            let lines = lines.lock().unwrap();
+            lines
+                .iter()
+                .filter(|l| l.starts_with("lobby: 64x36, intro "))
+                .count()
+        };
+        for _ in 0..2 * MENU_FRAMES {
+            a.draw(&mut c, &mut text);
+            a.tick(t0);
+        }
+        assert!(intro_red(&a).is_none());
+        assert_eq!(timed(&a), 0);
+        go.send(()).unwrap();
+        // Each picture in turn (red is its number, at k/30 s on the
+        // movie's clock, which starts at t0 with the decoder's first
+        // word), drawn twice: only the first draw counts.
+        for k in 0..MENU_FRAMES {
+            let after = if k == 0 { 0.0 } else { 0.001 };
+            let t = t0 + Duration::from_secs_f64(f64::from(k) / 30.0 + after);
+            tick_until(&mut a, t, |a| intro_red(a).map(u32::from) == Some(k));
+            a.draw(&mut c, &mut text);
+            a.draw(&mut c, &mut text);
+            if k + 1 < MENU_FRAMES {
+                assert_eq!(timed(&a), k + 1);
+                assert_eq!(logged(&lines), 0);
+            }
+        }
+        assert_eq!(logged(&lines), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

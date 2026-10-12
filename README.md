@@ -75,15 +75,17 @@ install. No game files are included in this repository.
   after it. Without Cartographer the menus are silent for now (MCC's own
   sounds can't be read yet); `menu_sound = off` in `lobby.txt` (or
   `H2LOBBY_SOUND=off`) silences them. With Cartographer's `movie` folder
-  the launcher first plays Halo 2's intro movie, with its sound, before
-  the start screen, as the Xbox did each time it started: any button
-  (A, B, X, Y, the bumpers, Start, Back, Enter, Esc, Space or a letter)
-  or a click skips it, but not the stick, the d-pad or the arrow keys.
-  At its end, or when skipped, the start screen comes in and its music
-  starts. It plays at every start; `intro = off` in `lobby.txt` (or
-  `H2LOBBY_INTRO=off`) goes straight to the start screen. On Windows N
-  without the Media Feature Pack it can't be played, and the start
-  screen comes at once. ONLINE
+  the launcher first plays Halo 2's intro movie, with its sound at full
+  volume as on the Xbox (silent with `menu_sound = off` or
+  `H2LOBBY_SOUND=off`), before the start screen, as the Xbox did each
+  time it started: any button (A, B, X, Y, the bumpers, the triggers,
+  Start, Back, Enter, Esc, Space or a letter) or a click skips it, but
+  not the stick, the d-pad or the arrow keys. At its end, or when
+  skipped, the start screen comes in and its music starts. It plays at
+  every start; `intro = off` in `lobby.txt` (or `H2LOBBY_INTRO=off`) goes
+  straight to the start screen. On Windows N without the Media Feature
+  Pack it can't be played, and the start screen comes at once (the
+  launcher itself still starts). ONLINE
   takes you to its lobby: pick a gamertag the first time (after that it
   signs you in by itself), form a party (the sign-in screen offers the
   project's server, h2.mohnjorrow.com, by default), search a playlist,

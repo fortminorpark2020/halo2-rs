@@ -320,15 +320,120 @@ pub fn opener() -> Option<Opener> {
 /// Media Foundation, which comes with Windows (with its WMV decoders; the
 /// N editions need the Media Feature Pack, or the intro is skipped). Ported
 /// closely from `menu-preview`'s `h2viewer/src/intro.rs`.
+///
+/// Its DLLs are loaded when the intro first plays (`Api`), never linked:
+/// Windows refuses to start a program that imports a DLL it lacks, so a
+/// linked Media Foundation would stop the whole launcher (the lobby and
+/// each match's engine, the same exe) on an N edition without the pack.
+/// Only the interfaces and constants are taken from the `windows` crate
+/// (their methods go through the objects, not imports); its free
+/// functions are never named here, and the gate checks the exe imports
+/// neither DLL (menu.md, "Cross-cutting rules").
 #[cfg(windows)]
 mod mf {
     use super::{Decoded, MovieSource, Picture};
     use crate::lobby::audio::Clip;
+    use std::ffi::c_void;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::SyncSender;
-    use windows::core::{Interface, Result, GUID, HSTRING};
-    use windows::Win32::Media::MediaFoundation::*;
+    use std::sync::OnceLock;
+    use windows::core::{s, w, Interface, Result, GUID, HRESULT, HSTRING, PCSTR, PCWSTR};
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::Media::MediaFoundation::{
+        IMF2DBuffer, IMFAttributes, IMFMediaType, IMFSample, IMFSourceReader, MFAudioFormat_PCM,
+        MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_RGB32, MFSTARTUP_FULL,
+        MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
+        MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+        MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
+        MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+        MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
+    };
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+    use windows::Win32::System::LibraryLoader::{
+        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+    };
+
+    /// What `GetProcAddress` gives, and the five functions as Media
+    /// Foundation declares them (their raw ABI).
+    type Found = unsafe extern "system" fn() -> isize;
+    type Startup = unsafe extern "system" fn(u32, u32) -> HRESULT;
+    type Shutdown = unsafe extern "system" fn() -> HRESULT;
+    type CreateAttributes = unsafe extern "system" fn(*mut *mut c_void, u32) -> HRESULT;
+    type CreateMediaType = unsafe extern "system" fn(*mut *mut c_void) -> HRESULT;
+    type CreateReader = unsafe extern "system" fn(PCWSTR, *mut c_void, *mut *mut c_void) -> HRESULT;
+
+    /// The Media Foundation functions the intro calls, looked up in
+    /// System32's mfplat.dll and mfreadwrite.dll.
+    struct Api {
+        startup: Startup,
+        shutdown: Shutdown,
+        create_attributes: CreateAttributes,
+        create_media_type: CreateMediaType,
+        create_reader: CreateReader,
+    }
+
+    /// Media Foundation's functions, loaded once for the whole run (the
+    /// DLLs stay loaded: objects they made may outlive any one use), or
+    /// why they can't be.
+    fn api() -> std::result::Result<&'static Api, String> {
+        static API: OnceLock<std::result::Result<Api, String>> = OnceLock::new();
+        API.get_or_init(load).as_ref().map_err(Clone::clone)
+    }
+
+    fn load() -> std::result::Result<Api, String> {
+        let missing = |what: String| {
+            format!(
+                "Media Foundation isn't installed ({what}; Windows N needs the Media Feature Pack)"
+            )
+        };
+        // SAFETY: System32's own DLLs, by name, searched for there only
+        // (never the exe's folder or the working one), and never freed.
+        let open =
+            |name: PCWSTR| unsafe { LoadLibraryExW(name, None, LOAD_LIBRARY_SEARCH_SYSTEM32) };
+        let plat = open(w!("mfplat.dll")).map_err(|e| missing(format!("no mfplat.dll: {e}")))?;
+        let rw =
+            open(w!("mfreadwrite.dll")).map_err(|e| missing(format!("no mfreadwrite.dll: {e}")))?;
+        let find = |module: HMODULE, name: PCSTR| -> std::result::Result<Found, String> {
+            // SAFETY: a loaded module and a NUL-terminated name.
+            let f = unsafe { GetProcAddress(module, name) };
+            // SAFETY: `s!` names are ASCII and NUL-terminated.
+            f.ok_or_else(|| missing(format!("no {}", unsafe { name.display() })))
+        };
+        // SAFETY: each pointer is the named function, whose signature is
+        // the type it is turned into (Media Foundation's headers).
+        unsafe {
+            Ok(Api {
+                startup: std::mem::transmute::<Found, Startup>(find(plat, s!("MFStartup"))?),
+                shutdown: std::mem::transmute::<Found, Shutdown>(find(plat, s!("MFShutdown"))?),
+                create_attributes: std::mem::transmute::<Found, CreateAttributes>(find(
+                    plat,
+                    s!("MFCreateAttributes"),
+                )?),
+                create_media_type: std::mem::transmute::<Found, CreateMediaType>(find(
+                    plat,
+                    s!("MFCreateMediaType"),
+                )?),
+                create_reader: std::mem::transmute::<Found, CreateReader>(find(
+                    rw,
+                    s!("MFCreateSourceReaderFromURL"),
+                )?),
+            })
+        }
+    }
+
+    /// An object a Media Foundation function made (`raw`, after it said
+    /// it succeeded), owned.
+    ///
+    /// # Safety
+    /// `raw` is null or a `T` the caller owns a reference to.
+    unsafe fn owned<T: Interface>(made: HRESULT, raw: *mut c_void) -> Result<T> {
+        made.ok()?;
+        if raw.is_null() {
+            return Err(windows::core::Error::empty());
+        }
+        // SAFETY: a `T`, as the caller says, handed over with its reference.
+        Ok(unsafe { T::from_raw(raw) })
+    }
 
     /// A movie file, decoded by Media Foundation.
     pub struct MfSource {
@@ -343,19 +448,31 @@ mod mf {
 
     /// A reader of one of the file's streams, decoding it to `subtype`
     /// (with 16-bit samples, for sound).
-    fn reader(path: &Path, stream: u32, major: GUID, subtype: GUID) -> Result<IMFSourceReader> {
-        // SAFETY: Media Foundation is started on this thread (`run`), and
-        // every pointer passed is to a live local.
+    fn reader(
+        api: &Api,
+        path: &Path,
+        stream: u32,
+        major: GUID,
+        subtype: GUID,
+    ) -> Result<IMFSourceReader> {
+        // SAFETY: Media Foundation is started on this thread (`run`), every
+        // pointer passed is to a live local, and each object made is owned
+        // as its function's type.
         unsafe {
-            let mut attributes = None;
-            MFCreateAttributes(&mut attributes, 1)?;
-            let attributes = attributes.ok_or_else(windows::core::Error::empty)?;
+            let mut raw = std::ptr::null_mut();
+            let made = (api.create_attributes)(&mut raw, 1);
+            let attributes: IMFAttributes = owned(made, raw)?;
             // Let it turn the video into RGB.
             attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
-            let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path), &attributes)?;
+            let url = HSTRING::from(path);
+            let mut raw = std::ptr::null_mut();
+            let made = (api.create_reader)(PCWSTR(url.as_ptr()), attributes.as_raw(), &mut raw);
+            let reader: IMFSourceReader = owned(made, raw)?;
             reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
             reader.SetStreamSelection(stream, true)?;
-            let wanted = MFCreateMediaType()?;
+            let mut raw = std::ptr::null_mut();
+            let made = (api.create_media_type)(&mut raw);
+            let wanted: IMFMediaType = owned(made, raw)?;
             wanted.SetGUID(&MF_MT_MAJOR_TYPE, &major)?;
             wanted.SetGUID(&MF_MT_SUBTYPE, &subtype)?;
             if major == MFMediaType_Audio {
@@ -410,9 +527,9 @@ mod mf {
     }
 
     /// The whole soundtrack, if the movie has one.
-    fn sound(path: &Path) -> Result<Option<Clip>> {
+    fn sound(api: &Api, path: &Path) -> Result<Option<Clip>> {
         let stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
-        let Ok(reader) = reader(path, stream, MFMediaType_Audio, MFAudioFormat_PCM) else {
+        let Ok(reader) = reader(api, path, stream, MFMediaType_Audio, MFAudioFormat_PCM) else {
             return Ok(None);
         };
         // SAFETY: plain COM calls on a live reader.
@@ -471,9 +588,9 @@ mod mf {
         Ok(out)
     }
 
-    fn pictures(path: &Path, tx: &SyncSender<Decoded>) -> Result<()> {
+    fn pictures(api: &Api, path: &Path, tx: &SyncSender<Decoded>) -> Result<()> {
         let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-        let reader = reader(path, stream, MFMediaType_Video, MFVideoFormat_RGB32)?;
+        let reader = reader(api, path, stream, MFMediaType_Video, MFVideoFormat_RGB32)?;
         let mut size = frame_size(&reader, stream)?;
         loop {
             let (sample, time, flags) = next(&reader, stream)?;
@@ -498,20 +615,23 @@ mod mf {
     }
 
     pub fn run(path: &Path, tx: &SyncSender<Decoded>) -> std::result::Result<(), String> {
+        // Without Media Foundation the intro is skipped, saying why.
+        let api = api()?;
         // SAFETY: COM and Media Foundation are started and stopped on this
         // thread, around everything that uses them.
         let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
-        let played = unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.and_then(|()| {
-            let played = sound(path).and_then(|clip| {
+        let started = unsafe { (api.startup)(MF_VERSION, MFSTARTUP_FULL) }.ok();
+        let played = started.and_then(|()| {
+            let played = sound(api, path).and_then(|clip| {
                 if let Some(c) = clip {
                     if tx.send(Decoded::Sound(c)).is_err() {
                         return Ok(());
                     }
                 }
-                pictures(path, tx)
+                pictures(api, path, tx)
             });
             // SAFETY: started above.
-            let _ = unsafe { MFShutdown() };
+            let _ = unsafe { (api.shutdown)() };
             played
         });
         if com {
@@ -525,13 +645,16 @@ mod mf {
 /// A made-up movie for tests: `pictures` solid pictures `step` seconds
 /// apart, after a short soundtrack; then, with `hold`, it says nothing
 /// more until `hold`'s sender goes (a stalled decoder), or with `fail`
-/// it fails.
+/// it fails. With `wait` it says nothing at all until `wait`'s sender
+/// sends or goes (a slow start, as Media Foundation's while it reads the
+/// whole soundtrack).
 #[cfg(test)]
 pub struct FakeSource {
     pub pictures: u32,
     pub step: f32,
     pub size: (u32, u32),
     pub sound_seconds: f32,
+    pub wait: Option<Receiver<()>>,
     pub hold: Option<Receiver<()>>,
     pub fail: Option<String>,
 }
@@ -546,6 +669,7 @@ impl FakeSource {
             step: 1.0 / 30.0,
             size: (4, 3),
             sound_seconds: 0.1,
+            wait: None,
             hold: None,
             fail: None,
         }
@@ -567,6 +691,9 @@ impl FakeSource {
 #[cfg(test)]
 impl MovieSource for FakeSource {
     fn run(self: Box<Self>, tx: &SyncSender<Decoded>) -> Result<(), String> {
+        if let Some(wait) = &self.wait {
+            let _ = wait.recv();
+        }
         if self.sound_seconds > 0.0 {
             let rate = 100;
             let clip = Clip {
@@ -699,16 +826,25 @@ mod tests {
         };
         let t0 = Instant::now();
         let mut intro = Intro::start(Box::new(source), t0).unwrap();
-        // Wait for its first word, on the test's clock.
+        // Wait for its first word, on the test's clock, then for its last
+        // picture (due at 1/30 s; the thread may send it a little after
+        // the first), so nothing more can come.
+        let showing = |intro: &Intro| intro.showing().map(|(p, _)| p.rgba[0]);
         let deadline = Instant::now() + Duration::from_secs(5);
         while intro.showing().is_none() && Instant::now() < deadline {
             assert!(intro.update(t0).end.is_none());
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(intro.showing().is_some());
+        assert_eq!(showing(&intro), Some(0));
+        let t1 = t0 + secs(0.05);
+        while showing(&intro) != Some(1) && Instant::now() < deadline {
+            assert!(intro.update(t1).end.is_none());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(showing(&intro), Some(1));
         // Within the stall it waits; past it, it gives up.
-        assert!(intro.update(t0 + STALL - secs(0.1)).end.is_none());
-        assert_eq!(intro.update(t0 + STALL + secs(0.1)).end, Some(End::Stalled));
+        assert!(intro.update(t1 + STALL - secs(0.1)).end.is_none());
+        assert_eq!(intro.update(t1 + STALL + secs(0.1)).end, Some(End::Stalled));
         drop(keep);
     }
 

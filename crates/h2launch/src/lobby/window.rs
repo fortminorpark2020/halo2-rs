@@ -122,9 +122,13 @@ impl Shell {
                         Button::East | Button::Select => Some(Input::B),
                         Button::West => Some(Input::X),
                         Button::North => Some(Input::Y),
-                        // gilrs calls the bumpers the triggers.
+                        // gilrs calls the bumpers the triggers, and the
+                        // triggers (pressed past its threshold) the
+                        // triggers 2.
                         Button::LeftTrigger => Some(Input::Lb),
                         Button::RightTrigger => Some(Input::Rb),
+                        Button::LeftTrigger2 => Some(Input::Lt),
+                        Button::RightTrigger2 => Some(Input::Rt),
                         Button::DPadUp => Some(Input::Up),
                         Button::DPadDown => Some(Input::Down),
                         Button::DPadLeft => Some(Input::Left),

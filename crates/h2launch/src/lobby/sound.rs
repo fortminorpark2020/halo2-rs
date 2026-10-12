@@ -40,10 +40,12 @@ const MUSIC_HOLD: Duration = Duration::from_secs(6);
 /// How long the music takes to fade when a match's engine starts, before
 /// the audio stream pauses: an estimate.
 const ENGINE_FADE: Duration = Duration::from_millis(500);
-/// The intro movie's soundtrack plays at the music's gain; this one when
-/// it comes before the music has been read: the music's in Halo 2 Vista's
-/// mainmenu.map (its own 0 dB, its class's -4 dB, its track's -6 dB).
-const MOVIE_DB: f32 = -10.0;
+/// The intro movie's soundtrack plays at its file's own level: Halo 2
+/// plays its movies through Bink straight to the sound card, at Bink's
+/// full volume on the front left and right (0x8000 in 0x156090, called
+/// with the intro by 0x12bf90), with no sound class or track gain. The
+/// menu music is off while it plays, so it has the headroom.
+const MOVIE_GAIN: f32 = 1.0;
 /// How long the intro's soundtrack takes to stop when it is skipped (ours:
 /// short, so the cut doesn't click).
 const MOVIE_STOP: Duration = Duration::from_millis(50);
@@ -127,8 +129,8 @@ impl Cue {
 #[derive(Clone)]
 pub enum SoundOut {
     Cue(Cue),
-    /// The intro movie's soundtrack came: play it once, now, at the
-    /// music's gain.
+    /// The intro movie's soundtrack came: play it once, now, at its own
+    /// level (`MOVIE_GAIN`).
     Movie(Arc<Clip>),
     /// The intro was skipped or given up: stop its soundtrack.
     StopMovie,
@@ -320,8 +322,14 @@ fn find(set: &MapSet, group: &str, name: &str) -> Option<DatumIndex> {
         .map(|t| t.datum)
 }
 
+/// A sound's own gain and its class's at a scale of 1, in decibels,
+/// added (`tag_gain` makes the sum a gain, with the music's track's).
+fn sound_db(own_db: f32, class: u8, classes: &Classes) -> f32 {
+    own_db + classes.db(class)
+}
+
 /// A sound's variations decoded, and its own gain and its class's at a
-/// scale of 1 (decibels, added).
+/// scale of 1 (decibels, added: `sound_db`).
 fn clips(
     set: &mut MapSet,
     reader: &mut SoundReader,
@@ -333,7 +341,7 @@ fn clips(
         return Err(format!("{} didn't decode", s.name));
     }
     let (channels, rate) = (s.channels, s.sample_rate);
-    let db = s.gain_db + classes.db(s.class);
+    let db = sound_db(s.gain_db, s.class, classes);
     let clips = s
         .permutations
         .into_iter()
@@ -669,8 +677,7 @@ impl MenuSound {
                     }
                 }
                 SoundOut::Movie(clip) => {
-                    let music = self.sounds.music.as_ref();
-                    let g = music.map_or(gain(MOVIE_DB), |m| m.gain);
+                    let g = MOVIE_GAIN;
                     self.movie = Some(audio.play_movie(clip, g));
                     (self.log)(&format!(
                         "sound: the intro's soundtrack, {:.1} s (gain {g:.2})",
@@ -838,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn the_intros_soundtrack_plays_once_at_the_music_gain_until_skipped() {
+    fn the_intros_soundtrack_plays_once_at_its_own_level_until_skipped() {
         let (mut s, dir) = playing("movie");
         let t0 = Instant::now();
         let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
@@ -847,11 +854,12 @@ mod tests {
             channels: 1,
             rate: 100,
         });
-        // The intro: no music, the soundtrack at the music's gain.
+        // The intro: no music, the soundtrack at its own level (not the
+        // music's, 0.5 here).
         s.update_at(at(0.0), &[SoundOut::Movie(clip.clone())], false, false);
         let movie = s.movie.unwrap();
         let a = s.audio.as_ref().unwrap();
-        assert_eq!(a.gain(movie), Some(0.5));
+        assert_eq!(a.gain(movie), Some(1.0));
         assert_eq!(a.voices(), 1);
         // Skipped: it stops (in a moment), and the music starts.
         s.update_at(at(0.5), &[SoundOut::StopMovie], true, false);
@@ -867,7 +875,7 @@ mod tests {
         drop(s);
 
         // Before the menus' sounds have come: the output opens for it,
-        // at the music's gain in Vista's map.
+        // at the same level.
         let (log, lines) = logged();
         let mut early = MenuSound::off(&log);
         early.enabled = true;
@@ -876,9 +884,11 @@ mod tests {
         early.loading = Some(rx);
         early.update_at(at(0.0), &[SoundOut::Movie(clip.clone())], false, false);
         let movie = early.movie.unwrap();
-        let g = early.audio.as_ref().unwrap().gain(movie).unwrap();
-        assert!((g - gain(MOVIE_DB)).abs() < 1e-6, "{g}");
-        assert!(lines.lock().unwrap()[1].starts_with("sound: the intro's soundtrack, 1000.0 s"));
+        assert_eq!(early.audio.as_ref().unwrap().gain(movie), Some(1.0));
+        assert_eq!(
+            lines.lock().unwrap()[1],
+            "sound: the intro's soundtrack, 1000.0 s (gain 1.00)"
+        );
         drop(early);
 
         // Silent menus stay silent.
@@ -1028,6 +1038,15 @@ mod tests {
         assert_eq!(classes.db(1), -4.0);
         assert_eq!(classes.db(50), 0.0);
         assert_eq!(Classes(vec![f32::NAN]).db(0), 0.0);
+        // A sound's decibels as `clips` gives them: its own and its
+        // class's, by its class's number (a menu sound of class 50 at -4
+        // dB, -3 dB of its own: 0.45, not the 0.71 of its own alone).
+        let mut table = vec![0.0; 51];
+        table[50] = -4.0;
+        let table = Classes(table);
+        assert_eq!(sound_db(-3.0, 50, &table), -7.0);
+        assert!(near(tag_gain(sound_db(-3.0, 50, &table), 0.0, 0.0), 0.447));
+        assert_eq!(sound_db(-3.0, 51, &table), -3.0);
     }
 
     #[test]

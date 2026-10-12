@@ -528,6 +528,18 @@ mod tests {
     }
 
     #[test]
+    fn the_mix_takes_nothing_off_the_tags_gains() {
+        // Nothing scales the mix after a sound's own gain (`MASTER` is
+        // 1, menu.md "After P2"): a full-scale clip at gain 0.5 comes out
+        // at half of full scale, not 0.5 times a master volume.
+        let mut m = mixer(100);
+        m.start(1, &clip(i16::MAX, 10, 100), 0.5, Vec::new(), false);
+        let mut out = vec![0.0; 2 * 5];
+        m.mix(&mut out, 2);
+        assert!(out.iter().all(|s| (s - 0.5).abs() < 1e-3), "{out:?}");
+    }
+
+    #[test]
     fn two_voices_mix() {
         let mut m = mixer(100);
         m.start(1, &clip(8192, 50, 100), 1.0, Vec::new(), false);

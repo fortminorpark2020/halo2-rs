@@ -209,27 +209,38 @@ the launcher doesn't do.
   Vista's `movie` folder (`intro_60.wmv`, or `intro_low_60.wmv` in a
   window under 720 pixels tall, either one when the other is missing),
   decoded by Media Foundation on a thread of its own from the first
-  draw, with its soundtrack at the music's gain. Any button skips it (A,
-  B, X, Y, LB, RB, the pad's Start and Back, Enter, Esc, Backspace, Space
-  or a letter) and so does a click; a direction (the stick, the d-pad,
-  the arrows) and Tab don't. Leaving it sounds nothing. At its end, on a
-  skip, when the decoder sends nothing for 5 s, or when it can't be
-  played (Windows N without the Media Feature Pack), the start screen
-  comes in with its intro animations and its music. It isn't played
-  headless, with `H2LOBBY_INTRO=off` or `intro = off` in `lobby.txt`,
-  off Windows, or without the movie: then the lobby opens on the start
-  screen as before. While it plays the window draws every 16 ms (else
-  33 ms). The log says `intro: none (<why>); the lobby opens on the
-  start screen` at start when it won't play, else `intro: playing
+  draw, with its soundtrack at its own level (gain 1, as Halo 2 plays
+  its movies; silent with `H2LOBBY_SOUND=off` or `menu_sound = off`,
+  which open no audio device, while the movie still plays). Media
+  Foundation's DLLs are loaded when the intro starts, not linked, so a
+  PC without them (Windows N without the Media Feature Pack) still runs
+  the launcher and only skips the intro. Any button skips it (A, B, X,
+  Y, LB, RB, LT, RT, the pad's Start and Back, Enter, Esc, Backspace,
+  Space or a letter) and so does a click; a direction (the stick, the
+  d-pad, the arrows) and Tab don't. The triggers do nothing anywhere
+  else. Leaving it sounds nothing. At its end, on a skip, when the
+  decoder sends nothing for 5 s, or when it can't be played, the start
+  screen comes in with its intro animations and its music. It isn't
+  played headless, with `H2LOBBY_INTRO=off` or `intro = off` in
+  `lobby.txt`, off Windows, or without the movie: then the lobby opens
+  on the start screen as before. While it plays the window draws every
+  16 ms (else 33 ms). The log says `intro: none (<why>); the lobby opens
+  on the start screen` at start when it won't play, else `intro: playing
   intro_60.wmv (1920x1080 window)`, `sound: the intro's soundtrack, <n>
-  s (gain 0.32)`, and one of `intro: skipped at <t> s`, `intro: played
-  to the end (<t> s, <n> pictures, <k> late ones passed over)`, `intro:
-  the decoder sent nothing for 5 s; skipped` or `intro: <why>; skipped`.
+  s (gain 1.00)` (not with the sound off), and one of `intro: skipped at
+  <t> s`, `intro: played to the end (<t> s, <n> pictures, <k> late ones
+  passed over)`, `intro: the decoder sent nothing for 5 s; skipped` or
+  `intro: <why>; skipped` (for example `intro: Media Foundation isn't
+  installed (no mfplat.dll: ...; Windows N needs the Media Feature
+  Pack); skipped`).
 - Every screen's CPU time is logged once per window size, averaged over
   its first 30 frames there (menu.md's CPU budget): the menus as `menus:
   1920x1080, start screen 3.4 ms a frame on the CPU (background 20 ms
   once)`, the others as `lobby: 1920x1080, playlists 2.7 ms a frame on
-  the CPU`. The names are intro, start screen, main menu, sign-in, signing in,
+  the CPU`. The intro's counts only frames that draw a new picture (not
+  the black ones before the first, nor one drawn again), so it is the
+  cost of one picture, logged after its first 30 (about half a second
+  of movie). The names are intro, start screen, main menu, sign-in, signing in,
   playlists, searching, players, party, custom game, pregame lobby, in
   game, carnage report, offline, service record, friends and settings (a
   popup counts as the screen under it).
@@ -455,7 +466,7 @@ line (`--set-option 0x354=i32:60 --pad none`, say). A script line is
 0.3 a                 # ONLINE: the sign-in form (no gamertag saved yet)
 0 wait signin 5
 0 type ALPHA          # typed into the focused field
-0.3 a                 # a key: up down left right a b x y lb rb tab back
+0.3 a                 # a key: up down left right a b x y lb rb lt rt tab back
 0 wait live 20        # until the screen is "live" (at most 20 s)
 1 down
 0.5 a

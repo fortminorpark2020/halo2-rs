@@ -542,6 +542,8 @@ fn parse_script(text: &str) -> Result<Vec<(f64, Step)>, String> {
             "y" => Step::Press(Input::Y),
             "lb" => Step::Press(Input::Lb),
             "rb" => Step::Press(Input::Rb),
+            "lt" => Step::Press(Input::Lt),
+            "rt" => Step::Press(Input::Rt),
             "tab" => Step::Press(Input::Tab),
             "back" => Step::Press(Input::Backspace),
             "type" => Step::Type(arg.to_string()),
@@ -764,7 +766,7 @@ mod tests {
             ]
         );
         let s = parse_script(
-            "0 lb\n0 rb\n0 see Wants to be your friend 20\n0 see 12 of 100 120\n\
+            "0 lb\n0 rb\n0 lt\n0 rt\n0 see Wants to be your friend 20\n0 see 12 of 100 120\n\
              0 see CHARLIE\n0 see Head to Head: 60\n0 see 60\n0 pick bravo one\n",
         )
         .unwrap();
@@ -773,6 +775,8 @@ mod tests {
             vec![
                 (0.0, Step::Press(Input::Lb)),
                 (0.0, Step::Press(Input::Rb)),
+                (0.0, Step::Press(Input::Lt)),
+                (0.0, Step::Press(Input::Rt)),
                 (0.0, Step::See("Wants to be your friend".into(), 20.0)),
                 (0.0, Step::See("12 of 100".into(), 120.0)),
                 (0.0, Step::See("CHARLIE".into(), 120.0)),

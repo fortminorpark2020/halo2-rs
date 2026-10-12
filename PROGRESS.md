@@ -164,19 +164,32 @@ Next, in order:
    (2026-10-11; menu.md "What Phase 2.3 built"): with a window on
    Windows the lobby opens on Halo 2's intro movie from Cartographer's
    `movie` folder (`lobby/intro.rs`, Media Foundation, ported from
-   `menu-preview`), with its soundtrack at the music's gain; any button
-   or a click skips it (not a direction), and at its end, a skip, a 5 s
-   stall or a failure the start screen comes in with its music.
+   `menu-preview`), with its soundtrack at its own level (gain 1, as
+   Halo 2 plays its movies); any button (the triggers too) or a click
+   skips it (not a direction), and at its end, a skip, a 5 s stall or a
+   failure the start screen comes in with its music.
    `H2LOBBY_INTRO=off` or `intro = off` in lobby.txt skips it; headless
    and Linux never play it. `App::take_cues` became `take_sound`
    (`SoundOut`: cues, the soundtrack and its stop), and the window draws
-   every 16 ms while it plays. On the owner's PC (check P3): the intro
-   with sound from `C:\Games\Halo 2 Project Cartographer\movie`; A skips
-   it; the start screen comes in and the music starts; with
-   `H2LOBBY_VISTA=off` or `H2LOBBY_INTRO=off` the lobby opens on the
-   start screen; `lobby.log`'s `lobby: 1920x1080, intro <n> ms a frame`
-   (25 ms in the container) and the end line's late count. Next: 2.4,
-   the menu scene as data.
+   every 16 ms while it plays. Review fixes, round 1 (2026-10-12):
+   Media Foundation's DLLs are loaded when the intro plays instead of
+   linked (linked, an N edition without the Media Feature Pack couldn't
+   start the launcher at all), and the gate checks the exe imports
+   neither; the soundtrack at gain 1 rather than the music's 0.32; the
+   triggers skip it; the intro's timer counts only draws of a new
+   picture. On the owner's PC (check P3): the intro with sound from
+   `C:\Games\Halo 2 Project Cartographer\movie`, as loud as the
+   original (louder than the menu music); let it play a second or two,
+   then A skips it; the start screen comes in and the music starts;
+   with `H2LOBBY_VISTA=off` or `H2LOBBY_INTRO=off` the lobby opens on
+   the start screen; `lobby.log`'s `sound: the intro's soundtrack, <n> s
+   (gain 1.00)`, `lobby: 1920x1080, intro <n> ms a frame` (one new
+   picture's draw, logged after 30 of them; the container measured one
+   picture at 25 ms at 1920x1080 by itself) and the end line's late
+   count. On a Windows N PC without the Media Feature Pack, if one is
+   at hand: the launcher starts, and the log says `intro: Media
+   Foundation isn't installed (...); skipped`. Next: 2.4, the menu
+   scene as data.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.
