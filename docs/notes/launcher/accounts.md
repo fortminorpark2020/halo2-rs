@@ -44,7 +44,8 @@ script). Not deployed yet: see "Deploy and rollback".
   (`h2live user rename <GAMERTAG> <NEW GAMERTAG>`), make an admin account
   (`h2live user add <GAMERTAG> --admin`), and anything on his own account
   or another admin's (those options are greyed in the launcher, with "Use
-  the server's command line for that.").
+  the server's command line for that."; he still changes his own password
+  with "Change my password").
 
 ## What friends do
 
@@ -122,12 +123,12 @@ owner may read it.
   12-character passwords from 25 letters and digits that can't be confused
   with one another (no 0 or O, 1, I or L, 2 or Z, 5 or S, 8 or B), shown as
   XXXX-XXXX-XXXX (about 56 bits). They are shown once and not kept.
-- **Where hashing happens.** Only when a PC is added, an account is made,
-  or a password changes, so a few times a week. A hash's time on the
-  owner's server is an estimate (tens of milliseconds) until the first
-  `h2live user add` there prints "hashing took N ms". In this project's
-  Linux container a release build's `user add` took 30 to 36 ms (stage 3's
-  check below).
+- **Where hashing happens.** Only when a PC signs in with a password (to
+  be added, right or wrong), an account is made, or a password changes, so
+  a few times a week. A hash's time on the owner's server is an estimate
+  (tens of milliseconds) until the first `h2live user add` there prints
+  "hashing took N ms". In this project's Linux container a release
+  build's `user add` took 30 to 36 ms (stage 3's check below).
 - **Why the main thread is fine.** The hash runs on the server's main
   thread, at most 30 a minute. The launcher's game traffic runs on the
   relay's own thread, so matches aren't touched.
@@ -348,6 +349,36 @@ command line uses this lock to tell whether the server is running.
   removal is refused ("THE SERVER COULDN'T SAVE ITS FILES") and nothing
   changes: friends.txt is put back if accounts.txt is what failed.
 
+**When a file can't be saved** (a full disk, say; the log says `live:
+can't save <file>: <why>`), what happens depends on what the change does:
+- **Changes that let someone in, make an admin or keep an account are
+  undone** and refused with "THE SERVER COULDN'T SAVE ITS FILES": making
+  an account (logins.txt, then accounts.txt), making an admin
+  (logins.txt), a rename (accounts.txt) and a removal (friends.txt or
+  accounts.txt, as above).
+  Nothing has changed, so the same request can simply be made again.
+- **Changes that shut someone out hold** until the server next starts,
+  since undoing them would let back in whoever they shut out: a new
+  password (from an admin's launcher or `user passwd`), signing out of all
+  PCs, unmaking an admin, and a player changing their own password. Their
+  answer is a refusal that says what was done, then "BUT THE SERVER
+  COULDN'T SAVE ITS FILES, SO IT'S UNDONE WHEN THE SERVER NEXT STARTS. TRY
+  AGAIN." (for example "KAT IS SIGNED OUT OF ALL PCS. BUT THE SERVER ..."),
+  so it's asked for again once the files can be saved.
+  - The command line exits with 1 and doesn't print the password it made
+    up (running it again makes another).
+  - The launcher keeps the popup up with the server's words. A new
+    password isn't shown, and A asks again with another. In CHANGE
+    PASSWORD the new password becomes CURRENT, because it's the one that
+    works now.
+- **Only logged:** logins.txt after a removal (accounts.txt no longer has
+  the account, so its lines are dropped at the next start anyway), and a
+  PC a right password just added, or the first PC of an account open
+  sign-up just made. Those PCs sign in now. If logins.txt is still unsaved
+  at the next start, the added PC is asked for the password again, and an
+  account open sign-up made (if accounts.txt has it) is adopted again from
+  its PC.
+
 An ordinary sign-in writes nothing new. Back up the whole folder.
 logins.txt and secret.txt can't be rebuilt from stat cards.
 
@@ -370,8 +401,8 @@ theirs; else "BAD SIGNATURE")**, checked in this order:
 - **The key is already one of the account's PCs:** it signs in as PROVE
   would, and the password isn't checked (no hash, no count, and no lock
   stops it).
-- **More than 30 password checks in the last minute on the whole server:**
-  "THE SERVER IS BUSY".
+- **30 password checks or hashes already in the last minute on the whole
+  server:** "THE SERVER IS BUSY".
 - **10 wrong tries from one address in 10 minutes:** "TOO MANY WRONG
   PASSWORDS" for that address.
 - **5 wrong tries for the account in 10 minutes, or 10 passwords checked
@@ -396,7 +427,8 @@ theirs; else "BAD SIGNATURE")**, checked in this order:
   gamertag) and the address. Logged with the account's gamertag and the
   address, or for a gamertag no account has, with the address only
   (`live: wrong password for a gamertag no account has, from 1.2.3.4 (1 in
-  10 minutes)`): that gamertag may be a password typed in the wrong box.
+  10 minutes)`, counting the address's wrong tries): that gamertag may be
+  a password typed in the wrong box.
 - **A right password:** the account's wrong count is cleared. From a new
   PC, the PC is added (up to 5) and the log says `live: KAT signed in with
   a password from 1.2.3.4 (new PC "DESKTOP-1", 2 of 5)`.
@@ -443,6 +475,24 @@ same id, its stat card bringing back its gamertag (if free) and levels;
 only its friends and PCs are lost. games.log keeps its history.
 
 **The last admin** can't be removed or unmade.
+
+**The server's log** says what changed, and who changed it: "command line"
+or the admin's gamertag, here KAT. A changed account is named by its
+gamertag, here JUN. The lines (after the date and time):
+- `live: KAT: made the account JUN` (`made the admin account JUN` for
+  `user add --admin`);
+- `live: KAT gave JUN a new password`;
+- `live: KAT signed JUN out of all PCs (2 PCs)`, with how many PCs it had;
+- `live: KAT removed JUN`;
+- `live: command line: JUN is an admin` (or `isn't an admin`), followed
+  by the sign-up lines when that opens or closes auto sign-up;
+- `live: command line renamed JUN NOBLE SIX`;
+- `live: JUN changed their password`, or `live: wrong password for JUN
+  from 1.2.3.4 changing it (1 in 10 minutes)`;
+- the password sign-ins above (`signed in with a password`, `wrong
+  password for ...`);
+- at the start, `live: logins.txt named 1 account accounts.txt doesn't
+  have: dropped` and the adoption line above.
 
 ## LIVE_PROTOCOL 4 messages
 
@@ -738,9 +788,11 @@ None of the tests need the internet or game files.
   to update, the auto setting, a one-time seal key for every connection
   (across a restart too), a launcher hanging up on a SEAL_KEY and
   CHALLENGE played back from another sign-in, the command line acting
-  only on the account called what was typed, and a stand-in made like
-  most kept hashes, on simulated time. A request the command line gave up
-  waiting on is never carried out (`admin.rs`).
+  only on the account called what was typed, a stand-in made like most
+  kept hashes, and files that can't be saved (each change undone, or held
+  and answered with what it did and that it wasn't saved), on simulated
+  time. A request the command line gave up waiting on is never carried
+  out (`admin.rs`).
 - **Command line:** `crates/h2live/tests/program.rs` runs the real program
   against a running and a stopped server, a second server on one folder, a
   folder that isn't the command line's own (with and without a lock left
@@ -754,9 +806,11 @@ None of the tests need the internet or game files.
   (and one played by the test, to read every byte sent). They check that a
   password is never drawn, logged or sent unsealed, the refusals, that a
   changed server key sends nothing, creating an account and signing in
-  with the password shown, new password (not closed by an early press),
-  sign out, remove, changing a password, a password typed in the GAMERTAG
-  box never logged or shown, a malformed built-in key failing the build,
+  with the password shown, new password (not closed by an early press,
+  and none shown when the server couldn't save it), sign out, remove,
+  changing a password (tried again from the new one when the server
+  couldn't save it), a password typed in the GAMERTAG box never logged or
+  shown, a malformed built-in key failing the build,
   and that every new screen and popup draws and takes clicks.
 - **Stage 3's end-to-end check** (Linux, release builds, 2026-10-11): a
   closed local server, the command line while it ran and while it was

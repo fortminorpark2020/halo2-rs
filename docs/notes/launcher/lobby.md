@@ -225,8 +225,8 @@ the launcher doesn't do.
    server must prove its key: if it isn't the one pinned for that address,
    SERVER KEY CHANGED shows both short codes; A ("Trust the new key", taken
    once the popup has been up a second) pins the new one and signs in
-   again, B goes back to the main menu. B goes back to the main
-   menu, and so does B while signing in (which calls it off).
+   again, B goes back to the main menu. On the form, B goes back to the
+   main menu too, and so does B while signing in (which calls it off).
 2. Xbox Live: the playlists (name, your level in it, people searching and
    playing) and the party (members and their levels in the playlist
    selected, or the one searched while searching; their highest on the
@@ -364,8 +364,12 @@ the launcher doesn't do.
    send the request again. An answer that comes later
    is still acted on (the password made up shown, CHANGE PASSWORD closed),
    until the link goes. The server's answers come as notices or in the
-   popup. B goes back to the playlists. The gamertag and password
-   fields need a keyboard until menu Phase 2's on-screen keyboard.
+   popup. A change the server couldn't save keeps its popup up with the
+   server's words: no new password is shown, A asks again, and in CHANGE
+   PASSWORD the new password becomes the current one (`accounts.md`,
+   "When a file can't be saved"). B goes back to the playlists. The
+   gamertag and password fields need a keyboard until menu Phase 2's
+   on-screen keyboard.
 
 ## Testing without MCC
 

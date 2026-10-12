@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-12 10:45 UTC. Any assistant that works on the project
+Last updated 2026-10-12 13:55 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -174,7 +174,11 @@ told to check a list they don't have; a removal whose friends.txt can't be
 written is refused and changes nothing; the rollback docs say the version
 3 server lets signed-out PCs and removed accounts back in, and that a
 backup goes in place of the data folder, not over it), pushed, not
-deployed.
+deployed. After the seventh round the docs were checked against the code;
+`accounts.md` now also says what happens when the server can't save its
+files (a change that lets someone in is undone; one that shuts someone
+out holds until the next start and says so) and lists the server's
+account log lines.
 `launcher-menu` with the in-game GAME MENU (PR #9, below) is merged into
 it up to 18279ad (the lobby's console echo fix, merged 2026-10-12), so its
 builds carry both; the GAME MENU changes neither protocol, and

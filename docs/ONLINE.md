@@ -217,7 +217,16 @@ gamertag starting with `-` goes after `--` (`h2live user admin -- -KAT-
 on`). With sign-up open, a removed account that a PC made by signing in
 comes back when that PC signs in again, its levels too. Accounts
 from before (live protocol 3) keep signing in from the PC that made them,
-with no password until the owner gives them one. The whole design is in
+with no password until the owner gives them one.
+
+If the server can't write its files (a full disk, say), a command or the
+launcher's Accounts screen says so:
+- "THE SERVER COULDN'T SAVE ITS FILES" means nothing changed.
+- What was done followed by "BUT THE SERVER COULDN'T SAVE ITS FILES, SO
+  IT'S UNDONE WHEN THE SERVER NEXT STARTS" (a new password, a sign-out,
+  unmaking an admin) holds only until h2live restarts.
+
+Either way, free the space and do it again. The whole design is in
 `docs/notes/launcher/accounts.md`.
 
 ## Moving or turning off the relay
