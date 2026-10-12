@@ -99,6 +99,12 @@ pub mod colour {
     pub const MAIN_MENU_SHADOW: [f32; 3] = [0.29, 0.33, 0.37];
     /// Headers (the globals' text colour).
     pub const HEADER: [f32; 3] = [0.68, 0.76, 0.85];
+    /// The button legends' words: not the headers' colour. An estimate
+    /// from the owner's Xbox screenshot, where they are near white and
+    /// less blue than the header; Vista (Cartographer) draws them a
+    /// neutral grey, about 0.53. Their A, B, X and Y keep the font's own
+    /// colours.
+    pub const LEGEND: [f32; 3] = [1.0, 1.0, 1.0];
     /// "PRESS START", and the small print at the bottom right.
     pub const PRESS_START: [f32; 3] = [0.64, 0.72, 0.87];
     pub const SMALL_PRINT: [f32; 3] = [0.64, 0.72, 0.87];
@@ -231,11 +237,14 @@ pub fn key_name(face: Face) -> &'static str {
     }
 }
 
-/// One button of a legend and what it does ("SELECT").
+/// One button of a legend and what it does ("SELECT"). A `keyless` one
+/// shows what it does alone, with no glyph or key name: where its button
+/// or key does nothing (a click on it can still press it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LegendItem {
     pub face: Face,
     pub label: String,
+    pub keyless: bool,
 }
 
 impl LegendItem {
@@ -243,6 +252,15 @@ impl LegendItem {
         LegendItem {
             face,
             label: label.to_string(),
+            keyless: false,
+        }
+    }
+
+    /// `face`'s item shown by its label alone (`keyless`).
+    pub fn label_only(face: Face, label: &str) -> LegendItem {
+        LegendItem {
+            keyless: true,
+            ..LegendItem::new(face, label)
         }
     }
 }
@@ -837,17 +855,19 @@ impl ChromeLayout {
 impl Default for ChromeLayout {
     /// Without the tags: the framing alone (it draws nothing without its
     /// picture, leaving the navy), the globals' boxes, the header in the
-    /// title font and the legend in the body font, both in the globals'
-    /// text colour, and the globals' overlay.
+    /// title font and the globals' text colour, the legend in the body
+    /// font and its own colour (`colour::LEGEND`), and the globals'
+    /// overlay.
     fn default() -> ChromeLayout {
-        let text = |bounds: [f32; 4], font: Font, justify: Justify| {
-            TextWidget::new(font, colour::HEADER, bounds, justify)
+        let text = |bounds: [f32; 4], font: Font, color, justify: Justify| {
+            TextWidget::new(font, color, bounds, justify)
         };
+        let (header, legend) = (colour::HEADER, colour::LEGEND);
         ChromeLayout {
             still: vec![framing()],
             moving: Vec::new(),
-            headers: HEADER_BOUNDS.map(|b| text(b, Font::Title, Justify::Left)),
-            legends: LEGEND_BOUNDS.map(|b| text(b, Font::Body, Justify::Right)),
+            headers: HEADER_BOUNDS.map(|b| text(b, Font::Title, header, Justify::Left)),
+            legends: LEGEND_BOUNDS.map(|b| text(b, Font::Body, legend, Justify::Right)),
             overlay: colour::OVERLAY,
         }
     }
@@ -979,7 +999,7 @@ mod tests {
             assert_eq!((h.font, h.justify), (Font::Title, Justify::Left));
             assert_eq!(l.bounds, legend_box(size));
             assert_eq!((l.font, l.justify), (Font::Body, Justify::Right));
-            assert_eq!(h.color, colour::HEADER);
+            assert_eq!((h.color, l.color), (colour::HEADER, colour::LEGEND));
         }
         assert_eq!(c.overlay, colour::OVERLAY);
     }

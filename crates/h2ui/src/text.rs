@@ -514,11 +514,15 @@ impl Fonts {
                     let left = pen + g.origin[0] * units;
                     let top = -g.origin[1] * units;
                     if g.size[0] > 0.0 && g.size[1] > 0.0 {
+                        // A button's glyph keeps its own colours (white
+                        // multiplies nothing), as Halo 2 draws its A, B, X
+                        // and Y in any text; letters take the text's.
+                        let own = button(c).map(|_| [1.0; 3]);
                         line.glyphs.push(PlacedGlyph {
                             texture: Texture::Font(k as u16),
                             uv: g.uv,
                             rect: [left, top, left + g.size[0] * units, top + g.size[1] * units],
-                            color: None,
+                            color: own,
                         });
                     }
                     pen = left + g.advance * units;
@@ -808,6 +812,22 @@ pub(crate) mod tests {
         // The text after it follows the disc.
         assert!(line.glyphs[2].rect[0] > disc.rect[2]);
         assert!(wanted('\u{e103}') && wanted('e') && !wanted('\u{e200}'));
+    }
+
+    #[test]
+    fn a_halo_2_fonts_button_keeps_its_own_colours() {
+        let mut file = font();
+        file.glyphs.push(glyph('\u{e100}', 8, 10, 0, 10, 9));
+        let mut files = vec![None; 12];
+        files[Font::MainMenu.index()] = Some(file);
+        let mut f = Fonts::new(&files);
+        f.set_units_per_pixel(Font::MainMenu, 1.0);
+        let line = f.line(Font::MainMenu, 1.0, "\u{e100}A");
+        let (button, letter) = (line.glyphs[0], line.glyphs[1]);
+        assert_eq!(button.texture, Texture::Font(0));
+        // White: the font's own colours, untinted by the text's.
+        assert_eq!(button.color, Some([1.0; 3]));
+        assert_eq!((letter.texture, letter.color), (Texture::Font(0), None));
     }
 
     #[test]

@@ -429,8 +429,9 @@ fn sensible([l, t, r, b]: [f32; 4]) -> bool {
 /// strips; in Vista's tags framing_center and 17 strips, 16 of them
 /// scrolling), split into the pictures that scroll and those that don't;
 /// the globals' header and legend boxes by size, the header fonts and
-/// the text colour; and the overlay colour. Each piece the tags lack keeps
-/// the built-in one (`ChromeLayout::default`).
+/// the text colour (the headers'; the legends keep their own,
+/// `layout::colour::LEGEND`); and the overlay colour. Each piece the tags
+/// lack keeps the built-in one (`ChromeLayout::default`).
 ///
 /// Every bitmap of Vista's shell has the globals' first animation as its
 /// intro (sliding in from the right): the chrome is drawn settled
@@ -490,8 +491,9 @@ pub fn chrome(ui: Option<&Ui>, sources: &mut Vec<String>) -> ChromeLayout {
     }
     let colour = g.text_color.map(|c| finite(c, 0.0).clamp(0.0, 1.0));
     let coloured = colour.iter().any(|&c| c > 0.0);
+    // The headers' colour; the legends keep their own.
     if coloured {
-        for t in out.headers.iter_mut().chain(out.legends.iter_mut()) {
+        for t in out.headers.iter_mut() {
             t.color = colour;
         }
     }
@@ -504,8 +506,8 @@ pub fn chrome(ui: Option<&Ui>, sources: &mut Vec<String>) -> ChromeLayout {
     note(
         sources,
         format!(
-            "headers and button legends: {boxes} of 8 boxes from the globals, the text colour \
-             from {}, the overlay from {}",
+            "headers and button legends: {boxes} of 8 boxes from the globals, the headers' \
+             colour from {}, the overlay from {}",
             built_in(coloured),
             built_in(dims)
         ),
@@ -898,7 +900,7 @@ mod tests {
         assert_eq!(c.legends[2].bounds, [-400.0, -225.0, 480.0, -270.0]);
         assert_eq!(c.legends[3].bounds, layout::LEGEND_BOUNDS[3]);
         assert!(c.headers.iter().all(|h| h.color == [0.5, 0.6, 0.7]));
-        assert_eq!(c.legends[0].color, [0.5, 0.6, 0.7]);
+        assert!(c.legends.iter().all(|l| l.color == layout::colour::LEGEND));
         assert_eq!(c.overlay, [0.0, 0.1, 0.2, 0.8]);
         assert!(sources.iter().all(|l| l.starts_with("menus: ")));
         assert!(sources[0].contains("2 still, 2 scrolling"), "{sources:?}");

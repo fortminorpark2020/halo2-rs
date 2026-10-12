@@ -2115,15 +2115,18 @@ usual:
    in Halo 2's title font) and its buttons at the bottom right in the
    legend's band. `lobby.log` has `menus: the shell's pictures from wgit
    ...game_shell_background: 2 still, 16 scrolling` and `menus: headers
-   and button legends: 8 of 8 boxes from the globals, the text colour
-   from the globals, the overlay from the globals`.
+   and button legends: 8 of 8 boxes from the globals, the headers'
+   colour from the globals, the overlay from the globals`.
 2. Every other screen after the main menu has the same: signing in,
    searching, players, party, custom game, pregame, in game, carnage
    report, offline, service record, friends and CONTROLLER (SETTINGS on
    the main menu). Signed in, the top right has the level icon, the
    gamertag, the level, the number online and the ms.
 3. With only a pad from the start, the legend shows the pad's A and B
-   (Halo 2's green and red buttons). Press an arrow key: it says ENTER
+   (Halo 2's green and red buttons in the font's own colours, not tinted
+   blue; the words near white, as on his Xbox screenshot, next to the
+   header's light blue: white is an estimate, so say if they look too
+   bright). Press an arrow key: it says ENTER
    and ESC. Press a pad button: the buttons again. A click or the wheel
    also switches it to the keys. Click BACK in the legend: it goes back.
    With a popup up (Y on the friends list opens ADD FRIEND), a click on
@@ -2144,6 +2147,66 @@ usual:
    report, LB's service record and RB's friends list (both still work,
    though the legend doesn't show them), a custom game, a settings
    change. The notices stack just above the legend.
+7. (After the review fixes below.) Double-click the legend's BACK on
+   PLAYERS ONLINE: the playlists, not the main menu. With a friend
+   request waiting (sent from another PC while this one was signed
+   out), "1 friend request" in gold under the top right line on every
+   screen. On SIGN IN after typing, the legend says CONTROLLER SETTINGS
+   with no X before it, and a click on it opens them; during a match,
+   IN GAME's legend says LEAVE GAME with no ESC or B. With the match
+   played and the engine's window in front, Task Manager shows the lobby
+   (the h2launch.exe without the engine) using less CPU than before 2.6's
+   fixes; bringing the lobby forward, its lines scroll smoothly again.
+
+**Review fixes, round 1 (2026-10-12).**
+
+- **A double-click goes on once.** The legend ends at its box's right,
+  so BACK, last on most screens, sits in the same place from screen to
+  screen, and a double-click on PLAYERS ONLINE's BACK went through the
+  playlists to the main menu. A click within `DOUBLE_CLICK` (0.4 s) of
+  one that changed the screen or shut a popup now presses no button or
+  arrow and only selects a row, on every screen (the start screen and
+  main menu kept their own rules). Two clicks in a popup that is still
+  up both count.
+- **No key or button named that does nothing.** `LegendItem::keyless`
+  (`LegendItem::label_only`) shows an item's words alone, still
+  clickable. The shell (`App::unpressable`) uses it where the key the
+  legend would name is swallowed (`keys_are_the_games`: IN GAME's B
+  while the engine plays) or, after the pad, where the pad is the
+  game's (IN GAME while the engine plays); and for X and Y where a name
+  is typed (SIGN IN, ADD FRIEND), where the X and Y keys are letters.
+- **Friend requests are counted again.** The playlists' RB hint said
+  "Friends (2)" while requests waited (live-v3.md), and 2.6's legend
+  dropped RB with it. The count is now a gold line under the top right
+  status ("1 friend request", "2 friend requests"), on every shell
+  screen, so a request made while the player was offline (which gives
+  no notice) is seen.
+- **The window is drawn twice a second behind a match.** Windows sends
+  a covered window its paints, so the shell's strips were drawn 30
+  times a second for the whole match. `App::draw_interval` is now
+  500 ms (`FRAME_BEHIND_GAME`, our own choice) while the engine plays
+  and the lobby's window hasn't the focus, and the window still wakes
+  each `frame_interval` (33 ms), since each wake's `tick` polls the
+  server and the engine (`window::next_wake` gives both). The focus, a
+  key or a click draws at once.
+- **The legend's colours.** It had the globals' text colour, the
+  header's light blue, and with Halo 2's fonts its A, B, X and Y were
+  multiplied by it too. Measured on the references: Cartographer's
+  header is exactly the globals' colour but its legend words a neutral
+  grey (135, 135, 135) and its A disc's own colours untinted; on the
+  Xbox screenshot the legend words are near white, less blue than the
+  header. The legend now has its own colour, `colour::LEGEND`, white
+  (an estimate from the Xbox; the owner's priority), and
+  `tags::chrome` gives the globals' colour to the headers only. A
+  button glyph from a Halo 2 font is drawn in its own colours anywhere
+  (`Fonts::line` gives it white, so only the text's alpha applies), as
+  Halo 2 draws them, also inline. The in-game menu's legend
+  (`gamemenu`) takes the same colour.
+- **The kept background's test** drew SETTINGS first at a new size, so
+  its first frame went untimed for the size alone and couldn't show the
+  fresh still layer is left out. It now draws the main menu first at the
+  same size, as when SETTINGS is picked from it, and checks that frame
+  isn't timed.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 

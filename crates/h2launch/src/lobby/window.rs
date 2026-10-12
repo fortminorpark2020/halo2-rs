@@ -51,6 +51,7 @@ struct Shell {
     error: Option<String>,
     /// When the next frame is drawn. A redraw wakes the loop again at once,
     /// so asking for one on every wake would draw as fast as the CPU goes.
+    /// (The loop wakes between frames drawn less often: `next_wake`.)
     next_frame: Instant,
 }
 
@@ -305,6 +306,8 @@ impl ApplicationHandler for Shell {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Focused(on) => {
                 self.focused = on;
+                // Frames come at their own pace again (`draw_interval`).
+                self.next_frame = Instant::now();
                 if !on {
                     self.repeat.reset();
                 }
@@ -385,7 +388,9 @@ impl ApplicationHandler for Shell {
             el.exit();
             return;
         }
-        let (draw, next) = next_wake(now, self.next_frame, self.app.frame_interval());
+        let every = self.app.draw_interval(self.focused);
+        let poll = self.app.frame_interval();
+        let (draw, next, wake) = next_wake(now, self.next_frame, every, poll);
         self.next_frame = next;
         if let Some(w) = &self.window {
             if self.app.take_focus() {
@@ -396,27 +401,38 @@ impl ApplicationHandler for Shell {
                 w.request_redraw();
             }
         }
-        // Woken for the next frame, or sooner for the next repeat.
+        // Woken for the next frame or poll, or sooner for the next repeat.
         let wake = match self.repeat.next_due() {
-            Some(due) => due.min(self.next_frame),
-            None => self.next_frame,
+            Some(due) => due.min(wake),
+            None => wake,
         };
         el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 }
 
-/// Whether to draw at `now`, with the next frame due at `next`, and when
-/// the frame after is due: one frame each `interval` (the app's,
-/// `App::frame_interval`: shorter while the intro movie plays, and behind
-/// the flythrough with `H2LOBBY_SCENE_FPS=60`), and none
+/// Whether to draw at `now`, with the next frame due at `next`; when the
+/// frame after is due; and when the loop wakes next at the latest. One
+/// frame each `every` (the app's, `App::draw_interval`: shorter while the
+/// intro movie plays and behind the flythrough with
+/// `H2LOBBY_SCENE_FPS=60`, longer behind the engine's window), and none
 /// in between however often the loop wakes (a redraw, the mouse moving, a
-/// pad). The lobby polls the server and the engine as often.
-fn next_wake(now: Instant, next: Instant, interval: Duration) -> (bool, Instant) {
-    if now >= next {
-        (true, now + interval)
+/// pad). The loop wakes at least each `poll` (`App::frame_interval`), as
+/// the lobby polls the server and the engine on each wake, however seldom
+/// it draws. A frame due further off than `every` (it just got shorter)
+/// comes after `every`.
+fn next_wake(
+    now: Instant,
+    next: Instant,
+    every: Duration,
+    poll: Duration,
+) -> (bool, Instant, Instant) {
+    let next = next.min(now + every);
+    let (draw, next) = if now >= next {
+        (true, now + every)
     } else {
         (false, next)
-    }
+    };
+    (draw, next, next.min(now + poll))
 }
 
 /// Which way a left stick at (`x`, `y`) points, up and right positive: the
@@ -447,22 +463,48 @@ mod tests {
     #[test]
     fn frames_come_once_each_frame_however_often_the_loop_wakes() {
         const FRAME: Duration = Duration::from_millis(33);
+        let ms = Duration::from_millis;
         let t = Instant::now();
-        let (draw, next) = next_wake(t, t, FRAME);
+        let (draw, next, wake) = next_wake(t, t, FRAME, FRAME);
         assert!(draw);
-        assert_eq!(next, t + FRAME);
-        // The redraw wakes the loop again straight away: no second frame.
-        for ms in [0, 1, 10, 32] {
+        assert_eq!((next, wake), (t + FRAME, t + FRAME));
+        // The redraw wakes the loop again straight away: no second frame,
+        // and the next wake is the next frame's.
+        for k in [0, 1, 10, 32] {
             assert_eq!(
-                next_wake(t + Duration::from_millis(ms), next, FRAME),
-                (false, next)
+                next_wake(t + ms(k), next, FRAME, FRAME),
+                (false, next, next)
             );
         }
         let later = t + FRAME;
-        assert_eq!(next_wake(later, next, FRAME), (true, later + FRAME));
+        let after = later + FRAME;
+        assert_eq!(next_wake(later, next, FRAME, FRAME), (true, after, after));
         // The intro's shorter frames.
-        let movie = Duration::from_millis(16);
-        assert_eq!(next_wake(later, later, movie), (true, later + movie));
+        let movie = ms(16);
+        let soon = later + movie;
+        assert_eq!(next_wake(later, later, movie, movie), (true, soon, soon));
+        // Drawn twice a second behind the engine: the loop still wakes
+        // each frame's interval, without drawing until the frame is due.
+        let slow = ms(500);
+        let (draw, next, wake) = next_wake(t, t, slow, FRAME);
+        assert!(draw);
+        assert_eq!((next, wake), (t + slow, t + FRAME));
+        assert_eq!(
+            next_wake(t + FRAME, next, slow, FRAME),
+            (false, next, t + FRAME + FRAME)
+        );
+        assert_eq!(
+            next_wake(t + ms(490), next, slow, FRAME),
+            (false, next, next)
+        );
+        assert!(next_wake(t + slow, next, slow, FRAME).0);
+        // Back to 30 a second (the engine closed): the frame due in half
+        // a second comes after one frame's interval.
+        let now = t + ms(40);
+        assert_eq!(
+            next_wake(now, next, FRAME, FRAME),
+            (false, now + FRAME, now + FRAME)
+        );
     }
 
     #[test]

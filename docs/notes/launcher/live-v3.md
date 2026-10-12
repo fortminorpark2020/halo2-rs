@@ -837,7 +837,9 @@ request is waiting either way), LB Service record, RB Friends.
 **Live screen** hints become: A Search (or Custom game), X Players, Y
 Party, RB Friends, LB Service record, B Quit. While friend requests wait
 for this player's answer, the RB hint says "Friends (2)" with their count,
-so a request made while they were offline or in a game is seen.
+so a request made while they were offline or in a game is seen. (Since
+menu 2.6 the legend leaves RB off, so the count is a line under the
+status at the top right of every screen: "2 friend requests".)
 
 While the party searches, the Live screen takes only B today
 (`live_input` returns early). LB and RB work there too: the search goes
@@ -1302,7 +1304,7 @@ A review of this note against the code (2026-10-10) changed:
     account, so a list arriving between two presses can't make A or X act
     on someone else.
 14. LB and RB work while the party searches; the RB hint counts requests
-    waiting; friend notices don't clear the custom game's `asked`; the add
+    waiting (since menu 2.6, a line at the top right); friend notices don't clear the custom game's `asked`; the add
     friend popup needs a keyboard (Y on Players and carnage doesn't);
     "Invite only" is read from the ONLINE list.
 15. `ranks::read` checks the version word itself, so an MCC map says

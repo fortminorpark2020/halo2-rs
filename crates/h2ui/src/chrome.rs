@@ -80,9 +80,12 @@ pub fn header(p: &mut Painter, c: &ChromeLayout, size: DialogSize, text: &str) {
     p.text(w.bounds, TextStyle::of(w, 1.0), &line);
 }
 
-/// A legend item's two parts: the glyph or key, and the label.
+/// A legend item's first part: the glyph or key (none for a `keyless`
+/// item).
 fn key(item: &LegendItem, keyboard: bool) -> String {
-    if keyboard {
+    if item.keyless {
+        String::new()
+    } else if keyboard {
         key_name(item.face).to_string()
     } else {
         item.face.glyph()
@@ -239,6 +242,9 @@ mod tests {
             for q in &list.quads {
                 assert!(q.rect[0] >= boxes[0].0[0] - 1.0 && q.rect[2] <= x1 + 1.0);
             }
+            // The words in the legend's own colour, not the header's.
+            let words = |c: [f32; 3]| list.quads.iter().any(|q| q.color[0][..3] == c);
+            assert!(words(colour::LEGEND) && !words(colour::HEADER));
             if keyboard {
                 assert_eq!(list.texts, ["ENTER", "SELECT", "ESC", "BACK", "Y", "PARTY"]);
             } else {
@@ -260,6 +266,27 @@ mod tests {
         let white = [LegendItem::new(Face::White, "MUTE")];
         legend(&mut p, &c, DialogSize::Full, &white, true);
         assert_eq!(p.finish().texts, ["MUTE"]);
+        // So does a keyless item, by either device, and its box is still
+        // there for a click, ending at the legend's right as before.
+        for keyboard in [false, true] {
+            let mut p = Painter::new(space, &FlatArt, &fonts, 0.0);
+            let two = [
+                LegendItem::new(Face::A, "SELECT"),
+                LegendItem::label_only(Face::X, "SETTINGS"),
+            ];
+            let boxes = legend(&mut p, &c, DialogSize::Full, &two, keyboard);
+            let texts = p.finish().texts;
+            assert_eq!(&texts[1..], ["SELECT", "SETTINGS"], "{texts:?}");
+            assert_eq!(texts.len(), 3);
+            assert_eq!(boxes[1].1, Face::X);
+            let [_, _, x1, _] = space.rect(legend_box(DialogSize::Full));
+            assert!((boxes[1].0[2] - x1).abs() <= 1.0, "{boxes:?}");
+            // Its box holds its label alone: about the label's width.
+            let label = fonts.width(c.legend(DialogSize::Full).font, "SETTINGS");
+            let [l, _, r, _] = boxes[1].0;
+            let k = space.k;
+            assert!(((r - l) / k - label).abs() <= 1.0, "{boxes:?} {label}");
+        }
         // None: nothing.
         let mut p = Painter::new(space, &FlatArt, &fonts, 0.0);
         assert!(legend(&mut p, &c, DialogSize::Full, &[], false).is_empty());

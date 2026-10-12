@@ -1,7 +1,10 @@
 # Progress and handoff
 
-Last updated 2026-10-12 (P4, the owner's check of 2.5, passed, and its
-follow-ups: the flythrough's veil darker, bluer and soft; before them
+Last updated 2026-10-12 (menu 2.6's review fixes, round 1: double-clicks,
+legends naming only keys that work, the friend-request count, slow
+drawing behind a match, the legend's colours; P4, the owner's check of
+2.5, passed, and its follow-ups: the flythrough's veil darker, bluer and
+soft; before them
 menu 2.6: Halo 2's shell, header and button legend on every lobby
 screen after the main menu, legends by the device used last, the stick
 at 90% and held directions repeating; 2.5, the flythrough behind the
@@ -279,7 +282,18 @@ Next, in order:
    owner's PC: the list after "What Phase 2.6 built" (every screen in
    the shell, the legend switching between the pad and the keys, a held
    d-pad repeating, at most about 10 ms a frame at 1080p, every flow
-   working). P4 passed on the owner's PC (2026-10-12, RTX 5080,
+   working, and step 7 for the review fixes). 2.6's review fixes
+   (round 1; menu.md "Review fixes, round 1" under 2.6): a double-click
+   no longer goes on twice (the legend's BACK sits in the same place on
+   most screens); a legend item whose key or button does nothing there
+   shows its words alone (IN GAME's LEAVE GAME while the engine plays,
+   SIGN IN's X and Y after the keyboard); the friend requests waiting
+   are counted under the top right status (the RB hint that counted
+   them is off the legend); the window draws twice a second while the
+   engine plays and the lobby hasn't the focus, still polling each
+   33 ms; the legend's words have their own colour (white, an estimate
+   from the Xbox screenshot) and Halo 2's button glyphs keep their own
+   colours. P4 passed on the owner's PC (2026-10-12, RTX 5080,
    2560x1351; menu.md "Results on the owner's PC (P4)"): the scene
    5.0 ms to draw and 2.8 to read back, the main menu 4.9 ms a frame,
    asleep through a match with the lobby's GPU at 0 %. Next to a video

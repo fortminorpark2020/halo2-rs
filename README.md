@@ -109,7 +109,13 @@ install. No game files are included in this repository.
   after you used the keyboard or the mouse; click one to press it. LB
   and RB still open the service record and the friends list but aren't
   listed there. Who you are signed in as, your level, how many are
-  online and the server's ping are on a small line at the top right. On
+  online and the server's ping are on a small line at the top right, and
+  friend requests waiting for your answer are counted under it. A button
+  that can't be pressed with its key or the controller just then (LEAVE
+  GAME while the game plays, or CONTROLLER SETTINGS while you type a
+  gamertag) shows only its words; click it instead. While a match is
+  played and the launcher's window isn't in front, it is drawn only
+  twice a second, leaving the computer to the game. On
   a controller the stick now counts only when pushed nearly all the way
   (as in Halo 2's menus), and holding the d-pad or the stick moves again
   every quarter second. The screens' insides still have the launcher's

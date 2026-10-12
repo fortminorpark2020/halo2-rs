@@ -106,8 +106,9 @@ const IN_GAME_MENU_HINT: &str = "Start or Esc in the game's window opens the gam
 const MENU_FRAMES: u32 = 30;
 /// A click this soon (seconds) after one that changed the screen or shut a
 /// popup is the second half of a double-click: on the start screen it
-/// doesn't go on, and on the main menu it only focuses a row. Windows'
-/// default double-click time is 0.5 s; 0.4 s is our own choice.
+/// doesn't go on, on the main menu it only focuses a row, and elsewhere it
+/// presses no button or arrow and only selects a row. Windows' default
+/// double-click time is 0.5 s; 0.4 s is our own choice.
 const DOUBLE_CLICK: f64 = 0.4;
 /// Cues kept for the sound to take (`App::take_sound`); older ones are
 /// dropped when nothing takes them (no sound, and the tests).
@@ -117,6 +118,10 @@ const CUES_KEPT: usize = 16;
 /// about 30 (the menus' animations and the lobby's screens).
 const FRAME_MOVIE: Duration = Duration::from_millis(16);
 const FRAME: Duration = Duration::from_millis(33);
+/// How often the window is drawn while the engine plays and the lobby's
+/// window hasn't the focus (`draw_interval`): our own choice, often
+/// enough for a lobby left in sight on another screen to keep up.
+const FRAME_BEHIND_GAME: Duration = Duration::from_millis(500);
 /// The flythrough's first frame fades in over the still background in
 /// this long (seconds), when it wasn't ready as the start screen opened
 /// (the intro wakes it ahead): our estimate, so the scene doesn't pop in
@@ -794,12 +799,28 @@ impl App {
 
     /// How long the window waits between frames: shorter while the intro
     /// movie plays, and while the flythrough shows if `Config::scene_fast`
-    /// asks for 60 frames a second.
+    /// asks for 60 frames a second. It wakes at least this often even
+    /// when it draws less often (`draw_interval`), as `tick` polls the
+    /// server and the engine.
     pub fn frame_interval(&self) -> Duration {
         match self.screen {
             Screen::Intro => FRAME_MOVIE,
             Screen::Start | Screen::Main if self.cfg.scene_fast && self.scene_shown => FRAME_MOVIE,
             _ => FRAME,
+        }
+    }
+
+    /// How long the window waits between the frames it draws: each
+    /// `frame_interval`, except while the engine plays and the lobby's
+    /// window hasn't the focus (`focused`), when the shell's scrolling
+    /// strips needn't be drawn 30 times a second under the engine's window
+    /// (Windows still sends a covered window its paints): only every
+    /// `FRAME_BEHIND_GAME`. A key, a click or the focus draws at once.
+    pub fn draw_interval(&self, focused: bool) -> Duration {
+        if self.engine_running() && !focused {
+            FRAME_BEHIND_GAME
+        } else {
+            self.frame_interval()
         }
     }
 
@@ -2914,6 +2935,14 @@ impl App {
                 _ => {}
             }
         }
+        // Elsewhere, the second half of a double-click whose first half
+        // changed the screen or shut a popup lands on what is shown now
+        // (the legend's BACK is in the same place on most screens): a
+        // button or an arrow there isn't pressed, and a row is only
+        // selected. Two clicks in a popup that is still up both count.
+        let went_on = before.is_some_and(|(t, screen, was_over)| {
+            clock - t < DOUBLE_CLICK && (screen != self.screen || (was_over && !over))
+        });
         let (s, ox, oy) = self.view;
         let (x, y) = ((x - ox) / s, (y - oy) / s);
         let top = self.areas.iter().any(|a| a.top);
@@ -2925,6 +2954,7 @@ impl App {
             .find(|a| x >= a.x && x < a.x + a.w && y >= a.y && y < a.y + a.h)
             .map(|a| a.hit);
         match hit {
+            Some(Hit::Press(_) | Hit::Step(..)) if went_on => {}
             Some(Hit::Press(i)) => self.input_inner(i),
             Some(Hit::Field(f)) => self.field = f,
             Some(Hit::Step(r, on)) => {
@@ -2936,28 +2966,28 @@ impl App {
                 self.input_inner(if on { Input::Right } else { Input::Left });
             }
             Some(Hit::Row(r)) if matches!(self.popup, Some(Popup::FriendOptions(_))) => {
-                if self.osel == r {
+                if self.osel == r && !went_on {
                     self.input_inner(Input::A);
                 } else if let Some(Popup::FriendOptions(who)) = self.popup {
                     self.pick_option(who, r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Friends => {
-                if self.fsel == r {
+                if self.fsel == r && !went_on {
                     self.input_inner(Input::A);
                 } else {
                     self.select_friend(r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Players => {
-                if self.psel == r {
+                if self.psel == r && !went_on {
                     self.input_inner(Input::A);
                 } else {
                     self.select_player(r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Settings => {
-                if self.srow == r {
+                if self.srow == r && !went_on {
                     self.input_inner(Input::A);
                 } else {
                     self.srow = r;
@@ -2966,7 +2996,7 @@ impl App {
             // A row of the carnage report is only selected: A continues.
             Some(Hit::Row(r)) if self.screen == Screen::Carnage => self.csel = r,
             Some(Hit::Row(r)) if self.screen == Screen::Custom => {
-                if self.crow == r && r == CUSTOM_ROWS - 1 {
+                if self.crow == r && r == CUSTOM_ROWS - 1 && !went_on {
                     self.input_inner(Input::A);
                 } else {
                     self.crow = r;
@@ -2977,7 +3007,7 @@ impl App {
                     Screen::Party => &mut self.msel,
                     _ => &mut self.sel,
                 };
-                if *sel == r {
+                if *sel == r && !went_on {
                     self.input_inner(Input::A);
                 } else {
                     *sel = r;
@@ -3446,6 +3476,17 @@ impl App {
             let level = w.best.max(1);
             p.level(x, 44.0, 18.0, WHITE, Align::Right, level, Size::Small);
         }
+        // Friend requests waiting for an answer, under it on every screen:
+        // one made while this player was offline gives no notice when
+        // they sign in, and one made during a game only a short one. RB
+        // (E) opens the friends list, where they come first.
+        let asking = c.view.friends.iter();
+        let asking = asking.filter(|f| f.relation == Relation::AskedUs).count();
+        if asking > 0 {
+            let s = if asking == 1 { "" } else { "s" };
+            let line = format!("{asking} friend request{s}");
+            p.text(1220.0, 68.0, 15.0, GOLD, Align::Right, &line);
+        }
     }
 
     fn draw_sign_in(&self, p: &mut Pen) {
@@ -3535,24 +3576,14 @@ impl App {
         let Some(v) = self.view() else {
             return;
         };
-        // The RB hint counts the friend requests waiting for an answer.
-        let asking = v
-            .friends
-            .iter()
-            .filter(|f| f.relation == Relation::AskedUs)
-            .count();
-        let friends = if asking > 0 {
-            format!("Friends ({asking})")
-        } else {
-            "Friends".into()
-        };
+        // (The friend requests waiting are counted by `draw_status`.)
         if self.searching() {
             self.draw_search(p, v);
             let mut hints = Vec::new();
             if self.leader() {
                 hints.push((Input::B, "Stop searching"));
             }
-            hints.push((Input::Rb, friends.as_str()));
+            hints.push((Input::Rb, "Friends"));
             hints.push((Input::Lb, "Service record"));
             p.hints(&hints);
         } else {
@@ -3568,7 +3599,7 @@ impl App {
             if v.party.is_some() {
                 hints.push((Input::Y, "Party"));
             }
-            hints.push((Input::Rb, friends.as_str()));
+            hints.push((Input::Rb, "Friends"));
             hints.push((Input::Lb, "Service record"));
             hints.push((Input::B, "Back"));
             p.hints(&hints);
@@ -5689,6 +5720,8 @@ mod tests {
             hit.copied().unwrap()
         };
         let next_map = arrow(&a, 1, true);
+        // (Not the second half of a double-click with the start screen's.)
+        a.last_click = None;
         a.click(ox + (next_map.x + 5.0) * s, oy + (next_map.y + 5.0) * s);
         assert_eq!((a.crow, a.cmap), (1, 0));
         let back = arrow(&a, 0, false);
@@ -5743,6 +5776,74 @@ mod tests {
     }
 
     #[test]
+    fn the_legend_names_no_key_or_button_that_does_nothing() {
+        let mut text = Text::none();
+        let dir = scratch("legend-keyless");
+        let mut c = Canvas::new(1280, 720);
+        let shows = |a: &App, s: &str| a.drawn().iter().any(|d| d == s);
+        let legend_b = |a: &App| {
+            let hit = a.areas.iter().find(|ar| ar.hit == Hit::Press(Input::B));
+            hit.copied().unwrap()
+        };
+        // While the engine plays, the in-game screen's Esc and the pad
+        // are the game's: LEAVE GAME alone, after either device.
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        let g = a.game.as_mut().unwrap();
+        g.results = None;
+        g.ended_at = None;
+        g.child = Some(Running::waiting());
+        a.screen = Screen::InGame;
+        for keyboard in [false, true] {
+            a.keyboard = keyboard;
+            a.draw(&mut c, &mut text);
+            assert!(shows(&a, "LEAVE GAME"), "{:?}", a.drawn());
+            for key in ["ESC", "\u{e101}"] {
+                assert!(!shows(&a, key), "{key:?} in {:?}", a.drawn());
+            }
+        }
+        // A click on it still asks.
+        let (s, ox, oy) = a.view;
+        let b = legend_b(&a);
+        a.click(ox + (b.x + 3.0) * s, oy + (b.y + 3.0) * s);
+        assert_eq!(a.label(), "leave");
+        a.popup = None;
+        // Once the engine has closed, Esc and the pad's B work there.
+        a.game.as_mut().unwrap().child.as_mut().unwrap().kill();
+        a.game.as_mut().unwrap().child = None;
+        a.keyboard = true;
+        a.draw(&mut c, &mut text);
+        assert!(shows(&a, "ESC") && shows(&a, "LEAVE GAME"));
+        a.keyboard = false;
+        a.draw(&mut c, &mut text);
+        assert!(shows(&a, "\u{e101}"));
+        // On SIGN IN the X key types a letter: after the keyboard its X
+        // is CONTROLLER SETTINGS alone (Enter and Esc still named); after
+        // the pad, whose X opens them, its glyph shows.
+        let mut a = app(&dir);
+        to_online(&mut a);
+        assert_eq!(a.label(), "signin");
+        a.key(Input::Char('a'));
+        a.draw(&mut c, &mut text);
+        for s in ["ENTER", "CONTROLLER SETTINGS", "ESC", "BACK"] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        assert!(!shows(&a, "X"), "{:?}", a.drawn());
+        // A click on it still opens them.
+        let (s, ox, oy) = a.view;
+        let x = a.areas.iter().find(|ar| ar.hit == Hit::Press(Input::X));
+        let x = x.copied().unwrap();
+        a.click(ox + (x.x + 3.0) * s, oy + (x.y + 3.0) * s);
+        assert_eq!(a.label(), "settings");
+        a.input(Input::B);
+        assert_eq!(a.label(), "signin");
+        a.pad(Input::Down);
+        a.draw(&mut c, &mut text);
+        assert!(shows(&a, "\u{e102}") && shows(&a, "CONTROLLER SETTINGS"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_playlists_legend_holds_its_buttons_and_presses_them() {
         let mut text = Text::none();
         let dir = scratch("legend-live");
@@ -5760,6 +5861,29 @@ mod tests {
         // Who is signed in, at the top right.
         assert!(drawn.iter().any(|d| d == "ALPHA"));
         assert!(drawn.iter().any(|d| d.starts_with("Level 3  ·  0 online")));
+        // Under it, the friend requests waiting, if any (not those we
+        // made, nor friends).
+        assert!(drawn.iter().all(|d| !d.contains("friend request")));
+        let asked = |id, name: &str, r| friend(id, name, r, Online::Offline);
+        view(&mut a).friends = vec![
+            asked(12, "YAN", Relation::AskedUs),
+            asked(13, "ZED", Relation::WeAsked),
+            asked(14, "UMA", Relation::Friend),
+        ];
+        a.draw(&mut c, &mut text);
+        let requests: Vec<&String> = a.drawn().iter().filter(|d| d.contains("request")).collect();
+        assert_eq!(requests, ["1 friend request"]);
+        view(&mut a)
+            .friends
+            .push(asked(15, "AMY", Relation::AskedUs));
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().any(|d| d == "2 friend requests"));
+        // On the other screens too.
+        a.screen = Screen::Players;
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().any(|d| d == "2 friend requests"));
+        a.screen = Screen::Live;
+        view(&mut a).friends.clear();
         // With the invitation up, it alone takes clicks: the legend's
         // B doesn't go back.
         let area = |a: &App, i: Input| {
@@ -5780,6 +5904,42 @@ mod tests {
         let players = area(&a, Input::X);
         click(&mut a, players);
         assert_eq!(a.label(), "players");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_double_click_on_the_legends_back_goes_back_once() {
+        let mut text = Text::none();
+        let dir = scratch("double-back");
+        let (mut a, _server) = live_app(&dir);
+        let mut c = Canvas::new(1280, 720);
+        a.input(Input::X);
+        assert_eq!(a.label(), "players");
+        a.draw(&mut c, &mut text);
+        let (s, ox, oy) = a.view;
+        let back = |a: &App| {
+            let hit = a.areas.iter().find(|ar| ar.hit == Hit::Press(Input::B));
+            hit.copied().unwrap()
+        };
+        // Near the legend's right end, where its BACK is on every screen.
+        let b = back(&a);
+        let (x, y) = (ox + (b.x + b.w - 3.0) * s, oy + (b.y + 3.0) * s);
+        a.click(x, y);
+        assert_eq!(a.label(), "live");
+        a.draw(&mut c, &mut text);
+        let under = back(&a);
+        let (ux, uy) = ((x - ox) / s, (y - oy) / s);
+        assert!(
+            ux >= under.x && ux < under.x + under.w && uy >= under.y && uy < under.y + under.h,
+            "the playlists' BACK is under the click: {under:?}"
+        );
+        // The double-click's second half doesn't go on to the main menu.
+        a.click(x, y);
+        assert_eq!(a.label(), "live");
+        // A click there a moment later does.
+        a.last_click = None;
+        a.click(x, y);
+        assert_eq!(a.label(), "main");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5818,11 +5978,16 @@ mod tests {
         }];
         let mut a = app(&dir);
         a.cfg.menus = Arc::new(menus);
+        let mut c = Canvas::new(1280, 720);
         a.input(Input::A);
+        // The main menu drawn first at the same size, as when SETTINGS is
+        // picked from it: the timer's size is set, so only the shell's
+        // own fresh background keeps its first frame out.
+        assert_eq!(a.label(), "main");
+        a.draw(&mut c, &mut text);
         a.input(Input::Down);
         a.input(Input::A);
         assert_eq!(a.label(), "settings");
-        let mut c = Canvas::new(1280, 720);
         let timed = |a: &App| {
             let f = a.menu_times.frames.iter().find(|f| f.name == "settings");
             f.map_or(0, |f| f.frames)
@@ -5830,6 +5995,7 @@ mod tests {
         // The first frame at a size draws the still background (and isn't
         // timed); the next ones copy it in, so they are.
         a.draw(&mut c, &mut text);
+        assert_eq!(timed(&a), 0, "the fresh background's frame was timed");
         let first = c.px.clone();
         a.clock -= Duration::from_secs(2);
         a.draw(&mut c, &mut text);
@@ -6562,6 +6728,27 @@ mod tests {
         assert_eq!(a.take_cues(), [Cue::Advance]);
         a.tick(a.now);
         assert!(a.take_cues().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn behind_the_engine_the_window_is_drawn_seldom_but_polled_as_often() {
+        let dir = scratch("draw-pace");
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        a.screen = Screen::InGame;
+        a.game.as_mut().unwrap().child = None;
+        assert_eq!(
+            (a.draw_interval(true), a.draw_interval(false)),
+            (FRAME, FRAME)
+        );
+        // While the engine plays, twice a second without the focus, and
+        // each frame with it; the window wakes each frame either way.
+        a.game.as_mut().unwrap().child = Some(Running::waiting());
+        assert_eq!(a.draw_interval(false), FRAME_BEHIND_GAME);
+        assert_eq!(a.draw_interval(true), FRAME);
+        assert_eq!(a.frame_interval(), FRAME);
+        a.game.as_mut().unwrap().child.as_mut().unwrap().kill();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

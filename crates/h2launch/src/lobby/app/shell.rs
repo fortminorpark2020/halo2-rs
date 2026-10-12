@@ -57,12 +57,32 @@ impl App {
         }
     }
 
+    /// The legend's `i` names no key or button, its words alone: the
+    /// key it would name (after the keyboard) or the controller (after
+    /// the pad) does nothing here, though a click on it still presses it.
+    /// While the engine plays, the in-game screen's keys and the
+    /// controller are the game's (`keys_are_the_games`, `wants_pad`); where
+    /// a name is typed, the X and Y keys are letters.
+    fn unpressable(&self, i: Input) -> bool {
+        if !self.keyboard {
+            return !self.wants_pad();
+        }
+        let key = match i {
+            Input::X => Input::Char('x'),
+            Input::Y => Input::Char('y'),
+            other => other,
+        };
+        let letter = matches!(key, Input::Char(_));
+        self.keys_are_the_games(key, self.engine_running()) || (letter && self.typing())
+    }
+
     /// A screen after the main menu in Halo 2's shell, into `c` (`view`
     /// is the lobby layout's scale and offset in it): the shell's still
     /// background (drawn again only when it changes, `shell_backdrop`),
     /// its scrolling strips, the screen's body (`draw_body`), then the
     /// header and the legend of the body's hints, which name keys or show
-    /// the pad's buttons by the device used last (`keyboard`). A click on
+    /// the pad's buttons by the device used last (`keyboard`), or neither
+    /// where they do nothing (`unpressable`). A click on
     /// a legend's button presses it: its part of the legend goes into
     /// `areas` (under any popup's). The header and legend's words go into
     /// `drawn`. False when the still background was drawn afresh, so the
@@ -104,7 +124,13 @@ impl App {
         let hints = std::mem::take(&mut p.legend);
         let items: Vec<LegendItem> = hints
             .iter()
-            .filter_map(|(i, label)| face_of(*i).map(|f| LegendItem::new(f, label)))
+            .filter_map(|(i, label)| {
+                let face = face_of(*i)?;
+                Some(match self.unpressable(*i) {
+                    true => LegendItem::label_only(face, label),
+                    false => LegendItem::new(face, label),
+                })
+            })
             .collect();
         let mut painter = Painter::new(space, art, fonts, clock);
         let (size, cl) = (DialogSize::Full, &shell.chrome);

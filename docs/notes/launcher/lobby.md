@@ -135,7 +135,12 @@ the launcher doesn't do.
   legend shows yet) after a key, a click or the wheel. The headless
   script's presses leave it as it was. A click on a button in the legend
   presses it (not while a popup is up: the popup alone takes clicks).
-  LB and RB keep their shortcuts but stay off the legends (menu.md 1.2).
+  An item whose key or button does nothing just then shows its words
+  alone, still clickable. LB and RB keep their shortcuts but stay off
+  the legends (menu.md 1.2). The second click of a double-click whose
+  first changed the screen or shut a popup presses nothing and only
+  selects a row (the legend's BACK is in the same place on most
+  screens, so a double-click on it goes back once).
 - Notices (the server's NOTICEs and the lobby's own) stay up 6 s, at most
   three at once, stacked above the button legend (from y 660), newest
   lowest. They are drawn last and below every popup's box (y 524 to
@@ -166,7 +171,9 @@ the launcher doesn't do.
   front if the engine's didn't come forward, and B then A (melee, jump),
   Esc (Halo 2's pause) then Enter, or Esc then Space would otherwise leave
   the game. Leaving takes a click on the legend's B and then on the
-  popup's A. The window's keys come through `App::key`, which does this;
+  popup's A (the legend shows LEAVE GAME alone then, with no key or
+  button, as neither works; so does SIGN IN's X after the keyboard, as
+  the X key types a letter there). The window's keys come through `App::key`, which does this;
   the controller's presses through `App::pad`, the wheel's through
   `App::wheel` and clicks through `App::click` (which also set which
   device the legends show); the headless script's `press` goes to
@@ -402,9 +409,10 @@ the launcher doesn't do.
    another playlist the lobby asks for the members' service records and
    reads the level there (level 1 in one they haven't played; "-" until
    the record comes). A searches (party leader only), X opens the players list, Y
-   the party screen, RB the friends list ("Friends (2)" while two friend
-   requests wait for an answer), LB your own service record, B goes back
-   to the main menu (still signed in, the party kept).
+   the party screen, RB the friends list, LB your own service record, B
+   goes back to the main menu (still signed in, the party kept). While
+   friend requests wait for your answer, a gold line under the top right
+   status says how many ("2 friend requests"), on every screen.
 3. Players: everyone signed in. A invites them, X joins their open party,
    Y sends them a friend request (unless they are a friend or a request is
    waiting either way), LB opens their service record, RB the friends
