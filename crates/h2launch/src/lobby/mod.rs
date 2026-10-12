@@ -308,27 +308,36 @@ fn start_scene(
         return None;
     }
     let vista = vista?;
-    let veil = match std::env::var(VEIL_ENV) {
-        Ok(v) if v.trim() == "off" => h2scene::Veil::NONE,
-        Ok(v) => h2scene::Veil::parse(&v).unwrap_or_else(|| {
-            log(&format!(
-                "scene: {VEIL_ENV}={v} isn't r,g,b,k[,s[,gain]]; the usual veil"
-            ));
-            h2scene::Veil::menu()
-        }),
-        Err(_) => h2scene::Veil::menu(),
-    };
-    let options = h2scene::Options {
-        // Only for tests and checks: a software GPU draws it far too
-        // slowly for a player.
-        allow_cpu: env.as_deref().map(str::trim) == Some("on"),
-        veil,
-    };
+    let veil = std::env::var(VEIL_ENV).ok();
+    let options = scene_options(env.as_deref(), veil.as_deref(), log);
     Some(Arc::new(h2scene::Backdrop::start(
         vista.mainmenu(),
         options,
         log.clone(),
     )))
+}
+
+/// How the flythrough is drawn: `scene_env` (`H2LOBBY_SCENE`) `on` lets a
+/// software GPU draw it, and `veil_env` (`H2LOBBY_VEIL`) is its veil
+/// (`off` for none; one that doesn't read is logged, and the usual veil
+/// is used, as it is when unset).
+fn scene_options(scene_env: Option<&str>, veil_env: Option<&str>, log: &Log) -> h2scene::Options {
+    let veil = match veil_env {
+        Some(v) if v.trim() == "off" => h2scene::Veil::NONE,
+        Some(v) => h2scene::Veil::parse(v).unwrap_or_else(|| {
+            log(&format!(
+                "scene: {VEIL_ENV}={v} isn't r,g,b,k[,s[,gain]]; the usual veil"
+            ));
+            h2scene::Veil::menu()
+        }),
+        None => h2scene::Veil::menu(),
+    };
+    h2scene::Options {
+        // Only for tests and checks: a software GPU draws it far too
+        // slowly for a player.
+        allow_cpu: scene_env.map(str::trim) == Some("on"),
+        veil,
+    }
 }
 
 /// The variable that names the mainmenu.map the start screen and main
@@ -972,6 +981,51 @@ mod tests {
         // Headless only when asked for (tests and checks).
         assert_eq!(scene_skip_reason(true, true, None, None), Some("headless"));
         assert_eq!(scene_skip_reason(true, true, Some(" on "), None), None);
+    }
+
+    #[test]
+    fn the_flythroughs_options_come_from_its_variables() {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let log: Log = Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string()));
+        let said = || std::mem::take(&mut *lines.lock().unwrap());
+        // A software GPU only with H2LOBBY_SCENE=on.
+        for (scene, cpu) in [
+            (Some("on"), true),
+            (Some(" on "), true),
+            (None, false),
+            (Some(""), false),
+            (Some("off"), false),
+            (Some("yes"), false),
+        ] {
+            assert_eq!(scene_options(scene, None, &log).allow_cpu, cpu, "{scene:?}");
+        }
+        // The usual veil when unset, none when off, and the one given.
+        assert_eq!(scene_options(None, None, &log).veil, h2scene::Veil::menu());
+        assert_eq!(
+            scene_options(Some("on"), Some("off"), &log).veil,
+            h2scene::Veil::NONE
+        );
+        assert_eq!(
+            scene_options(None, Some(" off "), &log).veil,
+            h2scene::Veil::NONE
+        );
+        let given = "10,20,30,0.5";
+        assert_eq!(
+            scene_options(None, Some(given), &log).veil,
+            h2scene::Veil::parse(given).unwrap()
+        );
+        assert_ne!(h2scene::Veil::parse(given), Some(h2scene::Veil::menu()));
+        assert!(said().is_empty());
+        // One that doesn't read: the usual veil, and the log says so.
+        assert_eq!(
+            scene_options(None, Some("junk"), &log).veil,
+            h2scene::Veil::menu()
+        );
+        assert_eq!(
+            said(),
+            ["scene: H2LOBBY_VEIL=junk isn't r,g,b,k[,s[,gain]]; the usual veil"]
+        );
     }
 
     #[test]

@@ -597,19 +597,28 @@ fn blend_px(under: &mut [u32], top: &[u32], alpha: f32) {
 #[derive(Default)]
 struct MenuTimes {
     size: (usize, usize),
-    /// Each screen's frames timed at this size, by its timer name, with
-    /// their total time (ms).
-    frames: Vec<(&'static str, u32, f64)>,
+    /// Each screen's frames timed at this size.
+    frames: Vec<ScreenTimes>,
     /// The size the menus' still background was last drawn at: a frame
     /// that draws it again isn't timed.
     kept: (usize, usize),
     /// Each size's background time (ms), the first time it was drawn.
     backgrounds: Vec<((usize, usize), f64)>,
-    /// The flythrough's frames copied in (`draw_menu`) in the frames timed
-    /// at this size: how many, and their total time (ms).
-    copies: (u32, f64),
     /// The sizes and screens already logged.
     logged: Vec<((usize, usize), &'static str)>,
+}
+
+/// One screen's frames timed at the window's size (`MenuTimes`).
+struct ScreenTimes {
+    /// Its timer name (`App::timer_name`).
+    name: &'static str,
+    /// How many frames, and their total time (ms).
+    frames: u32,
+    total: f64,
+    /// The flythrough's frames copied in (`draw_menu`) among them: how
+    /// many, and their total time (ms).
+    copies: u32,
+    copy_total: f64,
 }
 
 impl App {
@@ -3233,7 +3242,8 @@ impl App {
     /// size `size`, unless it isn't `timed`, and log the average once its
     /// first `MENU_FRAMES` there are timed: once per screen and size. The
     /// first frame after the size changes isn't timed either. `copy_ms` is
-    /// the part of it spent copying the flythrough's frame in, if it was.
+    /// the part of it spent copying the flythrough's frame in, if it was;
+    /// a screen's line gives the average of its own copies only.
     fn time_frame(
         &mut self,
         size: (usize, usize),
@@ -3247,37 +3257,43 @@ impl App {
         if t.size != size {
             t.size = size;
             t.frames.clear();
-            t.copies = (0, 0.0);
             return;
         }
         if !timed || t.logged.contains(&(size, name)) {
             return;
         }
-        if let Some(ms) = copy_ms {
-            t.copies.0 += 1;
-            t.copies.1 += ms;
-        }
-        let k = match t.frames.iter().position(|f| f.0 == name) {
+        let k = match t.frames.iter().position(|f| f.name == name) {
             Some(k) => k,
             None => {
-                t.frames.push((name, 0, 0.0));
+                t.frames.push(ScreenTimes {
+                    name,
+                    frames: 0,
+                    total: 0.0,
+                    copies: 0,
+                    copy_total: 0.0,
+                });
                 t.frames.len() - 1
             }
         };
-        let (_, n, total) = &mut t.frames[k];
-        *n += 1;
-        *total += frame_ms;
-        if *n != MENU_FRAMES {
+        let f = &mut t.frames[k];
+        f.frames += 1;
+        f.total += frame_ms;
+        if let Some(ms) = copy_ms {
+            f.copies += 1;
+            f.copy_total += ms;
+        }
+        if f.frames != MENU_FRAMES {
             return;
         }
+        let average = f.total / f64::from(MENU_FRAMES);
+        let copies = (f.copies, f.copy_total);
         t.logged.push((size, name));
-        let average = *total / f64::from(MENU_FRAMES);
         let (w, h) = size;
         let line = if menus {
             let background = t.backgrounds.iter().find(|b| b.0 == size).map(|b| b.1);
             let mut parts = Vec::new();
-            if t.copies.0 > 0 {
-                let copy = t.copies.1 / f64::from(t.copies.0);
+            if copies.0 > 0 {
+                let copy = copies.1 / f64::from(copies.0);
                 parts.push(format!("the scene's frame copied in {copy:.1} ms"));
             }
             if background.is_some() || parts.is_empty() {
@@ -7588,11 +7604,30 @@ mod tests {
             a.time_frame((1280, 720), 3.0, true, Some(1.5));
         }
         a.time_frame((1280, 720), 3.0, true, Some(1.5));
+        // At the same size, a screen that copied none in (the scene
+        // failed after the start screen's) says nothing of copies.
+        a.screen = Screen::Main;
+        a.menu_times.backgrounds.push(((1280, 720), 20.0));
+        for _ in 0..MENU_FRAMES {
+            a.time_frame((1280, 720), 3.0, true, None);
+        }
+        // Each screen's copy time is its own.
+        a.screen = Screen::Start;
+        for _ in 0..=MENU_FRAMES {
+            a.time_frame((320, 180), 3.0, true, Some(1.0));
+        }
+        a.screen = Screen::Main;
+        for i in 0..MENU_FRAMES {
+            a.time_frame((320, 180), 3.0, true, (i % 2 == 0).then_some(4.0));
+        }
         assert_eq!(
             *lines.lock().unwrap(),
             [
                 "menus: 640x360, main menu 3.0 ms a frame on the CPU (the scene's frame copied in 1.5 ms; background 20 ms once)",
                 "menus: 1280x720, start screen 3.0 ms a frame on the CPU (the scene's frame copied in 1.5 ms)",
+                "menus: 1280x720, main menu 3.0 ms a frame on the CPU (background 20 ms once)",
+                "menus: 320x180, start screen 3.0 ms a frame on the CPU (the scene's frame copied in 1.0 ms)",
+                "menus: 320x180, main menu 3.0 ms a frame on the CPU (the scene's frame copied in 4.0 ms)",
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -8029,8 +8064,8 @@ mod tests {
         let t0 = Instant::now();
         a.tick(t0);
         let timed = |a: &App| {
-            let f = a.menu_times.frames.iter().find(|f| f.0 == "intro");
-            f.map_or(0, |f| f.1)
+            let f = a.menu_times.frames.iter().find(|f| f.name == "intro");
+            f.map_or(0, |f| f.frames)
         };
         let logged = |lines: &Mutex<Vec<String>>| {
             let lines = lines.lock().unwrap();

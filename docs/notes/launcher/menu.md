@@ -1735,7 +1735,7 @@ build --release -p h2launch` and run as usual (a variable set first in
 the same console: `set H2LOBBY_SCENE=off` in cmd,
 `$env:H2LOBBY_SCENE="off"` in PowerShell). It also takes the two checks
 put off to it: 2.4's `scene_info` (step 1) and the intro's time at
-1080p (step 3).
+about 1080p (step 3).
 
 1. 2.4's scene, read on its own: `cargo run --release -p h2scene
    --example scene_info -- "C:\Games\Halo 2 Project
@@ -1756,16 +1756,24 @@ put off to it: 2.4's `scene_info` (step 1) and the intro's time at
    leave before the scene's first frame: the flythrough then fades in
    over the still background in a quarter second. Note whether the
    movie stutters as it starts (the scene waking on the GPU then).
-3. The intro at 1080p: the window opens at 1280x720 (1600x900 at 125 %
-   scaling), so maximise it to 1920x1080 in the intro's first seconds
-   and let it play on. After 30 new pictures at that size the log has
-   `lobby: 1920x1080, intro <n> ms a frame on the CPU` (P3 measured 7.9
-   to 8.2 ms at 1600x900).
-4. In the maximised 1920x1080 window, after half a minute on the main
-   menu, the log has `menus: 1920x1080, main menu <n> ms a frame on the
-   CPU (the scene's frame copied in <m> ms; ...)` with `<n>` at most
-   about 9, and `scene: 1920x1080, <a> ms to draw a frame and <b> ms to
-   read it back (on its own thread)`.
+3. The intro at about 1080p: the window opens at 1280x720 (1600x900 at
+   125 % scaling) and has no full-screen mode, so maximise it in the
+   intro's first seconds and let it play on. A maximised window leaves
+   out the taskbar and its own title bar, so the log names a little
+   less than the screen: on a 1920x1080 screen about 1920x1009 (about
+   1920x990 at 125 %), some 93 % of 1080p's pixels and near enough to
+   stand for it. Write down the size the log names (`<W>x<H>` here and
+   in step 4). After 30 new pictures at that size the log has
+   `lobby: <W>x<H>, intro <n> ms a frame on the CPU` (P3 measured 7.9
+   to 8.2 ms at 1600x900). On a bigger screen, compare it with 1080p by
+   the pixel count: about `<n>` × (1920×1080) / (W×H).
+4. In the same maximised window, after half a minute on the main menu,
+   the log has `menus: <W>x<H>, main menu <n> ms a frame on the CPU
+   (the scene's frame copied in <m> ms; ...)` and `scene: <W>x<H>, <a>
+   ms to draw a frame and <b> ms to read it back (on its own thread)`.
+   The budget is about 9 ms at 1920x1080, scaled by the pixel count:
+   `<n>` at most about 9 × (W×H) / (1920×1080), which is about 8.4 at
+   1920x1009 and about 15 at 2560x1369.
 5. SETTINGS, then B: `scene: asleep (its GPU device closed)`, then
    `scene: awake in <n> ms`, and the flythrough carries on from where it
    was.
@@ -1821,6 +1829,31 @@ put off to it: 2.4's `scene_info` (step 1) and the intro's time at
   to P4 (2.4's `scene_info` and the intro at 1080p), and the match step
   asks for a playlist match or a custom game (the lobby has no offline
   match) and says which h2launch.exe is the lobby.
+
+**Review fixes, round 2 (2026-10-12).**
+
+- **The lobby's scene wiring has tests.** Every lobby test had put a
+  fake scene straight into `Config::scene`, so nothing in the gate ran
+  `start_scene`. Its options are now a function of their own
+  (`scene_options`: `H2LOBBY_SCENE=on` alone allows a software GPU;
+  `H2LOBBY_VEIL` unset gives the usual veil, `off` none, and one that
+  doesn't read the usual veil and a log line), with a unit test. A
+  program test (`tests/scene.rs`, no GPU and no game files) runs a
+  headless lobby on a made-up Vista folder whose mainmenu.map is junk:
+  with `H2LOBBY_SCENE=on` and a bad `H2LOBBY_VEIL` the log has the veil
+  line once and `menus: the scene can't be drawn (<that mainmenu.map>:
+  not a Halo 2 map)` once, and without `H2LOBBY_SCENE` it has
+  `scene: none (headless)`.
+- **Each screen's copy time is its own.** The per-screen timer had one
+  copy count for every screen at a size, so the main menu's line
+  could carry the start screen's copies (and say the scene's frame was
+  copied in when the scene had failed and none were). The count is now
+  kept with each screen's frames.
+- **P4's steps 3 and 4 at the size the log names.** The lobby window
+  has no full-screen mode, and a maximised window leaves out the
+  taskbar and its title bar, so it never logs exactly 1920x1080. The
+  steps now note the size the log gives and judge the budget against
+  1080p by the pixel count.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 
