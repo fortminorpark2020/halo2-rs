@@ -5,9 +5,24 @@
 //! Each `camera_set` starts the camera towards a point over a number of
 //! ticks, and the script's `sleep` lets the next one cut in halfway, so
 //! the camera only comes to rest where the loop ends (where it began). A
-//! move picks up the speed and turn the camera already has, so it flies
-//! smoothly through every cut.
+//! move picks up the speed and turn the camera already has, and how fast
+//! they are changing, so it flies smoothly through every cut.
+//!
+//! How Halo 2 moves it (decompilation, in our words): `camera_set`
+//! (0x16c2f0) aims the observer at the point, and 0x16c840 asks it to get
+//! there in the move's ticks. Each frame the observer solves, for its
+//! position and its turn, the fifth-order curve (0x16ff10) that starts
+//! from where it is with its velocity and acceleration and arrives with
+//! neither, and follows it (0x1701f0, 0x170630). The code that counts a
+//! move's ticks down hasn't been found; one curve per move assumes it
+//! does, as `camera_time` (the ticks left) and the script's last move
+//! (300 ticks, then a 300-tick sleep before the loop starts again on the
+//! same point at rest) suggest. Solving again each frame with the ticks
+//! counting down gives the same curve. Halo 2 turns by a rotation vector
+//! in the world's frame; this turns by one in the camera's frame at the
+//! start of the move, which is close.
 
+use crate::camera::halo_rotation;
 use blam_cache::scenario::CameraPoint;
 use blam_cache::script::{value_type, NodeKind, Scripts};
 use glam::{DQuat, DVec3, Vec3};
@@ -29,28 +44,26 @@ struct Pose {
 }
 
 impl Pose {
-    /// Halo's camera points turn like placed objects: yaw about +z, then
-    /// pitch up, then roll about the way they face. The roll's sign is
-    /// unverified (the main menu's points bank up to 45 degrees either
-    /// way; nothing has shown yet which way Halo 2 turns them).
+    /// A camera point, turned as Halo 2's `camera_set` turns it
+    /// (`camera::halo_rotation`).
     fn of(c: &CameraPoint) -> Pose {
-        let [yaw, pitch, roll] = c.orientation.map(f64::from);
         Pose {
             at: DVec3::from(c.position.map(f64::from)),
-            rot: DQuat::from_rotation_z(yaw)
-                * DQuat::from_rotation_y(-pitch)
-                * DQuat::from_rotation_x(roll),
+            rot: halo_rotation(c.orientation.map(f64::from)),
         }
     }
 }
 
-/// The camera on its way: its pose, velocity (units per tick) and spin
-/// (a rotation vector per tick, in its own frame).
+/// The camera on its way: its pose, velocity (units per tick),
+/// acceleration (units per tick squared), spin (a rotation vector per
+/// tick, in its own frame) and how fast the spin changes (per tick).
 #[derive(Clone, Copy, Debug)]
 struct Motion {
     pose: Pose,
     vel: DVec3,
+    acc: DVec3,
     spin: DVec3,
+    spin_rate: DVec3,
 }
 
 impl Motion {
@@ -58,7 +71,9 @@ impl Motion {
         Motion {
             pose,
             vel: DVec3::ZERO,
+            acc: DVec3::ZERO,
             spin: DVec3::ZERO,
+            spin_rate: DVec3::ZERO,
         }
     }
 }
@@ -87,11 +102,27 @@ fn number(scripts: &Scripts, i: u16) -> Option<f64> {
     }
 }
 
-/// The script's statements in order, inside its `begin`s.
-fn statements(scripts: &Scripts, i: u16, out: &mut Vec<u16>) {
-    if scripts.function_name(i) == "begin" && out.len() < 4096 {
+/// The most expressions `statements` looks at, and the deepest `begin`
+/// it goes into. mainmenu.map's script has a few dozen statements; the
+/// limits only stop a damaged script (whose `begin`s lead back into
+/// themselves, or fan out) from running on or overflowing the stack,
+/// which would end the process rather than panic.
+const MAX_EXPRESSIONS: u32 = 4096;
+const MAX_DEPTH: u32 = 64;
+
+/// The script's statements in order, inside its `begin`s, looking at no
+/// more than `budget` more expressions.
+fn statements(scripts: &Scripts, i: u16, depth: u32, budget: &mut u32, out: &mut Vec<u16>) {
+    if *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+    if depth < MAX_DEPTH && scripts.function_name(i) == "begin" {
         for a in scripts.arguments(i) {
-            statements(scripts, a, out);
+            if *budget == 0 {
+                break;
+            }
+            statements(scripts, a, depth + 1, budget, out);
         }
     } else {
         out.push(i);
@@ -101,8 +132,8 @@ fn statements(scripts: &Scripts, i: u16, out: &mut Vec<u16>) {
 /// The script's moves: each `(camera_set <point> <ticks>)` and the
 /// `(sleep <ticks>)` after it.
 fn moves(scripts: &Scripts, root: u16) -> Vec<Move> {
-    let mut list = Vec::new();
-    statements(scripts, root, &mut list);
+    let (mut list, mut budget) = (Vec::new(), MAX_EXPRESSIONS);
+    statements(scripts, root, 0, &mut budget, &mut list);
     let mut out: Vec<Move> = Vec::new();
     for s in list {
         let args = scripts.arguments(s);
@@ -131,21 +162,34 @@ fn moves(scripts: &Scripts, root: u16) -> Vec<Move> {
     out
 }
 
-/// The Hermite basis at `u` (start, start tangent, end) and its slopes.
-fn hermite(u: f64) -> ([f64; 3], [f64; 3]) {
-    let (u2, u3) = (u * u, u * u * u);
-    (
+/// Halo 2's camera curve over a move (0x16ff10) at `u` of the way: the
+/// weights of the start, its velocity (times the move's ticks), its
+/// acceleration (times the ticks squared) and the end; then their first
+/// and second slopes. It leaves with the camera's velocity and
+/// acceleration and arrives at rest: of the curves that do, the one with
+/// the least jerk.
+fn quintic(u: f64) -> [[f64; 4]; 3] {
+    let (u2, u3, u4, u5) = (u * u, u * u * u, u * u * u * u, u * u * u * u * u);
+    [
         [
-            2.0 * u3 - 3.0 * u2 + 1.0,
-            u3 - 2.0 * u2 + u,
-            3.0 * u2 - 2.0 * u3,
+            1.0 - 10.0 * u3 + 15.0 * u4 - 6.0 * u5,
+            u - 6.0 * u3 + 8.0 * u4 - 3.0 * u5,
+            0.5 * u2 - 1.5 * u3 + 1.5 * u4 - 0.5 * u5,
+            10.0 * u3 - 15.0 * u4 + 6.0 * u5,
         ],
         [
-            6.0 * u2 - 6.0 * u,
-            3.0 * u2 - 4.0 * u + 1.0,
-            6.0 * u - 6.0 * u2,
+            -30.0 * u2 + 60.0 * u3 - 30.0 * u4,
+            1.0 - 18.0 * u2 + 32.0 * u3 - 15.0 * u4,
+            u - 4.5 * u2 + 6.0 * u3 - 2.5 * u4,
+            30.0 * u2 - 60.0 * u3 + 30.0 * u4,
         ],
-    )
+        [
+            -60.0 * u + 180.0 * u2 - 120.0 * u3,
+            -36.0 * u + 96.0 * u2 - 60.0 * u3,
+            1.0 - 9.0 * u + 18.0 * u2 - 10.0 * u3,
+            60.0 * u - 180.0 * u2 + 120.0 * u3,
+        ],
+    ]
 }
 
 /// A rotation as a rotation vector, the short way round.
@@ -155,34 +199,43 @@ fn log(q: DQuat) -> DVec3 {
 }
 
 /// Turning from `from` by `delta` (in its own frame) over `len` ticks,
-/// `u` of the way: starting with its spin, ending still.
+/// `u` of the way: starting with its spin and the spin's rate of change,
+/// ending still.
 fn turned(from: &Motion, delta: DVec3, len: f64, u: f64) -> DQuat {
-    let ([_, h10, h01], _) = hermite(u);
-    from.pose.rot * DQuat::from_scaled_axis(from.spin * (h10 * len) + delta * h01)
+    let [[_, w_spin, w_rate, w_end], _, _] = quintic(u);
+    let turn = from.spin * (w_spin * len) + from.spin_rate * (w_rate * len * len) + delta * w_end;
+    from.pose.rot * DQuat::from_scaled_axis(turn)
 }
 
 /// The camera `s` ticks into a move from `from` to `to` that takes `len`
-/// ticks: a curve that starts at the camera's velocity and spin and ends
-/// at rest on the point.
+/// ticks: Halo 2's curve from the camera's velocity and acceleration (and
+/// its spin and the spin's rate of change) to rest on the point.
 fn glide(from: &Motion, to: Pose, len: f64, s: f64) -> Motion {
     if len <= 0.0 || s >= len {
         return Motion::at_rest(to);
     }
     let u = (s / len).max(0.0);
-    let ([h00, h10, h01], [d00, d10, d01]) = hermite(u);
-    let (p0, m0) = (from.pose.at, from.vel * len);
-    let at = p0 * h00 + m0 * h10 + to.at * h01;
-    let vel = (p0 * d00 + m0 * d10 + to.at * d01) / len;
+    let curve = |w: [f64; 4]| {
+        from.pose.at * w[0] + from.vel * (w[1] * len) + from.acc * (w[2] * len * len) + to.at * w[3]
+    };
+    let [at, slope, bend] = quintic(u);
     let delta = log(from.pose.rot.inverse() * to.rot);
     let rot = turned(from, delta, len, u);
-    // Its spin: how it turns over a moment, in its own frame.
-    let e = 1e-3;
-    let next = turned(from, delta, len, u + e / len);
-    let spin = log(rot.inverse() * next) / e;
+    // Its spin and the spin's rate of change, in its own frame: how it
+    // turns over a moment before and a moment after.
+    let h = 1e-2;
+    let before = turned(from, delta, len, u - h / len);
+    let after = turned(from, delta, len, u + h / len);
+    let (early, late) = (
+        log(before.inverse() * rot) / h,
+        log(rot.inverse() * after) / h,
+    );
     Motion {
-        pose: Pose { at, rot },
-        vel,
-        spin,
+        pose: Pose { at: curve(at), rot },
+        vel: curve(slope) / len,
+        acc: curve(bend) / (len * len),
+        spin: (early + late) * 0.5,
+        spin_rate: (late - early) / h,
     }
 }
 
@@ -379,6 +432,79 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_script_cannot_run_on() {
+        // A `begin` whose name's next argument is the call itself, and
+        // whose own next is itself again: it reads as a `begin` of 4,097
+        // copies of itself, without end.
+        let mut b = Builder::default();
+        let name = b.node(NodeKind::Value, value_type::VOID, "begin", 0);
+        let looped = b.node(NodeKind::Call, value_type::VOID, "", name as u32);
+        b.0.expressions[name as usize].next = Some(looped);
+        b.0.expressions[looped as usize].next = Some(looped);
+        assert!(moves(&b.0, looped).is_empty());
+        // Empty `begin`s fanned out (each level a `begin` of 4,097 of the
+        // level below): 4,097 to the fifth power calls without the budget.
+        let mut b = Builder::default();
+        let name = b.node(NodeKind::Value, value_type::VOID, "begin", 0);
+        let mut level = b.node(NodeKind::Call, value_type::VOID, "", name as u32);
+        for _ in 0..5 {
+            let name = b.node(NodeKind::Value, value_type::VOID, "begin", 0);
+            b.0.expressions[name as usize].next = Some(level);
+            b.0.expressions[level as usize].next = Some(level);
+            level = b.node(NodeKind::Call, value_type::VOID, "", name as u32);
+        }
+        assert!(moves(&b.0, level).is_empty());
+        // A move in one `begin` is read; in `begin`s nested 1,000 deep it
+        // is past the depth followed (a damaged script nested deep enough
+        // would overflow the stack), so nothing is.
+        let mut b = Builder::default();
+        let (p, t) = (b.short(0), b.short(0));
+        let mut inner = b.call("camera_set", &[p, t]);
+        let shallow = b.call("begin", &[inner]);
+        assert_eq!(moves(&b.0, shallow).len(), 1);
+        for _ in 0..1000 {
+            inner = b.call("begin", &[inner]);
+        }
+        assert!(moves(&b.0, inner).is_empty());
+    }
+
+    #[test]
+    fn moves_to_missing_points_are_dropped() {
+        let m = |to, ticks, wait| Move { to, ticks, wait };
+        // Only a move to a point the map doesn't have: nothing to fly.
+        assert!(Flythrough::from_moves(points(), vec![m(7, 100.0, 50.0)]).is_none());
+        // Among good ones, it's left out and the rest fly.
+        let fly = Flythrough::from_moves(
+            points(),
+            vec![m(0, 0.0, 90.0), m(9, 100.0, 50.0), m(1, 500.0, 250.0)],
+        )
+        .unwrap();
+        assert_eq!(fly.moves(), 2);
+        for seconds in [0.0, 3.5, 7.0, 20.0, 1000.0] {
+            let (at, forward, _) = fly.camera(seconds);
+            assert!(at.is_finite() && forward.is_finite());
+        }
+        // Moves that never wait loop over nothing.
+        assert!(Flythrough::from_moves(points(), vec![m(0, 100.0, 0.0)]).is_none());
+        assert!(Flythrough::from_moves(points(), Vec::new()).is_none());
+        // No flythrough script, or one with nothing in it.
+        let cams = [CameraPoint {
+            name: String::new(),
+            position: [0.0; 3],
+            orientation: [0.0; 3],
+        }];
+        assert!(Flythrough::new(&Scripts::default(), &cams).is_none());
+        let mut scripts = Scripts::default();
+        scripts.scripts.push(Script {
+            name: SCRIPT.into(),
+            kind: ScriptKind::Continuous,
+            return_type: value_type::VOID,
+            root: None,
+        });
+        assert!(Flythrough::new(&scripts, &cams).is_none());
+    }
+
+    #[test]
     fn loops_back_to_where_it_began_at_rest() {
         let fly = Flythrough::from_moves(points(), path()).unwrap();
         assert_eq!(fly.length, 1090.0);
@@ -389,6 +515,7 @@ mod tests {
         assert!(start.pose.at.distance(end.pose.at) < 1e-6);
         assert!(start.pose.rot.angle_between(end.pose.rot) < 1e-6);
         assert!(end.vel.length() < 1e-6 && end.spin.length() < 1e-6);
+        assert!(end.acc.length() < 1e-6 && end.spin_rate.length() < 1e-6);
         // It rests on the first point before it sets off.
         assert!(fly.motion(45.0).pose.at.distance(start.pose.at) < 1e-9);
     }
@@ -399,26 +526,52 @@ mod tests {
         // Sixty frames a second, round the loop and on into the next.
         let dt = 1.0 / 60.0;
         let frames = ((fly.seconds() + 5.0) / dt) as usize;
-        let at = |k: usize| fly.motion(k as f64 * dt * TICKS);
-        let (mut speed, mut turn) = (None::<DVec3>, None::<f64>);
-        let (mut fastest, mut sharpest) = (0.0f64, 0.0f64);
-        for k in 0..frames {
-            let (a, b) = (at(k), at(k + 1));
-            // Velocity and turn rate per second from frame to frame.
-            let v = (b.pose.at - a.pose.at) / dt;
-            let w = a.pose.rot.angle_between(b.pose.rot) / dt;
-            if let (Some(s), Some(t)) = (speed, turn) {
-                // No sudden change of speed or of turn rate anywhere: a
-                // move restarting from rest would jump by the whole speed,
-                // where braking for the last point changes it by about 2% of
-                // its top speed from one frame to the next.
-                let change = (v - s).length();
-                assert!(change < 0.05 * fastest.max(1.0), "speed jumps at frame {k}");
-                assert!((w - t).abs() < 0.01, "turn jumps at frame {k}");
-            }
-            fastest = fastest.max(v.length());
-            sharpest = sharpest.max(w);
-            (speed, turn) = (Some(v), Some(w));
+        let poses: Vec<Pose> = (0..=frames)
+            .map(|k| fly.motion(k as f64 * dt * TICKS).pose)
+            .collect();
+        // Velocity and spin per second from frame to frame, the turn rate,
+        // and how the velocity and spin change (per second squared).
+        let vel: Vec<DVec3> = poses.windows(2).map(|p| (p[1].at - p[0].at) / dt).collect();
+        let spin: Vec<DVec3> = poses
+            .windows(2)
+            .map(|p| log(p[0].rot.inverse() * p[1].rot) / dt)
+            .collect();
+        let turn: Vec<f64> = spin.iter().map(|w| w.length()).collect();
+        let acc: Vec<DVec3> = vel.windows(2).map(|v| (v[1] - v[0]) / dt).collect();
+        let spin_rate: Vec<DVec3> = spin.windows(2).map(|w| (w[1] - w[0]) / dt).collect();
+        let most = |v: &[DVec3]| v.iter().map(|x| x.length()).fold(0.0, f64::max);
+        let (fastest, sharpest) = (most(&vel), turn.iter().copied().fold(0.0, f64::max));
+        let (hardest, sharpest_change) = (most(&acc), most(&spin_rate));
+        let mut fastest_yet = 0.0f64;
+        for k in 1..vel.len() {
+            // No sudden change of speed or of turn rate anywhere: a move
+            // restarting from rest would jump by the whole speed, where
+            // braking for the last point changes it by about 2% of its top
+            // speed from one frame to the next.
+            fastest_yet = fastest_yet.max(vel[k - 1].length());
+            let change = (vel[k] - vel[k - 1]).length();
+            assert!(
+                change < 0.05 * fastest_yet.max(1.0),
+                "speed jumps at frame {k}"
+            );
+            assert!(
+                (turn[k] - turn[k - 1]).abs() < 0.01,
+                "turn jumps at frame {k}"
+            );
+        }
+        for k in 1..acc.len() {
+            // Nor of acceleration, in moving or turning: Halo 2's curve
+            // starts each move with the acceleration the last one had and
+            // changes it by under 2% of the strongest a frame. A curve that
+            // starts it afresh (the cubic used before) jumps at the cuts by
+            // 5 to 48% (moving) and 16 to 54% (turning).
+            let jump = (acc[k] - acc[k - 1]).length() / hardest;
+            assert!(jump < 0.03, "acceleration jumps {jump} at frame {k}");
+            let jump = (spin_rate[k] - spin_rate[k - 1]).length() / sharpest_change;
+            assert!(
+                jump < 0.03,
+                "turning acceleration jumps {jump} at frame {k}"
+            );
         }
         // It does move, and turn.
         assert!(fastest > 1.0 && sharpest > 0.05, "{fastest} {sharpest}");
@@ -443,14 +596,35 @@ mod tests {
     }
 
     #[test]
-    fn banks_with_the_points_roll() {
-        let fly = Flythrough::from_moves(points(), path()).unwrap();
-        // At rest on the first point (rolled 5 degrees): up leans off +z
-        // and stays square to forward.
+    fn a_level_point_stays_level() {
+        // Turned as Halo 2 turns it, the menu's seventh path point (its
+        // angles rounded) is a level camera looking 46 degrees down at the
+        // city. Rolling about the camera's own forward instead would bank
+        // it 45 degrees and point it 10 degrees up.
+        let point = CameraPoint {
+            name: String::new(),
+            position: [0.0, 0.0, 200.0],
+            orientation: [-100.2f32, 10.4, 45.2].map(f32::to_radians),
+        };
+        let fly = Flythrough::from_moves(
+            vec![Pose::of(&point)],
+            vec![Move {
+                to: 0,
+                ticks: 0.0,
+                wait: 90.0,
+            }],
+        )
+        .unwrap();
         let (_, forward, up) = fly.camera(1.0);
         assert!(forward.dot(up).abs() < 1e-5);
+        let pitch = forward.z.asin().to_degrees();
+        assert!((pitch + 46.1).abs() < 0.1, "{pitch}");
         let level = forward.cross(Vec3::Z).cross(forward).normalize();
         let bank = level.angle_between(up).to_degrees();
-        assert!((bank - 5.0).abs() < 0.01, "{bank}");
+        assert!(bank < 0.1, "{bank}");
+        // The way placed scenery turns, too.
+        let placed = crate::load::placement_matrix([0.0; 3], point.orientation, 1.0);
+        assert!(placed.transform_vector3(Vec3::X).distance(forward) < 1e-5);
+        assert!(placed.transform_vector3(Vec3::Z).distance(up) < 1e-5);
     }
 }

@@ -1,9 +1,9 @@
 # Progress and handoff
 
 Last updated 2026-10-12 (menu 2.4: the menu scene as data, in the new
-`crates/h2scene`). Any assistant that works on the project
-should update this file before it stops, so the next one can pick up. Read
-AGENTS.md first for the rules.
+`crates/h2scene`, and its review fixes). Any assistant that works on the
+project should update this file before it stops, so the next one can pick
+up. Read AGENTS.md first for the rules.
 
 ## Goal (changed 2026-10-09 23:12)
 
@@ -206,8 +206,15 @@ Next, in order:
    format-13 maps are refused ("no geometry reader yet"). On the owner's
    PC (with P4): `cargo run --release -p h2scene --example scene_info --
    "C:\Games\Halo 2 Project Cartographer\maps\mainmenu.map"` should
-   print the same counts. Next: 2.5, the scene drawn behind the start
-   screen and main menu (wgpu offscreen).
+   print the same counts. Review fixes, round 1 (2026-10-12): the
+   camera points (and placed scenery) now turn as Halo 2's `camera_set`
+   turns them, the roll last about the world's x (the port banked the
+   camera up to 45 degrees and pointed it at the sky; now at most 13
+   over the loop), and the camera follows Halo 2's fifth-order curve,
+   which keeps its acceleration through each cut; a damaged map's far
+   vertex or looping script can no longer take the process down; the
+   real-map test pins every count exactly. Next: 2.5, the scene drawn
+   behind the start screen and main menu (wgpu offscreen).
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

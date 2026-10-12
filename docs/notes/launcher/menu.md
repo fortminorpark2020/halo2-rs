@@ -251,7 +251,7 @@ stay as PC extras but leave the button legends.
     reader, none of which exists: several weeks plus research. Until then,
     players with only MCC get no scene.
 - **Fidelity:** medium-high. There are no particles or bloom, and the
-  camera roll sign and the 70 degree field of view are unverified.
+  70 degree field of view is unverified.
 - It also revives the renderer the pivot meant to stop maintaining.
 
 ### (C) Halo 2's 2D UI over a still background
@@ -1395,12 +1395,13 @@ visible changes; 2.5 draws it.
   glows (`ShaderInfo::multiply`). `read_shader`, which h2viewer and
   h2tool use, is unchanged.
 - **`h2scene`**, copied from `menu-preview`'s h2viewer (ours):
-  - `flythrough.rs`, as it was: the `mainmenu_flythrough` script's
+  - `flythrough.rs`: the `mainmenu_flythrough` script's
     `camera_set`s and `sleep`s at 30 ticks a second, each move a curve
     that starts at the camera's speed and turn and is cut off by the
-    next. Its 70-degree field of view and the sign of the camera
-    points' roll are still unverified (marked so). New: `seconds`,
-    `ticks`, `points`, `points_used` and `moves`, for the example.
+    next. Its 70-degree field of view is still unverified (marked so).
+    New: `seconds`, `ticks`, `points`, `points_used` and `moves`, for
+    the example. Review round 1 changed how the points turn and the
+    curve (below).
   - `camera.rs`: `look_to` (a view that banks with the camera's up),
     `Lens` with the reversed-Z projection and `fov_magnification`, and
     `menu_view_proj` (the camera at a time and its view-projection for
@@ -1435,8 +1436,8 @@ visible changes; 2.5 draws it.
   from only what `.dockerignore` lets through, with and without the
   stub).
 - **Tests (no game files).** The flythrough's (copied: reading the
-  script, the loop back to rest, no jumps in speed or turn at the cuts,
-  the bank); the lens (70 degrees across 4:3, depth reversed, a banked
+  script, the loop back to rest, no jumps in speed or turn at the cuts);
+  the lens (70 degrees across 4:3, depth reversed, a banked
   view tilts, the menu view centred on where the flythrough faces); `from_sections` on made-up sections (batches, shared
   batches, lighting, damaged sections), the mip chain's sizes and
   averages, the vertex bytes; `LevelLight` over two made-up floors and
@@ -1478,6 +1479,63 @@ and 0 not decoded, 40 materials as 27/7/6, 10 objects, 18 camera points
 with 12 flown through, 2,990 ticks and 99.7 s) and a load time; and on
 MCC's `halo2\h2_maps_win64_dx11\mainmenu.map`, `error: MCC maps have no
 geometry reader yet`.
+
+**Review fixes, round 1 (2026-10-12).**
+
+- **The camera points turn as Halo 2 turns them.** Its `camera_set`
+  (0x16c2f0) makes a point's forward and up through 0x11df60 and
+  0x141ce0: yaw about +z first, then pitch, and the roll last, about
+  the world's +x (`camera::halo_rotation`). The port rolled about the
+  camera's own forward instead, which banked the menu's camera up to 45
+  degrees and pointed it into the sky at points 7 to 10. Now, on
+  Cartographer's map, the camera banks at most 13 degrees over the whole
+  loop (3 on average) and looks between 47 degrees down and 5 up; the
+  review found five of the twelve points level to a tenth of a degree. Placed scenery turns the same
+  way (0x0b7300 uses the same conversion), so `placement_matrix` does
+  too; the carrier turns by yaw only and doesn't change, the plasma
+  screens do. h2viewer's own `placement_matrix` (the parked engine)
+  still rolls the old way; fix it there if that engine is picked up
+  again.
+- **The camera follows Halo 2's curve.** The observer solves, each
+  frame, a fifth-order curve from its position, velocity and
+  acceleration to the point at rest (0x16ff10, followed by 0x1701f0 and
+  0x170630), for moving and for turning. The port's cubic forgot the
+  acceleration at every cut, so it jumped there; `Motion` now carries
+  acceleration and the spin's rate of change, and each move is that
+  curve (the review measured the two paths up to 6.7 units apart on
+  the real loop). Still
+  open: the code that counts a move's ticks down hasn't been found; one
+  curve per move assumes it does (`camera_time` returns the ticks left,
+  and the script's last 300-tick move ends exactly as the loop starts
+  again). Halo 2 turns by a rotation vector in the world's frame, this
+  by one in the camera's frame at the start of the move, which is close.
+- **A damaged map can't take the lobby down.** `LevelLight::new` leaves
+  out a triangle with a vertex that isn't a finite number or that spans
+  more than 1,024 grid cells (2,048 units; the level is about 470
+  across), which would otherwise fill memory until the process
+  aborted, past `load`'s panic catch. The script reader looks at no
+  more than 4,096 expressions and 64 nested `begin`s, so a script that
+  leads back into itself can't recurse until the stack overflows.
+- **Tests.** Damaged vertices are left out of the light grid; damaged
+  scripts (a `begin` that is its own argument, `begin`s fanned out five
+  deep, 1,000 nested) end; moves to points the map lacks are dropped
+  and the rest fly, and no script, an empty one or one that never
+  waits gives no flythrough; acceleration and turning acceleration
+  don't jump at the cuts (under 2% of the strongest a frame, where the
+  old cubic jumped 5 to 54%); a level point stays level (the seventh
+  path point's rounded angles look 46 degrees down with no bank), and
+  placed scenery turns the same way; `halo_rotation` gives 0x141ce0's
+  forward, left and up. `shader::shader_info` (the template match, now
+  a pure function under `read_shader` and `read_menu_shader`) is tested
+  for the menu's three templates both ways (a glow shown, clouds
+  multiplied, added clouds doubled and as bright as slot 0's alpha),
+  and h2scene's `material` for which second map wins (glow, mask,
+  change colour, multiply; doubled only above 1; emblem) and for asking
+  for the colour map first. `reads_the_real_main_menu` now pins every
+  number above exactly (triangles, 39 textures, 40 materials as
+  27/7/6, 10 objects with 9 lit, the fog's 0.5 from 0 to 150, the clear
+  colour, 18 points with 12 flown in 13 moves, 2,990 ticks); if the
+  owner's map differs, change them here and in the test together.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 

@@ -10,6 +10,11 @@ use std::collections::HashMap;
 const CELL: f32 = 2.0;
 /// How far below a point to look for a floor.
 const MAX_DROP: f32 = 30.0;
+/// The widest triangle (world units, in x or y) put in the grid: 1,024
+/// cells. The menu's level is about 470 units across, so only a damaged
+/// vertex makes one wider, and filling that many cells would take the
+/// process down (out of memory) instead of failing the load.
+const MAX_SPAN: f32 = CELL * 1024.0;
 
 #[derive(Default)]
 pub struct LevelLight {
@@ -76,17 +81,19 @@ impl LevelLight {
                 if t.iter().any(|&i| i as usize >= probe.positions.len()) {
                     continue;
                 }
+                let p = t.map(|i| probe.positions[i as usize]);
+                let (lo, hi) = (p[0].min(p[1]).min(p[2]), p[0].max(p[1]).max(p[2]));
+                // A damaged vertex (not a number, infinite, or far off)
+                // leaves its triangle out.
+                if !p.iter().all(|v| v.is_finite())
+                    || hi.x - lo.x > MAX_SPAN
+                    || hi.y - lo.y > MAX_SPAN
+                {
+                    continue;
+                }
                 let id = probe.triangles.len() as u32;
                 probe.triangles.push((*t, b.lightmap));
-                let p = t.map(|i| probe.positions[i as usize]);
-                let lo = cell(
-                    p[0].x.min(p[1].x).min(p[2].x),
-                    p[0].y.min(p[1].y).min(p[2].y),
-                );
-                let hi = cell(
-                    p[0].x.max(p[1].x).max(p[2].x),
-                    p[0].y.max(p[1].y).max(p[2].y),
-                );
+                let (lo, hi) = (cell(lo.x, lo.y), cell(hi.x, hi.y));
                 for cx in lo.0..=hi.0 {
                     for cy in lo.1..=hi.1 {
                         probe.grid.entry((cx, cy)).or_default().push(id);
@@ -196,6 +203,44 @@ mod tests {
         // Off the floors, and far above them.
         assert!(probe.at(&[], Vec3::new(50.0, 0.0, 1.0)).is_none());
         assert!(probe.at(&[], Vec3::new(0.0, 0.0, 50.0)).is_none());
+    }
+
+    #[test]
+    fn damaged_vertices_are_left_out() {
+        // A good floor, then triangles a damaged map might hold: one with
+        // an infinite vertex, one with a vertex a million units off in x
+        // and y, one too wide for the grid, and one with a vertex that
+        // isn't a number. Filling the grid for either of the first two
+        // would run out of memory instead of returning.
+        let lit = [0.5, 0.5, 0.5, 0.0];
+        let vertices = vec![
+            vertex(-5.0, -5.0, 0.0, lit),
+            vertex(5.0, -5.0, 0.0, lit),
+            vertex(0.0, 5.0, 0.0, lit),
+            vertex(f32::INFINITY, 0.0, 0.0, lit),
+            vertex(1e6, 1e6, 0.0, lit),
+            vertex(-1500.0, 1.0, 0.0, lit),
+            vertex(1500.0, 1.0, 0.0, lit),
+            vertex(f32::NAN, 0.0, 0.0, lit),
+        ];
+        let mesh = MeshData {
+            vertices,
+            indices: vec![0, 1, 2, 0, 1, 3, 0, 1, 4, 5, 6, 2, 0, 1, 7],
+            batches: vec![Batch {
+                material: 0,
+                lightmap: 0,
+                first_index: 0,
+                index_count: 15,
+            }],
+            baked_lighting: true,
+        };
+        let probe = LevelLight::new(&mesh);
+        assert_eq!(probe.triangles.len(), 1);
+        // The good floor's 6x6 cells, and nothing else.
+        assert_eq!(probe.grid.len(), 36);
+        let c = probe.at(&[], Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        assert!((c[0] - 0.5).abs() < 1e-5, "{c:?}");
+        assert!(probe.at(&[], Vec3::new(1000.0, 1.0, 1.0)).is_none());
     }
 
     #[test]

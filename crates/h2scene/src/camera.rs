@@ -4,7 +4,7 @@
 //! camera the menus need (menu-preview's `camera.rs`); no input.
 
 use crate::flythrough::{Flythrough, FOV};
-use glam::{Mat4, Vec3, Vec4};
+use glam::{DQuat, Mat4, Vec3, Vec4};
 
 /// Widest horizontal field of view, for very wide views, so their sides
 /// don't stretch.
@@ -13,6 +13,17 @@ const MAX_FOV_X: f32 = 100.0;
 /// about 470 units across.
 pub const NEAR: f32 = 0.05;
 pub const FAR: f32 = 2000.0;
+
+/// How Halo 2 turns a camera point or a placed object by its three
+/// angles (radians): yaw about +z first, then pitch (raising +x), and the
+/// roll last, about the world's +x. Its `camera_set` (0x16c2f0) and the
+/// code that places scenario objects (0x0b7300) both make a point's
+/// forward and up this way, through 0x11df60 and 0x141ce0. The menu's
+/// camera points come out level or nearly so, where turning the roll
+/// about the camera's own forward would bank them up to 45 degrees.
+pub fn halo_rotation([yaw, pitch, roll]: [f64; 3]) -> DQuat {
+    DQuat::from_rotation_x(roll) * DQuat::from_rotation_y(-pitch) * DQuat::from_rotation_z(yaw)
+}
 
 /// The view matrix of a camera at `at` facing `forward` with `up` as its
 /// up (it need not be +z: the flythrough banks). Right-handed.
@@ -122,6 +133,28 @@ mod tests {
     /// Halo 2's: the biped's 70 degrees and the globals' crosshair.
     fn halo2() -> Lens {
         Lens::new(70f32.to_radians(), 0.165)
+    }
+
+    #[test]
+    fn points_turn_as_halo_2_turns_them() {
+        // Halo 2's forward, left and up for yaw a, pitch b, roll c
+        // (0x141ce0, in our words).
+        let (a, b, c) = (0.7f64, -0.3f64, 1.1f64);
+        let ((sa, ca), (sb, cb), (sc, cc)) = (a.sin_cos(), b.sin_cos(), c.sin_cos());
+        let forward = glam::DVec3::new(ca * cb, sa * cc - sb * sc * ca, sb * cc * ca + sa * sc);
+        let left = glam::DVec3::new(-sa * cb, sb * sc * sa + ca * cc, ca * sc - sb * cc * sa);
+        let up = glam::DVec3::new(-sb, -cb * sc, cb * cc);
+        let rot = halo_rotation([a, b, c]);
+        assert!((rot * glam::DVec3::X).distance(forward) < 1e-12);
+        assert!((rot * glam::DVec3::Y).distance(left) < 1e-12);
+        assert!((rot * glam::DVec3::Z).distance(up) < 1e-12);
+        // One angle at a time: yawed a quarter turn, +x goes to +y;
+        // pitched up, +x rises; rolled, up leans to -y.
+        let quarter = std::f64::consts::FRAC_PI_2;
+        let yawed = halo_rotation([quarter, 0.0, 0.0]) * glam::DVec3::X;
+        assert!(yawed.distance(glam::DVec3::Y) < 1e-12);
+        assert!((halo_rotation([0.0, 0.5, 0.0]) * glam::DVec3::X).z > 0.4);
+        assert!((halo_rotation([0.0, 0.0, 0.5]) * glam::DVec3::Z).y < -0.4);
     }
 
     #[test]
