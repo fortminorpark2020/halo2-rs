@@ -45,7 +45,27 @@ const DEFAULT_CLEAR: [f32; 3] = [0.62, 0.70, 0.80];
 
 /// An sRGB byte as linear light.
 pub fn srgb_to_linear(c: u8) -> f32 {
-    let c = f32::from(c) / 255.0;
+    srgb_decode(f32::from(c) / 255.0)
+}
+
+/// Linear light as an sRGB byte (rounded, clamped).
+pub fn linear_to_srgb(c: f32) -> u8 {
+    (srgb_encode(c) * 255.0).round() as u8
+}
+
+/// Linear light (0 to 1, clamped) as its sRGB-encoded value (0 to 1).
+pub fn srgb_encode(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// An sRGB-encoded value (0 to 1, clamped) as linear light.
+pub fn srgb_decode(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
     if c <= 0.04045 {
         c / 12.92
     } else {
@@ -53,36 +73,32 @@ pub fn srgb_to_linear(c: u8) -> f32 {
     }
 }
 
-/// Linear light as an sRGB byte (rounded, clamped).
-pub fn linear_to_srgb(c: f32) -> u8 {
-    let c = c.clamp(0.0, 1.0);
-    let s = if c <= 0.003_130_8 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (s * 255.0).round() as u8
-}
-
 /// The last pass over the scene, as the menus darken and tint the
-/// flythrough navy behind the logo and rows: in linear light, each pixel
-/// keeps `saturation` of its colour (the rest is its grey), is multiplied
-/// by one colour, then has another added. Halo 2 Vista's own numbers for
-/// this aren't known; `Veil::menu`'s are estimates chosen against the
-/// owner's Cartographer screenshot (docs/notes/launcher/menu.md, "What
-/// Phase 2.5 built").
+/// flythrough navy behind the logo and rows. It works on sRGB-encoded
+/// values, as Halo 2 Vista's Direct3D 9 blending did (its screen's hue is
+/// the same at every brightness in sRGB bytes, which a multiply in linear
+/// light can't give): each pixel keeps `saturation` of its colour (the
+/// rest is its grey), is brightened by `gain` and clipped at white, is
+/// multiplied by one colour, then has another added. Halo 2 Vista's own
+/// numbers for this aren't known; `Veil::menu`'s are estimates chosen
+/// against the owner's Cartographer screenshot
+/// (docs/notes/launcher/menu.md, "What Phase 2.5 built").
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Veil {
-    /// Linear factors per channel.
+    /// Factors per channel, on sRGB-encoded values.
     pub multiply: [f32; 3],
-    /// Linear light added per channel, after the multiply.
+    /// Added per channel after the multiply, sRGB-encoded.
     pub add: [f32; 3],
     /// How much of each pixel's colour is kept before the multiply: 1 all
     /// of it, 0 none (its grey alone).
     pub saturation: f32,
+    /// How much each pixel is brightened before the multiply (what passes
+    /// white is clipped there, so white comes out as the multiply).
+    pub gain: f32,
 }
 
-/// Linear light's luminance weights (Rec. 709), for a pixel's grey.
+/// Linear light's luminance weights (Rec. 709), for a pixel's grey (its
+/// luminance, then encoded).
 pub const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
 impl Veil {
@@ -91,33 +107,38 @@ impl Veil {
         multiply: [1.0; 3],
         add: [0.0; 3],
         saturation: 1.0,
+        gain: 1.0,
     };
 
-    /// A veil that keeps `saturation` of the colour, multiplies by `navy`
-    /// (sRGB bytes) and adds `navy` times `k`.
-    pub fn navy(navy: [u8; 3], k: f32, saturation: f32) -> Veil {
-        let m = navy.map(srgb_to_linear);
+    /// A veil that keeps `saturation` of the colour, brightens it by
+    /// `gain` (clipped at white), multiplies by `navy` (sRGB bytes) and
+    /// adds `navy` times `k`.
+    pub fn navy(navy: [u8; 3], k: f32, saturation: f32, gain: f32) -> Veil {
+        let m = navy.map(|c| f32::from(c) / 255.0);
         Veil {
             multiply: m,
             add: m.map(|c| c * k.max(0.0)),
             saturation: saturation.clamp(0.0, 1.0),
+            gain: gain.max(0.0),
         }
     }
 
     /// The menus' veil, by estimate (`MENU_NAVY`, `MENU_K`,
-    /// `MENU_SATURATION`).
+    /// `MENU_SATURATION`, `MENU_GAIN`).
     pub fn menu() -> Veil {
-        Veil::navy(MENU_NAVY, MENU_K, MENU_SATURATION)
+        Veil::navy(MENU_NAVY, MENU_K, MENU_SATURATION, MENU_GAIN)
     }
 
-    /// `r,g,b,k` or `r,g,b,k,s` (the navy as sRGB bytes, how much of it is
-    /// added, and the colour kept, `MENU_SATURATION` when left out), as
+    /// `r,g,b,k`, `r,g,b,k,s` or `r,g,b,k,s,gain` (the navy as sRGB
+    /// bytes, how much of it is added, the colour kept and the
+    /// brightening, `MENU_SATURATION` and `MENU_GAIN` when left out), as
     /// `H2LOBBY_VEIL` gives it; None if it doesn't read.
     pub fn parse(text: &str) -> Option<Veil> {
         let parts: Vec<&str> = text.split(',').map(str::trim).collect();
-        let (r, g, b, k, s) = match parts.as_slice() {
-            [r, g, b, k] => (r, g, b, k, None),
-            [r, g, b, k, s] => (r, g, b, k, Some(s)),
+        let (r, g, b, k, s, gain) = match parts.as_slice() {
+            [r, g, b, k] => (r, g, b, k, None, None),
+            [r, g, b, k, s] => (r, g, b, k, Some(s), None),
+            [r, g, b, k, s, gain] => (r, g, b, k, Some(s), Some(gain)),
             _ => return None,
         };
         let byte = |s: &str| s.parse::<u8>().ok();
@@ -127,16 +148,21 @@ impl Veil {
             Some(s) => number(s).filter(|s| *s <= 1.0)?,
             None => MENU_SATURATION,
         };
-        Some(Veil::navy([byte(r)?, byte(g)?, byte(b)?], k, s))
+        let gain = match gain {
+            Some(g) => number(g)?,
+            None => MENU_GAIN,
+        };
+        Some(Veil::navy([byte(r)?, byte(g)?, byte(b)?], k, s, gain))
     }
 
     /// A linear colour after the veil (the GPU's pass, on the CPU).
     pub fn apply(&self, linear: [f32; 3]) -> [f32; 3] {
-        let grey: f32 = (0..3).map(|c| linear[c] * LUMA[c]).sum();
+        let grey = srgb_encode((0..3).map(|c| linear[c] * LUMA[c]).sum());
         let mut out = [0.0; 3];
         for c in 0..3 {
-            let kept = grey + (linear[c] - grey) * self.saturation;
-            out[c] = (kept * self.multiply[c] + self.add[c]).clamp(0.0, 1.0);
+            let kept = grey + (srgb_encode(linear[c]) - grey) * self.saturation;
+            let lit = (kept * self.gain).clamp(0.0, 1.0);
+            out[c] = srgb_decode(lit * self.multiply[c] + self.add[c]);
         }
         out
     }
@@ -147,27 +173,33 @@ impl Veil {
     }
 
     /// The veil pass's uniform: the multiply with the saturation, then the
-    /// add.
+    /// add with the gain.
     fn uniform(&self) -> [f32; 8] {
         let ([mr, mg, mb], [ar, ag, ab]) = (self.multiply, self.add);
-        [mr, mg, mb, self.saturation, ar, ag, ab, 0.0]
+        [mr, mg, mb, self.saturation, ar, ag, ab, self.gain]
     }
 }
 
-/// The menus' navy, as sRGB bytes: the scene's grey is multiplied by it,
-/// and `MENU_K` of it is added. Estimates, fitted in the container (on
-/// lavapipe, with Cartographer's mainmenu.map, a frame every 5 s of the
-/// loop) so the scene's mean comes to the owner's Cartographer
-/// screenshot's, about (31, 39, 61), and its spread of blues (the middle
-/// half from about 50 to 70) to the screenshot's (47 to 71).
-pub const MENU_NAVY: [u8; 3] = [101, 121, 176];
-/// How much of the navy is added after the multiply: it lifts the
-/// blacks. An estimate (above).
-pub const MENU_K: f32 = 0.03;
+/// The menus' navy, as sRGB bytes: the colour the owner's Cartographer
+/// screenshot clips at (an eighth of its upper half, the lit carrier,
+/// the lift's beam and the flak, is exactly it, and nothing is
+/// brighter), so white comes out as it. Its darker pixels are the same hue, scaled.
+pub const MENU_NAVY: [u8; 3] = [44, 55, 88];
+/// How much of the navy is added after the multiply: none (the
+/// screenshot's shadows go down to about (6, 6, 10)). An estimate.
+pub const MENU_K: f32 = 0.0;
 /// How much colour the scene keeps: none. The screenshot is all one hue
 /// (the brown sky and the water both navy); multiplying the colours
 /// alone left the sky brown-black and the water purple. An estimate.
 pub const MENU_SATURATION: f32 = 0.0;
+/// How much the scene's grey (sRGB-encoded) is brightened before the
+/// multiply. An estimate, fitted in the container (on lavapipe, with
+/// Cartographer's mainmenu.map, a frame every 5 s of the loop) to the
+/// screenshot's scene, away from the logo, the rows and the text: its
+/// mean is about (28, 35, 56) and 8 % of it is clipped at the navy; 20
+/// frames at 1280x720 came to (28, 35, 57) with 7 % clipped, and about
+/// the same spread of brightness.
+pub const MENU_GAIN: f32 = 2.15;
 
 /// Where the camera is and how it faces.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -505,15 +537,29 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
 "#;
 
 /// The veil: one triangle over the whole frame, each pixel of the scene
-/// read and graded (`Veil::apply`).
+/// read and graded (`Veil::apply`) on sRGB-encoded values, then decoded
+/// for the sRGB target.
 const VEIL_SHADER: &str = r#"
 struct V {
     // The multiply, and w: the colour kept.
     multiply: vec4<f32>,
+    // The add, and w: the gain.
     add: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> v: V;
 @group(0) @binding(1) var scene: texture_2d<f32>;
+
+fn encode(c: vec3<f32>) -> vec3<f32> {
+    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    let hi = 1.055 * pow(max(x, vec3<f32>(0.0031308)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, x * 12.92, x <= vec3<f32>(0.0031308));
+}
+
+fn decode(c: vec3<f32>) -> vec3<f32> {
+    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    let hi = pow((max(x, vec3<f32>(0.04045)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, x / 12.92, x <= vec3<f32>(0.04045));
+}
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -525,9 +571,10 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
     let c = textureLoad(scene, vec2<i32>(at.xy), 0).rgb;
-    let grey = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let kept = vec3<f32>(grey) + (c - vec3<f32>(grey)) * v.multiply.w;
-    return vec4<f32>(clamp(kept * v.multiply.rgb + v.add.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    let grey = encode(vec3<f32>(dot(c, vec3<f32>(0.2126, 0.7152, 0.0722))));
+    let kept = grey + (encode(c) - grey) * v.multiply.w;
+    let lit = clamp(kept * v.add.w, vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(decode(lit * v.multiply.rgb + v.add.rgb), 1.0);
 }
 "#;
 
@@ -632,6 +679,14 @@ fn uniform_entry(binding: u32, dynamic: bool, size: Option<u64>) -> wgpu::BindGr
     }
 }
 
+/// Whether an adapter of `kind` is refused: a software one (lavapipe,
+/// WARP, llvmpipe, the Microsoft Basic Render Driver of a remote desktop
+/// or a virtual machine) unless `allow_cpu`, as drawing the scene on it
+/// would cost the CPU more than the still background.
+fn refused(kind: wgpu::DeviceType, allow_cpu: bool) -> bool {
+    kind == wgpu::DeviceType::Cpu && !allow_cpu
+}
+
 impl Renderer {
     /// A device on this PC's GPU, from the instance's backends (so
     /// `WGPU_BACKEND` is honoured), preferring the low-power one. A
@@ -648,7 +703,7 @@ impl Renderer {
         }))
         .map_err(|e| format!("no GPU adapter ({e})"))?;
         let info = adapter.get_info();
-        if info.device_type == wgpu::DeviceType::Cpu && !allow_cpu {
+        if refused(info.device_type, allow_cpu) {
             return Err(format!(
                 "only a software adapter ({}, {:?}), refused",
                 info.name, info.backend
@@ -1510,84 +1565,124 @@ mod tests {
     }
 
     #[test]
-    fn the_veil_greys_multiplies_then_adds_in_linear_light() {
+    fn the_veil_greys_brightens_multiplies_then_adds_on_srgb_values() {
         // None leaves every colour.
-        for c in [[0, 0, 0], [10, 120, 250], [255, 255, 255]] {
+        for c in [[0, 0, 0], [10, 120, 250], [128, 64, 32], [255, 255, 255]] {
             assert_eq!(Veil::NONE.apply_srgb(c), c);
         }
-        // Keeping all the colour: black takes the added colour alone,
-        // white the multiply plus it.
-        let v = Veil::navy([100, 120, 200], 0.25, 1.0);
-        let navy = [100u8, 120, 200].map(srgb_to_linear);
+        // Keeping all the colour, with no gain: black takes the added
+        // colour alone, white the multiply plus it, each channel on its
+        // sRGB value.
+        let v = Veil::navy([100, 120, 200], 0.25, 1.0, 1.0);
+        let navy = [100u8, 120, 200].map(|c| f32::from(c) / 255.0);
         assert_eq!(v.multiply, navy);
         assert_eq!(v.add, navy.map(|c| c * 0.25));
-        assert_eq!(v.apply([0.0; 3]), v.add);
+        assert_eq!(v.apply([0.0; 3]), v.add.map(srgb_decode));
         let white = v.apply([1.0; 3]);
         for c in 0..3 {
-            assert!((white[c] - navy[c] * 1.25).abs() < 1e-6);
+            assert!((srgb_encode(white[c]) - navy[c] * 1.25).abs() < 1e-5);
         }
-        // In sRGB bytes: (sRGB -> linear) x navy + navy/4 -> sRGB.
+        // In sRGB bytes: 128 x navy + navy/4.
         let grey = v.apply_srgb([128, 128, 128]);
-        let want = navy.map(|n| linear_to_srgb(srgb_to_linear(128) * n + n * 0.25));
+        let want = [100.0f32, 120.0, 200.0].map(|n| (128.0 / 255.0 * n + n * 0.25).round() as u8);
         assert_eq!(grey, want);
-        // It tints: blue strongest, red weakest; with less added, it
-        // darkens too.
-        assert!(grey[2] > grey[1] && grey[1] > grey[0], "{grey:?}");
-        let dark = Veil::navy([100, 120, 200], 0.1, 1.0).apply_srgb([128, 128, 128]);
-        assert!(dark.iter().all(|&c| c < 128), "{dark:?}");
         // Nothing past white.
         assert_eq!(
-            Veil::navy([255; 3], 4.0, 1.0).apply_srgb([255; 3]),
+            Veil::navy([255; 3], 4.0, 1.0, 1.0).apply_srgb([255; 3]),
             [255; 3]
         );
-        // Keeping no colour, every pixel is its grey times the navy: a
-        // brown and a purple of the same brightness come out the same.
-        let mono = Veil::navy([100, 120, 200], 0.0, 0.0);
+        // The gain brightens, and what passes white is clipped there.
+        let lit = Veil::navy([255; 3], 0.0, 1.0, 2.0);
+        assert_eq!(lit.apply_srgb([60, 60, 60]), [120; 3]);
+        assert_eq!(lit.apply_srgb([200, 100, 10]), [255, 200, 20]);
+        // Keeping no colour, every pixel is its grey (its luminance,
+        // encoded) times the navy: a brown and a purple of the same
+        // brightness come out the same.
+        let mono = Veil::navy([100, 120, 200], 0.0, 0.0, 1.0);
         let brown = [0.30f32, 0.19, 0.08];
         let y: f32 = (0..3).map(|c| brown[c] * LUMA[c]).sum();
         let purple = [y + 0.1 * LUMA[1] / LUMA[0], y - 0.1, y + 0.0];
         let py: f32 = (0..3).map(|c| purple[c] * LUMA[c]).sum();
+        assert!((py - y).abs() < 1e-6);
         let out = mono.apply(brown);
+        let other = mono.apply(purple);
         for c in 0..3 {
-            assert!((out[c] - y * navy[c]).abs() < 1e-6);
+            assert!((srgb_encode(out[c]) - srgb_encode(y) * navy[c]).abs() < 1e-5);
+            assert!((out[c] - other[c]).abs() < 1e-5);
         }
-        let other = Veil::navy([100, 120, 200], 0.0, 0.0).apply(purple);
+        // Half the colour: halfway between the grey and the colour, on
+        // their sRGB values.
+        let half = Veil::navy([255; 3], 0.0, 0.5, 1.0).apply(brown);
         for c in 0..3 {
-            assert!((other[c] - py * navy[c]).abs() < 1e-6);
+            let want = (srgb_encode(y) + srgb_encode(brown[c])) / 2.0;
+            assert!((srgb_encode(half[c]) - want).abs() < 1e-5);
         }
-        // Half the colour: halfway between the grey and the colour.
-        let half = Veil::navy([255; 3], 0.0, 0.5).apply(brown);
-        for c in 0..3 {
-            assert!((half[c] - (y + brown[c]) / 2.0).abs() < 1e-6);
-        }
-        // The menus' own darkens a mid grey, and turns it navy.
-        let m = Veil::menu().apply_srgb([128, 128, 128]);
-        assert!(m.iter().all(|&c| c < 128), "{m:?}");
-        assert!(m[2] > m[1] && m[1] > m[0], "{m:?}");
-        // And a brown sky the same navy as a grey of its brightness.
-        let sky = Veil::menu().apply_srgb([150, 120, 80]);
-        assert!(sky[2] > sky[1] && sky[1] > sky[0], "{sky:?}");
     }
 
     #[test]
-    fn veils_read_from_four_or_five_numbers() {
+    fn the_menus_veil_clips_white_at_the_navy_and_keeps_its_hue_at_every_brightness() {
+        let m = Veil::menu();
+        // The screenshot's brightest: white (and anything past it once
+        // brightened) is the navy; black stays black.
+        assert_eq!(m.apply_srgb([255; 3]), MENU_NAVY);
+        assert_eq!(m.apply_srgb([200, 210, 190]), MENU_NAVY);
+        assert_eq!(m.apply_srgb([0; 3]), [0; 3]);
+        // Below the clip, every pixel is the navy scaled (in sRGB bytes),
+        // so its hue is the same as the screenshot's at every brightness.
+        for v in [8u8, 20, 40, 60, 90, 110] {
+            let out = m.apply_srgb([v; 3]);
+            let scale = (f32::from(v) / 255.0 * MENU_GAIN).min(1.0);
+            for c in 0..3 {
+                let want = f32::from(MENU_NAVY[c]) * scale;
+                assert!(
+                    (f32::from(out[c]) - want).abs() <= 1.0,
+                    "{v}: {out:?}, want {want} in {c}"
+                );
+            }
+            assert!(out[2] > out[1] && out[1] >= out[0], "{v}: {out:?}");
+        }
+        // A brown sky the same navy as a grey of its brightness.
+        let sky = m.apply_srgb([150, 120, 80]);
+        let y: f32 = (0..3)
+            .map(|c| [150u8, 120, 80].map(srgb_to_linear)[c] * LUMA[c])
+            .sum();
+        let like = m.apply_srgb([linear_to_srgb(y); 3]);
+        assert!(
+            (0..3).all(|c| sky[c].abs_diff(like[c]) <= 1),
+            "{sky:?} {like:?}"
+        );
+    }
+
+    #[test]
+    fn veils_read_from_four_five_or_six_numbers() {
         assert_eq!(
             Veil::parse("100, 120,200,0.25"),
-            Some(Veil::navy([100, 120, 200], 0.25, MENU_SATURATION))
+            Some(Veil::navy(
+                [100, 120, 200],
+                0.25,
+                MENU_SATURATION,
+                MENU_GAIN
+            ))
         );
         assert_eq!(
             Veil::parse("100,120,200,0.25,0.5"),
-            Some(Veil::navy([100, 120, 200], 0.25, 0.5))
+            Some(Veil::navy([100, 120, 200], 0.25, 0.5, MENU_GAIN))
+        );
+        assert_eq!(
+            Veil::parse("44,55,88,0,0,3"),
+            Some(Veil::navy([44, 55, 88], 0.0, 0.0, 3.0))
         );
         assert_eq!(
             Veil::parse("0,0,0,0"),
-            Some(Veil::navy([0; 3], 0.0, MENU_SATURATION))
+            Some(Veil::navy([0; 3], 0.0, MENU_SATURATION, MENU_GAIN))
         );
         for bad in [
             "",
             "1,2,3",
-            "1,2,3,4,5,6",
+            "1,2,3,4,5,6,7",
             "1,2,3,4,1.5",
+            "1,2,3,4,1,-2",
+            "1,2,3,4,1,inf",
             "256,0,0,1",
             "a,b,c,d",
             "1,2,3,-1",
@@ -1596,7 +1691,28 @@ mod tests {
             assert_eq!(Veil::parse(bad), None, "{bad:?}");
         }
         // The menus' is the estimate.
-        assert_eq!(Veil::menu(), Veil::navy(MENU_NAVY, MENU_K, MENU_SATURATION));
+        assert_eq!(
+            Veil::menu(),
+            Veil::navy(MENU_NAVY, MENU_K, MENU_SATURATION, MENU_GAIN)
+        );
+    }
+
+    #[test]
+    fn a_software_adapter_is_refused_unless_allowed() {
+        use wgpu::DeviceType::*;
+        assert!(refused(Cpu, false));
+        assert!(!refused(Cpu, true));
+        for kind in [IntegratedGpu, DiscreteGpu, VirtualGpu, Other] {
+            assert!(!refused(kind, false), "{kind:?}");
+            assert!(!refused(kind, true), "{kind:?}");
+        }
+        // And on this machine: refused, or not a software adapter (where
+        // lavapipe is the only one, as in the container, this checks
+        // `new` itself asks).
+        match Renderer::new(false, Veil::NONE) {
+            Ok(r) => assert_ne!(r.info.device_type, Cpu, "{}", r.adapter()),
+            Err(e) => eprintln!("refused or none: {e}"),
+        }
     }
 
     /// A square of two triangles facing -x (towards a camera at the
@@ -1717,7 +1833,7 @@ mod tests {
 
         // The veil over the same frame: as `Veil::apply` says, within a
         // step of rounding.
-        let veil = Veil::navy([90, 110, 170], 0.1, 0.3);
+        let veil = Veil::navy([90, 110, 170], 0.1, 0.3, 1.6);
         r.set_veil(veil);
         let veiled = r.render(w, h, eye).unwrap();
         for (x, y, was) in [

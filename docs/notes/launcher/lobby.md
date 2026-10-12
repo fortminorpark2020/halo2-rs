@@ -245,8 +245,12 @@ the launcher doesn't do.
   menu ask that thread for a frame of the window's size at each draw.
   It draws the scene on the GPU, offscreen, darkened and tinted navy
   (the veil), reads it back and keeps only the newest; the lobby copies
-  that in where the still background would go. The first frame fades in
-  over the still background in 0.25 s (an estimate). The flythrough's
+  that in where the still background would go. The intro asks for the
+  first frame (once per window size) and doesn't put the thread to
+  sleep, so the GPU wakes and the frame is drawn behind the movie and
+  the start screen has the scene from its first frame; a frame that
+  comes only after the screen is up (no intro, a new window size) fades
+  in over the still background in 0.25 s (an estimate). The flythrough's
   clock runs only while those two screens are up, and moves on at most
   0.25 s a frame, so a stall doesn't jump it. On any other screen, from the
   moment a match is made (before its engine starts) and while a match
@@ -262,7 +266,7 @@ the launcher doesn't do.
   goes wrong (no GPU adapter, a device that can't be made, a GPU error,
   a lost device, a damaged map, a panic on its thread) leaves the still
   background for the rest of the run, logged once. `H2LOBBY_VEIL=r,g,b,k`
-  (or `r,g,b,k,s`) changes the veil for a look check, `off` leaves it
+  (or `r,g,b,k,s` or `r,g,b,k,s,gain`) changes the veil for a look check, `off` leaves it
   out; `H2LOBBY_SCENE_FPS=60` has the window draw every 16 ms instead of
   33 while the flythrough shows (the scene then gets asked twice as
   often). `WGPU_BACKEND` (`dx12`, `vulkan`, `gl`) picks wgpu's backend.

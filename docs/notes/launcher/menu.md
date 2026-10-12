@@ -1396,7 +1396,7 @@ skipped (no Windows N PC at hand).
    (2 late in another run).
 4. The intro took 7.9 to 8.2 ms a frame on the CPU at 1600x900, and the
    start screen 2.1 ms. That isn't the 1080p the list asked for; P4's
-   1080p measure can take it too.
+   list (after Phase 2.5) has it as its step 3.
 5. The three `intro: none` cases each opened on the start screen.
 
 It also found that the windowed lobby, started from its own console,
@@ -1492,8 +1492,8 @@ visible changes; 2.5 draws it.
   - the load: about 1.9 s the first time (the file read from disk),
     about 110 ms once the file is in the disk cache.
 
-**On the owner's PC (with P4)**, from the clone (`C:\Halo 2 Rust
-Project` or the work folder):
+**On the owner's PC (with P4, its step 1)**, from the clone (`C:\Halo
+2 Rust Project` or the work folder):
 
 ```
 cargo run --release -p h2scene --example scene_info -- "C:\Games\Halo 2 Project Cartographer\maps\mainmenu.map"
@@ -1616,26 +1616,36 @@ the still background, and nothing touches the GPU while a match runs.
   and the unpacking into `0x00RRGGBB` pixels. `Eye::flythrough` is the
   camera at a time on the loop (2.4's `camera_set` rotation; the roll
   is settled and untouched).
-- **The veil** (`Veil`), a pass of our own: in linear light each pixel
-  keeps `saturation` of its colour (the rest is its Rec. 709 grey), is
-  multiplied by the navy, then has `k` times the navy added. Halo 2
-  Vista's own numbers for the darkening aren't known; ours are
-  estimates fitted in the container (lavapipe, Cartographer's map, a
-  frame every 5 s of the loop) to the owner's Cartographer screenshot,
-  whose mean is about (31, 39, 61) and whose middle half of blues runs
-  from 47 to 71: the navy (101, 121, 176), `k` 0.03, and saturation 0.
-  The scene alone averages about (80, 77, 76); veiled, 20 frames at
-  1280x720 average (32, 40, 62), within 1 of the screenshot, with the
-  middle half of blues from about 50 to 70. Saturation 0 because the
-  screenshot is all one hue: multiplying the colours alone left the
-  brown sky brown-black and the water purple. `H2LOBBY_VEIL=r,g,b,k`
-  or `r,g,b,k,s` tries others (`off` for none).
+- **The veil** (`Veil`), a pass of our own, on sRGB-encoded values (as
+  Halo 2 Vista's Direct3D 9 blending was; corrected in the review fixes
+  below): each pixel keeps `saturation` of its colour (the rest is its
+  grey, the Rec. 709 luminance encoded), is brightened by `gain` and
+  clipped at white, is multiplied by the navy, then has `k` times the
+  navy added, and is decoded for the sRGB target. Halo 2 Vista's own
+  numbers for the darkening aren't known; ours are estimates read off
+  and fitted to the owner's Cartographer screenshot. Its scene clips at
+  exactly (44, 55, 88) (an eighth of its upper half: the lit carrier,
+  the lift's beam and the flak; nothing is brighter), its shadows go
+  down to about (6, 6, 10), and its sRGB ratios are the same at every
+  brightness (green 1.26 and blue 2.0 times red), which is the navy
+  scaled on encoded values. So the navy is (44, 55, 88), `k` 0 and saturation 0, and the
+  gain, 2.15, is fitted in the container (lavapipe, Cartographer's map,
+  a frame every 5 s of the loop) to the screenshot's scene away from the
+  logo, rows and text: there its mean is (28, 35, 56), its brightness
+  (Rec. 709, in bytes) 10 at the 1st percentile, 26, 39 and 43 at the
+  quartiles and 55 from the 95th, and 8 % of it is clipped. Veiled, 20
+  frames at 1280x720 average (28, 35, 57), with brightness 4, 28, 35,
+  43 and 55 at the same points, 7 % clipped, and the same ratios at
+  every brightness. Saturation 0 because the screenshot is all one hue:
+  multiplying the colours alone left the brown sky brown-black and the
+  water purple. `H2LOBBY_VEIL=r,g,b,k`, `r,g,b,k,s` or
+  `r,g,b,k,s,gain` tries others (`off` for none).
 - **Departure from the brief.** It asked for the veil as two blended
   draws over the scene (multiply by the navy, then add it). That can't
   grey the picture first, which the fit needed, so the scene is drawn
   into a texture of its own and the veil is a full-screen pass that
   reads it; `H2LOBBY_VEIL` takes the optional fifth number for the
-  saturation.
+  saturation and sixth for the gain.
 - **`h2scene::backdrop`** (`Backdrop`, behind the `SceneSource` trait
   the lobby's tests fake): a thread that reads mainmenu.map, then on
   each ask opens the device if it has none (logging the adapter once
@@ -1654,14 +1664,20 @@ the still background, and nothing touches the GPU while a match runs.
   main menu each draw asks for a frame of the window's size at the
   flythrough's clock and copies the newest of that size in where the
   still background would go (the still background otherwise, at a new
-  size until a frame of it comes). The first frame fades in over the
-  still background in 0.25 s (`SCENE_FADE`, an estimate; Halo 2 had the
-  scene from the start, so it shouldn't pop in). The flythrough's clock
-  runs only on those two screens, at most 0.25 s a frame
-  (`SCENE_STEP`). `tick` puts the scene to sleep on every other screen
-  and while a match exists, and `on_match` does before the engine
-  starts; it wakes when the menus next ask, the last frame showing
-  meanwhile. A failure is logged once (`menus: the scene can't be
+  size until a frame of it comes). The intro wakes it ahead: its first
+  draw asks for the scene's first frame at the window's size (again only
+  at a new size), and the scene isn't put to sleep while the movie
+  plays, so the GPU device opens and the frame is drawn behind the movie
+  and the start screen has the scene whole from its first frame, as
+  Halo 2's did. A frame that comes only after the screen is up (no
+  intro, the intro skipped at once, a new window size) fades in over
+  the still background in 0.25 s (`SCENE_FADE`, an estimate, so it
+  doesn't pop in). The flythrough's clock runs only on those two
+  screens, at most 0.25 s a frame (`SCENE_STEP`). `tick` puts the scene
+  to sleep on every other screen (the intro aside) and while a match
+  exists, and `on_match` does before the engine starts; it wakes when
+  the menus next ask, the last frame showing meanwhile. A failure is
+  logged once (`menus: the scene can't be
   drawn (<why>); the still background from now on`) and the still
   background stays for the run. The lobby still draws every 33 ms (the
   plan's 30 fps default); `H2LOBBY_SCENE_FPS=60` makes it 16 ms while
@@ -1671,8 +1687,12 @@ the still background, and nothing touches the GPU while a match runs.
   with each one's mean colour and times, for the look check and for
   tuning the veil on a PC.
 - **Tests (no game files).** Rows padded to 256 bytes and unpacked past
-  the padding; sRGB round trips; the veil's grey, multiply and add, and
-  its four- or five-number form; the mailbox keeping the newest, only
+  the padding; sRGB round trips; the veil's grey, gain, clip, multiply
+  and add on sRGB values, the menus' veil taking white to the navy and
+  black to black and keeping the navy's hue at every brightness, and
+  its four-, five- or six-number form; a software adapter refused unless
+  allowed (`refused`, for every kind of adapter, and `Renderer::new`
+  where lavapipe is the only one); the mailbox keeping the newest, only
   the newest ask drawn, a missing map failing with why. A GPU test,
   skipped with no adapter (or only a software one, unless
   `H2LOBBY_SCENE=on`): a made-up red square in the sky and a lit green
@@ -1680,8 +1700,11 @@ the still background, and nothing touches the GPU while a match runs.
   by pixel against `Veil::apply_srgb` (it runs on lavapipe with
   `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
   WGPU_BACKEND=vulkan H2LOBBY_SCENE=on`). The lobby, with a fake scene:
-  the scene's colour under the start screen's and main menu's rows once
-  faded in, the still background before and a blend half way; none on
+  the intro asking for the scene's first frame once (again at a new
+  size), never putting it to sleep, and the start screen's first draw
+  having it whole behind it; with no intro, the scene's colour under the
+  start screen's and main menu's rows once faded in, the still
+  background before and a blend half way; none on
   the settings or the playlists; a sleep (once) on leaving and none
   asked for while a match is on (`on_match` sleeps it); the clock
   carrying on where it stopped and stepping at most 0.25 s; a failed
@@ -1696,8 +1719,8 @@ the still background, and nothing touches the GPU while a match runs.
   (device, pipelines and 39 textures) in about 105 ms, 25 to 280 ms to
   draw a 1280x720 frame and 1.5 to 2.2 ms to read it back; the main menu
   8 to 18 ms a frame on the UI thread with the copy 0.6 to 2.1 ms. The
-  real-map test's frames at 640x360 average (29, 37, 58), (35, 44, 68)
-  and (36, 44, 68).
+  real-map test's frames at 640x360 average (25, 32, 51), (32, 40, 64)
+  and (33, 42, 67) with the veil as the review fixes left it.
 - **Looks like / still missing** (from the container's frames next to the
   owner's screenshot): the carrier, the city, the tether and the water
   in one navy, as in the screenshot. Missing: the carrier's gravity-lift
@@ -1706,50 +1729,98 @@ the still background, and nothing touches the GPU while a match runs.
   the one-triangle stand-ins for the firing effects showed nowhere in the
   frames looked at.
 
-**On the owner's PC (P5)**, with Cartographer's files found, from the
+**On the owner's PC (P4)**, with Cartographer's files found, from the
 clone (`C:\Halo 2 Rust Project` or the work folder), built with `cargo
 build --release -p h2launch` and run as usual (a variable set first in
 the same console: `set H2LOBBY_SCENE=off` in cmd,
-`$env:H2LOBBY_SCENE="off"` in PowerShell):
+`$env:H2LOBBY_SCENE="off"` in PowerShell). It also takes the two checks
+put off to it: 2.4's `scene_info` (step 1) and the intro's time at
+1080p (step 3).
 
-1. After the intro the start screen comes in over the still navy and,
-   within a moment, the flythrough fades in behind it and plays on behind
-   the main menu. `lobby.log` has `scene: ...mainmenu.map read in <t> s
-   (45919 triangles, 39 textures, a 99.7 s flythrough)`, `scene: drawing
-   on <your graphics card> (<kind>, <backend>)` and `scene: awake in <n>
-   ms`.
-2. In a maximised 1920x1080 window, after half a minute on the main
+1. 2.4's scene, read on its own: `cargo run --release -p h2scene
+   --example scene_info -- "C:\Games\Halo 2 Project
+   Cartographer\maps\mainmenu.map"` prints the counts in "What Phase
+   2.4 built" (1 BSP, 45,919 triangles, 39 textures and 0 not decoded,
+   40 materials as 27/7/6, 10 objects, 18 camera points with 12 flown
+   through, 2,990 ticks and 99.7 s) and a load time; on MCC's
+   `halo2\h2_maps_win64_dx11\mainmenu.map` it prints `error: MCC maps
+   have no geometry reader yet`.
+2. Launched: the start screen has the flythrough behind it from its
+   first frame (it was woken and drawn while the intro played, so no
+   still navy or slanted framing bars show first), and it plays on
+   behind the main menu. `lobby.log` has `scene: ...mainmenu.map read in
+   <t> s (45919 triangles, 39 textures, a 99.7 s flythrough)`, `scene:
+   drawing on <your graphics card> (<kind>, <backend>)` and `scene:
+   awake in <n> ms`, the last before the `intro: skipped` or `intro:
+   played to the end` line. Skipped in its first second, the intro may
+   leave before the scene's first frame: the flythrough then fades in
+   over the still background in a quarter second. Note whether the
+   movie stutters as it starts (the scene waking on the GPU then).
+3. The intro at 1080p: the window opens at 1280x720 (1600x900 at 125 %
+   scaling), so maximise it to 1920x1080 in the intro's first seconds
+   and let it play on. After 30 new pictures at that size the log has
+   `lobby: 1920x1080, intro <n> ms a frame on the CPU` (P3 measured 7.9
+   to 8.2 ms at 1600x900).
+4. In the maximised 1920x1080 window, after half a minute on the main
    menu, the log has `menus: 1920x1080, main menu <n> ms a frame on the
    CPU (the scene's frame copied in <m> ms; ...)` with `<n>` at most
    about 9, and `scene: 1920x1080, <a> ms to draw a frame and <b> ms to
    read it back (on its own thread)`.
-3. SETTINGS, then B: `scene: asleep (its GPU device closed)`, then
+5. SETTINGS, then B: `scene: asleep (its GPU device closed)`, then
    `scene: awake in <n> ms`, and the flythrough carries on from where it
    was.
-4. A match (an offline one or a custom game): the log has `scene:
-   asleep` before the engine's lines, and during the match Task
-   Manager's GPU column (Details tab) shows the launcher's lobby process
-   at about 0. After the match, back on the main menu, it wakes.
-5. `H2LOBBY_VISTA=off`: the still background, and `scene: none (no Halo 2
+6. A playlist match or a custom game (alone: ONLINE, then Custom Game
+   under the playlists, then START GAME): the log has `scene: asleep`
+   before the engine's lines. During the match Task Manager's Details
+   tab shows two h2launch.exe: the engine runs in a second copy, started
+   with `--session ...match-session.txt`. Right-click a column header,
+   choose Select columns and tick Command line (and GPU if it isn't
+   shown): the lobby is the h2launch.exe whose command line has no
+   `--session`, and its GPU column shows about 0. After the match, back
+   on the main menu, it wakes.
+7. `H2LOBBY_VISTA=off`: the still background, and `scene: none (no Halo 2
    Vista folder); the menus have the still background`.
    `H2LOBBY_SCENE=off`, or `background = still` in `lobby.txt`: the
    still background, with that reason on the same line.
-6. A forced failure, `WGPU_BACKEND=metal` (Windows has no Metal): the
+8. A forced failure, `WGPU_BACKEND=metal` (Windows has no Metal): the
    still background and one line, `menus: the scene can't be drawn (no
    GPU adapter (...)); the still background from now on`.
-7. Resizing the window: the still background for a moment, then the
+9. Resizing the window: the still background for a moment, then the
    flythrough at the new size.
-8. Optional, the look: `cargo run --release -p h2scene --example
-   scene_shot -- "C:\Games\Halo 2 Project Cartographer\maps"
-   C:\h2work\scene 1920x1080 10 40 70` writes three PNGs (keep them on
-   the PC) and prints each frame's mean; the container's lavapipe gave
-   about (29, 37, 58), (35, 44, 68) and (36, 44, 68) at those times. A
-   real GPU should be within a few levels; if the PC's screen looks
-   lighter, darker or off-hue next to the Xbox's or Cartographer's
-   menu, try `H2LOBBY_VEIL=101,121,176,0.03` with other numbers and
-   send the ones that look right.
-9. Optional: `H2LOBBY_SCENE_FPS=60` makes the flythrough smoother; its
-   frame time is in the same log line.
+10. Optional, the look: `cargo run --release -p h2scene --example
+    scene_shot -- "C:\Games\Halo 2 Project Cartographer\maps"
+    C:\h2work\scene 1920x1080 10 40 70` writes three PNGs (keep them on
+    the PC) and prints each frame's mean; the container's lavapipe gave
+    about (25, 32, 51), (32, 40, 64) and (33, 42, 67) at those times. A
+    real GPU should be within a few levels; if the PC's screen looks
+    lighter, darker or off-hue next to the Xbox's or Cartographer's
+    menu, try `H2LOBBY_VEIL=44,55,88,0,0,2.15` with other numbers (the
+    last, the gain, brightens all but the brightest; the first three are
+    the brightest colour) and send the ones that look right.
+11. Optional: `H2LOBBY_SCENE_FPS=60` makes the flythrough smoother; its
+    frame time is in the same log line.
+
+**Review fixes, round 1 (2026-10-12).**
+
+- **The veil's tone range.** It had been fitted to the screenshot's
+  whole-frame mean alone (logo, rows and text included), with the
+  multiply in linear light: black came out (13, 17, 30) and white
+  (102, 123, 178), so the shadows were lifted, the highlights went past
+  the screenshot's ceiling of (44, 55, 88), and the picture was hazy and
+  flat. It now works on sRGB-encoded values with the screenshot's clip
+  colour as the navy, no added light and a gain (above), fitted to the
+  scene's own areas; the uniform's spare fourth number carries the gain.
+- **The start screen has the scene from its first frame.** The GPU was
+  opened only at the start screen's first draw, which showed the still
+  background, framing bars and all, while the scene faded in over it.
+  The intro now asks for the first frame (above).
+- **A software adapter refused unless allowed** is a function of its
+  own (`refused`) with a test of every kind of adapter.
+- This list was called P5 by mistake; the plan's P4 is the check after
+  2.5 (P5 is 2.7's `menu_png --all`). It now has the two checks put off
+  to P4 (2.4's `scene_info` and the intro at 1080p), and the match step
+  asks for a playlist match or a custom game (the lobby has no offline
+  match) and says which h2launch.exe is the lobby.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 

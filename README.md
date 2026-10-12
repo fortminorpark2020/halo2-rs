@@ -64,10 +64,12 @@ install. No game files are included in this repository.
   `%LOCALAPPDATA%\h2launch\lobby.txt`, or set `H2LOBBY_VISTA` to it. With
   Cartographer's files, Halo 2's main menu flythrough (the Covenant
   carrier over New Mombasa, darkened navy as on the Xbox) plays behind the
-  start screen and the main menu: it fades in over a moment once your
-  graphics card has its first picture, carries on where it left off when
-  you come back to the main menu, and stops while you are on any other
-  screen or in a match, so the game has the graphics card to itself.
+  start screen and the main menu: your graphics card draws its first
+  picture while the intro plays, so it is there as the start screen
+  opens (without the intro it fades in over a moment), carries on where
+  it left off when you come back to the main menu, and stops while you
+  are on any other screen or in a match, so the game has the graphics
+  card to itself.
   Without Cartographer, without a graphics card that can draw it, or with
   `background = still` in `lobby.txt` (or `H2LOBBY_SCENE=off`), the menus
   have a still navy background instead. With Cartographer's files the

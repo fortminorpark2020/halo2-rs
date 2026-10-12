@@ -1,8 +1,9 @@
 # Progress and handoff
 
 Last updated 2026-10-12 (menu 2.5: the flythrough behind the start
-screen and main menu; before it 2.4, the menu scene as data in the new
-`crates/h2scene`, and its review fixes, rounds 1 and 2; P3 passed). Any assistant that works on the
+screen and main menu, and its review fixes, round 1; before it 2.4, the
+menu scene as data in the new `crates/h2scene`, and its review fixes,
+rounds 1 and 2; P3 passed). Any assistant that works on the
 project should update this file before it stops, so the next one can pick
 up. Read AGENTS.md first for the rules.
 
@@ -226,22 +227,34 @@ Next, in order:
    built"): with Cartographer's files the darkened navy flythrough plays
    behind the start screen and main menu, drawn by `h2scene`'s own wgpu
    renderer offscreen on a thread of its own (`render.rs`,
-   `backdrop.rs`), read back and copied under the menus; it fades in
-   over 0.25 s, sleeps (no GPU device at all) on every other screen and
-   from the moment a match is made, and any failure leaves the still
-   background with one log line. The veil (grey, multiply by a navy, add
-   a little) is our estimate, fitted on lavapipe to the owner's
-   Cartographer screenshot's mean colour (within 1 level); its numbers
-   and the departure from the brief (a post pass that greys first) are
-   in menu.md. `background = still` in `lobby.txt` or
+   `backdrop.rs`), read back and copied under the menus; the intro wakes
+   it and has its first frame drawn, so the start screen has it from its
+   first frame (a frame that comes later fades in over 0.25 s); it
+   sleeps (no GPU device at all) on every other screen and from the
+   moment a match is made, and any failure leaves the still background
+   with one log line. The veil (grey, brighten, multiply by a navy, on
+   sRGB values) is our estimate from the owner's Cartographer
+   screenshot: its navy is the screenshot's clip colour (44, 55, 88) and
+   its gain is fitted on lavapipe to the screenshot's scene (mean, spread
+   and clipped share within a level or a point); its numbers and the
+   departure from the brief (a post pass that greys first) are in
+   menu.md. Review fixes, round 1 (2026-10-12): the veil, first fitted
+   to the whole frame's mean alone with a linear multiply, had lifted
+   shadows and highlights twice the screenshot's ceiling (now as above);
+   the start screen showed the still background and its framing bars
+   while the scene faded in (now woken during the intro); the software
+   adapter refusal has a test; the owner's list is P4 (it had been
+   called P5) with 2.4's `scene_info` and the intro at 1080p added. `background = still` in `lobby.txt` or
    `H2LOBBY_SCENE=off` switches it off; `H2LOBBY_SCENE=on` allows it
    headless and on a software GPU, `H2LOBBY_VEIL` and
    `H2LOBBY_SCENE_FPS=60` are for checks. Still missing from the look:
    the gravity-lift beam, particles, engine glow, bloom; the 70-degree
-   field of view is unverified. On the owner's PC: menu.md's P5 list
-   (the flythrough plays, at most about 9 ms a frame on the UI thread
-   at 1080p, nothing on the GPU during a match, the still background
-   with `H2LOBBY_VISTA=off`, `H2LOBBY_SCENE=off` or the forced failure
+   field of view is unverified. On the owner's PC: menu.md's P4 list
+   (2.4's `scene_info` counts, the flythrough behind the start screen
+   from its first frame, the intro and the main menu timed at 1080p (at
+   most about 9 ms a frame on the UI thread), nothing on the lobby's GPU
+   during a playlist match or custom game, the still background with
+   `H2LOBBY_VISTA=off`, `H2LOBBY_SCENE=off` or the forced failure
    `WGPU_BACKEND=metal`). Next: 2.6, Halo 2's shell on every lobby
    screen.
 2. Friends: the owner sends their public IPs; add each to the allowlist

@@ -73,10 +73,11 @@ and mouse or an Xbox controller, and just runs the .exe.
   animations, text, pictures, CPU backend). Plan in
   `docs/notes/launcher/menu.md`.
 - `crates/h2scene`: Halo 2's main-menu scene (mainmenu.map's level, sky,
-  fog, scenery and flythrough camera path) as plain data for the
-  launcher's renderer, with no GPU. It reads Halo 2 Vista (Cartographer)
-  maps only; MCC's format 13 is refused. Notes in
-  `docs/notes/launcher/menu.md` (Phase 2.4; drawn in 2.5).
+  fog, scenery and flythrough camera path), read as plain data with no
+  GPU (`load`) and drawn offscreen with wgpu on a thread of its own
+  (`render`, `backdrop`) for the lobby's start screen and main menu. It
+  reads Halo 2 Vista (Cartographer) maps only; MCC's format 13 is
+  refused. Notes in `docs/notes/launcher/menu.md` (Phases 2.4 and 2.5).
 - `docs/notes/`: design notes and research behind larger features (controller
   layouts, the main menu, the decompilation findings). Paths there that start
   with `$SP` or `scratchpad` refer to a scratch folder that no longer exists.

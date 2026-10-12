@@ -115,8 +115,9 @@ const CUES_KEPT: usize = 16;
 const FRAME_MOVIE: Duration = Duration::from_millis(16);
 const FRAME: Duration = Duration::from_millis(33);
 /// The flythrough's first frame fades in over the still background in
-/// this long (seconds): our estimate, so the scene doesn't pop in once
-/// the GPU has it (Halo 2 had it from the start).
+/// this long (seconds), when it wasn't ready as the start screen opened
+/// (the intro wakes it ahead): our estimate, so the scene doesn't pop in
+/// once the GPU has it (Halo 2 had it from the start).
 const SCENE_FADE: f64 = 0.25;
 /// The flythrough's clock goes on at most this much (seconds) between two
 /// frames, so a stall (the window dragged, a slow PC) doesn't jump it.
@@ -425,14 +426,16 @@ pub struct App {
     /// is up), the menus' clock at its last step, when its first frame
     /// showed (it fades in from then; None until a frame of the window's
     /// size comes), whether it was told to sleep, whether it failed (the
-    /// still background for the rest of the run), and whether its frame
-    /// is on screen (`frame_interval`).
+    /// still background for the rest of the run), whether its frame is
+    /// on screen (`frame_interval`), and the window's size the intro
+    /// asked for its first frame at (`scene_warm_up`).
     scene_seconds: f64,
     scene_step: Option<f64>,
     scene_since: Option<f64>,
     scene_asleep: bool,
     scene_failed: bool,
     scene_shown: bool,
+    scene_warm: Option<(usize, usize)>,
     /// The window's size in pixels at the last draw of the start screen
     /// or main menu: the main menu's rows are found under the mouse at it.
     size: (usize, usize),
@@ -677,6 +680,7 @@ impl App {
             scene_asleep: true,
             scene_failed: false,
             scene_shown: false,
+            scene_warm: None,
             size: (0, 0),
             menu_times: MenuTimes::default(),
             last_click: None,
@@ -1044,10 +1048,32 @@ impl App {
         matches!(self.screen, Screen::Start | Screen::Main)
     }
 
-    /// The flythrough may be drawn: the start screen or main menu is up
-    /// and no match is on (its engine has the GPU to itself).
+    /// The flythrough may be drawn: the start screen or main menu is up,
+    /// or the intro before them (which wakes it ahead), and no match is
+    /// on (its engine has the GPU to itself).
     fn scene_wanted(&self) -> bool {
-        self.on_menus() && self.game.is_none()
+        matches!(self.screen, Screen::Intro | Screen::Start | Screen::Main) && self.game.is_none()
+    }
+
+    /// While the intro plays, ask the flythrough for its first frame at
+    /// the window's size (again only if the size changes): its GPU device
+    /// opens and the frame is drawn behind the movie, so the start screen
+    /// has the scene from its first frame, as Halo 2's did, and the fade
+    /// is only for a scene that comes later.
+    fn scene_warm_up(&mut self, w: usize, h: usize) {
+        if self.scene_failed || self.scene_warm == Some((w, h)) || !self.scene_wanted() {
+            return;
+        }
+        let Some(scene) = self.cfg.scene.clone() else {
+            return;
+        };
+        // A failure is logged by the menus' first draw.
+        if matches!(scene.state(), SceneState::Failed(_)) {
+            return;
+        }
+        scene.ask(w, h, self.scene_seconds);
+        self.scene_asleep = false;
+        self.scene_warm = Some((w, h));
     }
 
     /// Tell the flythrough to let go of the GPU (once), and stop its
@@ -1074,6 +1100,8 @@ impl App {
             return None;
         }
         let scene = self.cfg.scene.clone()?;
+        // The intro's frame counts for the menus' first draw only.
+        let warm = self.scene_warm.take();
         if let SceneState::Failed(why) = scene.state() {
             self.scene_failed = true;
             self.scene_since = None;
@@ -1095,7 +1123,14 @@ impl App {
             self.scene_since = None;
             return None;
         };
-        let since = *self.scene_since.get_or_insert(clock);
+        // Drawn during the intro, it is there as the screen opens: shown
+        // whole at once, with no fade from the still background.
+        let first = if warm == Some((w, h)) {
+            clock - SCENE_FADE
+        } else {
+            clock
+        };
+        let since = *self.scene_since.get_or_insert(first);
         Some((frame, scene_alpha(clock - since)))
     }
 
@@ -1669,6 +1704,7 @@ impl App {
             }
         }
         let (w, h) = (c.w, c.h);
+        self.scene_warm_up(w, h);
         let shown = self.intro.as_ref().and_then(Intro::showing);
         let Some((p, serial)) = shown else {
             c.px.fill(0);
@@ -7268,8 +7304,8 @@ mod tests {
             a.drawn_screen = Some(a.screen);
             a.menu_opened = a.menu_clock() - 5.0;
             a.main_focus = Focus::on(a.main_focus.item, a.menu_opened);
-            // The first frame has come: it starts to fade in, so this
-            // draw is still the still background.
+            // With no intro to wake it ahead, the first frame fades in
+            // as it comes: this draw is still the still background.
             a.scene_since = None;
             a.draw_menu(&mut c, &mut Vec::new());
             assert_eq!(scene.asks().last().map(|k| (k.0, k.1)), Some((w, h)));
@@ -7309,6 +7345,71 @@ mod tests {
         assert_eq!(count_of(&big.px, SCENE_COLOUR), 0);
         assert!(!a.scene_shown);
         assert_eq!(a.scene_since, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_intro_wakes_the_flythrough_so_the_start_screen_has_it_at_once() {
+        let dir = scratch("scene-intro");
+        let (mut a, _) = intro_app(&dir, intro::FakeSource::second());
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let source: Arc<dyn SceneSource> = scene.clone();
+        a.cfg.scene = Some(source);
+        let mut text = Text::none();
+        let (w, h) = (320, 180);
+        let mut c = Canvas::new(w, h);
+        let t0 = Instant::now();
+        // Nothing is asked before the intro's first draw.
+        a.tick(t0);
+        assert!(scene.asks().is_empty());
+        // Its first draw asks for the scene's first frame at the window's
+        // size, once; it isn't put to sleep while the movie plays, and
+        // isn't drawn under it.
+        for _ in 0..5 {
+            a.draw(&mut c, &mut text);
+            a.tick(t0);
+        }
+        assert_eq!(a.label(), "intro");
+        assert_eq!(scene.asks(), [(w, h, 0.0)]);
+        assert_eq!(scene.sleeps(), 0);
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        // A new size asks again, once.
+        let mut big = Canvas::new(400, 200);
+        a.draw(&mut big, &mut text);
+        a.draw(&mut big, &mut text);
+        assert_eq!(scene.asks().len(), 2);
+        assert_eq!(scene.asks()[1], (400, 200, 0.0));
+        a.draw(&mut c, &mut text);
+        assert_eq!(scene.asks().len(), 3);
+        // Skipped: the start screen's first draw has the scene whole
+        // behind it (no fade from the still background, so no framing
+        // showing through), from the loop's start.
+        a.input(Input::A);
+        assert_eq!(a.label(), "start");
+        a.tick(t0);
+        assert_eq!(scene.sleeps(), 0);
+        a.draw(&mut c, &mut text);
+        let n = count_of(&c.px, SCENE_COLOUR);
+        assert!(n > w * h / 2, "{n}");
+        assert!(a.scene_shown);
+        assert_eq!(scene.asks().last(), Some(&(w, h, 0.0)));
+        // A frame that only comes later (the window resized) fades in:
+        // its first draw is still the still background.
+        *scene.ready.lock().unwrap() = false;
+        a.draw(&mut big, &mut text);
+        *scene.ready.lock().unwrap() = true;
+        a.draw(&mut big, &mut text);
+        assert_eq!(count_of(&big.px, SCENE_COLOUR), 0);
+        assert!(a.scene_since.is_some());
+        // A scene that can't be drawn isn't asked for during the intro.
+        let (mut b, _) = intro_app(&dir, intro::FakeSource::second());
+        let failed = FakeScene::new(SCENE_COLOUR);
+        *failed.state.lock().unwrap() = SceneState::Failed("no GPU".into());
+        let source: Arc<dyn SceneSource> = failed.clone();
+        b.cfg.scene = Some(source);
+        b.draw(&mut c, &mut text);
+        assert_eq!(b.label(), "intro");
+        assert!(failed.asks().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

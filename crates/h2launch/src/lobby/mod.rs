@@ -261,8 +261,8 @@ fn intro_plan(
 /// menu even headless and on a software GPU (lavapipe, WARP: tests and
 /// checks); `off` leaves the still background.
 const SCENE_ENV: &str = "H2LOBBY_SCENE";
-/// `r,g,b,k` (or `r,g,b,k,s`): the flythrough's veil (`h2scene::Veil::parse`);
-/// `off` for none.
+/// `r,g,b,k`, `r,g,b,k,s` or `r,g,b,k,s,gain`: the flythrough's veil
+/// (`h2scene::Veil::parse`); `off` for none.
 const VEIL_ENV: &str = "H2LOBBY_VEIL";
 /// `60`: the window draws 60 frames a second while the flythrough shows.
 const SCENE_FPS_ENV: &str = "H2LOBBY_SCENE_FPS";
@@ -312,7 +312,7 @@ fn start_scene(
         Ok(v) if v.trim() == "off" => h2scene::Veil::NONE,
         Ok(v) => h2scene::Veil::parse(&v).unwrap_or_else(|| {
             log(&format!(
-                "scene: {VEIL_ENV}={v} isn't r,g,b,k or r,g,b,k,s; the usual veil"
+                "scene: {VEIL_ENV}={v} isn't r,g,b,k[,s[,gain]]; the usual veil"
             ));
             h2scene::Veil::menu()
         }),
