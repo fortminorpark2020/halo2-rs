@@ -58,11 +58,15 @@ pub struct Quad {
     pub wrap: [bool; 2],
 }
 
-/// Quads in the order they're drawn, for a window `size` pixels big.
+/// Quads in the order they're drawn, for a window `size` pixels big, and
+/// the lines of text drawn in them (`Painter::text`'s, each non-empty one
+/// drawn with some alpha, in order: what a test or the lobby's headless
+/// script reads, as it can't read the glyphs).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DrawList {
     pub size: [u32; 2],
     pub quads: Vec<Quad>,
+    pub texts: Vec<String>,
 }
 
 /// Where a backend finds a quad's pixels.
@@ -176,6 +180,7 @@ impl<'a> Painter<'a> {
             list: DrawList {
                 size: [space.size[0] as u32, space.size[1] as u32],
                 quads: Vec::new(),
+                texts: Vec::new(),
             },
             space,
             art,
@@ -405,7 +410,13 @@ impl<'a> Painter<'a> {
 
     /// A line of text in a box (UI units): across as its style says, its
     /// line (ascent and descent) centred down the box. Returns its width.
+    /// The line is kept in the list's `texts` when it isn't empty or
+    /// clear.
     pub fn text(&mut self, [l, t, r, b]: [f32; 4], style: TextStyle, text: &str) -> f32 {
+        let seen = style.color[3] > 0.0 || style.bottom.is_some_and(|c| c[3] > 0.0);
+        if !text.is_empty() && seen {
+            self.list.texts.push(text.to_string());
+        }
         let line = self.fonts.line(style.font, style.scale, text);
         let x = match style.justify {
             Justify::Left => l,
@@ -619,6 +630,19 @@ mod tests {
         };
         p.text([0.0, 20.0, 100.0, -10.0], right, "LI");
         assert_eq!(p.list().quads[1].rect[2], 800.0 + 99.0);
+    }
+
+    #[test]
+    fn the_list_keeps_the_lines_drawn() {
+        let fonts = Fonts::fallback();
+        let mut p = Painter::new(space(), &FlatArt, &fonts, 0.0);
+        let style = TextStyle::new(Font::Body, [1.0; 4], Justify::Left);
+        p.text([0.0, 20.0, 100.0, -10.0], style, "ONE");
+        // Empty, or clear: not drawn, so not kept.
+        p.text([0.0, 20.0, 100.0, -10.0], style, "");
+        p.text([0.0, 20.0, 100.0, -10.0], style.alpha(0.0), "HIDDEN");
+        p.text([0.0, 20.0, 100.0, -10.0], style.alpha(0.5), "TWO");
+        assert_eq!(p.finish().texts, ["ONE", "TWO"]);
     }
 
     #[test]

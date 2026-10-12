@@ -14,7 +14,8 @@
 use crate::anim::{Animation, ItemLook, Keyframe};
 use crate::art::{last_part, ArtSource};
 use crate::layout::{
-    self, BitmapWidget, Flat, ListLayout, MainMenuLayout, SkinLayout, StartLayout, TextWidget,
+    self, BitmapWidget, ChromeLayout, Flat, ListLayout, MainMenuLayout, SkinLayout, StartLayout,
+    TextWidget,
 };
 use crate::paint::Blend;
 use crate::text::Justify;
@@ -416,14 +417,116 @@ pub fn framing(ui: Option<&Ui>, sources: &mut Vec<String>) -> BitmapWidget {
     }
 }
 
+/// A box of the tags that can hold something: wider than it is nothing,
+/// and taller (a globals block that didn't read is all zeros).
+fn sensible([l, t, r, b]: [f32; 4]) -> bool {
+    r > l && t > b
+}
+
+/// What every screen after the main menu sits in (menu.md 1.3), from the
+/// tags (`ui`; none when they weren't read), noting where each piece came
+/// from: `game_shell_background`'s first pane (the framing and the track
+/// strips; in Vista's tags framing_center and 17 strips, 16 of them
+/// scrolling), split into the pictures that scroll and those that don't;
+/// the globals' header and legend boxes by size, the header fonts and
+/// the text colour; and the overlay colour. Each piece the tags lack keeps
+/// the built-in one (`ChromeLayout::default`).
+///
+/// Every bitmap of Vista's shell has the globals' first animation as its
+/// intro (sliding in from the right): the chrome is drawn settled
+/// (`chrome`), so only scrolling decides which list a picture goes in.
+pub fn chrome(ui: Option<&Ui>, sources: &mut Vec<String>) -> ChromeLayout {
+    let mut out = ChromeLayout::default();
+    let found = pane(ui, BACKGROUND);
+    match (&found, ui.map(|ui| &ui.globals)) {
+        (Ok((s, p)), Some(g)) => {
+            let mut built_in = layout::shell_art();
+            built_in.push(layout::framing());
+            let art = bitmaps(p, g, &built_in);
+            if art.is_empty() {
+                let why = format!("{} names no bitmaps", s.name);
+                note(sources, format!("the shell's pictures: built-in ({why})"));
+            } else {
+                let (moving, still): (Vec<_>, Vec<_>) = art
+                    .into_iter()
+                    .partition(|w| w.wraps_per_second.iter().any(|&v| v != 0.0));
+                note(
+                    sources,
+                    format!(
+                        "the shell's pictures from wgit {}: {} still, {} scrolling",
+                        s.name,
+                        still.len(),
+                        moving.len()
+                    ),
+                );
+                out.still = still;
+                out.moving = moving;
+            }
+        }
+        (Err(why), _) => note(sources, format!("the shell's pictures: built-in ({why})")),
+        // A pane is found only in tags that were read.
+        (Ok(_), None) => {}
+    }
+    let Some(g) = ui.map(|ui| &ui.globals) else {
+        note(
+            sources,
+            "headers, button legends and the overlay: built-in (no UI tags were read)".to_string(),
+        );
+        return out;
+    };
+    let mut boxes = 0;
+    for k in 0..4 {
+        let header = bounds(g.header_bounds[k]);
+        if sensible(header) {
+            out.headers[k].bounds = header;
+            out.headers[k].font = g.header_fonts[k];
+            boxes += 1;
+        }
+        let legend = bounds(g.button_key_bounds[k]);
+        if sensible(legend) {
+            out.legends[k].bounds = legend;
+            boxes += 1;
+        }
+    }
+    let colour = g.text_color.map(|c| finite(c, 0.0).clamp(0.0, 1.0));
+    let coloured = colour.iter().any(|&c| c > 0.0);
+    if coloured {
+        for t in out.headers.iter_mut().chain(out.legends.iter_mut()) {
+            t.color = colour;
+        }
+    }
+    let overlay = g.overlay_color.map(|c| finite(c, 0.0).clamp(0.0, 1.0));
+    let dims = overlay[3] > 0.0;
+    if dims {
+        out.overlay = overlay;
+    }
+    let built_in = |read: bool| if read { "the globals" } else { "built-in" };
+    note(
+        sources,
+        format!(
+            "headers and button legends: {boxes} of 8 boxes from the globals, the text colour \
+             from {}, the overlay from {}",
+            built_in(coloured),
+            built_in(dims)
+        ),
+    );
+    out
+}
+
 /// Every bitmap (name and frame) the layouts draw.
-pub fn wanted(start: &StartLayout, main: &MainMenuLayout) -> Vec<(String, usize)> {
+pub fn wanted(
+    start: &StartLayout,
+    main: &MainMenuLayout,
+    chrome: &ChromeLayout,
+) -> Vec<(String, usize)> {
     start
         .art
         .iter()
         .chain(&main.art)
         .chain(&main.list.skin.bitmaps)
         .chain([&start.framing, &main.framing])
+        .chain(&chrome.still)
+        .chain(&chrome.moving)
         .map(|w| (w.name.clone(), w.frame))
         .collect()
 }
@@ -699,12 +802,130 @@ mod tests {
         assert!(sources[0].contains(BACKGROUND));
         let start = start_layout(Some(&ui), &mut Vec::new());
         let main = main_menu_layout(Some(&ui), &FlatArt, &mut Vec::new());
-        let names = wanted(&start, &main);
-        assert_eq!(names.len(), 2 + 1 + 2 + 2);
+        let shell = chrome(Some(&ui), &mut Vec::new());
+        let names = wanted(&start, &main, &shell);
+        // The start screen's, the main menu's, its skin's, the two
+        // framings, and the chrome's corner and framing.
+        assert_eq!(names.len(), 2 + 1 + 2 + 2 + 2);
+        assert!(names.contains(&("ui\\global_bitmaps\\corner".to_string(), 0)));
         assert!(names.contains(&("list_bkd_multiply".to_string(), 0)));
         assert_eq!(
             screen(&ui, MAIN_MENU).unwrap().name,
             "ui\\elsewhere\\main_menu"
         );
+    }
+
+    /// A game_shell_background of a framing, one strip that stays and two
+    /// that scroll (each with the globals' first animation as its intro,
+    /// as Vista's have), and globals with boxes, fonts and colours.
+    fn shell_menus() -> Ui {
+        let mut ui = menus();
+        let g = &mut ui.globals;
+        let rect = |[top, left, bottom, right]: [i16; 4]| Rect {
+            top,
+            left,
+            bottom,
+            right,
+        };
+        g.header_bounds = [
+            rect([560, -720, 520, 40]),
+            rect([390, -500, 310, 55]),
+            rect([158, -500, 73, 255]),
+            rect([182, -252, 142, 350]),
+        ];
+        g.button_key_bounds = [
+            rect([-500, 100, -540, 730]),
+            rect([-354, 0, -394, 535]),
+            rect([-225, -400, -270, 480]),
+            // One that didn't read: the built-in box stays.
+            rect([0, 0, 0, 0]),
+        ];
+        g.header_fonts = [Font::Title, Font::LargeBody, Font::Body, Font::Body];
+        g.text_color = [0.5, 0.6, 0.7];
+        g.overlay_color = [0.0, 0.1, 0.2, 0.8];
+        let strip = |name: &str, y: i16, wraps: f32| {
+            let mut b = tag_bitmap(name, [-1100, y]);
+            b.scale = [1.1, 1.1];
+            b.wraps_per_second = [wraps, 0.0];
+            b.depth = 11;
+            b.animation = Some(1);
+            b
+        };
+        let mut framing = tag_bitmap("ui\\global_bitmaps\\framing_center", [-1070, 654]);
+        framing.scale = [1.078, 1.078];
+        framing.depth = 10;
+        framing.animation = Some(1);
+        let k = ui
+            .screens
+            .iter()
+            .position(|s| s.name == BACKGROUND)
+            .unwrap();
+        ui.screens[k].panes[0] = Pane {
+            bitmaps: vec![
+                framing,
+                strip("ui\\global_bitmaps\\track5", 136, 0.08),
+                strip("ui\\global_bitmaps\\track7a", -284, 0.0),
+                strip("ui\\global_bitmaps\\track7c", 475, 0.15),
+            ],
+            ..Pane::default()
+        };
+        ui
+    }
+
+    #[test]
+    fn the_chrome_splits_the_shell_into_still_and_moving_pictures() {
+        let ui = shell_menus();
+        let mut sources = Vec::new();
+        let c = chrome(Some(&ui), &mut sources);
+        let names = |ws: &[BitmapWidget]| {
+            ws.iter()
+                .map(|w| last_part(&w.name).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&c.still), ["framing_center", "track7a"]);
+        assert_eq!(names(&c.moving), ["track5", "track7c"]);
+        assert_eq!(c.moving[1].wraps_per_second, [0.15, 0.0]);
+        assert_eq!(
+            (c.still[0].corner, c.still[0].depth),
+            ([-1070.0, 654.0], 10)
+        );
+        assert!(c.still[0].intro.is_some(), "read, though drawn settled");
+        // The track keeps its flat shape for when its picture is missing.
+        assert!(matches!(c.moving[0].flat, Flat::Track { .. }));
+        // The globals' boxes, fonts and colours.
+        assert_eq!(c.headers[0].bounds, [-720.0, 560.0, 40.0, 520.0]);
+        assert_eq!(c.headers[1].font, Font::LargeBody);
+        assert_eq!(c.legends[2].bounds, [-400.0, -225.0, 480.0, -270.0]);
+        assert_eq!(c.legends[3].bounds, layout::LEGEND_BOUNDS[3]);
+        assert!(c.headers.iter().all(|h| h.color == [0.5, 0.6, 0.7]));
+        assert_eq!(c.legends[0].color, [0.5, 0.6, 0.7]);
+        assert_eq!(c.overlay, [0.0, 0.1, 0.2, 0.8]);
+        assert!(sources.iter().all(|l| l.starts_with("menus: ")));
+        assert!(sources[0].contains("2 still, 2 scrolling"), "{sources:?}");
+        assert!(sources[1].contains("7 of 8 boxes"), "{sources:?}");
+        assert!(!sources.join("\n").contains("built-in"), "{sources:?}");
+    }
+
+    #[test]
+    fn a_chrome_without_tags_is_the_built_in_one() {
+        let mut sources = Vec::new();
+        assert_eq!(chrome(None, &mut sources), ChromeLayout::default());
+        assert!(
+            sources.iter().all(|l| l.contains("built-in")),
+            "{sources:?}"
+        );
+        // Tags without a shell background, and globals that didn't read:
+        // the built-in pictures and boxes.
+        let mut ui = menus();
+        ui.screens.retain(|s| s.name != BACKGROUND);
+        ui.globals = Globals::default();
+        let mut sources = Vec::new();
+        assert_eq!(chrome(Some(&ui), &mut sources), ChromeLayout::default());
+        assert!(
+            sources[0].contains("no game_shell_background screen"),
+            "{sources:?}"
+        );
+        assert!(sources[1].contains("0 of 8 boxes"), "{sources:?}");
+        assert!(sources[1].contains("colour from built-in"), "{sources:?}");
     }
 }

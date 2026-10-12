@@ -1,7 +1,9 @@
-//! Draws the start screen and the main menu on the CPU and writes them as
-//! PNGs, at 1920x1080 and 1280x720, printing how long a frame takes: the
-//! still background is drawn once (its time printed apart) and copied in
-//! under each frame, as a caller keeps it (`cpu::Kept`).
+//! Draws the start screen, the main menu and the shell of the screens
+//! after it (`shell-*.png`: the chrome with the header PREGAME LOBBY and
+//! the legend A SELECT, B BACK) on the CPU and writes them as PNGs, at
+//! 1920x1080 and 1280x720, printing how long a frame takes: the still
+//! background is drawn once (its time printed apart) and copied in under
+//! each frame, as a caller keeps it (`cpu::Kept`).
 //!
 //! ```text
 //! cargo run --release -p h2ui --example menu_png -- <out dir> [<fonts dir>]
@@ -22,9 +24,12 @@
 
 use h2ui::anim::Focus;
 use h2ui::art::{ArtImage, ArtSource, Bitmap, FlatArt, MemoryArt, Sequence};
+use h2ui::chrome;
 use h2ui::cpu::Kept;
-use h2ui::layout::{self, MainMenuLayout, Space, StartLayout};
-use h2ui::paint::{DrawList, Resources};
+use h2ui::layout::{
+    self, ChromeLayout, DialogSize, Face, LegendItem, MainMenuLayout, Space, StartLayout,
+};
+use h2ui::paint::{DrawList, Painter, Resources};
 use h2ui::screens::{self, Backdrop, MainMenu, Start};
 use h2ui::shell::Shell;
 use h2ui::text::Fonts;
@@ -91,11 +96,12 @@ fn fonts_beside(map: &Path) -> Option<PathBuf> {
     .find(|d| d.is_dir())
 }
 
-/// One way to draw both screens: its name, layouts and pictures.
+/// One way to draw the screens: its name, layouts and pictures.
 struct Look<'a> {
     name: &'static str,
     start: &'a StartLayout,
     main: &'a MainMenuLayout,
+    chrome: &'a ChromeLayout,
     art: &'a dyn ArtSource,
 }
 
@@ -132,17 +138,20 @@ fn main() {
     let standin = standin_art();
     let start_layout = StartLayout::default();
     let main_layout = MainMenuLayout::default();
+    let chrome_layout = ChromeLayout::default();
     let mut looks = vec![
         Look {
             name: "flat",
             start: &start_layout,
             main: &main_layout,
+            chrome: &chrome_layout,
             art: &FlatArt,
         },
         Look {
             name: "standin",
             start: &start_layout,
             main: &main_layout,
+            chrome: &chrome_layout,
             art: &standin,
         },
     ];
@@ -152,10 +161,15 @@ fn main() {
                 name,
                 start: &s.start,
                 main: &s.main,
+                chrome: &s.chrome,
                 art: s.art(),
             });
         }
     }
+    let legend = [
+        LegendItem::new(Face::A, "SELECT"),
+        LegendItem::new(Face::B, "BACK"),
+    ];
     let rows = ["ONLINE", "SPLIT SCREEN", "SETTINGS"];
     for (w, h) in [(1920u32, 1080u32), (1280, 720)] {
         let space = Space::new(w, h);
@@ -180,18 +194,35 @@ fn main() {
                 };
                 screens::main_menu(clock, &m, art, &fonts, space)
             };
+            let c = look.chrome;
+            let shell = |clock: f64| {
+                let mut list = chrome::moving(clock, c, art, &fonts, space);
+                let mut p = Painter::new(space, art, &fonts, clock);
+                chrome::header(&mut p, c, DialogSize::Full, "PREGAME LOBBY");
+                chrome::legend(&mut p, c, DialogSize::Full, &legend, false);
+                let over = p.finish();
+                list.quads.extend(over.quads);
+                list.texts.extend(over.texts);
+                list
+            };
             let res = Resources { art, fonts: &fonts };
             let framing = &look.main.framing;
             let background = |clock: f64| {
                 screens::background(clock, Backdrop::Still, framing, art, &fonts, space)
             };
+            let behind_shell = |clock: f64| chrome::still(clock, c, art, &fonts, space);
             let look = look.name;
-            for (name, build) in [
-                ("start", &start as &dyn Fn(f64) -> DrawList),
-                ("main", &main),
+            for (name, build, behind) in [
+                (
+                    "start",
+                    &start as &dyn Fn(f64) -> DrawList,
+                    &background as &dyn Fn(f64) -> DrawList,
+                ),
+                ("main", &main, &background),
+                ("shell", &shell, &behind_shell),
             ] {
                 let file = out.join(format!("{name}-{look}-{w}x{h}.png"));
-                let t = time(&background, build, w, h, &res);
+                let t = time(behind, build, w, h, &res);
                 if let Err(e) = save(&file, &t.px, w, h) {
                     eprintln!("{}: {e}", file.display());
                     std::process::exit(1);

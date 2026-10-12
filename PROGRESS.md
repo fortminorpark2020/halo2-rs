@@ -1,9 +1,10 @@
 # Progress and handoff
 
-Last updated 2026-10-12 (menu 2.5: the flythrough behind the start
-screen and main menu, and its review fixes, round 1; before it 2.4, the
-menu scene as data in the new `crates/h2scene`, and its review fixes,
-rounds 1 and 2; P3 passed). Any assistant that works on the
+Last updated 2026-10-12 (menu 2.6: Halo 2's shell, header and button
+legend on every lobby screen after the main menu, legends by the device
+used last, the stick at 90% and held directions repeating; before it
+2.5, the flythrough behind the start screen and main menu, and its
+review fixes; P3 passed). Any assistant that works on the
 project should update this file before it stops, so the next one can pick
 up. Read AGENTS.md first for the rules.
 
@@ -255,8 +256,29 @@ Next, in order:
    most about 9 ms a frame on the UI thread), nothing on the lobby's GPU
    during a playlist match or custom game, the still background with
    `H2LOBBY_VISTA=off`, `H2LOBBY_SCENE=off` or the forced failure
-   `WGPU_BACKEND=metal`). Next: 2.6, Halo 2's shell on every lobby
-   screen.
+   `WGPU_BACKEND=metal`). 2.6 is done (2026-10-12; menu.md "What Phase
+   2.6 built"): every screen after the main menu sits in Halo 2's shell,
+   drawn by `h2ui` (`chrome.rs`, `tags::chrome`) from the same
+   mainmenu.map as the menus: the navy framing kept once per window
+   size, its 16 track strips scrolling every frame, the screen's name as
+   Halo 2's header at the top left and its A, B, X and Y as Halo 2's
+   button legend at the bottom right (clickable; LB and RB still work
+   but aren't shown), with who is signed in on one small line at the
+   top right. The lobby's body is unchanged for now (each screen is
+   restyled later), drawn by `lobby/app/shell.rs`'s order: still layer,
+   strips, body, header and legend, then the popups and notices. The
+   legend shows the pad's buttons after a pad (from the start) and key
+   names (ENTER, ESC) after a key, click or the wheel. The stick counts
+   past 90% (was 60%) and a held d-pad or stick direction repeats after
+   250 ms (an estimate) and every 250 ms. Departure from the brief:
+   every picture of the shell has an intro in Vista's tags, so the still
+   and moving split is by scrolling alone and the pictures are drawn
+   settled (no slide-in yet). In the container a shell screen takes
+   about 5 ms a frame at 1280x720 with Cartographer's shell; on the
+   owner's PC: the list after "What Phase 2.6 built" (every screen in
+   the shell, the legend switching between the pad and the keys, a held
+   d-pad repeating, at most about 10 ms a frame at 1080p, every flow
+   working). Next: 2.7, `h2ui` drawing any screen from its tags.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

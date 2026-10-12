@@ -100,7 +100,20 @@ install. No game files are included in this repository.
   `intro = off` in `lobby.txt` (or `H2LOBBY_INTRO=off`) goes straight to
   the start screen. On Windows N without the Media Feature
   Pack it can't be played, and the start screen comes at once (the
-  launcher itself still starts). ONLINE
+  launcher itself still starts). Every screen after the main menu sits in
+  Halo 2's own frame: the navy background with its bands at the top and
+  bottom and thin lines scrolling slowly across it, the screen's name at
+  the top left, and the buttons it takes at the bottom right (such as
+  A SELECT and B BACK). Those show the controller's buttons after you
+  used a controller (how it starts) and the keys, such as ENTER and ESC,
+  after you used the keyboard or the mouse; click one to press it. LB
+  and RB still open the service record and the friends list but aren't
+  listed there. Who you are signed in as, your level, how many are
+  online and the server's ping are on a small line at the top right. On
+  a controller the stick now counts only when pushed nearly all the way
+  (as in Halo 2's menus), and holding the d-pad or the stick moves again
+  every quarter second. The screens' insides still have the launcher's
+  own look for now. ONLINE
   takes you to its lobby: pick a gamertag the first time (after that it
   signs you in by itself), form a party (the sign-in screen offers the
   project's server, h2.mohnjorrow.com, by default), search a playlist,

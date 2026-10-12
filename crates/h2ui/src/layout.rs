@@ -165,9 +165,90 @@ pub const LEGENDS: [(&str, &str); 3] = [
     ("a_select_b_cancel", "\u{e100} SELECT \u{e101} CANCEL"),
 ];
 
+/// A controller button in a button legend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Face {
+    A,
+    B,
+    X,
+    Y,
+    Lb,
+    Rb,
+    Start,
+    Back,
+    White,
+    Black,
+}
+
+impl Face {
+    /// The six with a glyph in Halo 2's fonts, by code point.
+    const GLYPHS: [(Face, char); 6] = [
+        (Face::A, '\u{e100}'),
+        (Face::B, '\u{e101}'),
+        (Face::X, '\u{e102}'),
+        (Face::Y, '\u{e103}'),
+        (Face::Black, '\u{e104}'),
+        (Face::White, '\u{e105}'),
+    ];
+
+    /// The face a glyph of Halo 2's fonts shows.
+    pub fn of_glyph(c: char) -> Option<Face> {
+        Face::GLYPHS.iter().find(|g| g.1 == c).map(|g| g.0)
+    }
+
+    /// What a legend shows for it after the pad was used: its glyph in
+    /// Halo 2's fonts (U+E100 A, U+E101 B, U+E102 X, U+E103 Y, U+E104
+    /// Black, U+E105 White; the built-in font draws them as coloured
+    /// discs), or its name for the four that have none.
+    pub fn glyph(self) -> String {
+        match Face::GLYPHS.iter().find(|g| g.0 == self) {
+            Some(g) => g.1.to_string(),
+            None => match self {
+                Face::Lb => "LB",
+                Face::Rb => "RB",
+                Face::Start => "START",
+                _ => "BACK",
+            }
+            .to_string(),
+        }
+    }
+}
+
+/// The key that does what `face` does in the lobby, as a legend names it
+/// after the keyboard was used (Vista's keyboard legends are mangled in
+/// the tags, so these are built here): Enter is A and Start, Esc B and
+/// Back, X and Y the letters, Q and E the bumpers. White and Black have
+/// no key: none.
+pub fn key_name(face: Face) -> &'static str {
+    match face {
+        Face::A | Face::Start => "ENTER",
+        Face::B | Face::Back => "ESC",
+        Face::X => "X",
+        Face::Y => "Y",
+        Face::Lb => "Q",
+        Face::Rb => "E",
+        Face::White | Face::Black => "",
+    }
+}
+
+/// One button of a legend and what it does ("SELECT").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegendItem {
+    pub face: Face,
+    pub label: String,
+}
+
+impl LegendItem {
+    pub fn new(face: Face, label: &str) -> LegendItem {
+        LegendItem {
+            face,
+            label: label.to_string(),
+        }
+    }
+}
+
 /// A legend by name, with the keys that do what its buttons do when the
-/// keyboard was used last (Vista's keyboard legends are mangled in the
-/// tags, so these are built here).
+/// keyboard was used last (`key_name`).
 pub fn legend(name: &str, keyboard: bool) -> Option<String> {
     let line = LEGENDS.iter().find(|l| l.0 == name)?.1;
     if !keyboard {
@@ -175,10 +256,10 @@ pub fn legend(name: &str, keyboard: bool) -> Option<String> {
     }
     let mut keys = String::new();
     for word in line.split(' ') {
-        let key = match word {
-            "\u{e100}" => "ENTER",
-            "\u{e101}" => "ESC",
-            w => w,
+        let mut glyph = word.chars();
+        let key = match (glyph.next().and_then(Face::of_glyph), glyph.next()) {
+            (Some(face), None) => key_name(face),
+            _ => word,
         };
         if !keys.is_empty() {
             keys.push_str(if key != word { "   " } else { " " });
@@ -722,6 +803,56 @@ impl Default for MainMenuLayout {
     }
 }
 
+/// What every screen after the main menu sits in (menu.md 1.3): the
+/// framing and track strips behind it (`game_shell_background`), the
+/// header at its top left and the button legend at its bottom right, by
+/// the screen's size (`DialogSize`), and the overlay that dims what is
+/// behind a dialog. Drawn by `chrome`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChromeLayout {
+    /// The pictures that don't move, kept and copied in under each frame
+    /// (`chrome::still`), and the ones that scroll, drawn every frame
+    /// (`chrome::moving`).
+    pub still: Vec<BitmapWidget>,
+    pub moving: Vec<BitmapWidget>,
+    /// By `DialogSize`: the header's box, font and colour, and the
+    /// legend's.
+    pub headers: [TextWidget; 4],
+    pub legends: [TextWidget; 4],
+    pub overlay: Rgba,
+}
+
+impl ChromeLayout {
+    /// The header of a screen of `size`.
+    pub fn header(&self, size: DialogSize) -> &TextWidget {
+        &self.headers[size as usize]
+    }
+
+    /// The button legend of a screen of `size`.
+    pub fn legend(&self, size: DialogSize) -> &TextWidget {
+        &self.legends[size as usize]
+    }
+}
+
+impl Default for ChromeLayout {
+    /// Without the tags: the framing alone (it draws nothing without its
+    /// picture, leaving the navy), the globals' boxes, the header in the
+    /// title font and the legend in the body font, both in the globals'
+    /// text colour, and the globals' overlay.
+    fn default() -> ChromeLayout {
+        let text = |bounds: [f32; 4], font: Font, justify: Justify| {
+            TextWidget::new(font, colour::HEADER, bounds, justify)
+        };
+        ChromeLayout {
+            still: vec![framing()],
+            moving: Vec::new(),
+            headers: HEADER_BOUNDS.map(|b| text(b, Font::Title, Justify::Left)),
+            legends: LEGEND_BOUNDS.map(|b| text(b, Font::Body, Justify::Right)),
+            overlay: colour::OVERLAY,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,6 +943,45 @@ mod tests {
         );
         assert_eq!(legend("a_select", true).unwrap(), "ENTER SELECT");
         assert!(legend("nope", false).is_none());
+        // Every face's key, and its glyph or name for the pad.
+        let keys = [
+            (Face::A, "ENTER", "\u{e100}"),
+            (Face::B, "ESC", "\u{e101}"),
+            (Face::X, "X", "\u{e102}"),
+            (Face::Y, "Y", "\u{e103}"),
+            (Face::Lb, "Q", "LB"),
+            (Face::Rb, "E", "RB"),
+            (Face::Start, "ENTER", "START"),
+            (Face::Back, "ESC", "BACK"),
+            (Face::White, "", "\u{e105}"),
+            (Face::Black, "", "\u{e104}"),
+        ];
+        for (face, key, glyph) in keys {
+            assert_eq!((key_name(face), face.glyph().as_str()), (key, glyph));
+        }
+        assert_eq!(Face::of_glyph('\u{e103}'), Some(Face::Y));
+        assert_eq!(Face::of_glyph('Y'), None);
+    }
+
+    #[test]
+    fn the_chromes_default_is_the_globals_boxes() {
+        let c = ChromeLayout::default();
+        assert_eq!(c.still, [framing()]);
+        assert!(c.moving.is_empty());
+        for size in [
+            DialogSize::Full,
+            DialogSize::Large,
+            DialogSize::Half,
+            DialogSize::Quarter,
+        ] {
+            let (h, l) = (c.header(size), c.legend(size));
+            assert_eq!(h.bounds, header_box(size));
+            assert_eq!((h.font, h.justify), (Font::Title, Justify::Left));
+            assert_eq!(l.bounds, legend_box(size));
+            assert_eq!((l.font, l.justify), (Font::Body, Justify::Right));
+            assert_eq!(h.color, colour::HEADER);
+        }
+        assert_eq!(c.overlay, colour::OVERLAY);
     }
 
     #[test]

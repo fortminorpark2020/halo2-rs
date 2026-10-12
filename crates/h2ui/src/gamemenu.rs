@@ -506,6 +506,7 @@ pub fn crop(list: &DrawList, [x, y, w, h]: [u32; 4]) -> DrawList {
     DrawList {
         size: [w, h],
         quads,
+        texts: list.texts.clone(),
     }
 }
 

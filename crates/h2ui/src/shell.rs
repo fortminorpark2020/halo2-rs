@@ -1,5 +1,5 @@
-//! The start screen and the main menu as the player's own mainmenu.map
-//! gives them: MCC's (cache format 13, with the shared.map and
+//! The start screen, the main menu and the chrome of the other screens
+//! (`chrome`) as the player's own mainmenu.map gives them: MCC's (cache format 13, with the shared.map and
 //! textures.dat beside it) or Halo 2 Vista's, read with
 //! `blam_cache::ui`. The layouts come from its UI tags (`tags`) and the
 //! pictures from its bitmaps (`art::read`); whatever can't be read keeps
@@ -8,16 +8,18 @@
 //! lobby logs where its rank icons came from.
 
 use crate::art::{self, last_part, ArtSource, FlatArt, MemoryArt};
-use crate::layout::{MainMenuLayout, StartLayout};
+use crate::layout::{ChromeLayout, MainMenuLayout, StartLayout};
 use crate::tags;
 use blam_cache::ui::{Menus, Pictures, Ui};
 use std::path::{Path, PathBuf};
 
-/// The start screen's and main menu's layouts and pictures.
+/// The start screen's and main menu's layouts, the chrome of the screens
+/// after them, and their pictures.
 #[derive(Debug, Default)]
 pub struct Shell {
     pub start: StartLayout,
     pub main: MainMenuLayout,
+    pub chrome: ChromeLayout,
     pub art: MemoryArt,
     /// Where each piece came from, a line each (what `open` logged).
     pub sources: Vec<String>,
@@ -79,7 +81,8 @@ impl Shell {
         let start = tags::start_layout(ui, &mut scratch);
         let mut main = tags::main_menu_layout(ui, &FlatArt, &mut scratch);
         main.framing = tags::framing(ui, &mut scratch);
-        let wanted = tags::wanted(&start, &main);
+        let chrome = tags::chrome(ui, &mut scratch);
+        let wanted = tags::wanted(&start, &main, &chrome);
         let mut found = Vec::new();
         let art = match pictures {
             Some(p) => {
@@ -98,10 +101,12 @@ impl Shell {
         let framing = tags::framing(ui, &mut sources);
         start.framing = framing.clone();
         main.framing = framing;
+        let chrome = tags::chrome(ui, &mut sources);
         sources.append(&mut found);
         Shell {
             start,
             main,
+            chrome,
             art,
             sources,
         }
@@ -394,6 +399,11 @@ mod tests {
         let f = &shell.main.framing;
         assert_eq!(f.corner, [-1070.0, 654.0]);
         assert!((f.scale()[0] - 1.08).abs() < 0.005);
+        // The chrome: the framing and one strip still, 16 scrolling, and
+        // the globals' full-size header box.
+        let c = &shell.chrome;
+        assert_eq!((c.still.len(), c.moving.len()), (2, 16));
+        assert_eq!(c.headers[0].bounds, [-730.0, 567.0, 50.0, 520.0]);
     }
 
     /// MCC's mainmenu.map in `H2_MCC_MAPS`.

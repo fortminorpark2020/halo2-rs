@@ -5,7 +5,8 @@
 //! `child`), the carnage report, the friends list and players' service
 //! records. Behind the start screen and main menu goes the main menu's
 //! flythrough when it can be drawn (`h2scene`, `Config::scene`), else a
-//! still background.
+//! still background; every screen after them sits in Halo 2's shell
+//! (`shell`): its background, header and button legend.
 //! Nothing here opens a window: `window`, or the headless loop in
 //! `mod.rs`, gives it input and time and shows what it draws.
 
@@ -42,6 +43,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+mod shell;
 
 /// How long the pregame lobby shows the match before the engine starts.
 const PREGAME: Duration = Duration::from_secs(5);
@@ -421,6 +424,14 @@ pub struct App {
     menu_opened: f64,
     /// The menus' still background, drawn once for a window size.
     backdrop: Kept<u32>,
+    /// The shell's still background behind the other screens
+    /// (`shell::draw_shell`), kept apart from the menus' so going between
+    /// the main menu and them never draws either again.
+    shell_backdrop: Kept<u32>,
+    /// The keyboard or the mouse was used last, not the controller: the
+    /// button legends name keys rather than show the pad's buttons. The
+    /// controller comes first, so it starts false.
+    keyboard: bool,
     /// The flythrough (`Config::scene`): how far into it the menus are
     /// (seconds; its clock runs only while the start screen or main menu
     /// is up), the menus' clock at its last step, when its first frame
@@ -682,6 +693,8 @@ impl App {
             drawn_screen: None,
             menu_opened: 0.0,
             backdrop: Kept::default(),
+            shell_backdrop: Kept::default(),
+            keyboard: false,
             scene_seconds: 0.0,
             scene_step: None,
             scene_since: None,
@@ -1734,6 +1747,7 @@ impl App {
                 blend: Blend::Plain,
                 wrap: [false; 2],
             }],
+            texts: Vec::new(),
         };
         self.intro_kept.draw(&list, &mut c.px, w, h, &MovieFrame(p));
         Some(new)
@@ -2037,13 +2051,29 @@ impl App {
     // ------------------------------------------------------------- input
 
     /// A key pressed in the lobby's window (the window's keyboard events
-    /// come here; clicks, the controller and the headless script's
-    /// presses go straight to `input`).
+    /// come here; the controller's go to `pad`, the wheel's to `wheel`,
+    /// clicks to `click`, and the headless script's presses straight to
+    /// `input`). The legends name keys from now on.
     pub fn key(&mut self, i: Input) {
+        self.keyboard = true;
         if self.keys_are_the_games(i, self.engine_running()) {
             return;
         }
         self.input(i)
+    }
+
+    /// A press from the controller: the legends show its buttons from now
+    /// on.
+    pub fn pad(&mut self, i: Input) {
+        self.keyboard = false;
+        self.input(i)
+    }
+
+    /// The mouse wheel turned a notch, up or down: a press of Up or Down,
+    /// and the legends name keys from now on.
+    pub fn wheel(&mut self, up: bool) {
+        self.keyboard = true;
+        self.input(if up { Input::Up } else { Input::Down })
     }
 
     /// A key the window repeats while it's held down: the arrows and
@@ -2842,7 +2872,9 @@ impl App {
     }
 
     /// A click at window pixel (`x`, `y`), with its sound (`sounding`).
+    /// The legends name keys from now on.
     pub fn click(&mut self, x: f32, y: f32) {
+        self.keyboard = true;
         self.sounding(|a| a.click_inner(x, y));
     }
 
@@ -3022,9 +3054,12 @@ impl App {
         }
     }
 
-    /// Draw the screen into `c`. The first frames on each screen at each
-    /// window size are timed for the log (`time_frame`): the whole draw
-    /// here, the start screen's and main menu's in `draw_menu`.
+    /// Draw the screen into `c`: the intro, the start screen or main menu
+    /// (`draw_menu`), or another screen in Halo 2's shell (`draw_shell`);
+    /// then over it the popups and notices (`draw_over`). The first frames
+    /// on each screen at each window size are timed for the log
+    /// (`time_frame`): the whole draw here, the start screen's and main
+    /// menu's in `draw_menu`.
     pub fn draw(&mut self, c: &mut Canvas, t: &mut Text) {
         let started = Instant::now();
         let intro = match self.screen {
@@ -3053,15 +3088,15 @@ impl App {
             }
         }
         let menus = self.on_menus();
+        let mut areas = Vec::new();
+        // A frame whose still background was drawn afresh isn't timed.
+        let mut timed = true;
         if menus {
-            // Halo 2's own screen in place of the lobby's chrome.
+            // Halo 2's own screen.
             self.draw_menu(c, &mut drawn);
         } else {
-            c.gradient(0.0, 0.0, w, h, BG_TOP, BG_BOTTOM);
-            c.fill(0.0, 0.0, w, oy + 88.0 * s, Color::rgb(0).alpha(90));
-            c.fill(0.0, oy + 88.0 * s, w, (2.0 * s).max(1.0), EDGE.alpha(120));
+            timed = self.draw_shell(c, t, (s, ox, oy), &mut areas, &mut drawn);
         }
-        let mut areas = Vec::new();
         let ranks = self.cfg.ranks.clone();
         let mut p = Pen {
             c,
@@ -3073,14 +3108,15 @@ impl App {
             top: false,
             ranks: ranks.as_deref(),
             drawn: &mut drawn,
+            legend: Vec::new(),
         };
-        self.draw_screen(&mut p);
+        self.draw_over(&mut p);
         self.areas = areas;
         self.drawn = drawn;
         self.view = (s, ox, oy);
         if !menus {
             let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
-            self.time_frame((c.w, c.h), frame_ms, true, None);
+            self.time_frame((c.w, c.h), frame_ms, timed, None);
         }
     }
 
@@ -3310,30 +3346,11 @@ impl App {
         self.log(&line);
     }
 
-    fn draw_screen(&self, p: &mut Pen) {
-        let title = match self.screen {
-            // Halo 2's own screens have no title or header.
-            Screen::Intro | Screen::Start | Screen::Main => "",
-            Screen::SignIn => "SIGN IN",
-            Screen::Connecting => "SIGNING IN",
-            Screen::Live if self.searching() => "MATCHMAKING",
-            Screen::Live => "PLAYLISTS",
-            Screen::Players => "PLAYERS ONLINE",
-            Screen::Party => "PARTY",
-            Screen::Custom => "CUSTOM GAME",
-            Screen::Pregame => "PREGAME LOBBY",
-            Screen::InGame => "IN GAME",
-            Screen::Carnage => "CARNAGE REPORT",
-            Screen::Failed => "OFFLINE",
-            Screen::Record => "SERVICE RECORD",
-            Screen::Friends => "FRIENDS",
-            Screen::Settings => "CONTROLLER",
-        };
-        let menus = self.on_menus();
-        if !menus {
-            p.text(60.0, 58.0, 36.0, WHITE, Align::Left, title);
-            self.draw_header(p);
-        }
+    /// A screen's own part in the shell (between its header and legend):
+    /// who is signed in at the top right, then the screen's body. Its
+    /// button hints are gathered for the legend (`Pen::hints`).
+    fn draw_body(&self, p: &mut Pen) {
+        self.draw_status(p);
         match self.screen {
             // Drawn already (`draw_intro`, `draw_menu`).
             Screen::Intro | Screen::Start | Screen::Main => {}
@@ -3351,16 +3368,11 @@ impl App {
             Screen::Friends => self.draw_friends(p),
             Screen::Settings => self.draw_settings(p),
         }
-        if !menus {
-            p.text(
-                1220.0,
-                712.0,
-                14.5,
-                DIM,
-                Align::Right,
-                "Keyboard: Enter or Space = A, Esc or Backspace = B, X, Y, Q = LB, E = RB, arrows",
-            );
-        }
+    }
+
+    /// What goes over any screen: a popup or the party invitation, then
+    /// the notices.
+    fn draw_over(&self, p: &mut Pen) {
         if let Some(popup) = self.popup {
             match popup {
                 Popup::Quit => {
@@ -3412,33 +3424,28 @@ impl App {
         self.draw_toasts(p);
     }
 
-    fn draw_header(&self, p: &mut Pen) {
+    /// Who is signed in, on one small line at the top right, level with
+    /// the header: the highest level's icon, the gamertag, then the level,
+    /// how many are online and the server's round trip.
+    fn draw_status(&self, p: &mut Pen) {
         let Some(c) = &self.client else {
             return;
         };
         let Some(w) = &c.view.welcome else {
             return;
         };
-        let wd = p.text(1220.0, 44.0, 24.0, WHITE, Align::Right, &w.gamertag);
-        // The highest level's icon left of the gamertag (the line below
-        // has the number).
-        if p.has_icons() {
-            let x = 1220.0 - wd - 10.0;
-            p.level(
-                x,
-                44.0,
-                24.0,
-                WHITE,
-                Align::Right,
-                w.best.max(1),
-                Size::Small,
-            );
-        }
         let mut line = format!("Level {}  ·  {} online", w.best.max(1), c.view.online.len());
         if let Some(ms) = c.view.round_trip {
             line += &format!("  ·  {ms} ms");
         }
-        p.text(1220.0, 70.0, 16.0, DIM, Align::Right, &line);
+        let rest = p.text(1220.0, 44.0, 16.0, DIM, Align::Right, &line);
+        let x = 1220.0 - rest - 14.0;
+        let wd = p.text(x, 44.0, 18.0, WHITE, Align::Right, &w.gamertag);
+        if p.has_icons() {
+            let x = x - wd - 8.0;
+            let level = w.best.max(1);
+            p.level(x, 44.0, 18.0, WHITE, Align::Right, level, Size::Small);
+        }
     }
 
     fn draw_sign_in(&self, p: &mut Pen) {
@@ -4622,8 +4629,8 @@ impl App {
     }
 
     /// The notices, newest at the bottom, stacked up from just above the
-    /// button hints and clear of every popup's box (the lowest ends at
-    /// y 520), so none is hidden behind one.
+    /// shell's button legend and clear of every popup's box (the lowest
+    /// ends at y 520), so none is hidden behind one.
     fn draw_toasts(&self, p: &mut Pen) {
         for (k, (text, _)) in self.toasts.iter().rev().enumerate() {
             let top = toast_top(k);
@@ -4644,10 +4651,6 @@ impl App {
 /// A notice's height, in layout units.
 const TOAST_H: f32 = 40.0;
 
-/// The top of the `k`th notice up from the newest (layout units): the
-/// newest ends at y 652, above the button hints (from about 656), and the
-/// third starts at y 524, below the lowest popup's box (the friend options
-/// popup ends at 520).
 /// The intro's picture showing, as the only texture of its draw list
 /// (`App::draw_intro`).
 struct MovieFrame<'a>(&'a intro::Picture);
@@ -4664,6 +4667,10 @@ impl Textures for MovieFrame<'_> {
     }
 }
 
+/// The top of the `k`th notice up from the newest (layout units): the
+/// newest ends at y 652, above the shell's button legend (from 660), and
+/// the third starts at y 524, below the lowest popup's box (the friend
+/// options popup ends at 520).
 fn toast_top(k: usize) -> f32 {
     612.0 - k as f32 * 44.0
 }
@@ -4729,8 +4736,6 @@ fn first_row(sel: usize, len: usize, rows: usize) -> usize {
     }
 }
 
-const BG_TOP: Color = Color::rgb(0x0B_2246);
-const BG_BOTTOM: Color = Color::rgb(0x02_0814);
 const PANEL: Color = Color::rgb(0x10_2A52).alpha(200);
 const EDGE: Color = Color::rgb(0x4F_86C6);
 const SEL: Color = Color::rgb(0x2F_6DB5);
@@ -4767,6 +4772,8 @@ struct Pen<'a> {
     ranks: Option<&'a RankIcons>,
     /// Every string drawn, for `App::drawn`.
     drawn: &'a mut Vec<String>,
+    /// The screen's button hints, for the shell's legend (`hints`).
+    legend: Vec<(Input, String)>,
 }
 
 impl Pen<'_> {
@@ -4963,9 +4970,17 @@ impl Pen<'_> {
         self.text(x, y + 6.5, 18.0, WHITE, Align::Center, letter);
     }
 
-    /// Button hints along the bottom, from the left.
+    /// The screen's button hints, for the shell's legend at the bottom
+    /// right (`App::draw_shell`), which draws them: A, B, X and Y, their
+    /// words in capitals as Halo 2's legends are. LB and RB still work
+    /// (the service record and the friends list) but are PC extras and
+    /// stay off it (menu.md 1.2).
     fn hints(&mut self, hints: &[(Input, &str)]) {
-        self.hint_row(hints, 60.0, 680.0);
+        for &(i, label) in hints {
+            if matches!(i, Input::A | Input::B | Input::X | Input::Y) {
+                self.legend.push((i, label.to_uppercase()));
+            }
+        }
     }
 
     fn hint_row(&mut self, hints: &[(Input, &str)], mut x: f32, y: f32) {
@@ -5011,6 +5026,7 @@ impl Pen<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use h2ui::layout::DialogSize;
     use std::sync::Mutex;
 
     fn app(folder: &std::path::Path) -> App {
@@ -5491,7 +5507,8 @@ mod tests {
         a.click(ox + (arrow.x + 5.0) * s, oy + (arrow.y + 5.0) * s);
         assert_eq!(a.srow, BUTTONS_ROW);
         assert_eq!(a.settings.controls.buttons, before.next(true));
-        // Every row and its arrows are on the panel, above the help line.
+        // Every row and its arrows are on the panel, above the help line
+        // and the shell's legend.
         let last = a
             .areas
             .iter()
@@ -5499,6 +5516,8 @@ mod tests {
             .copied()
             .unwrap();
         assert!(last.y + last.h <= 600.0, "{}", last.y + last.h);
+        let back = a.areas.iter().find(|ar| ar.hit == Hit::Press(Input::B));
+        assert!(back.is_some_and(|b| b.y >= legend_top() - 0.5 && b.y >= last.y + last.h));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5545,19 +5564,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `rgb` (0 to 1) as the canvas's pixel.
+    fn pixel([r, g, b]: [f32; 3]) -> u32 {
+        let c = |v: f32| (v * 255.0).round() as u32;
+        (c(r) << 16) | (c(g) << 8) | c(b)
+    }
+
+    /// The pixels of `c` within 3 of `want` in each of red, green and blue.
+    fn pixels_like(c: &Canvas, want: u32) -> Vec<(f32, f32)> {
+        let near = |p: u32| {
+            (0..3).all(|k| ((p >> (8 * k)) & 0xFF).abs_diff((want >> (8 * k)) & 0xFF) <= 3)
+        };
+        let mut found = Vec::new();
+        for (k, &p) in c.px.iter().enumerate() {
+            if near(p) {
+                found.push(((k % c.w) as f32 + 0.5, (k / c.w) as f32 + 0.5));
+            }
+        }
+        found
+    }
+
+    /// The shell legend's top edge, in layout units (at 16:9 they are the
+    /// window's pixels at 1280 by 720).
+    fn legend_top() -> f32 {
+        let space = Space::new(1280, 720);
+        space.rect(h2ui::layout::legend_box(DialogSize::Full))[1]
+    }
+
     #[test]
     fn screens_draw_and_clicks_land_on_buttons() {
-        let Ok(mut text) = Text::system() else {
-            // No font on this system: nothing to draw with.
-            return;
-        };
+        // Without a font on this system the lobby's own words aren't
+        // drawn; the shell's header and legend are (h2ui's built-in font).
+        let mut text = Text::system().unwrap_or_else(|_| Text::none());
         let dir = scratch("draw");
         let mut a = app(&dir);
         to_online(&mut a);
+        assert_eq!(a.label(), "signin");
         let mut c = Canvas::new(640, 480);
         a.draw(&mut c, &mut text);
-        assert!(c.px.contains(&0xFF_FFFF), "the title is drawn");
-        // The B hint ("Back") sits last in the row along the bottom.
+        // Halo 2's header, in its colour, at the top left in its box.
+        let space = Space::new(640, 480);
+        let [x0, y0, x1, y1] = space.rect(h2ui::layout::header_box(DialogSize::Full));
+        let header = pixels_like(&c, pixel(h2ui::layout::colour::HEADER));
+        let inside = |&(x, y): &(f32, f32)| x >= x0 && x <= x1 && y >= y0 && y <= y1;
+        assert!(
+            header.iter().filter(|p| inside(p)).count() > 20,
+            "{header:?}"
+        );
+        assert!(a.drawn().iter().any(|d| d == "SIGN IN"));
+        // No lobby title or keyboard line any more.
+        assert!(a.drawn().iter().all(|d| !d.starts_with("Keyboard:")));
+        // The legend's B ("BACK") is last, at the bottom right in the
+        // legend's box, and a click on it goes back.
         let b = a
             .areas
             .iter()
@@ -5565,7 +5623,21 @@ mod tests {
             .copied()
             .unwrap();
         let (s, ox, oy) = a.view;
-        a.click(ox + (b.x + 5.0) * s, oy + (b.y + 5.0) * s);
+        let [l0, t0, r0, b0] = space.rect(h2ui::layout::legend_box(DialogSize::Full));
+        let (bx, by) = (ox + b.x * s, oy + b.y * s);
+        assert!(
+            (by - t0).abs() < 0.5 && (by + b.h * s - b0).abs() < 0.5,
+            "{b:?}"
+        );
+        assert!((bx + b.w * s - r0).abs() <= 1.0 && bx > l0, "{b:?}");
+        assert!(!b.top);
+        let legend: Vec<&String> = a.drawn().iter().skip_while(|d| *d != "SIGN IN").collect();
+        assert_eq!(
+            legend.last().map(|d| d.as_str()),
+            Some("BACK"),
+            "{legend:?}"
+        );
+        a.click(bx + 5.0, by + 5.0);
         assert_eq!(a.label(), "main");
         a.input(Input::B);
         a.input(Input::B);
@@ -5622,6 +5694,159 @@ mod tests {
         let back = arrow(&a, 0, false);
         a.click(ox + (back.x + 5.0) * s, oy + (back.y + 5.0) * s);
         assert_eq!((a.crow, a.cgame), (0, names::CUSTOM_GAMES.len() - 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_legend_names_the_device_used_last() {
+        let mut text = Text::none();
+        let dir = scratch("legend-device");
+        let mut a = app(&dir);
+        // The main menu's SETTINGS.
+        a.input(Input::A);
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        let mut c = Canvas::new(1280, 720);
+        let shows = |a: &App, s: &str| a.drawn().iter().any(|d| d == s);
+        // The controller comes first: its buttons' glyphs before any
+        // press.
+        a.draw(&mut c, &mut text);
+        assert!(!a.keyboard);
+        for s in ["\u{e100}", "CHANGE", "\u{e101}", "BACK"] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        assert!(!shows(&a, "ENTER"));
+        // A key: the keys' names.
+        a.key(Input::A);
+        a.draw(&mut c, &mut text);
+        for s in ["ENTER", "CHANGE", "ESC", "BACK"] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        assert!(!shows(&a, "\u{e100}"));
+        // The pad again: its buttons.
+        a.pad(Input::Down);
+        assert_eq!(a.srow, 1);
+        a.draw(&mut c, &mut text);
+        assert!(!shows(&a, "ENTER") && shows(&a, "\u{e100}"));
+        // The headless script's presses leave it as it was.
+        a.input(Input::Up);
+        assert!(!a.keyboard);
+        // A click or the wheel is the keyboard's side.
+        a.wheel(false);
+        assert!(a.keyboard);
+        assert_eq!(a.srow, 1);
+        a.pad(Input::Up);
+        a.click(1.0, 1.0);
+        assert!(a.keyboard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_playlists_legend_holds_its_buttons_and_presses_them() {
+        let mut text = Text::none();
+        let dir = scratch("legend-live");
+        let (mut a, _server) = live_app(&dir);
+        let mut c = Canvas::new(1280, 720);
+        a.draw(&mut c, &mut text);
+        let drawn = a.drawn().to_vec();
+        for s in ["PLAYLISTS", "PLAYERS", "BACK"] {
+            assert!(drawn.iter().any(|d| d == s), "{s:?} in {drawn:?}");
+        }
+        // The bumpers' shortcuts stay off it (they still work).
+        assert!(drawn.iter().all(
+            |d| !d.eq_ignore_ascii_case("service record") && !d.eq_ignore_ascii_case("friends")
+        ));
+        // Who is signed in, at the top right.
+        assert!(drawn.iter().any(|d| d == "ALPHA"));
+        assert!(drawn.iter().any(|d| d.starts_with("Level 3  ·  0 online")));
+        // With the invitation up, it alone takes clicks: the legend's
+        // B doesn't go back.
+        let area = |a: &App, i: Input| {
+            let hit = a.areas.iter().find(|ar| !ar.top && ar.hit == Hit::Press(i));
+            hit.copied().unwrap()
+        };
+        let (s, ox, oy) = a.view;
+        let click = |a: &mut App, ar: Area| a.click(ox + (ar.x + 3.0) * s, oy + (ar.y + 3.0) * s);
+        view(&mut a).invites.push((9, "BRAVO".into()));
+        a.draw(&mut c, &mut text);
+        let back = area(&a, Input::B);
+        click(&mut a, back);
+        assert_eq!(a.label(), "invite");
+        view(&mut a).invites.clear();
+        a.last_click = None;
+        // Without it, the legend's X opens the players online.
+        a.draw(&mut c, &mut text);
+        let players = area(&a, Input::X);
+        click(&mut a, players);
+        assert_eq!(a.label(), "players");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_shells_still_background_is_kept_while_its_strips_scroll() {
+        let mut text = Text::none();
+        let dir = scratch("shell-kept");
+        let mut menus = Menus::flat();
+        // A framing and one strip that scrolls, with stand-in pictures:
+        // the strip's columns differ so its scrolling shows.
+        let flat = |w: usize, h: usize| h2ui::art::ArtImage {
+            width: w,
+            height: h,
+            rgba: [40, 60, 120, 200].repeat(w * h),
+        };
+        let strip = h2ui::art::ArtImage {
+            width: 32,
+            height: 40,
+            rgba: (0..32 * 40)
+                .flat_map(|k| [(k % 32 * 8) as u8, 255, 0, 255])
+                .collect(),
+        };
+        let shell = &mut menus.shell;
+        shell.art.add_image(h2ui::layout::FRAMING, flat(64, 40));
+        shell.art.add_image("strip", strip);
+        shell.chrome.still = vec![BitmapWidget {
+            scale: [32.0, 32.0],
+            depth: 10,
+            ..BitmapWidget::new(h2ui::layout::FRAMING, h2ui::layout::FRAMING_CORNER)
+        }];
+        shell.chrome.moving = vec![BitmapWidget {
+            scale: [1.1, 1.1],
+            wraps_per_second: [0.08, 0.0],
+            depth: 11,
+            ..BitmapWidget::new("strip", [-200.0, 300.0])
+        }];
+        let mut a = app(&dir);
+        a.cfg.menus = Arc::new(menus);
+        a.input(Input::A);
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        let mut c = Canvas::new(1280, 720);
+        let timed = |a: &App| {
+            let f = a.menu_times.frames.iter().find(|f| f.name == "settings");
+            f.map_or(0, |f| f.frames)
+        };
+        // The first frame at a size draws the still background (and isn't
+        // timed); the next ones copy it in, so they are.
+        a.draw(&mut c, &mut text);
+        let first = c.px.clone();
+        a.clock -= Duration::from_secs(2);
+        a.draw(&mut c, &mut text);
+        assert_eq!(timed(&a), 1, "the kept background wasn't drawn again");
+        a.clock -= Duration::from_secs(2);
+        a.draw(&mut c, &mut text);
+        assert_eq!(timed(&a), 2);
+        // The strip moved, and nothing else: from 256 to 300 units up and
+        // 200 to 165 left of the middle (y 180 to 206 and x 520 to 541
+        // here).
+        let changed: Vec<usize> = (0..c.px.len()).filter(|&k| c.px[k] != first[k]).collect();
+        assert!(!changed.is_empty(), "the strip scrolls");
+        for k in changed {
+            let (x, y) = (k % 1280, k / 1280);
+            assert!((178..=208).contains(&y), "pixel {x}, {y} changed");
+            assert!((518..=543).contains(&x), "pixel {x}, {y} changed");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7021,9 +7246,10 @@ mod tests {
     #[test]
     fn notices_are_drawn_above_popups() {
         // Clear of every popup's box (the lowest ends at 520) and of the
-        // button hints along the bottom (from about 656).
+        // shell's legend at the bottom (from 660).
         assert!(toast_top(2) >= 520.0);
-        assert!(toast_top(0) + TOAST_H <= 656.0);
+        assert_eq!(legend_top(), 660.0);
+        assert!(toast_top(0) + TOAST_H <= legend_top());
         let Ok(mut text) = Text::system() else {
             return;
         };

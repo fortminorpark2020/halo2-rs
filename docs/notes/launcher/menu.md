@@ -132,7 +132,7 @@ The lobby's current keys move to Halo 2's:
 
 - A or Start selects; B or Back goes back.
 - The d-pad or the left stick moves. The stick counts only past about 90%
-  (H; the lobby uses 60% today). Holding repeats every 250 ms (H).
+  (H; the lobby used 60% until 2.6). Holding repeats every 250 ms (H).
 - X opens options (Y menu) or changes teams (lobby).
 - In the Y menu, LB and RB change tabs, and so do Left and Right. Halo 2's
   own choice isn't known (L).
@@ -159,8 +159,8 @@ stay as PC extras but leave the button legends.
   - After a keyboard key, the legend uses key names instead. Those legends
     are built in code, because Vista's keyboard variants are mangled in the
     tags.
-  - The lobby doesn't yet track whether a pad or the keyboard was used
-    last; 2.6 adds that (section 7, Phase 2's corrections).
+  - The lobby tracks whether a pad or the keyboard was used last since
+    2.6 ("What Phase 2.6 built").
 - **Transitions.** Fades of 250 ms. Pieces slide in from the right one after
   another over 180 to 320 ms, and slide out to the left when a screen
   closes.
@@ -936,7 +936,7 @@ later; the button layouts offered stay as they are.
 **Corrections to the sections above.**
 
 - 1.3 said the lobby tracks whether a pad or the keyboard was used last.
-  It doesn't; 2.6 adds that.
+  It didn't; 2.6 added it.
 - Phase 3 said A cancels the countdown for the leader. In the
   decompilation it is X, which cancels it for the leader and delays it
   for the others.
@@ -1854,6 +1854,179 @@ about 1080p (step 3).
   taskbar and its title bar, so it never logs exactly 1920x1080. The
   steps now note the size the log gives and judge the budget against
   1080p by the pixel count.
+
+#### What Phase 2.6 built (2026-10-12)
+
+Every screen after the main menu sits in Halo 2's shell (1.3): the navy
+framing with its track strips scrolling, the screen's name as Halo 2's
+header at the top left, and its buttons as Halo 2's button legend at the
+bottom right, drawn by `h2ui` around the lobby's own body (which each
+later sub-phase restyles). The legends follow the device used last, and
+the pad moves as in Halo 2's menus.
+
+- **`h2ui`.**
+  - `DrawList.texts`: each line `Painter::text` draws, unless it is empty
+    or wholly transparent, so a caller can tell what was shown.
+  - `layout::Face` (A, B, X, Y, LB, RB, Start, Back, White, Black):
+    `glyph` gives Halo 2's code point for the six its fonts have
+    (U+E100 to U+E105) and the name for the others; `key_name` gives
+    the key that does the same (A ENTER, B ESC, X X, Y Y, LB Q, RB E,
+    Start ENTER, Back ESC; none for White and Black), which `legend()`
+    now uses. `LegendItem` is a face and its words.
+  - `ChromeLayout`: the shell's still and moving pictures, a header and
+    a legend box for each dialog size, and the overlay colour. Its
+    default is the built-in numbers: the framing alone, `HEADER_BOUNDS`
+    in the title font, left-justified, `LEGEND_BOUNDS` in the body font,
+    right-justified, the header colour, and the overlay of 1.3.
+  - `tags::chrome`: pane 0 of `game_shell_background`'s pictures (the
+    framing and 17 strips at depth 11, scale 1.1, in Vista's), split by
+    their scrolling; the globals' header boxes, header fonts and text
+    colour, their button-key boxes for the legends, and their overlay.
+    A box that isn't one (right not past left, or top not above bottom)
+    keeps the built-in one; a colour of all zeros or a clear overlay
+    keeps the built-in one. Each gives a `menus:` line. `wanted()` now
+    asks for the shell's pictures too, and `Shell::chrome` is built in
+    both passes of `from_tags`, as the layouts are.
+  - `chrome.rs`: `still` (the navy gradient, then the still pictures by
+    depth), `moving` (the strips, scrolling through `Painter::bitmap`'s
+    wraps), `header` (one line in its box, cut to fit with "..."), and
+    `legend`, which lays its items on one line ending at the box's right
+    edge, goes on past its left when wider, shrinks to fit when wider
+    than the window (a margin of 2 % each side, our own), and returns
+    each button's part as a pixel box. After a pad each button is its
+    glyph, a space and its words, a space between buttons (as Halo 2's
+    legend strings space them); after the keyboard it is the key's name,
+    three spaces and its words, six spaces between keys (our own
+    spacing: Halo 2 had no keyboard legends).
+  - `examples/menu_png.rs` also writes `shell-<look>-<size>.png`: the
+    shell with the header PREGAME LOBBY and the legend A SELECT, B BACK.
+- **Departure from the brief: the split, and the intros.** The brief put
+  a picture with a nonzero `wraps_per_second` *or an intro* among the
+  moving ones. In Vista's tags all 18 pictures have an intro (the
+  globals' animation 0, their slide-in), so that rule would have left
+  nothing to keep and drawn the framing every frame. The split is by
+  scrolling alone (2 still: the framing and one strip that doesn't
+  scroll; 16 moving), and every picture is drawn settled, as it is once
+  its intro is over. How the shell comes in is left to the screen
+  transitions.
+- **The lobby** (`lobby/app/shell.rs`, a child module of `app.rs`, the
+  pattern the later screens follow). On every screen but the intro,
+  the start screen and the main menu, each frame is: the shell's still
+  layer through its own `Kept` (`shell_backdrop`, apart from the menus'
+  backdrop, so going between the main menu and the other screens draws
+  neither again); the strips, every frame; the screen's body by the
+  lobby's `Pen` (`draw_body`: the screen's match as before, and who is
+  signed in on one small line at the top right: the highest level's
+  icon, the gamertag, then the level, the number online and the round
+  trip, in place of the two lines that were there); the header
+  (`screen_title`, the titles the lobby had) and the legend at the full
+  size; then a second `Pen` for the popups, the invitation and the
+  notices (`draw_over`, also run over the start screen and main menu).
+  The gradient, the dark top band, its edge line, the lobby's own title
+  and the "Keyboard: ..." line are gone. `Pen::hints` no longer draws:
+  it gathers A, B, X and Y (in capitals) for the legend; LB and RB keep
+  working but stay off it (1.2). A popup's own buttons are still drawn
+  by `hint_row`. Each legend button's pixel box becomes a click area
+  for its press under any popup's (so a popup alone takes clicks), and
+  the header's and legend's words go into `drawn` for the scripts'
+  `see`, which is case-blind, so no flow changed. The notices end above
+  the legend (y 652, the legend from 660).
+- **The device flag** (`App::keyboard`, false at first: the controller
+  comes first). `App::key`, a click and the wheel (`App::wheel`) set it;
+  `App::pad`, which the window's controller presses now come through,
+  clears it; the headless script's presses leave it.
+- **The pad** (`window.rs`): the stick counts past 90 % (`STICK`, was
+  60 %; H), still by its stronger axis only. `Repeat` holds the newest
+  direction pressed on the d-pad or the stick and repeats it 250 ms
+  after the press (an estimate) and then every 250 ms (H), one at a time
+  however late the window wakes; letting go stops it, and losing the
+  focus or the engine having the pad resets it. The window wakes for the
+  earlier of the next frame and the next repeat.
+- **The timer.** A shell screen's frame is timed whole, as before; the
+  frame that draws the still layer afresh (a new size) isn't.
+- **Tests (no game files).** `h2ui`: a made-up `game_shell_background`
+  (the framing, a still strip, two scrolling) splits into two still and
+  two moving, with the globals' boxes, fonts, colour and overlay taken
+  and a broken box keeping the built-in one; no tags gives the default;
+  the header in its box for each size; legend boxes in order, apart,
+  ending at the box's right within a pixel, with ENTER and ESC after a
+  keyboard and the glyphs (discs in the built-in font) after a pad; an
+  over-wide legend inside the window at three window shapes; the strips
+  moving between two clocks while the still list stays the same;
+  `DrawList.texts`; `Kept::draw` saying whether it drew. The lobby: the
+  sign-in screen's header colour inside the header box and no
+  "Keyboard:" line, the legend's B at the box's bottom right going back
+  when clicked; ENTER after `key(A)`, the glyphs again after `pad(Down)`,
+  the script's presses leaving it, a click and the wheel setting it; the
+  playlists' legend (PLAYERS, BACK, no service record or friends), the
+  status line, the invitation taking the legend's clicks, the legend's X
+  opening the players; with a made-up shell, the kept layer not drawn
+  again between frames (they are timed) while only the strip's pixels
+  change; the notices and the settings rows above the legend's top;
+  `Repeat`'s timing; the stick at 90 %. The flows pass unchanged.
+- **Measured in the container** (four shared cores; numbers vary by up
+  to a half between runs). The lobby headless at 1280x720: flat, the
+  playlists 2.4 ms and the settings 2.6 ms a frame; with Cartographer's
+  `mainmenu.map`, 5.2 and 5.4 ms. With that map's shell, the 16 strips
+  alone take 2.6 ms at 1280x720 (181,000 pixels) and 4.5 ms at
+  1920x1080 (407,000 pixels), the kept layer's copy 0.3 and 0.7 ms, and
+  the still layer 25 to 44 ms once; `menu_png`'s shell frame (copy,
+  strips, header, legend) 4.4 ms at 1280x720 and 4.8 to 8.3 ms at
+  1920x1080. So a shell screen at 1080p is about 7 to 9 ms here; the
+  budget is 10 ms on the owner's PC, which ran the intro and menus
+  faster than the container.
+- **Looks like** (the playlists and the settings next to the
+  Cartographer lobby screenshot, 1812 by 1176): the header starts 730
+  units left of the middle, which puts it at x 190 there and the
+  screenshot's at about 200; the legend ends 730 units right of the
+  middle, x 1621 there, and the screenshot's at about 1655 (its Halo 2
+  font is bigger than the built-in one); the framing's bands and the
+  strips match; the navy between them is (9, 21, 42) against the
+  screenshot's (10, 22, 43). The container has no Halo 2 fonts, so
+  its header and legend are in the built-in font, smaller than the
+  screenshot's. Missing: the shell's slide-in and the screen
+  transitions, the overlay (used by 2.8's dialogs), and the bodies in
+  Halo 2's style.
+
+**On the owner's PC (after 2.6)**, with Cartographer's files found, from
+the clone, built with `cargo build --release -p h2launch` and run as
+usual:
+
+1. On the main menu pick ONLINE: the sign-in screen or the playlists
+   sit on the navy framing, thin track lines scroll slowly across it,
+   the screen's name is at the top left in the header's band (PLAYLISTS
+   in Halo 2's title font) and its buttons at the bottom right in the
+   legend's band. `lobby.log` has `menus: the shell's pictures from wgit
+   ...game_shell_background: 2 still, 16 scrolling` and `menus: headers
+   and button legends: 8 of 8 boxes from the globals, the text colour
+   from the globals, the overlay from the globals`.
+2. Every other screen after the main menu has the same: signing in,
+   searching, players, party, custom game, pregame, in game, carnage
+   report, offline, service record, friends and CONTROLLER (SETTINGS on
+   the main menu). Signed in, the top right has the level icon, the
+   gamertag, the level, the number online and the ms.
+3. With only a pad from the start, the legend shows the pad's A and B
+   (Halo 2's green and red buttons). Press an arrow key: it says ENTER
+   and ESC. Press a pad button: the buttons again. A click or the wheel
+   also switches it to the keys. Click BACK in the legend: it goes back.
+   With a popup up (Y on the friends list opens ADD FRIEND), a click on
+   the legend does nothing; the popup's own buttons work.
+4. On CONTROLLER, hold the d-pad down: one move, then after a quarter
+   second one every quarter second; let go and it stops. The same with
+   the stick pushed all the way; a push of half to three quarters does
+   nothing now, and a diagonal push moves at most one way. Holding a
+   direction while switching to another window and back doesn't keep
+   repeating.
+5. Maximise the window (as in P4 step 3) and visit the playlists, the
+   players, the friends, the CONTROLLER and the carnage report after a
+   match: the log has `lobby: <W>x<H>, <screen> <n> ms a frame on the
+   CPU` for each, each at most about 10 ms at 1920x1080 (scaled by the
+   pixel count at another size: about 9.3 at 1920x1009).
+6. Every flow still works with the keyboard, the mouse and the pad: sign
+   in, invite a friend, the party, a search and a match, the carnage
+   report, LB's service record and RB's friends list (both still work,
+   though the legend doesn't show them), a custom game, a settings
+   change. The notices stack just above the legend.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 

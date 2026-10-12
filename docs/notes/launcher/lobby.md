@@ -109,17 +109,50 @@ the launcher doesn't do.
   the same code writes PNGs for tests without a GPU (with Halo 2's fonts
   those PNGs hold Vista's or MCC's glyphs: keep them on the owner's PC).
 - Layout is in units of 1/720 of the window's height, so it scales.
+- Every screen after the main menu sits in Halo 2's shell (menu.md,
+  "What Phase 2.6 built"; `lobby/app/shell.rs`), drawn by `crates/h2ui`
+  around the screen's own body: `game_shell_background` behind (the navy
+  and the framing, drawn once for a window size and copied in, then its
+  16 track strips scrolling over them every frame), the screen's name as
+  Halo 2's header at the top left (`App::screen_title`: SIGN IN, SIGNING
+  IN, PLAYLISTS or MATCHMAKING, PLAYERS ONLINE, PARTY, CUSTOM GAME,
+  PREGAME LOBBY, IN GAME, CARNAGE REPORT, OFFLINE, SERVICE RECORD,
+  FRIENDS, CONTROLLER) and the screen's buttons as Halo 2's button legend
+  at the bottom right (A, B, X and Y, their words in capitals, in the
+  order the screen gives them). Who is signed in is one small line at
+  the top right: the highest level's icon, the gamertag, the level, how
+  many are online and the server's round trip. The pictures, scroll
+  rates, boxes, header font and text colour come from the same
+  `mainmenu.map` as the menus' (`menus: the shell's pictures from ...`
+  and `menus: headers and button legends: ...` in the log); in the flat
+  look the shell is the navy gradient with the built-in boxes and font.
+  The body is still the lobby's own (panels and rows) until each screen
+  is restyled.
+- The legend follows the device used last: the controller's A, B, X and
+  Y (Halo 2's glyphs from its fonts, coloured discs in the built-in
+  font) after a controller press, which is how the lobby starts; the
+  keys' names (ENTER, ESC, X, Y; then Q and E for the bumpers, which no
+  legend shows yet) after a key, a click or the wheel. The headless
+  script's presses leave it as it was. A click on a button in the legend
+  presses it (not while a popup is up: the popup alone takes clicks).
+  LB and RB keep their shortcuts but stay off the legends (menu.md 1.2).
 - Notices (the server's NOTICEs and the lobby's own) stay up 6 s, at most
-  three at once, stacked above the button hints, newest lowest. They are
-  drawn last and below every popup's box (y 524 to 652), so a popup
-  neither hides nor dims them.
+  three at once, stacked above the button legend (from y 660), newest
+  lowest. They are drawn last and below every popup's box (y 524 to
+  652), so a popup neither hides nor dims them.
 - Keyboard (arrows, Enter or Space for A, Esc or Backspace for B, the X
   and Y keys, Q or Page Up for LB and E or Page Down for RB), mouse (click
-  a row to select it, again to pick it; click a button hint or a `<` `>`
-  arrow) and Xbox controllers (gilrs: d-pad or left stick, both ways, A,
-  B, X, Y, the bumpers LB and RB; Start is A and Back is B). Where the
-  screens below say so, LB opens a service record (yours, or the selected
-  player's) and RB the friends list. Where a gamertag is typed (the
+  a row to select it, again to pick it; click a button in the legend or a
+  popup, or a `<` `>` arrow; the wheel moves up and down) and Xbox
+  controllers (gilrs: d-pad or left stick, both ways, A, B, X, Y, the
+  bumpers LB and RB; Start is A and Back is B). The stick counts only
+  past 90% of its travel, as Halo 2's menus (it was 60%), and a direction
+  held on the d-pad or the stick repeats 250 ms after it was pressed (an
+  estimate) and then every 250 ms, as Halo 2's menus (`window::Repeat`;
+  the newest direction pressed is the one that repeats, and nothing
+  repeats while the window isn't in front or the engine has the pad).
+  Where the screens below say so, LB opens a service record (yours, or
+  the selected player's) and RB the friends list. Where a gamertag is typed (the
   sign-in screen, the add friend popup) letters are typed, not buttons,
   and Backspace rubs one out. W A S D don't move the selection: A is a
   button. A key held down repeats (Windows' repeats, `App::key_repeated`)
@@ -132,9 +165,12 @@ the launcher doesn't do.
   that screen and in its Leave Game popup: its window may still be in
   front if the engine's didn't come forward, and B then A (melee, jump),
   Esc (Halo 2's pause) then Enter, or Esc then Space would otherwise leave
-  the game. Leaving takes a click on the B hint and then on the popup's
-  A. The window's keys come through `App::key`, which does this; clicks,
-  the controller and the headless script's `press` go to `App::input`.
+  the game. Leaving takes a click on the legend's B and then on the
+  popup's A. The window's keys come through `App::key`, which does this;
+  the controller's presses through `App::pad`, the wheel's through
+  `App::wheel` and clicks through `App::click` (which also set which
+  device the legends show); the headless script's `press` goes to
+  `App::input`.
 - The engine's window should take the foreground when it opens (not yet
   seen on a PC): the lobby, being in front, passes the right to it
   (`AllowSetForegroundWindow` with the child's process id, at the start
@@ -145,7 +181,8 @@ the launcher doesn't do.
   front. Keys and the mouse reach only the window in front; the
   controller works either way.
 - The left stick moves the selection by its stronger axis only, so a
-  sloppy diagonal push doesn't also change the value on a row.
+  sloppy diagonal push doesn't also change the value on a row (and a
+  push at 45 degrees, short of 90% on both axes, moves nothing).
 - The start screen and the main menu are Halo 2's own (menu.md, phase 1),
   drawn by `crates/h2ui` into the same pixels in place of the lobby's
   chrome (no gradient, title, header or keyboard line): the main menu's
@@ -380,7 +417,8 @@ the launcher doesn't do.
    levels for a few seconds, then the engine starts.
 6. In game: the lobby window waits while the engine's window is up, saying
    whether the engine is starting, loading or playing. B leaves the game
-   (while the engine plays, only a click on the B hint and then on A).
+   (while the engine plays, only a click on the legend's B and then on
+   A).
 7. Carnage report: each player's place, team, score, kills, assists,
    deaths and level, in Halo 2 Xbox's columns (PLACE, PLAYER, SCORE,
    KILLS, ASSISTS, DEATHS, LEVEL), sorted by place, then team, then score,
@@ -449,7 +487,7 @@ the launcher doesn't do.
 
 13. Controller settings (SETTINGS on the main menu; "Settings", the row
    after Custom Game, for anyone; or the controller's X on the sign-in and
-   offline screens, and the hint there can be clicked): CONTROLLER, with
+   offline screens, and the legend's X there can be clicked): CONTROLLER, with
    the rows of Halo 2's CONTROLLER screen (in a profile's settings) in its
    order and words:
    Thumbstick Layout (Default, Southpaw, Legacy, Legacy Southpaw), Button

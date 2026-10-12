@@ -15,10 +15,12 @@
 //!   quads (pictures, fills and glyphs) in window pixels.
 //! - `cpu`: draws a `DrawList` into a pixel buffer.
 //! - `screens`: the start screen and the main menu.
+//! - `chrome`: what every other screen sits in: the shell's framing and
+//!   track strips, the header and the button legend.
 //! - `gamemenu`: the in-game GAME MENU and its pages, drawn as one opaque
 //!   panel for the launcher to copy into the engine's back buffer.
-//! - `tags`: those two screens' layouts from mainmenu.map's UI tags, piece
-//!   by piece, falling back to `layout`'s numbers.
+//! - `tags`: those two screens' layouts and the chrome from mainmenu.map's
+//!   UI tags, piece by piece, falling back to `layout`'s numbers.
 //! - `shell`: opens a mainmenu.map (MCC's or Vista's) for both screens,
 //!   tags and pictures, logging where each piece came from.
 //!
@@ -27,6 +29,7 @@
 
 pub mod anim;
 pub mod art;
+pub mod chrome;
 pub mod cpu;
 pub mod gamemenu;
 pub mod layout;
