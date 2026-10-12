@@ -23,12 +23,17 @@
 //!   UI tags, piece by piece, falling back to `layout`'s numbers.
 //! - `shell`: opens a mainmenu.map (MCC's or Vista's) for both screens,
 //!   tags and pictures, logging where each piece came from.
+//! - `catalog`: the other screens the lobby draws from their tags, by
+//!   their whole tag names, and each pane's scale (Vista's or the Xbox's);
+//!   `tags::screen_layout` lays any screen out and `screens::screen` draws
+//!   it.
 //!
 //! Colours are in gamma space throughout, as the tags give them and as
 //! the lobby's canvas blends.
 
 pub mod anim;
 pub mod art;
+pub mod catalog;
 pub mod chrome;
 pub mod cpu;
 pub mod gamemenu;

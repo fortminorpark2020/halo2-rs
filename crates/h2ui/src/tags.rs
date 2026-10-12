@@ -13,9 +13,11 @@
 
 use crate::anim::{Animation, ItemLook, Keyframe};
 use crate::art::{last_part, ArtSource};
+use crate::catalog::ScreenId;
 use crate::layout::{
-    self, BitmapWidget, ChromeLayout, Flat, ListLayout, MainMenuLayout, SkinLayout, StartLayout,
-    TextWidget,
+    self, colour, Arrows, BitmapWidget, ButtonLayout, ChromeLayout, Flat, ListLayout,
+    MainMenuLayout, PaneLayout, PlayersLayout, Scale, ScreenLayout, SkinLayout, SlotText,
+    StartLayout, TextWidget,
 };
 use crate::paint::Blend;
 use crate::text::Justify;
@@ -101,7 +103,7 @@ pub fn bitmap(b: &ui::Bitmap, g: &Globals, built_in: &[BitmapWidget]) -> Option<
     let flat = built_in
         .iter()
         .find(|w| last_part(&w.name).eq_ignore_ascii_case(last_part(&name)))
-        .map_or(Flat::None, |w| w.flat);
+        .map_or_else(|| flat_for(&name), |w| w.flat);
     Some(BitmapWidget {
         name,
         frame: usize::try_from(b.frame).unwrap_or(0),
@@ -266,6 +268,11 @@ pub fn skin(s: &ui::ListSkin, g: &Globals) -> SkinLayout {
             .collect(),
         texts: s.texts.iter().map(|t| text(t, g)).collect(),
         items: item_look(s),
+        arrows: s.arrows.as_ref().map(|t| Arrows {
+            bitmap: t.name.clone(),
+            up: s.arrow_up.map(f32::from),
+            down: s.arrow_down.map(f32::from),
+        }),
     }
 }
 
@@ -325,8 +332,36 @@ fn list(
     built_in: ListLayout,
     sources: &mut Vec<String>,
 ) -> ListLayout {
+    let (out, skin_note) = list_at(l, g, art, built_in, Scale::Vista);
+    let skin_note = match skin_note {
+        Ok(found) => format!("main menu list skin from {found}"),
+        Err(why) => format!("main menu list skin: built-in ({why})"),
+    };
+    let [x, y] = out.corner;
+    note(
+        sources,
+        format!(
+            "main menu list from {screen}: at ({x}, {y}), {} shown, a row every {} units",
+            out.visible, out.step
+        ),
+    );
+    note(sources, skin_note);
+    out
+}
+
+/// A list from the tags over `built_in`, its corner at `scale` (its skin,
+/// shared by every screen, as the globals have it: in Vista's units, an
+/// assumption checked in menu_png's pictures), and what its skin is or
+/// why it is the built-in one.
+fn list_at(
+    l: &ui::List,
+    g: &Globals,
+    art: &dyn ArtSource,
+    built_in: ListLayout,
+    scale: Scale,
+) -> (ListLayout, Result<String, String>) {
     let mut out = ListLayout {
-        corner: l.corner.map(f32::from),
+        corner: scale.point(l.corner.map(f32::from)),
         visible: usize::try_from(l.visible)
             .ok()
             .filter(|&v| v > 0)
@@ -348,32 +383,19 @@ fn list(
                 out.step = step;
             }
             let look = &out.skin.items;
-            format!(
-                "main menu list skin from skin {} (number {}): {} bitmaps, {} texts, \
-                 focus fades of {} and {} ms",
+            Ok(format!(
+                "skin {} (number {}): {} bitmaps, {} texts, focus fades of {} and {} ms",
                 tag.name,
                 l.skin,
                 out.skin.bitmaps.len(),
                 out.skin.texts.len(),
                 look.gain.period_ms,
                 look.lose.period_ms
-            )
+            ))
         }
-        None => format!(
-            "main menu list skin: built-in (skin {} isn't in the globals)",
-            l.skin
-        ),
+        None => Err(format!("skin {} isn't in the globals", l.skin)),
     };
-    let [x, y] = out.corner;
-    note(
-        sources,
-        format!(
-            "main menu list from {screen}: at ({x}, {y}), {} shown, a row every {} units",
-            out.visible, out.step
-        ),
-    );
-    note(sources, skin_note);
-    out
+    (out, skin_note)
 }
 
 /// The framing behind both screens on a still background: the framing
@@ -515,6 +537,341 @@ pub fn chrome(ui: Option<&Ui>, sources: &mut Vec<String>) -> ChromeLayout {
     out
 }
 
+/// A widget whose place has a number this far out is parked off the
+/// screen (Halo 2 parks them at ±9999; a few at about ±9,100 to ±9,600):
+/// it is left out.
+const PARKED: i16 = 9000;
+
+fn parked(v: &[i16]) -> bool {
+    v.iter().any(|v| v.unsigned_abs() >= PARKED as u16)
+}
+
+/// A box of the tags as numbers (top, left, bottom, right).
+fn rect_numbers(r: ui::Rect) -> [i16; 4] {
+    [r.top, r.left, r.bottom, r.right]
+}
+
+/// Plain panels for the pieces of Halo 2's dialogs and lists, so the flat
+/// look isn't bare text: the dialog frames' corners (ul_07, br_07) and
+/// plates (dialog1, dialog2), the pregame lobby's button, and the default
+/// list skin's item backing and end cap. Their sizes, in UI units at a
+/// scale of 1, are the pictures' own in Vista's mainmenu.map (menu_png
+/// `--frames`, menu.md 9.2), so a flat piece takes the room its picture
+/// would. Most of each picture is clear: the corners' lines and the
+/// plates' glow don't reach their edges, so the flat frame is only near
+/// the real one. The colours are our own, near the overlay's navy.
+fn flat_for(name: &str) -> Flat {
+    const PANEL: [f32; 4] = [0.05, 0.13, 0.25, 0.92];
+    const PLATE: [f32; 4] = [0.08, 0.18, 0.32, 0.85];
+    const EDGE: [f32; 4] = [0.33, 0.47, 0.64, 0.9];
+    const CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+    let (size, color, edge) = match last_part(name).to_ascii_lowercase().as_str() {
+        "ul_07" | "br_07" => ([256.0, 256.0], CLEAR, EDGE),
+        "dialog1" => ([512.0, 512.0], PANEL, EDGE),
+        "dialog2" => ([512.0, 512.0], PLATE, CLEAR),
+        "button" => ([358.0, 64.0], PLATE, EDGE),
+        "item_background" => ([400.0, 42.0], PLATE, CLEAR),
+        "end_cap" => ([56.0, 68.0], EDGE, CLEAR),
+        _ => return Flat::None,
+    };
+    Flat::Panel {
+        size,
+        color: colour_or(color),
+        edge,
+    }
+}
+
+/// A flat panel's colour (a clear one stays clear).
+fn colour_or(c: [f32; 4]) -> [f32; 4] {
+    if c[3] > 0.0 {
+        c
+    } else {
+        [
+            colour::OVERLAY[0],
+            colour::OVERLAY[1],
+            colour::OVERLAY[2],
+            0.0,
+        ]
+    }
+}
+
+/// A bitmap of a pane at `scale`: its corner moved out, its pictures (and
+/// flat shape) grown.
+fn scaled_bitmap(mut w: BitmapWidget, scale: Scale) -> BitmapWidget {
+    w.corner = scale.point(w.corner);
+    if scale != Scale::Vista {
+        let k = scale.bitmap();
+        w.scale = w.scale().map(|s| s * k);
+    }
+    w.flat = scaled_flat(w.flat, w.scale());
+    w
+}
+
+/// A flat shape's size times a bitmap's scale (`flat_for`'s sizes are at
+/// scale 1; the built-in ones are already at theirs).
+fn scaled_flat(flat: Flat, [sx, sy]: [f32; 2]) -> Flat {
+    match flat {
+        Flat::Panel { size, color, edge } => Flat::Panel {
+            size: [size[0] * sx, size[1] * sy],
+            color,
+            edge,
+        },
+        other => other,
+    }
+}
+
+/// A text slot of a pane at `scale`, `k`th of its kind.
+fn slot(t: &ui::Text, k: usize, g: &Globals, scale: Scale) -> SlotText {
+    let mut widget = text(t, g);
+    widget.bounds = scale.rect(widget.bounds);
+    SlotText {
+        key: if t.string.is_empty() {
+            format!("#{k}")
+        } else {
+            t.string.clone()
+        },
+        words: t.text.clone(),
+        widget,
+    }
+}
+
+/// The list a screen's list falls back on when its skin isn't in the
+/// globals: our own plain skin, one left-justified text in the default
+/// skin's colour (menu-preview's dialog place).
+fn plain_list() -> ListLayout {
+    let place = layout::DIALOG_PLACE;
+    ListLayout {
+        skin: SkinLayout {
+            texts: vec![TextWidget::new(
+                crate::Font::Body,
+                colour::LIST_TEXT,
+                place.item,
+                Justify::Left,
+            )],
+            ..SkinLayout::default()
+        },
+        corner: place.corner,
+        step: place.step,
+        visible: 6,
+        wraps: false,
+        intro: None,
+        delay_ms: 0.0,
+    }
+}
+
+/// A pane of a screen at `scale`: every bitmap, text, list, button and
+/// players block, the parked ones left out. Returns the pane and how many
+/// widgets were parked.
+fn pane_layout(
+    p: &Pane,
+    g: &Globals,
+    art: &dyn ArtSource,
+    scale: Scale,
+    skins: &mut Vec<String>,
+) -> (PaneLayout, usize) {
+    let mut dropped = 0;
+    let mut keep = |out: bool| {
+        dropped += usize::from(out);
+        !out
+    };
+    let bitmaps = p
+        .bitmaps
+        .iter()
+        .filter(|b| keep(parked(&b.corner)))
+        .filter_map(|b| bitmap(b, g, &[]))
+        .map(|w| scaled_bitmap(w, scale))
+        .collect();
+    let texts = p
+        .texts
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| keep(parked(&rect_numbers(t.bounds))))
+        .map(|(k, t)| slot(t, k, g, scale))
+        .collect();
+    let lists = p
+        .lists
+        .iter()
+        .filter(|l| keep(parked(&l.corner)))
+        .map(|l| {
+            let (list, found) = list_at(l, g, art, plain_list(), scale);
+            let name = match found {
+                Ok(_) => usize::try_from(l.skin)
+                    .ok()
+                    .and_then(|k| g.skins.get(k))
+                    .map_or_else(String::new, |t| last_part(&t.name).to_string()),
+                Err(why) => format!("our plain one ({why})"),
+            };
+            if !skins.contains(&name) {
+                skins.push(name);
+            }
+            list
+        })
+        .collect();
+    let buttons = p
+        .buttons
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| keep(parked(&rect_numbers(b.text.bounds))))
+        .map(|(k, b)| button(b, k, g, scale))
+        .collect();
+    let players = p
+        .players
+        .iter()
+        .filter(|e| keep(parked(&e.corner)))
+        .map(|e| PlayersLayout {
+            corner: scale.point(e.corner.map(f32::from)),
+            max: usize::from(e.max),
+            rows: usize::from(e.rows),
+            columns: usize::from(e.columns),
+            row_height: f32::from(e.row_height).abs() * scale.position(),
+            column_width: f32::from(e.column_width) * scale.position(),
+            skin: e.skin.as_ref().map(|t| t.name.clone()),
+        })
+        .collect();
+    let pane = PaneLayout {
+        scale,
+        bitmaps,
+        texts,
+        lists,
+        buttons,
+        players,
+    };
+    (pane, dropped)
+}
+
+/// A button of a pane at `scale`: its text slot, and its picture with its
+/// corner at the text box's top left moved by the tag's offset, whose y
+/// counts downwards (as menu-preview placed the pregame lobby's, which
+/// matches Cartographer's lobby), drawn under the text.
+fn button(b: &ui::Button, k: usize, g: &Globals, scale: Scale) -> ButtonLayout {
+    let text = slot(&b.text, k, g, scale);
+    let bitmap = b.bitmap.as_ref().map(|tag| {
+        let [ox, oy] = b.bitmap_offset.map(f32::from);
+        let corner = [
+            f32::from(b.text.bounds.left) + ox,
+            f32::from(b.text.bounds.top) - oy,
+        ];
+        let w = BitmapWidget {
+            depth: b.text.depth.saturating_sub(1),
+            intro: text.widget.intro.clone(),
+            delay_ms: text.widget.delay_ms,
+            flat: flat_for(&tag.name),
+            ..BitmapWidget::new(&tag.name, corner)
+        };
+        scaled_bitmap(w, scale)
+    });
+    ButtonLayout { text, bitmap }
+}
+
+/// A screen of the catalog laid out from the tags (`ui`), each pane at
+/// the catalog's scale with `overrides` over it (`H2LOBBY_SCALE`), noting
+/// what was found.
+pub fn screen_layout(
+    ui: &Ui,
+    id: ScreenId,
+    overrides: &[crate::catalog::Override],
+    art: &dyn ArtSource,
+    sources: &mut Vec<String>,
+) -> Result<ScreenLayout, String> {
+    let path = id.path();
+    let panes = ui.screen(&path).map_or(0, |s| s.panes.len());
+    let scales = id.scales(panes, overrides);
+    let mut out = screen_layout_at(ui, &path, &scales, art, sources)?;
+    out.id = Some(id);
+    Ok(out)
+}
+
+/// Any screen laid out from the tags by its whole tag name (only: two
+/// tags end in player_selected_dialog), pane `k` at `scales[k]` (the last
+/// one after them; Vista's without any), noting what was found.
+pub fn screen_layout_at(
+    ui: &Ui,
+    path: &str,
+    scales: &[Scale],
+    art: &dyn ArtSource,
+    sources: &mut Vec<String>,
+) -> Result<ScreenLayout, String> {
+    let s = ui
+        .screens
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(path))
+        .ok_or_else(|| format!("no {path} screen in the tags"))?;
+    let g = &ui.globals;
+    let mut dropped = 0;
+    let mut skins = Vec::new();
+    let panes: Vec<PaneLayout> = s
+        .panes
+        .iter()
+        .enumerate()
+        .map(|(k, p)| {
+            let scale = scales.get(k).or(scales.last()).copied().unwrap_or_default();
+            let (pane, parked) = pane_layout(p, g, art, scale, &mut skins);
+            dropped += parked;
+            pane
+        })
+        .collect();
+    let scale_names: Vec<&str> = panes.iter().map(|p| p.scale.name()).collect();
+    note(
+        sources,
+        format!(
+            "screen {}: {} panes ({}), {} parked widgets left out{}",
+            s.name,
+            panes.len(),
+            scale_names.join(", "),
+            dropped,
+            if skins.is_empty() {
+                String::new()
+            } else {
+                format!(", list skins {}", skins.join(", "))
+            }
+        ),
+    );
+    Ok(ScreenLayout {
+        id: None,
+        path: s.name.clone(),
+        size: s.dialog_size(),
+        has_header: s.flags & ui::NO_HEADER == 0,
+        header_id: s.header.clone(),
+        header_words: s.header_text.clone(),
+        button_key: s.button_key,
+        overlay: s.flags & ui::NO_OVERLAY == 0,
+        pane_per_item: s.flags & ui::PANE_PER_ITEM != 0,
+        panes,
+        strings: s.strings.clone(),
+    })
+}
+
+/// Bitmaps by their whole names, each with a frame drawn.
+pub type Wanted = Vec<(String, usize)>;
+
+/// Every bitmap (name and frame) a screen draws: its panes' pictures, its
+/// buttons' resting look, its lists' skins' and their arrows (both
+/// frames); then the frames drawn only where a bitmap has them (a
+/// button's focused look, `art::read_some`).
+pub fn screen_wanted(screen: &ScreenLayout) -> (Wanted, Wanted) {
+    let (mut out, mut extra) = (Vec::new(), Vec::new());
+    for p in &screen.panes {
+        out.extend(p.bitmaps.iter().map(|w| (w.name.clone(), w.frame)));
+        for b in p.buttons.iter().filter_map(|b| b.bitmap.as_ref()) {
+            out.push((b.name.clone(), BUTTON_FRAMES[0]));
+            extra.push((b.name.clone(), BUTTON_FRAMES[1]));
+        }
+        for l in &p.lists {
+            out.extend(l.skin.bitmaps.iter().map(|w| (w.name.clone(), w.frame)));
+            if let Some(a) = &l.skin.arrows {
+                out.extend([0, 1].map(|f| (a.bitmap.clone(), f)));
+            }
+        }
+    }
+    (out, extra)
+}
+
+/// The frames of a button's picture drawn: when it hasn't focus, and when
+/// it has (`screens::screen`; one with a single picture shows it for both).
+/// The pregame lobby's button has three (menu.md 9.2): resting, focused
+/// (lit, with arrow tips), and a softer third one not used.
+pub const BUTTON_FRAMES: [usize; 2] = [0, 1];
+
 /// Every bitmap (name and frame) the layouts draw.
 pub fn wanted(
     start: &StartLayout,
@@ -537,6 +894,7 @@ pub fn wanted(
 mod tests {
     use super::*;
     use crate::art::{ArtImage, FlatArt, MemoryArt};
+    use crate::layout::DialogSize;
     use crate::Font;
     use blam_cache::ui::{Keyframe as TagKeyframe, ListSkin, Rect, ScreenAnimation, TagRef};
     use blam_cache::DatumIndex;
@@ -605,6 +963,7 @@ mod tests {
             header: String::new(),
             header_text: None,
             panes: vec![pane],
+            strings: Vec::new(),
         }
     }
 
@@ -929,5 +1288,262 @@ mod tests {
         );
         assert!(sources[1].contains("0 of 8 boxes"), "{sources:?}");
         assert!(sources[1].contains("colour from built-in"), "{sources:?}");
+    }
+
+    /// The shell's menus with the default skin given a text, a backing
+    /// and its arrows, and a quarter dialog at `path` of two panes in the
+    /// Xbox's numbers: a picture, a text, a list, a button with its
+    /// picture, a players block, and two widgets parked off the screen.
+    fn dialog_menus(path: &str) -> Ui {
+        let mut ui = shell_menus();
+        let skin = &mut ui.globals.skins[0];
+        skin.texts = vec![tag_text(ui::LEFT_JUSTIFY, "", [20, 10, -10, 300])];
+        skin.bitmaps = vec![tag_bitmap(
+            "ui\\list_skins\\default\\item_background",
+            [0, 0],
+        )];
+        skin.arrows = tag("ui\\list_skins\\default\\arrows");
+        skin.arrow_up = [-30, 40];
+        skin.arrow_down = [-30, -120];
+        let mut picture = tag_bitmap("ui\\global_bitmaps\\dialog1", [-100, 80]);
+        picture.depth = 2;
+        let mut body = tag_text(0, "quarter_body", [40, -80, 0, 80]);
+        body.text = Some("SOME WORDS".into());
+        let pane = Pane {
+            bitmaps: vec![picture, tag_bitmap("ui\\global_bitmaps\\ul_07", [-9999, 0])],
+            texts: vec![body, tag_text(0, "", [9999, -9999, 9999, -9999])],
+            lists: vec![ui::List {
+                flags: 0,
+                skin: 0,
+                visible: 3,
+                corner: [-60, -10],
+                animation: None,
+                delay_ms: 0,
+            }],
+            buttons: vec![ui::Button {
+                text: tag_text(0, "quarter_button", [-40, -70, -56, 10]),
+                bitmap: tag("ui\\screens\\game_shell\\pregame_lobby\\button"),
+                bitmap_offset: [-8, -4],
+            }],
+            players: vec![ui::Players {
+                skin: tag("ui\\player_skins\\made_up"),
+                corner: [20, 30],
+                max: 8,
+                rows: 4,
+                columns: 2,
+                row_height: -22,
+                column_width: 90,
+            }],
+            ..Pane::default()
+        };
+        let second = Pane {
+            texts: vec![tag_text(0, "quarter_second", [10, -20, -10, 20])],
+            ..Pane::default()
+        };
+        ui.screens.push(Screen {
+            name: path.to_string(),
+            flags: ui::QUARTER_DIALOG,
+            screen_id: 9,
+            button_key: 2,
+            header: "quarter_header".into(),
+            header_text: Some("MADE UP".into()),
+            panes: vec![pane, second],
+            strings: vec![
+                ("quarter_header".into(), "MADE UP".into()),
+                ("quarter_body".into(), "SOME WORDS".into()),
+            ],
+        });
+        ui
+    }
+
+    const DIALOG: &str = "ui\\screens\\made_up\\quarter_dialog";
+
+    #[test]
+    fn an_xbox_dialog_grows_its_places_and_its_pictures() {
+        let ui = dialog_menus(DIALOG);
+        let mut sources = Vec::new();
+        let s = screen_layout_at(&ui, DIALOG, &[Scale::Xbox], &FlatArt, &mut sources).unwrap();
+        assert_eq!(s.id, None);
+        assert_eq!(s.path, DIALOG);
+        assert_eq!(s.size, DialogSize::Quarter);
+        assert!(s.has_header && s.overlay && !s.pane_per_item);
+        assert_eq!(s.button_key, 2);
+        assert_eq!(s.header_id, "quarter_header");
+        assert_eq!(s.header_words.as_deref(), Some("MADE UP"));
+        assert_eq!(s.string("quarter_body"), Some("SOME WORDS"));
+        assert_eq!(s.string("nothing"), None);
+        // The last scale goes for every pane after the ones given.
+        assert_eq!(s.panes.len(), 2);
+        assert!(s.panes.iter().all(|p| p.scale == Scale::Xbox));
+        let p = &s.panes[0];
+        // Places 2.5 times out, pictures 1.25 times their scale (a flat
+        // piece too); the parked picture and text are left out.
+        assert_eq!(p.bitmaps.len(), 1);
+        assert_eq!(p.bitmaps[0].corner, [-250.0, 200.0]);
+        assert_eq!(p.bitmaps[0].scale, [1.25, 1.25]);
+        assert_eq!(p.bitmaps[0].depth, 2);
+        assert!(matches!(
+            p.bitmaps[0].flat,
+            Flat::Panel {
+                size: [640.0, 640.0],
+                ..
+            }
+        ));
+        assert_eq!(p.texts.len(), 1);
+        assert_eq!(p.texts[0].key, "quarter_body");
+        assert_eq!(p.texts[0].words.as_deref(), Some("SOME WORDS"));
+        assert_eq!(p.texts[0].widget.bounds, [-200.0, 100.0, 200.0, 0.0]);
+        // A list's corner moves out; its skin, shared, stays in Vista's
+        // units, with its arrows.
+        let l = &p.lists[0];
+        assert_eq!(l.corner, [-150.0, -25.0]);
+        assert_eq!(l.visible, 3);
+        assert_eq!(l.skin.texts[0].bounds, [10.0, 20.0, 300.0, -10.0]);
+        assert_eq!(l.skin.bitmaps[0].corner, [0.0, 0.0]);
+        let arrows = l.skin.arrows.as_ref().unwrap();
+        assert_eq!(arrows.bitmap, "ui\\list_skins\\default\\arrows");
+        assert_eq!((arrows.up, arrows.down), ([-30.0, 40.0], [-30.0, -120.0]));
+        // A button's picture sits at its text box's top left moved by the
+        // offset (y counted down), under the text, grown like the rest.
+        let b = &p.buttons[0];
+        assert_eq!(b.key(), "quarter_button");
+        assert_eq!(b.text.widget.bounds, [-175.0, -100.0, 25.0, -140.0]);
+        let picture = b.bitmap.as_ref().unwrap();
+        assert_eq!(picture.corner, [-195.0, -90.0]);
+        assert_eq!(picture.depth, b.text.widget.depth - 1);
+        assert_eq!(picture.scale, [1.25, 1.25]);
+        assert!(matches!(
+            picture.flat,
+            Flat::Panel {
+                size: [447.5, 80.0],
+                ..
+            }
+        ));
+        // A players block: rows 22 Xbox pixels apart are 55 units.
+        let e = &p.players[0];
+        assert_eq!(
+            (e.corner, e.row_height, e.column_width),
+            ([50.0, 75.0], 55.0, 225.0)
+        );
+        assert_eq!((e.max, e.rows, e.columns), (8, 4, 2));
+        assert_eq!(e.skin.as_deref(), Some("ui\\player_skins\\made_up"));
+        assert_eq!(e.corner(0), [50.0, 75.0]);
+        assert_eq!(e.corner(5), [275.0, 20.0]);
+        let line = sources.last().unwrap();
+        assert_eq!(
+            line,
+            &format!(
+                "menus: screen {DIALOG}: 2 panes (xbox, xbox), 2 parked widgets left out, \
+                 list skins default"
+            )
+        );
+        // What it draws: the button's focused look only where its bitmap
+        // has it.
+        let (wanted, extra) = screen_wanted(&s);
+        let has = |name: &str, frame: usize| {
+            wanted
+                .iter()
+                .any(|(n, f)| last_part(n) == name && *f == frame)
+        };
+        assert!(has("dialog1", 0) && has("button", 0) && has("item_background", 0));
+        assert!(has("arrows", 0) && has("arrows", 1));
+        assert!(!has("button", 1) && !has("ul_07", 0));
+        assert_eq!(
+            extra,
+            [(
+                "ui\\screens\\game_shell\\pregame_lobby\\button".to_string(),
+                1
+            )]
+        );
+    }
+
+    #[test]
+    fn a_vista_screen_is_one_to_one_and_scales_either_way() {
+        let mut ui = dialog_menus(DIALOG);
+        ui.screens.last_mut().unwrap().flags = 0;
+        let mut sources = Vec::new();
+        let vista = screen_layout_at(&ui, DIALOG, &[], &FlatArt, &mut sources).unwrap();
+        assert_eq!(vista.size, DialogSize::Full);
+        let p = &vista.panes[0];
+        assert_eq!(p.scale, Scale::Vista);
+        assert_eq!(p.bitmaps[0].corner, [-100.0, 80.0]);
+        assert_eq!(p.bitmaps[0].scale(), [1.0, 1.0]);
+        assert!(matches!(
+            p.bitmaps[0].flat,
+            Flat::Panel {
+                size: [512.0, 512.0],
+                ..
+            }
+        ));
+        assert_eq!(p.texts[0].widget.bounds, [-80.0, 40.0, 80.0, 0.0]);
+        assert_eq!(p.lists[0].corner, [-60.0, -10.0]);
+        assert_eq!(p.buttons[0].bitmap.as_ref().unwrap().corner, [-78.0, -36.0]);
+        assert_eq!(p.players[0].row_height, 22.0);
+        // The same pane taken to the Xbox's scale is the one laid out
+        // there, and back again it is the Vista one.
+        let xbox = screen_layout_at(&ui, DIALOG, &[Scale::Xbox], &FlatArt, &mut sources).unwrap();
+        assert_eq!(p.at_scale(Scale::Xbox), xbox.panes[0]);
+        assert_eq!(p.at_scale(Scale::Vista), *p);
+        let back = xbox.panes[0].at_scale(Scale::Vista);
+        let near = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() < 1e-3;
+        assert_eq!(back.scale, Scale::Vista);
+        assert!(near(back.bitmaps[0].corner, p.bitmaps[0].corner));
+        assert!(near(back.bitmaps[0].scale(), [1.0, 1.0]));
+        assert!(near(back.lists[0].corner, p.lists[0].corner));
+        assert!((back.players[0].row_height - 22.0).abs() < 1e-3);
+        // A flag clear shows no header; one set keeps what is under it
+        // undimmed; another makes its panes follow its list.
+        let screen = ui.screens.last_mut().unwrap();
+        screen.flags = ui::NO_HEADER | ui::NO_OVERLAY | ui::PANE_PER_ITEM | ui::HALF_DIALOG;
+        let s = screen_layout_at(&ui, DIALOG, &[], &FlatArt, &mut sources).unwrap();
+        assert!(!s.has_header && !s.overlay && s.pane_per_item);
+        assert_eq!(s.size, DialogSize::Half);
+    }
+
+    #[test]
+    fn a_screen_is_found_by_its_whole_name_only() {
+        let mut ui = dialog_menus("ui\\screens\\one\\same_name");
+        let mut other = ui.screens.last().unwrap().clone();
+        other.name = "ui\\screens\\two\\same_name".into();
+        other.panes[0].texts[0].string = "two_body".into();
+        ui.screens.push(other);
+        let mut sources = Vec::new();
+        let mut key = |path: &str| {
+            screen_layout_at(&ui, path, &[], &FlatArt, &mut sources)
+                .map(|s| (s.path.clone(), s.panes[0].texts[0].key.clone()))
+        };
+        assert_eq!(
+            key("UI\\Screens\\Two\\Same_Name"),
+            Ok(("ui\\screens\\two\\same_name".into(), "two_body".into()))
+        );
+        assert_eq!(
+            key("ui\\screens\\one\\same_name").unwrap().1,
+            "quarter_body"
+        );
+        assert_eq!(
+            key("same_name"),
+            Err("no same_name screen in the tags".to_string())
+        );
+    }
+
+    #[test]
+    fn a_catalog_screen_takes_its_scales_and_the_overrides() {
+        let path = ScreenId::Lobby.path();
+        let mut ui = dialog_menus(&path);
+        let screen = ui.screens.last_mut().unwrap();
+        let third = screen.panes[1].clone();
+        screen.panes.push(third);
+        let mut sources = Vec::new();
+        let scales = |s: &ScreenLayout| s.panes.iter().map(|p| p.scale).collect::<Vec<_>>();
+        let s = screen_layout(&ui, ScreenId::Lobby, &[], &FlatArt, &mut sources).unwrap();
+        assert_eq!(s.id, Some(ScreenId::Lobby));
+        assert_eq!(scales(&s), [Scale::Vista, Scale::Xbox, Scale::Xbox]);
+        let (overrides, unread) = crate::catalog::overrides("lobby:0=xbox, lobby:2=vista");
+        assert!(unread.is_empty());
+        let s = screen_layout(&ui, ScreenId::Lobby, &overrides, &FlatArt, &mut sources).unwrap();
+        assert_eq!(scales(&s), [Scale::Xbox, Scale::Xbox, Scale::Vista]);
+        assert_eq!(s.panes[0].bitmaps[0].corner, [-250.0, 200.0]);
+        let missing = screen_layout(&ui, ScreenId::Online, &[], &FlatArt, &mut sources);
+        assert!(missing.unwrap_err().contains("xbox_live_main_menu"));
     }
 }

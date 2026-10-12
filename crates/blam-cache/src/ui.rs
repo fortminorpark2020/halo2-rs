@@ -81,11 +81,14 @@ pub const PULSATING: u32 = 4;
 /// height.
 pub const IGNORE_FOR_LIST_SIZE: u32 = 1;
 /// Screen flags: a quarter, half or large dialog (otherwise full screen),
-/// and no header.
+/// its panes going with its list's items, no header, and no overlay
+/// dimming the screens under it.
 pub const QUARTER_DIALOG: u32 = 1;
+pub const PANE_PER_ITEM: u32 = 2;
 pub const NO_HEADER: u32 = 4;
 pub const HALF_DIALOG: u32 = 8;
 pub const LARGE_DIALOG: u32 = 0x10;
+pub const NO_OVERLAY: u32 = 0x20;
 /// List flags: the list wraps round.
 pub const LIST_WRAPS: u32 = 1;
 
@@ -232,6 +235,10 @@ pub struct Screen {
     pub header: String,
     pub header_text: Option<String>,
     pub panes: Vec<Pane>,
+    /// Every string of the screen's own string list (`unic`), by its
+    /// string id's name, with its English words (Vista's language table;
+    /// MCC's through matg +0x190), in the list's order.
+    pub strings: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -888,6 +895,10 @@ pub fn parse_screen(
         header,
         header_text,
         panes: raw.iter().map(|p| pane(r, p, strings)).collect(),
+        strings: strings
+            .iter()
+            .map(|(id, words)| (r.string_id(*id), words.clone()))
+            .collect(),
     })
 }
 
@@ -1772,6 +1783,14 @@ mod tests {
             ([-300, 0], 16, 8, 2)
         );
         assert_eq!(players.row_height, 40);
+        // The screen's own strings, by name.
+        assert_eq!(
+            s.strings,
+            [(
+                "press_start".to_string(),
+                "PRESS ANY KEY TO CONTINUE".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -1855,6 +1874,10 @@ mod tests {
         assert_eq!(settings.dialog_size(), DialogSize::Half);
         assert_eq!(settings.header, "settings_header");
         assert_eq!(settings.header_text.as_deref(), Some("SETTINGS"));
+        assert_eq!(
+            settings.strings,
+            [("settings_header".to_string(), "SETTINGS".to_string())]
+        );
         assert_eq!(ui.globals.skins.len(), 1);
         assert_eq!(ui.globals.skins[0].name, r"ui\list_skins\main_menu");
         assert_eq!(ui.globals.skins[0].item_animations[0].period_ms, 120);

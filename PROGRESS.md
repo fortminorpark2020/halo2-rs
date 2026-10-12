@@ -1,6 +1,9 @@
 # Progress and handoff
 
-Last updated 2026-10-12 (menu 2.6's review fixes, round 2: Halo 2's
+Last updated 2026-10-12 (menu 2.7: `h2ui` lays out and draws any
+screen of mainmenu.map from its tags, a catalog of the 27 the lobby
+will use, checked on Cartographer's map; before it menu 2.6's review
+fixes, round 2: Halo 2's
 flat grey-navy above and below the shell's bands, tests for the popup
 double-click, the shell's tags and ADD FRIEND's legend, step 7's CPU
 check standing alone; round 1: double-clicks,
@@ -318,7 +321,29 @@ Next, in order:
    number). The menu layer's glyph bands and dotted lines show over it;
    nothing in Vista's tags lights the logo row itself (left to a look
    side by side on the PC). On the owner's PC: the short list after
-   "After P4". Next: 2.7, `h2ui` drawing any screen from its tags.
+   "After P4". 2.7 is done (2026-10-12; menu.md "What Phase 2.7 built"
+   and 9.2 "Phase 2.7's checks"), library only, so the lobby looks the
+   same: `h2ui` lays out any screen from its tags (`tags::screen_layout`)
+   at Vista's scale or the Xbox's (places ×2.5, pictures ×1.25),
+   leaving parked widgets out, and draws it (`screens::screen`) with the
+   caller's words for each slot (the tags' words reworded to ONLINE,
+   Bungie, clans and voice refused), rows, buttons, header and legend,
+   returning where clicks land. `h2ui::catalog` names the 27 screens the
+   lobby will draw and each pane's scale (`H2LOBBY_SCALE` overrides);
+   `Shell` lays them all out when it opens (62.7 MB of pictures, about
+   150 ms in the container). Checked with `menu_png --all` on
+   Cartographer's map: every screen found; error_dialog_ok's family of
+   dialogs at 1:1, task_progress's (Please Wait, Boot) and Player
+   Options at the Xbox's scale; the header and legend boxes stay in
+   Vista's units on every pane (a departure from the plan, whose
+   "scaled" put the header outside the frame); no Xbox Live logo in any
+   frame; the pregame lobby's pane 0 matches Cartographer's within
+   about 8 units and pane 2 the Xbox screenshot's rows (55 units
+   apart). Frames take 5 to 33 ms at 1080p in the container (the
+   full-screen pickers slowest), over the 10 ms budget there; P5 on the
+   owner's PC (menu.md, after "What Phase 2.7 built") runs `menu_png
+   --all` on MCC's mainmenu.map for the real times and the ignored
+   tests on both maps. Next: 2.8, Halo 2's dialogs.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

@@ -142,6 +142,15 @@ impl MemoryArt {
         self.bitmaps.is_empty()
     }
 
+    /// The bytes of its decoded pictures.
+    pub fn bytes(&self) -> usize {
+        self.bitmaps
+            .iter()
+            .flat_map(|(_, b)| &b.images)
+            .map(|i| i.rgba.len())
+            .sum()
+    }
+
     /// A bitmap's place, by its whole name, else by the last part of it.
     fn find(&self, name: &str) -> Option<usize> {
         self.bitmaps
@@ -222,12 +231,27 @@ pub struct Loaded {
 /// empty, and its sequences, a sprite's part of its image as
 /// `blam_cache::ui::BitmapInfo::frame` cuts it.
 pub fn read(pictures: &mut dyn Pictures, wanted: &[(String, usize)]) -> Loaded {
-    let mut names: Vec<(&str, Vec<usize>)> = Vec::new();
-    for (name, frame) in wanted {
+    read_some(pictures, wanted, &[])
+}
+
+/// As `read`, with the `extra` frames read too where their bitmaps have
+/// them: one a bitmap hasn't isn't missing (a button with one picture
+/// shows it when focused too, `screens::button_frame`).
+pub fn read_some(
+    pictures: &mut dyn Pictures,
+    wanted: &[(String, usize)],
+    extra: &[(String, usize)],
+) -> Loaded {
+    // Each bitmap's frames, and whether each must be there.
+    let mut names: Vec<(&str, Vec<(usize, bool)>)> = Vec::new();
+    let all = wanted.iter().map(|w| (w, true));
+    for ((name, frame), needed) in all.chain(extra.iter().map(|w| (w, false))) {
         match names.iter_mut().find(|n| n.0.eq_ignore_ascii_case(name)) {
-            Some(n) if !n.1.contains(frame) => n.1.push(*frame),
-            Some(_) => {}
-            None => names.push((name, vec![*frame])),
+            Some(n) => match n.1.iter_mut().find(|f| f.0 == *frame) {
+                Some(f) => f.1 |= needed,
+                None => n.1.push((*frame, needed)),
+            },
+            None => names.push((name, vec![(*frame, needed)])),
         }
     }
     let mut out = Loaded {
@@ -244,12 +268,14 @@ pub fn read(pictures: &mut dyn Pictures, wanted: &[(String, usize)]) -> Loaded {
         };
         let mut images: Vec<ArtImage> = vec![ArtImage::default(); info.images.len()];
         let mut whole = true;
-        for frame in frames {
+        for (frame, needed) in frames {
             let shown = i16::try_from(frame).ok().and_then(|f| info.frame(f));
             let Some(shown) = shown else {
-                out.missing
-                    .push((name.to_string(), format!("it has no frame {frame}")));
-                whole = false;
+                if needed {
+                    out.missing
+                        .push((name.to_string(), format!("it has no frame {frame}")));
+                    whole = false;
+                }
                 continue;
             };
             if images[shown.image].width > 0 {
@@ -413,6 +439,26 @@ mod tests {
         assert_eq!(loaded.found, 1);
         assert!(loaded.missing.is_empty());
         assert_eq!(loaded.art.picture("ui\\brace", 0).unwrap().size, [2.0, 2.0]);
+    }
+
+    #[test]
+    fn extra_frames_are_read_where_a_bitmap_has_them() {
+        let mut fake = Fake {
+            decoded: Vec::new(),
+        };
+        let wanted = [("ui\\brace".to_string(), 0)];
+        // Frame 1 exists, frame 7 doesn't: neither is missing.
+        let extra = [("ui\\brace".to_string(), 1), ("ui\\brace".to_string(), 7)];
+        let loaded = read_some(&mut fake, &wanted, &extra);
+        assert!(loaded.missing.is_empty(), "{:?}", loaded.missing);
+        assert_eq!((loaded.found, loaded.wanted), (1, 1));
+        assert!(loaded.art.picture("brace", 0).is_some());
+        assert!(loaded.art.picture("brace", 1).is_some());
+        // Wanted as well, a frame it hasn't is missing.
+        let both = [("ui\\brace".to_string(), 7)];
+        let loaded = read_some(&mut fake, &both, &extra);
+        assert_eq!(loaded.missing.len(), 1);
+        assert_eq!(loaded.found, 0);
     }
 
     #[test]

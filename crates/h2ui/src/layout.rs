@@ -459,6 +459,13 @@ pub enum Flat {
         size: [f32; 2],
         color: Rgba,
     },
+    /// A plain panel this size: `color` with an `edge` round it (a
+    /// dialog's frame pieces, a button, a list item's backing).
+    Panel {
+        size: [f32; 2],
+        color: Rgba,
+        edge: Rgba,
+    },
     /// Lettering in a box this size (the logo): `text` in `font`, this
     /// many times its size, shaded from `color` at the top to `bottom`.
     Lettering {
@@ -528,6 +535,7 @@ impl BitmapWidget {
             | Flat::Track { size, .. }
             | Flat::Sheen { size, .. }
             | Flat::Brace { size, .. }
+            | Flat::Panel { size, .. }
             | Flat::Lettering { size, .. } => Some(size),
         }
     }
@@ -571,6 +579,19 @@ pub struct SkinLayout {
     /// listed after the label and drawn under it).
     pub texts: Vec<TextWidget>,
     pub items: ItemLook,
+    /// Its scroll arrows, when it has them.
+    pub arrows: Option<Arrows>,
+}
+
+/// A list skin's scroll arrows: one bitmap, its first frame pointing up
+/// and its second down (the default skin's are so), each with its bottom
+/// left this far from the list's corner (UI units, as the skin's own
+/// bitmaps).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Arrows {
+    pub bitmap: String,
+    pub up: [f32; 2],
+    pub down: [f32; 2],
 }
 
 /// A list on a screen.
@@ -592,6 +613,244 @@ impl ListLayout {
     /// Item `k`'s corner.
     pub fn corner(&self, k: usize) -> [f32; 2] {
         [self.corner[0], self.corner[1] - self.step * k as f32]
+    }
+}
+
+/// Which units a pane's numbers are in. Vista redid most of mainmenu.map
+/// in its own UI units (1:1); the screens it never showed (most of the
+/// online ones, a few dialogs) kept the Xbox's numbers, which are its
+/// 640 by 480 frame's pixels from the middle, drawn with pictures made
+/// for that frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Scale {
+    #[default]
+    Vista,
+    Xbox,
+}
+
+/// UI units to an Xbox pixel (`FRAME` is 640 by 480 of them), for an Xbox
+/// pane's places and sizes; and how much bigger its pictures are drawn
+/// than their own scale says (the pictures Vista and MCC have are twice
+/// the Xbox's size: 2.5 / 2). Both are checked against the owner's
+/// screenshot of the Xbox's pregame lobby and three bitmaps only.
+pub const XBOX_POSITION: f32 = 2.5;
+pub const XBOX_BITMAP: f32 = 1.25;
+
+impl Scale {
+    /// How much a pane's places and boxes grow.
+    pub fn position(self) -> f32 {
+        match self {
+            Scale::Vista => 1.0,
+            Scale::Xbox => XBOX_POSITION,
+        }
+    }
+
+    /// How much a pane's pictures grow beyond their own scale.
+    pub fn bitmap(self) -> f32 {
+        match self {
+            Scale::Vista => 1.0,
+            Scale::Xbox => XBOX_BITMAP,
+        }
+    }
+
+    /// Its name in `H2LOBBY_SCALE` and menu_png's arguments.
+    pub fn name(self) -> &'static str {
+        match self {
+            Scale::Vista => "vista",
+            Scale::Xbox => "xbox",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Scale> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "vista" | "1" | "1:1" => Some(Scale::Vista),
+            "xbox" | "2.5" => Some(Scale::Xbox),
+            _ => None,
+        }
+    }
+
+    /// A point at this scale in UI units.
+    pub fn point(self, [x, y]: [f32; 2]) -> [f32; 2] {
+        let k = self.position();
+        [x * k, y * k]
+    }
+
+    /// A box at this scale in UI units.
+    pub fn rect(self, r: [f32; 4]) -> [f32; 4] {
+        let k = self.position();
+        r.map(|v| v * k)
+    }
+}
+
+/// A text slot of a screen: the string id its tag names (its `key`;
+/// `#<n>` for the `n`th text of its pane when it names none), the words
+/// the screen's string list has for it, and where and how it is drawn.
+/// Which words it shows is the screen's binding's choice
+/// (`screens::Words`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlotText {
+    pub key: String,
+    pub words: Option<String>,
+    pub widget: TextWidget,
+}
+
+/// A button of a screen (the pregame lobby's START GAME): its text slot,
+/// and the picture behind it, whose corner is the text box's top left
+/// moved by the tag's offset (its y counted downwards).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ButtonLayout {
+    pub text: SlotText,
+    pub bitmap: Option<BitmapWidget>,
+}
+
+impl ButtonLayout {
+    /// Its text's string id (`SlotText::key`).
+    pub fn key(&self) -> &str {
+        &self.text.key
+    }
+}
+
+/// A block of players (the lobby's roster): the first row's corner, how
+/// many it holds in how many rows and columns, the step down to the next
+/// row and across to the next column (UI units), and the player skin each
+/// row is drawn with (its tag's name; player skins are drawn in 2.10).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayersLayout {
+    pub corner: [f32; 2],
+    pub max: usize,
+    pub rows: usize,
+    pub columns: usize,
+    /// Down from one row to the next (the tags give it negative, as +y is
+    /// up; this is the distance).
+    pub row_height: f32,
+    pub column_width: f32,
+    pub skin: Option<String>,
+}
+
+impl PlayersLayout {
+    /// Player `k`'s corner, down each column then across.
+    pub fn corner(&self, k: usize) -> [f32; 2] {
+        let rows = self.rows.max(1);
+        let (column, row) = (k / rows, k % rows);
+        [
+            self.corner[0] + self.column_width * column as f32,
+            self.corner[1] - self.row_height * row as f32,
+        ]
+    }
+}
+
+/// One pane of a screen (a screen shows one at a time; a pane-per-item
+/// screen shows the one for its list's focused item), in UI units at its
+/// `scale`'s size.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PaneLayout {
+    pub scale: Scale,
+    pub bitmaps: Vec<BitmapWidget>,
+    pub texts: Vec<SlotText>,
+    pub lists: Vec<ListLayout>,
+    pub buttons: Vec<ButtonLayout>,
+    pub players: Vec<PlayersLayout>,
+}
+
+impl PaneLayout {
+    /// The same pane at another scale: every place and box moved out or
+    /// in, its pictures grown or shrunk (its lists' skins stay as they
+    /// are, as at either scale).
+    pub fn at_scale(&self, to: Scale) -> PaneLayout {
+        let from = self.scale;
+        let k = to.position() / from.position();
+        let pk = to.bitmap() / from.bitmap();
+        let point = |[x, y]: [f32; 2]| [x * k, y * k];
+        let picture = |w: &BitmapWidget| {
+            let mut w = w.clone();
+            w.corner = point(w.corner);
+            if pk != 1.0 {
+                w.scale = w.scale().map(|s| s * pk);
+                if let Flat::Panel { size, color, edge } = w.flat {
+                    w.flat = Flat::Panel {
+                        size: size.map(|v| v * pk),
+                        color,
+                        edge,
+                    };
+                }
+            }
+            w
+        };
+        let text = |t: &SlotText| {
+            let mut t = t.clone();
+            t.widget.bounds = t.widget.bounds.map(|v| v * k);
+            t
+        };
+        PaneLayout {
+            scale: to,
+            bitmaps: self.bitmaps.iter().map(picture).collect(),
+            texts: self.texts.iter().map(text).collect(),
+            lists: self
+                .lists
+                .iter()
+                .map(|l| ListLayout {
+                    corner: point(l.corner),
+                    ..l.clone()
+                })
+                .collect(),
+            buttons: self
+                .buttons
+                .iter()
+                .map(|b| ButtonLayout {
+                    text: text(&b.text),
+                    bitmap: b.bitmap.as_ref().map(picture),
+                })
+                .collect(),
+            players: self
+                .players
+                .iter()
+                .map(|e| PlayersLayout {
+                    corner: point(e.corner),
+                    row_height: e.row_height * k,
+                    column_width: e.column_width * k,
+                    ..e.clone()
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Any screen of mainmenu.map from its tag (`tags::screen_layout`): its
+/// size (where its header and legend go), its header's string id and
+/// words, its legend (the globals' `button_key` number; 0 none), whether
+/// it dims what is under it, whether its panes go with its list's items,
+/// its panes, and its string list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScreenLayout {
+    pub id: Option<crate::catalog::ScreenId>,
+    pub path: String,
+    pub size: DialogSize,
+    pub has_header: bool,
+    pub header_id: String,
+    pub header_words: Option<String>,
+    pub button_key: u16,
+    /// Shown over the screen under it, dimmed by the overlay (flag 0x20
+    /// clear).
+    pub overlay: bool,
+    /// Its panes follow its list's focus (flag 2).
+    pub pane_per_item: bool,
+    pub panes: Vec<PaneLayout>,
+    /// Its string list: string id name, English words.
+    pub strings: Vec<(String, String)>,
+}
+
+impl ScreenLayout {
+    /// The pane at `k`, or the last one (none when it has none).
+    pub fn pane(&self, k: usize) -> Option<&PaneLayout> {
+        self.panes.get(k).or(self.panes.last())
+    }
+
+    /// The words of a string id in its string list.
+    pub fn string(&self, key: &str) -> Option<&str> {
+        self.strings
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, w)| w.as_str())
     }
 }
 
@@ -806,6 +1065,7 @@ pub fn main_menu_skin() -> SkinLayout {
         ],
         texts: vec![label, shadow],
         items: ItemLook::default(),
+        arrows: None,
     }
 }
 

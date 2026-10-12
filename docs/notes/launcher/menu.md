@@ -946,6 +946,12 @@ later; the button layouts offered stay as they are.
   default above).
 - The playlist screen's level icon and player counts (1.2) are our
   additions; Halo 2's playlist list had neither.
+- The scale decision above said a dialog's header and legend boxes take
+  its pane's scale. 2.7's pictures showed they don't: the globals' boxes
+  are already in Vista's units, and grown with an Xbox pane the quarter
+  header lands above and left of the dialog's frame, while as they are
+  it sits in the plate's top (9.2, "Phase 2.7's checks"). They stay as
+  the globals have them for every pane.
 
 #### What Phase 2.1 built (2026-10-11)
 
@@ -2265,6 +2271,198 @@ usual:
   CPU). It now compares the lobby behind the engine's window with the
   lobby in front, in the same run.
 
+#### What Phase 2.7 built (2026-10-12)
+
+`h2ui` can now lay out and draw any screen of mainmenu.map from its
+tags. Nothing in the lobby uses it yet (2.8 onwards bind screens to it),
+so the owner sees no change; the lobby's log gains a line for each
+catalog screen.
+
+- **`blam-cache`.** `Screen.strings`: every string of the screen's own
+  string list, by its string id's name, with its English words (Vista's
+  language table, MCC's through the globals). The screen flags are named
+  (`QUARTER_DIALOG`, `PANE_PER_ITEM`, `NO_HEADER`, `HALF_DIALOG`,
+  `LARGE_DIALOG`, `NO_OVERLAY`).
+- **`h2ui::layout`.**
+  - `Scale::{Vista, Xbox}`: Vista's own units (1:1), or the Xbox's,
+    where places and boxes grow by `XBOX_POSITION` (2.5) and pictures by
+    `XBOX_BITMAP` (1.25) beyond their own scale. Both are checked
+    against the owner's Xbox lobby screenshot and three bitmaps only.
+  - `ScreenLayout`: a screen's whole tag name, its size (where its header
+    and legend go), whether it has a header, the header's string id and
+    words, its `button_key` number, whether it dims what is under it,
+    whether its panes follow its list, its panes and its string list.
+    `pane(k)` gives the last pane past the end.
+  - `PaneLayout`: its scale, its pictures, text slots (`SlotText`: the
+    string id it names, or `#<n>` when it names none, the tag's words,
+    and the text widget), lists, buttons (`ButtonLayout`: a text slot
+    and its picture) and players blocks (`PlayersLayout`: the first
+    row's corner, how many in how many rows and columns, the row and
+    column steps, filled down each column then across). `at_scale`
+    moves a pane to the other scale.
+  - A list skin's scroll arrows (`Arrows`: the bitmap, and each arrow's
+    bottom left from the list's corner), and `Flat::Panel`, a plain
+    panel with an edge for the flat look.
+- **`h2ui::catalog`.** The 27 screens the lobby will draw (`ScreenId`),
+  each with its whole tag name, a short name (`dialog_ok`, `online`,
+  `lobby`...) and its panes' scales. `H2LOBBY_SCALE` overrides any of
+  them for tuning: `<name>=xbox|vista` for all of a screen's panes,
+  `<name>:<pane>=...` for one, several separated by commas; what it
+  can't read is logged and left out.
+- **`h2ui::tags`.**
+  - `screen_layout` (a catalog screen, at its scales with the overrides)
+    and `screen_layout_at` (any screen by its whole tag name, at the
+    scales given). The name must match whole (any case): Vista has two
+    screens ending in `player_selected_dialog`. Each gives a `menus:
+    screen ...` line: its panes' scales, how many parked widgets were
+    left out, and its lists' skins.
+  - A widget with a place or box number of 9,000 or more either way is
+    parked off the screen (Halo 2 parks unused ones at ±9,999; a few
+    at about ±9,100 to ±9,600) and is left out.
+  - A button's picture goes at its text box's top left moved by the
+    tag's offset, whose y counts down (START GAME's at (-705, 492), as in
+    Cartographer's lobby), one depth under its text.
+  - A players block's row step is the tag's (negative) height, positive.
+  - List skins are shared by every screen and stay in Vista's units at
+    either scale; only a list's corner moves.
+  - `screen_wanted` gives what a screen draws: its pictures, its
+    buttons' resting frame, its skins' pictures and both arrows; then,
+    apart, each button's focused frame, read only where its bitmap has
+    it (`art::read_some`: a missing one isn't counted as missing).
+  - `flat_for` gives the dialog frame pieces, the pregame lobby's button
+    and the default skin's backing and end cap a panel of their
+    pictures' sizes for the flat look.
+- **Text and painting.** `Fonts::wrap` breaks text at spaces and at
+  `\n` or `\r\n`, cutting a word wider than the box. `Painter::text_box`
+  draws one line as `text` did, or several from the box's top, each a
+  line's height below the last, leaving out any whose bottom is past the
+  box's (the first always shows). `DrawList::fill_area` counts the
+  window pixels its quads cover.
+- **`h2ui::screens`.**
+  - `Words::{Tag, TagOr, Ours, Hide}`: what a text slot shows. The tag's
+    words always go through `wording` first: Xbox Live becomes ONLINE
+    in capitals, else online (Online starting a sentence), and an "on"
+    just before it goes; words still naming the Xbox, Bungie, clans or
+    voice are refused (hidden, or `TagOr`'s own words instead).
+  - Format tokens (U+E400 to U+E4FF) take the caller's values; a text
+    with one that has none is hidden.
+  - `Row` (a cell for each of the skin's texts, skin pictures shown at
+    another frame on that row, and whether it can be chosen; one that
+    can't is drawn at `DISABLED`, 0.4, our own), `ListState` (the rows,
+    the focus, the first shown), `Show` (keep, hide, or show another
+    picture in a pane picture's place, for a map's picture), and
+    `ScreenState` (the pane, when it opened, the chrome, the bindings,
+    the lists, the focused and dimmed buttons, the header's words, the
+    legend and the pictures).
+  - `screen()` draws a pane: its pictures and buttons' pictures by
+    depth (a button focused at frame 1, or 0 when its bitmap has one
+    frame), its lists (each shown row's pictures, then its cells; the
+    arrows while rows are hidden above or below), its texts and buttons'
+    texts by depth, the header in the globals' box for the screen's size
+    and the legend. It returns where clicks land (`HitArea`: a row, a
+    button with its picture, or a legend item).
+  - `overlay` (the dim under a dialog, drawn by the caller) and
+    `intro_end` (when a pane's last piece has come in, for the lobby's
+    `menu_settled`).
+  - The start screen and main menu draw exactly as before: a test pins
+    their quads at two sizes and two times.
+- **`h2ui::shell`.** `Shell.screens` holds every catalog screen the tags
+  have, laid out in both passes as the menus are (the first asks for
+  their pictures). `Shell::open` reads `H2LOBBY_SCALE` and logs a line
+  for each catalog screen (or why it is missing), then `menus: <n>
+  catalog screens, <n> MB of pictures decoded, opened in <n> ms`.
+- **`examples/menu_png.rs`.** `--screen <name or tag name>` (repeatable)
+  or `--all` draws screens from `--mcc` or `--vista`, each pane in the
+  map's look and the flat look, settled, over the shell (and the
+  overlay, for a dialog), to `<name>-<pane>-<look>-<w>x<h>.png`, at
+  1920x1080 and 1280x720 or `--size`. `--pane`, `--scale`, `--focus`
+  and `--words tag|ids|hide` (the tags' words through `wording`, each
+  slot's string id, or none) choose what is drawn. For each it prints
+  the quads, how much of the window they cover, the hit areas and the
+  time of a frame; for each small dialog, where its header box falls on
+  its frame pieces at both scales. `--frames <bitmap>` prints a bitmap's
+  images and sequences and writes each frame.
+- **Tests** (no game files): an Xbox quarter dialog of two panes grows
+  its places by 2.5 and its pictures by 1.25 (flat panels too), keeps
+  its skin's numbers, places a button's picture from its text box, steps
+  a players block by 55 units for 22 Xbox pixels, and leaves its two
+  parked widgets out; the same screen at Vista's scale is 1:1, and
+  `at_scale` takes either to the other; the whole tag name tells two
+  screens with the same last name apart; the catalog's scales and the
+  overrides; `wording`, `Words` and the tokens; a drawn dialog shows the
+  reworded and our own words and hides the refused and unknown ones,
+  fills each row's cells, puts its header in the globals' unscaled box,
+  dims the disabled row, and its hit areas hold the rows' labels, the
+  button's text and picture and each legend item's glyphs; rows take
+  their own frames, the focused button its second frame (or its only
+  one), the arrows both, and a picture can be swapped or hidden;
+  `intro_end` and the overlay; and a made-up format-13 map's please-wait
+  dialog read through `Shell::open` (its strings from a `unic`, its
+  plate and button pictures from textures.dat) laid out exactly as the
+  same tags made by hand. The ignored real-map tests also want every
+  catalog screen found and every picture decoded, or a reason naming a
+  missing frame or the format; and, with both maps, every catalog
+  screen placed the same in MCC's as in Vista's.
+- **Departures from the brief.**
+  - The header and legend boxes keep the globals' Vista units at both
+    scales (the brief had them grow with an Xbox pane; Corrections and
+    9.2).
+  - `flat_for`'s sizes are the pictures' real ones, read with
+    `--frames` (256 by 256 for the frame corners, 512 by 512 for the
+    plates, 358 by 64 for the button, 400 by 42 for the backing, 56 by
+    68 for the end cap). Most of each picture is clear, so the flat
+    frame is only near the real one.
+  - `wording` also drops an "on" before the name, after a sentence on
+    the ONLINE screen came out "on online".
+  - Both arrows are placed from the list's corner (the first try put
+    the down arrow below the last row shown, far under ok_cancel's
+    dialog).
+- **Measured in the container** (four shared cores; 9.2 has the rest):
+  `Shell::open` on Cartographer's mainmenu.map takes 144 to 180 ms and
+  decodes 62.7 MB of pictures (87 of 94 bitmaps; the 7 others are
+  frames the tags ask for that their bitmaps haven't). With the map's
+  art a pane takes 5 to 33 ms a frame at 1920x1080 (median 14.7) and 3
+  to 19 ms at 1280x720 (median 8.2), the shell's copy and strips
+  included; the flat look 0.9 to 4.4 ms. The full-screen pickers are
+  the slowest (select_variant 33 ms, select_game 27 to 31, the playlists
+  lobby 30, the keyboard 26, select_map 26), as their pictures cover
+  most of the window. That is over the 10 ms budget here; the owner's
+  PC has run the menus about twice as fast as the container, and P5
+  measures it there. A screen still over budget when it is bound moves
+  its still pictures into a kept layer (the rule above).
+
+**On the owner's PC (P5)**, from the clone, read-only (the PNGs stay on
+the PC; only the printed lines come back):
+
+1. Build the tool: `cargo build --release -p h2ui --example menu_png`.
+2. Draw every catalog screen from MCC's map:
+   `target\release\examples\menu_png.exe C:\h2work\p5 --mcc "C:\Program
+   Files (x86)\Steam\steamapps\common\Halo The Master Chief
+   Collection\halo2\h2_maps_win64_dx11\mainmenu.map" --all > p5.txt
+   2> p5-log.txt`. `p5-log.txt` should have 27 `menus: screen ...`
+   lines with panes (none `no ... screen in the tags`), `pictures for
+   87 of 94 bitmaps` or close, `drawn flat` lines only for missing
+   frames (`it has no frame ...`: beeper, xbox_live_menu, y_callout,
+   myhack, tabs, xbox_live, unknown) or naming a format, and `menus: 27
+   catalog screens, <n> MB of pictures decoded, opened in <n> ms`. Send
+   that last line and `p5.txt`'s timing lines (`<name> pane <k> ...
+   draw <n> ms a frame`), which say each screen's time at 1920x1080 and
+   1280x720.
+3. The same with `--vista` and Cartographer's `maps\mainmenu.map`, if
+   it is installed, to compare the times.
+4. The ignored tests: `set H2_MCC_MAPS=<MCC's h2_maps_win64_dx11>` and
+   `set H2_MAPS=<Cartographer's maps>`, then `cargo test --release -p
+   h2ui -- --ignored real_`: `real_mcc_menus_come_from_their_tags`,
+   `real_vista_menus_come_from_their_tags` and
+   `real_catalog_screens_are_placed_alike_in_both_maps` pass.
+5. Look at `online-0-mcc-1920x1080.png`, `please_wait-0-...`,
+   `player_options-0-...`, `lobby-0-...` and `lobby-2-...`: each dialog's
+   frame should look whole, with its header inside it, and no Xbox Live
+   logo anywhere. Say what looks wrong; don't send the pictures.
+6. The lobby is unchanged; its `lobby.log` has the 27 catalog lines and
+   the `menus: 27 catalog screens, ...` line, and the time it took to
+   open.
+
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 
 **1. MATCHMAKING (0xD2).**
@@ -2755,6 +2953,87 @@ parse turns into names.
   under 16 ms, so the CPU backend stays for phase 1.
 - The ignored real-file tests pass (`mainmenu` in blam-cache, `real_` in
   h2ui).
+
+**Phase 2.7's checks** (container, 2026-10-12, Cartographer's Vista
+`mainmenu.map` from the upload; `menu_png --all` and single screens; the
+PNGs stayed in the scratchpad):
+
+- **Every catalog screen is found** (27 of 27, 59 panes), and drawn in
+  the map's look and the flat look at 1920x1080 and 1280x720. Pictures
+  for 87 of 94 bitmaps, 62.7 MB decoded, `Shell::open` in 144 to 180 ms.
+  The seven drawn flat are frames the tags ask for that their bitmaps
+  haven't: beeper's 6, xbox_live_menu's 7 (it has 6 images), y_callout's
+  5, xbox_live's 8, myhack's 1, tabs' 1 and 2, unknown's 2. What the Xbox
+  did with such a frame is unknown; they draw nothing here. 32 parked
+  widgets are left out of the pregame lobby's panes.
+- **The small dialogs come in two families.** error_dialog_ok's
+  (DialogOk, OkCancel, LargeError, MultipleChoice, Confirm, Privacy,
+  Leader, RestoreControls) is **Vista's**: at 1:1 its frame pieces make
+  one box (dialog_ok's from (-292, 242) to (406, -386)) with the
+  quarter header box (-252, 182) to (350, 142) in its top; at 2.5 the
+  pieces spread over nearly the whole screen and don't meet.
+  task_progress_dialog's (PleaseWait, Boot) is **the Xbox's**: at 1:1
+  its pieces don't meet; at 2.5 the top-left corner, the plate and the
+  bottom-right corner make one dialog, (-360, 383) to (505, -403), with
+  the same quarter header box in the plate's top. PlayerOptions (half)
+  is **the Xbox's** too: at 2.5 its frame holds its list and the legend;
+  at 1:1 the corners cut across the list. `menu_png`'s printed fit (the
+  header box in the top quarter of the pieces' bounding box) agrees for
+  the first family but says "outside" for task_progress at both
+  scales: its bottom-right corner piece is a 256-pixel picture, mostly
+  clear, so the bounding box reaches well below what shows. The
+  pictures decided.
+- **The header and legend boxes don't scale.** Grown with an Xbox pane,
+  the quarter header box lands at (-630, 455) to (875, 355), above and
+  left of the task_progress frame; as the globals have it, it sits in
+  the plate's top, and the legend in the frame's bottom right. So they
+  keep Vista's units on every pane (a correction to the plan).
+- **List skins don't scale either.** In the Xbox screens (ONLINE, the
+  playlists, Player Options, Please Wait) the rows' backing and text at
+  the skin's own numbers fit the frames drawn at 2.5; at 2.5 they would
+  be wider than the frames.
+- **The arrows.** The default skin's arrows bitmap has two 52 by 34
+  images: the first points up, the second down. Both go from the list's
+  corner, as the skin places them.
+- **The pregame lobby's button** (`pregame_lobby\button`) has three 358
+  by 64 images: the first resting (a pale edge), the second focused (a
+  bright blue glow with arrow tips at both ends), the third like the
+  first with a softer, lighter edge (pressed or disabled, perhaps; not
+  used). The focused button shows the second.
+- **No Xbox Live logo.** xbox_live_menu's six frames: 0, 1, 2 and 4 are
+  diagrams of Spartans and squads with sliders and markers, 3 a small
+  grid corner, 5 a bungie.net name over a grid. xbox_live's three: the
+  unknown-map picture (440 by 414), Spartans with a flag, a vehicle and
+  a flag with checkboxes. No frame of either shows the Xbox Live logo.
+  Frame 5 of xbox_live_menu (at (-252, -155) on the ONLINE screen's
+  panes) names Bungie, so its binding hides it.
+- **The ONLINE screen fills the 4:3 frame** at the Xbox's scale: its
+  pieces run from about -700 to +670 units across (the frame is ±800)
+  and from the header band down to about -200; at 1:1 they would sit in
+  the middle 40 %. Its description sentence ended "on" plus the Xbox's
+  service and came out "on online"; `wording` now drops the "on".
+- **The pregame lobby's pane 0 at 1:1**, drawn at 1812 by 1177 next to
+  the Cartographer lobby screenshot: the header, START GAME and GAME
+  SETUP boxes are within about 8 units (START GAME's left edge -689
+  against -681); the mode block (`lobby_display`) at (-705, 350) and the
+  map picture's place match (its visible part starts about -332 in both;
+  its corner is -448). Cartographer hides FIND GAMES and GAME DETAILS and
+  shows a speaker icon only on filled rows: the binding's job (2.10).
+  The chat box is about 27 units right and 16 down of Cartographer's,
+  unexplained; noted for 2.10.
+- **Pane 2 at 2.5 against the Xbox screenshot**, drawn at 1024x768 and
+  set beside the reference at the same height (415 pixels): the same
+  layout (header, START GAME and GAME SETUP at the top left, the panel,
+  the matchmaking block lower left, the roster column on the right with
+  its speaker icons and grey bars). The roster's rows are 18.5 pixels
+  apart there against about 19 on the reference: about 21 to 22 Xbox
+  pixels, as the tag's 22 (55 units) says. The bars span about 500 to
+  695 against the reference's 476 to 691; our top block sits a little
+  higher.
+- **Times** at 1920x1080 with the map's art: 5 to 33 ms a frame (median
+  14.7), 3 to 19 ms at 1280x720 (median 8.2), the flat look 0.9 to 4.4
+  ms; the full-screen pickers are the slowest ("What Phase 2.7 built").
+- MCC's map isn't in the container: P5 runs the same on the owner's PC.
 
 ### 9.3 Sounds and movies
 

@@ -205,7 +205,13 @@ the launcher doesn't do.
   the tests get). Their text is in Halo 2's fonts from the same folder
   as the lobby's, else in `h2ui`'s built-in font. The log says where each
   piece came from (lines starting `menus:`). Popups and notices are drawn
-  over them as on every screen.
+  over them as on every screen. Since 2.7 the same map also gives the
+  layouts of the 27 screens in `h2ui::catalog` (none drawn by the lobby
+  yet), with a `menus: screen ...` line each and `menus: <n> catalog
+  screens, <n> MB of pictures decoded, opened in <n> ms`;
+  `H2LOBBY_SCALE` overrides a screen's scale for tuning
+  (`<name>=xbox|vista`, or `<name>:<pane>=...` for one pane, separated
+  by commas; menu.md "What Phase 2.7 built").
 - Sound (menu.md section 5 and "What Phase 2.2 built"; `lobby/sound.rs`
   and `lobby/audio.rs`): with Halo 2 Vista's files, Halo 2's menu music
   plays on the start screen and the main menu and its menu sounds on

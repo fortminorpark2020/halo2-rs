@@ -69,6 +69,24 @@ pub struct DrawList {
     pub texts: Vec<String>,
 }
 
+impl DrawList {
+    /// The window pixels its quads cover, each clipped to the window and
+    /// counted once per quad (overlaps count twice): what drawing it costs
+    /// on the CPU, roughly.
+    pub fn fill_area(&self) -> f64 {
+        let [w, h] = self.size.map(|v| v as f32);
+        self.quads
+            .iter()
+            .map(|q| {
+                let [x0, y0, x1, y1] = q.rect;
+                let across = (x1.min(w) - x0.max(0.0)).max(0.0);
+                let down = (y1.min(h) - y0.max(0.0)).max(0.0);
+                f64::from(across) * f64::from(down)
+            })
+            .sum()
+    }
+}
+
 /// Where a backend finds a quad's pixels.
 pub trait Textures {
     /// The pixels of `texture` (none for `Texture::White`, or for what
@@ -341,6 +359,16 @@ impl<'a> Painter<'a> {
                 let m = (l + r) * 0.5;
                 self.fill([m - e * 0.5, t, m + e * 0.5, (t + b) * 0.5], c);
             }
+            Flat::Panel { color, edge, .. } => {
+                let (c, e) = (fade(color), fade(edge));
+                self.fill([l, t, r, b], c);
+                // A thin edge round it, two units wide (our own choice).
+                let w = 2.0;
+                self.fill([l, t, r, t - w], e);
+                self.fill([l, b + w, r, b], e);
+                self.fill([l, t - w, l + w, b + w], e);
+                self.fill([r - w, t - w, r, b + w], e);
+            }
             Flat::Lettering {
                 text,
                 font,
@@ -426,6 +454,30 @@ impl<'a> Painter<'a> {
         let top = (t + b + line.ascent + line.descent) * 0.5;
         self.line(&line, [x, top - line.ascent], style);
         line.width
+    }
+
+    /// Text in a box (UI units), broken into lines that fit its width
+    /// (`Fonts::wrap`). One line is placed as `text` places it; several
+    /// start at the box's top, a line's height (ascent and descent) apart,
+    /// and those that would reach below its bottom are left out (the
+    /// first always shows).
+    pub fn text_box(&mut self, bounds: [f32; 4], style: TextStyle, text: &str) {
+        let [l, t, r, b] = bounds;
+        let lines = self.fonts.wrap(style.font, style.scale, text, r - l);
+        if lines.len() <= 1 {
+            let line = lines.first().map_or(text, String::as_str);
+            self.text(bounds, style, line);
+            return;
+        }
+        let probe = self.fonts.line(style.font, style.scale, "");
+        let height = probe.ascent + probe.descent;
+        for (k, line) in lines.iter().enumerate() {
+            let top = t - height * k as f32;
+            if k > 0 && top - height < b {
+                break;
+            }
+            self.text([l, top, r, top - height], style, line);
+        }
     }
 
     /// A text widget's line, its box moved by `offset`, faded by `alpha`.
@@ -630,6 +682,46 @@ mod tests {
         };
         p.text([0.0, 20.0, 100.0, -10.0], right, "LI");
         assert_eq!(p.list().quads[1].rect[2], 800.0 + 99.0);
+    }
+
+    #[test]
+    fn a_text_box_wraps_from_its_top_and_drops_what_doesnt_fit() {
+        let fonts = crate::text::tests::fonts();
+        let style = TextStyle::new(Font::MainMenu, [1.0; 4], Justify::Left);
+        // One line: just as `text` places it.
+        let mut one = Painter::new(space(), &FlatArt, &fonts, 0.0);
+        one.text_box([0.0, 20.0, 100.0, -10.0], style, "LI LI");
+        let mut plain = Painter::new(space(), &FlatArt, &fonts, 0.0);
+        plain.text([0.0, 20.0, 100.0, -10.0], style, "LI LI");
+        assert_eq!(one.finish(), plain.finish());
+        // Three lines in a box 31 wide and 40 tall: lines 15 high (ascent
+        // 12, descent 3) from the top at 20, so the third (down to -25)
+        // is left out.
+        let mut p = Painter::new(space(), &FlatArt, &fonts, 0.0);
+        p.text_box([0.0, 20.0, 31.0, -20.0], style, "LI LI LI LI\r\nH");
+        let list = p.finish();
+        assert_eq!(list.texts, ["LI LI", "LI LI"]);
+        // Each line's baseline is its ascent under its top: 8 and -7 (on
+        // whole pixels: 592 and 607 down the window).
+        let baselines: Vec<f32> = list.quads.iter().map(|q| q.rect[3]).collect();
+        assert_eq!(baselines[0], 592.0);
+        assert_eq!(*baselines.last().unwrap(), 607.0);
+        // A box too short for two lines still shows the first.
+        let mut p = Painter::new(space(), &FlatArt, &fonts, 0.0);
+        p.text_box([0.0, 20.0, 31.0, 10.0], style, "LI LI LI");
+        assert_eq!(p.finish().texts, ["LI LI"]);
+    }
+
+    #[test]
+    fn fill_area_counts_what_is_on_the_window() {
+        let fonts = Fonts::fallback();
+        let mut p = Painter::new(Space::new(100, 50), &FlatArt, &fonts, 0.0);
+        p.fill_px([10.0, 10.0, 20.0, 30.0], [1.0; 4]);
+        // Half off the left, and over the bottom right corner.
+        p.fill_px([-10.0, 0.0, 10.0, 10.0], [1.0; 4]);
+        p.fill_px([90.0, 40.0, 200.0, 200.0], [1.0; 4]);
+        assert_eq!(p.finish().fill_area(), 200.0 + 100.0 + 100.0);
+        assert_eq!(DrawList::default().fill_area(), 0.0);
     }
 
     #[test]

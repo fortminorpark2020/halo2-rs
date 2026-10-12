@@ -609,6 +609,43 @@ impl Fonts {
         String::new()
     }
 
+    /// `text` broken into lines no wider than `width` UI units in `font`
+    /// at `scale` times its size: at spaces, and at each line break (`\n`
+    /// or `\r\n`); a word wider than a line on its own is cut to fit it
+    /// (`fit`). Blank lines inside stay; none for empty text.
+    pub fn wrap(&self, font: Font, scale: f32, text: &str, width: f32) -> Vec<String> {
+        let room = if scale > 0.0 { width / scale } else { width };
+        let mut out = Vec::new();
+        for para in text.split('\n') {
+            let para = para.strip_suffix('\r').unwrap_or(para);
+            let mut line = String::new();
+            for word in para.split(' ').filter(|w| !w.is_empty()) {
+                let tried = if line.is_empty() {
+                    word.to_string()
+                } else {
+                    format!("{line} {word}")
+                };
+                if self.width(font, &tried) <= room {
+                    line = tried;
+                    continue;
+                }
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                }
+                if self.width(font, word) <= room {
+                    line = word.to_string();
+                } else {
+                    out.push(self.fit(font, word, room));
+                }
+            }
+            out.push(line);
+        }
+        while out.last().is_some_and(String::is_empty) {
+            out.pop();
+        }
+        out
+    }
+
     /// The pixels behind a font texture.
     pub fn image(&self, texture: Texture) -> Option<ImageRef<'_>> {
         match texture {
@@ -680,6 +717,33 @@ pub(crate) mod tests {
         let mut f = Fonts::new(&files);
         f.set_units_per_pixel(Font::MainMenu, 1.0);
         f
+    }
+
+    #[test]
+    fn text_wraps_at_spaces_and_line_breaks() {
+        let f = fonts();
+        // "LI" is 13 wide, a space 5, "LIL" 19 (the made-up font).
+        assert_eq!(f.width(Font::MainMenu, "LI LI"), 31.0);
+        assert_eq!(f.wrap(Font::MainMenu, 1.0, "LI LI", 31.0), ["LI LI"]);
+        assert_eq!(
+            f.wrap(Font::MainMenu, 1.0, "LI LI LI", 31.0),
+            ["LI LI", "LI"]
+        );
+        // Twice the size needs twice the room.
+        assert_eq!(f.wrap(Font::MainMenu, 2.0, "LI LI", 62.0), ["LI LI"]);
+        assert_eq!(f.wrap(Font::MainMenu, 2.0, "LI LI", 61.0), ["LI", "LI"]);
+        // Breaks, with or without a carriage return; a blank line stays,
+        // spaces at the ends and in a row don't count.
+        assert_eq!(
+            f.wrap(Font::MainMenu, 1.0, "LI\r\n\n  LI  LI \nI", 100.0),
+            ["LI", "", "LI LI", "I"]
+        );
+        // A word too wide on its own is cut.
+        let cut = f.wrap(Font::MainMenu, 1.0, "LILILILI I", 40.0);
+        assert!(cut[0].ends_with("...") && f.width(Font::MainMenu, &cut[0]) <= 40.0);
+        assert_eq!(cut[1], "I");
+        assert!(f.wrap(Font::MainMenu, 1.0, "", 10.0).is_empty());
+        assert!(f.wrap(Font::MainMenu, 1.0, "\n\n", 10.0).is_empty());
     }
 
     #[test]
