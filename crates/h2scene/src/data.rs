@@ -372,7 +372,9 @@ pub struct SceneData {
     pub materials: Vec<Material>,
     /// The camera path, from the map's script.
     pub flythrough: Flythrough,
-    /// Bitmaps that couldn't be decoded (their surfaces use texture 0).
+    /// Bitmaps and lightmap pages that couldn't be decoded, each counted
+    /// once: surfaces use texture 0 instead, and sections whose lightmap
+    /// page failed are unlit.
     pub failed_textures: usize,
 }
 

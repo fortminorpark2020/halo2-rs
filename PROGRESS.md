@@ -1,7 +1,7 @@
 # Progress and handoff
 
 Last updated 2026-10-12 (menu 2.4: the menu scene as data, in the new
-`crates/h2scene`, and its review fixes). Any assistant that works on the
+`crates/h2scene`, and its review fixes, rounds 1 and 2; P3 passed). Any assistant that works on the
 project should update this file before it stops, so the next one can pick
 up. Read AGENTS.md first for the rules.
 
@@ -177,18 +177,21 @@ Next, in order:
    start the launcher at all), and the gate checks the exe imports
    neither; the soundtrack at gain 1 rather than the music's 0.32; the
    triggers skip it; the intro's timer counts only draws of a new
-   picture. On the owner's PC (check P3): the intro with sound from
-   `C:\Games\Halo 2 Project Cartographer\movie`, as loud as the
-   original (louder than the menu music); let it play a second or two,
-   then A skips it; the start screen comes in and the music starts;
-   with `H2LOBBY_VISTA=off` or `H2LOBBY_INTRO=off` the lobby opens on
-   the start screen; `lobby.log`'s `sound: the intro's soundtrack, <n> s
-   (gain 1.00)`, `lobby: 1920x1080, intro <n> ms a frame` (one new
-   picture's draw, logged after 30 of them; the container measured one
-   picture at 25 ms at 1920x1080 by itself) and the end line's late
-   count. On a Windows N PC without the Media Feature Pack, if one is
-   at hand: the launcher starts, and the log says `intro: Media
-   Foundation isn't installed (...); skipped`. Review fixes, round 2
+   picture. P3 passed on the owner's PC (2026-10-12, on fcfb9e1; menu.md
+   "After P3"), driven by keys and clicks posted to a 1600x900 window,
+   so no pad button (A among them) was tried and the Windows N check
+   was skipped: the intro played with its soundtrack (18.0 s at gain 1,
+   louder than the menu music); Enter, Esc, Space, letters, Backspace
+   and a click skipped it and the arrows and Tab didn't; Enter or Esc
+   held gave one skip and no Quit popup; played out it logged 540
+   pictures, 1 late (2 in another run); the intro took 7.9-8.2 ms a
+   frame on the CPU at 1600x900 (the 1080p figure is still to measure,
+   with P4) and the start screen 2.1 ms; each `intro: none` case opened
+   on the start screen. It found that the windowed lobby started from
+   its own console exited with code 101 in about 1 launch in 7 (a
+   `println!` panicking as it raced `FreeConsole`); 18279ad on
+   `launcher-menu` fixed it (0 failures in 30 launches after), merged
+   here as 81b2e07. Review fixes, round 2
    (2026-10-12): a key held down repeats in the lobby only as a
    direction or typing (`App::key_repeated`), so Enter held to skip the
    intro no longer goes on to the main menu and signs in; the README
@@ -213,8 +216,13 @@ Next, in order:
    over the loop), and the camera follows Halo 2's fifth-order curve,
    which keeps its acceleration through each cut; a damaged map's far
    vertex or looping script can no longer take the process down; the
-   real-map test pins every count exactly. Next: 2.5, the scene drawn
-   behind the start screen and main menu (wgpu offscreen).
+   real-map test pins every count exactly. Review fixes, round 2
+   (2026-10-12): a lightmap page that can't be decoded is read and
+   counted once, not once for each section that uses it; a `camera_set`
+   to no point (-1) is skipped, as Halo 2 skips it, where it flew to the
+   first point; the old roll notes in `docs/notes/mainmenu-plan.md` are
+   marked superseded. Next: 2.5, the scene drawn behind the start screen
+   and main menu (wgpu offscreen).
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

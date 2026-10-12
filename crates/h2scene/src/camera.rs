@@ -17,10 +17,11 @@ pub const FAR: f32 = 2000.0;
 /// How Halo 2 turns a camera point or a placed object by its three
 /// angles (radians): yaw about +z first, then pitch (raising +x), and the
 /// roll last, about the world's +x. Its `camera_set` (0x16c2f0) and the
-/// code that places scenario objects (0x0b7300) both make a point's
-/// forward and up this way, through 0x11df60 and 0x141ce0. The menu's
-/// camera points come out level or nearly so, where turning the roll
-/// about the camera's own forward would bank them up to 45 degrees.
+/// code that fills in a scenario object's placement (0x0d5060) both make
+/// a point's forward and up this way, through 0x11df60 (which calls
+/// 0x141ce0). The menu's camera points come out level or nearly so,
+/// where turning the roll about the camera's own forward would bank them
+/// up to 45 degrees.
 pub fn halo_rotation([yaw, pitch, roll]: [f64; 3]) -> DQuat {
     DQuat::from_rotation_x(roll) * DQuat::from_rotation_y(-pitch) * DQuat::from_rotation_z(yaw)
 }

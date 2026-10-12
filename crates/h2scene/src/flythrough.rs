@@ -130,7 +130,9 @@ fn statements(scripts: &Scripts, i: u16, depth: u32, budget: &mut u32, out: &mut
 }
 
 /// The script's moves: each `(camera_set <point> <ticks>)` and the
-/// `(sleep <ticks>)` after it.
+/// `(sleep <ticks>)` after it. A `camera_set` to no point (-1, or any
+/// point below 0) is skipped, as Halo 2's `camera_set` (0x16c2f0) ignores
+/// it: the move before runs on through its sleep.
 fn moves(scripts: &Scripts, root: u16) -> Vec<Move> {
     let (mut list, mut budget) = (Vec::new(), MAX_EXPRESSIONS);
     statements(scripts, root, 0, &mut budget, &mut list);
@@ -140,11 +142,13 @@ fn moves(scripts: &Scripts, root: u16) -> Vec<Move> {
         let arg = |k: usize| args.get(k).copied();
         match scripts.function_name(s) {
             "camera_set" => {
-                let to = arg(0).and_then(|a| scripts.expression(a));
+                let to = arg(0)
+                    .and_then(|a| scripts.expression(a))
+                    .and_then(|e| usize::try_from(e.as_i16()).ok());
                 let ticks = arg(1).and_then(|a| number(scripts, a));
                 if let (Some(to), Some(ticks)) = (to, ticks) {
                     out.push(Move {
-                        to: to.as_i16().max(0) as usize,
+                        to,
                         ticks: ticks.max(0.0),
                         wait: 0.0,
                     });
@@ -429,6 +433,35 @@ mod tests {
         let fly = Flythrough::new(&scripts, &cams).unwrap();
         assert!((fly.seconds() - 340.0 / TICKS).abs() < 1e-9);
         assert_eq!((fly.points(), fly.points_used(), fly.moves()), (2, 2, 2));
+    }
+
+    #[test]
+    fn a_move_to_no_point_is_skipped() {
+        // (camera_set 0 0) (sleep 90) (camera_set -1 100) (sleep 50)
+        // (camera_set 1 500) (sleep 250): the move to no point isn't one,
+        // and the first runs on through its sleep, as in Halo 2.
+        let mut b = Builder::default();
+        let mut calls = Vec::new();
+        for (point, ticks, nap) in [(0, 0, 90), (-1, 100, 50), (1, 500, 250)] {
+            let (p, t) = (b.short(point), b.short(ticks));
+            calls.push(b.call("camera_set", &[p, t]));
+            let n = b.short(nap);
+            calls.push(b.call("sleep", &[n]));
+        }
+        let root = b.call("begin", &calls);
+        let found = moves(&b.0, root);
+        let m = |to, ticks, wait| Move { to, ticks, wait };
+        assert_eq!(found, [m(0, 0.0, 140.0), m(1, 500.0, 250.0)]);
+        let fly = Flythrough::from_moves(points(), found).unwrap();
+        assert_eq!((fly.moves(), fly.points_used(), fly.ticks()), (2, 2, 390.0));
+        // A script whose only move is to no point has nothing to fly.
+        let mut b = Builder::default();
+        let (p, t) = (b.short(-1), b.short(100));
+        let set = b.call("camera_set", &[p, t]);
+        let n = b.short(50);
+        let nap = b.call("sleep", &[n]);
+        let root = b.call("begin", &[set, nap]);
+        assert!(moves(&b.0, root).is_empty());
     }
 
     #[test]

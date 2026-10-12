@@ -161,7 +161,9 @@ struct Loader<'a> {
     texture_of_bitmap: HashMap<DatumIndex, usize>,
     materials: Vec<Material>,
     material_of_shader: HashMap<DatumIndex, usize>,
-    lightmap_pages: HashMap<(DatumIndex, usize), usize>,
+    /// Each lightmap page's texture, or `None` if it couldn't be decoded:
+    /// a page is shared by many sections and read (and counted) once.
+    lightmap_pages: HashMap<(DatumIndex, usize), Option<usize>>,
     mesh_of_object: HashMap<DatumIndex, Option<usize>>,
     failures: usize,
 }
@@ -260,15 +262,15 @@ impl<'a> Loader<'a> {
             .collect()
     }
 
+    /// The texture of a lightmap bitmap's page `page` (`None` if it can't
+    /// be decoded; its sections are then unlit).
     fn lightmap_page(&mut self, bitmap: DatumIndex, page: usize) -> Option<usize> {
         if let Some(&t) = self.lightmap_pages.get(&(bitmap, page)) {
-            return Some(t);
+            return t;
         }
         let read = bitmap::read_bitmap_at(&mut self.set, bitmap, page);
         let t = self.add_texture(read);
-        if let Some(t) = t {
-            self.lightmap_pages.insert((bitmap, page), t);
-        }
+        self.lightmap_pages.insert((bitmap, page), t);
         t
     }
 
@@ -403,6 +405,39 @@ mod tests {
             load(&path, &|_| {}).unwrap_err(),
             "MCC maps have no geometry reader yet"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_texture_that_fails_is_read_and_counted_once() {
+        // A Vista map with no tags at all, so every bitmap fails to read.
+        let dir = scratch("failed-pages");
+        let path = dir.join("mainmenu.map");
+        let mut b = vec![0u8; 0x1000];
+        b[..4].copy_from_slice(b"daeh");
+        b[4..8].copy_from_slice(&8i32.to_le_bytes());
+        b[0x10..0x14].copy_from_slice(&0x800u32.to_le_bytes());
+        b[0x7FC..0x800].copy_from_slice(b"toof");
+        b[0x81C..0x820].copy_from_slice(b"sgat");
+        std::fs::write(&path, b).unwrap();
+        let mut loader = Loader::new(MapSet::open(&path).unwrap(), &|_| {});
+        // One lightmap page shared by many sections: asked for by each,
+        // read and counted once.
+        let lightmap = DatumIndex(0xE174_0007);
+        for _ in 0..5 {
+            assert_eq!(loader.lightmap_page(lightmap, 2), None);
+        }
+        assert_eq!(loader.failures, 1);
+        // Another page of the same bitmap is a texture of its own.
+        assert_eq!(loader.lightmap_page(lightmap, 3), None);
+        assert_eq!(loader.failures, 2);
+        // A bitmap that fails is texture 0 for every shader that uses it.
+        let colour = DatumIndex(0xE175_0008);
+        for _ in 0..3 {
+            assert_eq!(loader.bitmap_texture(colour), 0);
+        }
+        assert_eq!(loader.failures, 3);
+        assert_eq!(loader.textures.len(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 

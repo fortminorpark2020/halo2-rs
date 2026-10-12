@@ -1380,6 +1380,31 @@ Halo 2's intro movie before the start screen, from Cartographer's
    the launcher still starts, and the log says `intro: Media Foundation
    isn't installed (...); skipped`.
 
+**After P3 (2026-10-12).** P3 passed on the owner's PC on fcfb9e1, with
+these limits: it was driven by keys and clicks posted to a 1600x900
+window, so no pad button (A among them) was tried, and check 6 was
+skipped (no Windows N PC at hand).
+
+1. `intro: playing intro_60.wmv (1600x900 window)`, the audio device
+   named, the soundtrack 18.0 s at gain 1.00 and louder than the menu
+   music after it.
+2. Enter, Esc, Space, letters, Backspace and a click skipped it at about
+   2 s, with no select or back sound; the arrows and Tab didn't. Enter
+   or Esc held for 1.2 s gave one skip and no Quit popup, and the start
+   screen's music started from its beginning.
+3. Left to play: `played to the end (18.0 s, 540 pictures, 1 late)`
+   (2 late in another run).
+4. The intro took 7.9 to 8.2 ms a frame on the CPU at 1600x900, and the
+   start screen 2.1 ms. That isn't the 1080p the list asked for; P4's
+   1080p measure can take it too.
+5. The three `intro: none` cases each opened on the start screen.
+
+It also found that the windowed lobby, started from its own console,
+exited with code 101 in about 1 launch in 7: `println!` panicked when
+its write raced the console being freed (`FreeConsole`). The log's
+console echo now ignores write errors (18279ad on `launcher-menu`, 0
+failures in 30 launches on the PC after; merged here as 81b2e07).
+
 #### What Phase 2.4 built (2026-10-12)
 
 The 3D scene behind the start screen and main menu, read into plain data
@@ -1491,7 +1516,8 @@ geometry reader yet`.
   Cartographer's map, the camera banks at most 13 degrees over the whole
   loop (3 on average) and looks between 47 degrees down and 5 up; the
   review found five of the twelve points level to a tenth of a degree. Placed scenery turns the same
-  way (0x0b7300 uses the same conversion), so `placement_matrix` does
+  way (0x0d5060, which fills in a scenario object's placement, uses the
+  same conversion through 0x11df60), so `placement_matrix` does
   too; the carrier turns by yaw only and doesn't change, the plasma
   screens do. h2viewer's own `placement_matrix` (the parked engine)
   still rolls the old way; fix it there if that engine is picked up
@@ -1536,6 +1562,34 @@ geometry reader yet`.
   27/7/6, 10 objects with 9 lit, the fog's 0.5 from 0 to 150, the clear
   colour, 18 points with 12 flown in 13 moves, 2,990 ticks); if the
   owner's map differs, change them here and in the test together.
+
+**Review fixes, round 2 (2026-10-12).**
+
+- **A lightmap page that can't be decoded is tried once.** The pages
+  are atlases many clusters and instances share; a page that failed
+  wasn't remembered, so it was read and inflated again for each
+  section that used it and counted each time, and the log's and
+  `scene_info`'s "not decoded" count could run far past the number of
+  bitmaps. It is now remembered either way (its sections are unlit), as
+  a failed bitmap already was (texture 0). Test: on a map with no tags,
+  a page asked for five times is counted once, another page of it once
+  more, and a bitmap asked for three times once.
+- **A `camera_set` to no point is skipped.** The reader turned a point
+  of -1 (the script's none) into point 0, so a damaged script would cut
+  the camera across to the first path point mid-loop. Halo 2's
+  `camera_set` (0x16c2f0) does nothing for a point below 0 or past the
+  last, so the move before runs on through the `sleep` after it; the
+  reader now skips it the same way. A move to a point past the map's
+  last is still dropped with its wait, as before. Test: (camera_set 0
+  0) (sleep 90) (camera_set -1 100) (sleep 50) (camera_set 1 500)
+  (sleep 250) reads as two moves, the first waiting 140 ticks.
+- **Docs.** The code that places scenario objects is cited as 0x0d5060
+  (it fills in a placement through 0x11df60); round 1 gave 0x0b7300,
+  the address the decompilation's file for it is named after, which is
+  another routine.
+  `docs/notes/mainmenu-plan.md`'s notes that the roll's sign was
+  unverified and should be flipped if the horizon tilted are marked
+  superseded; only the 70-degree field of view is still unverified.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 
