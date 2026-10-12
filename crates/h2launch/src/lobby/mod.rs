@@ -324,7 +324,11 @@ fn file_log(path: &Path) -> Log {
     let start = Instant::now();
     Arc::new(move |line: &str| {
         let line = format!("{:9.3} {line}", start.elapsed().as_secs_f64());
-        println!("{line}");
+        // Not println!: it panics when the write fails, and a line from
+        // another thread that races `hide_own_console`'s FreeConsole can
+        // fail with something other than an invalid handle (the lobby then
+        // exited with code 101 in about 1 launch in 7 on the owner's PC).
+        let _ = writeln!(std::io::stdout(), "{line}");
         if let Some(f) = &file {
             if let Ok(mut f) = f.lock() {
                 let _ = writeln!(f, "{line}");
