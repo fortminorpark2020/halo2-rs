@@ -169,6 +169,7 @@ pub fn run(args: &Args) -> i32 {
         menus,
         vista,
         intro: intro.ok(),
+        engine_args: std::env::var("H2LOBBY_ENGINE_ARGS").unwrap_or_default(),
     };
     let app = App::new(cfg);
     if no_window {
@@ -834,6 +835,7 @@ mod tests {
             menus: Arc::new(Menus::flat()),
             vista: None,
             intro: None,
+            engine_args: String::new(),
         });
         let script = parse_script(script).unwrap();
         let sound = MenuSound::off(&log);

@@ -1,6 +1,7 @@
 //! Command-line flags. Every flag takes `--flag value` or `--flag=value`.
 
 use crate::controls::{ButtonLayout, ControlFlags, PadMap, StickLayout};
+use crate::gamemenu::GameKind;
 use crate::net::{RecvPort, SelfSend, SendReturn};
 use crate::options::RawWrite;
 
@@ -87,6 +88,25 @@ Usage: h2launch [flags]
   --fake-engine           With --session: stand in for the engine and end
                           the game after a few seconds with made-up results
                           (for testing the lobby without MCC).
+  --game-kind <kind>      What kind of game this is, for the in-game GAME
+                          MENU: offline, ranked, social or custom (default
+                          offline, social with --session, or with --live
+                          the kind of the match the server made). The
+                          lobby passes it. A custom game's host and an
+                          offline run get End Game.
+  --no-game-menu          No in-game GAME MENU: Start and Esc reach the
+                          engine as they did before it.
+  --reload-message <n|off>  The engine message posted when the GAME MENU
+                          closes having changed the button layout, look
+                          sensitivity or automatic look centering, or
+                          turned vibration on, so the engine reads its
+                          profile and gamepad mapping again (default 5,
+                          which does that; 0 or off: none, and those
+                          settings wait for the next game).
+  --end-game-message <n>  End Game posts engine message n, then quits only
+                          if the game hasn't ended 10 s later (research
+                          only: no id has ended the game for everyone;
+                          try an id offline first, one id per run).
   --live-wait <seconds>   How long to search before giving up (default 600).
   --relay-wait <seconds>  How long to wait for the relay to take us in before
                           the engine starts (default 15).
@@ -131,6 +151,13 @@ it is in %LOCALAPPDATA%\\h2launch\\<name>\\ instead.";
 /// The playlist `--live` searches unless told: Head to Head, the launcher
 /// playlist for two (crates/h2live/src/playlists.txt).
 pub const DEFAULT_PLAYLIST: u8 = 11;
+
+/// The engine message the GAME MENU posts after a change to a setting the
+/// engine reads from its profile or gamepad mapping (`--reload-message`):
+/// PC check 8 found 5 makes it ask for both again (host slots 34 and 116),
+/// so Bumper Jumper and a new look sensitivity work mid-match, with no
+/// crash.
+pub const DEFAULT_RELOAD_MESSAGE: u32 = 5;
 
 /// Which controller is player 1's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +217,25 @@ pub struct Args {
     pub events: bool,
     /// `--fake-engine`.
     pub fake_engine: bool,
+    /// `--game-kind`: what kind of game the GAME MENU is over (offline
+    /// without `--session`, social with one, unless given; with `--live`
+    /// the server's match decides it once made, see `game_kind_set`).
+    pub game_kind: GameKind,
+    /// `--game-kind` was given (it then wins over the `--live` match's).
+    pub game_kind_set: bool,
+    /// `--no-game-menu` clears it: Start and Esc then reach the engine.
+    pub game_menu: bool,
+    /// `--reload-message N`: the engine message posted when the GAME
+    /// MENU closes having changed a setting the engine reads from its
+    /// profile or gamepad mapping, so it reads them again
+    /// (`DEFAULT_RELOAD_MESSAGE` unless given; None with 0 or `off`).
+    pub reload_message: Option<u32>,
+    /// `--end-game-message N`: the engine message End Game posts before
+    /// quitting, for research: check 15 found 2 ends only the host's game,
+    /// 6 stops rendering, 17 crashes and the others it tried do nothing,
+    /// so End Game quits the host's engine and sends its result instead.
+    /// Not refused in any run.
+    pub end_game_message: Option<u32>,
     pub relay_wait: f64,
     pub recv_port: RecvPort,
     pub send_return: SendReturn,
@@ -239,6 +285,11 @@ impl Default for Args {
             offline: false,
             events: false,
             fake_engine: false,
+            game_kind: GameKind::Offline,
+            game_kind_set: false,
+            game_menu: true,
+            reload_message: Some(DEFAULT_RELOAD_MESSAGE),
+            end_game_message: None,
             relay_wait: 15.0,
             recv_port: RecvPort::Auto,
             send_return: SendReturn::Len,
@@ -281,6 +332,13 @@ fn slot_value(flag: &str, v: &str, slots: usize) -> Result<(usize, u64), String>
     Ok((n as usize, val))
 }
 
+/// An engine message id.
+fn message(flag: &str, v: &str) -> Result<u32, String> {
+    crate::util::parse_u64(v.trim())
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| format!("{flag}: {v:?} is not a message number"))
+}
+
 /// Parses the arguments after the program name.
 pub fn parse<I, S>(args: I) -> Result<Args, String>
 where
@@ -288,6 +346,7 @@ where
     S: AsRef<str>,
 {
     let mut a = Args::default();
+    let mut game_kind = None;
     let list: Vec<String> = args.into_iter().map(|s| s.as_ref().to_string()).collect();
     let mut i = 0;
     while i < list.len() {
@@ -324,6 +383,23 @@ where
             "--offline" => switch(&mut a, |a| a.offline = true)?,
             "--events" => switch(&mut a, |a| a.events = true)?,
             "--fake-engine" => switch(&mut a, |a| a.fake_engine = true)?,
+            "--no-game-menu" => switch(&mut a, |a| a.game_menu = false)?,
+            "--game-kind" => {
+                let v = value()?;
+                game_kind = Some(GameKind::from_key(&v).ok_or_else(|| {
+                    format!("--game-kind: {v:?} should be offline, ranked, social or custom")
+                })?);
+            }
+            "--reload-message" => {
+                let v = value()?;
+                a.reload_message = match v.trim() {
+                    s if s.eq_ignore_ascii_case("off") => None,
+                    _ => Some(message("--reload-message", &v)?).filter(|&n| n != 0),
+                };
+            }
+            "--end-game-message" => {
+                a.end_game_message = Some(message("--end-game-message", &value()?)?);
+            }
             "--groundhog" => switch(&mut a, |a| a.groundhog = true)?,
             "--attach-input" => switch(&mut a, |a| a.attach_input = true)?,
             "--no-attach-input" => switch(&mut a, |a| a.attach_input = false)?,
@@ -518,6 +594,14 @@ where
     if a.offline && (a.lobby || a.live.is_some() || a.session.is_some()) {
         return Err("--offline can't go with --lobby, --live or --session".into());
     }
+    // A networked match (a session file, or one the server makes with
+    // --live) is social unless told; a test run alone is offline.
+    a.game_kind_set = game_kind.is_some();
+    a.game_kind = game_kind.unwrap_or(if a.session.is_some() || a.live.is_some() {
+        GameKind::Social
+    } else {
+        GameKind::Offline
+    });
     Ok(a)
 }
 
@@ -581,6 +665,69 @@ mod tests {
         assert!(!a.name_set);
         assert_eq!(a.relay_wait, 15.0);
         assert_eq!(a.recv_port, RecvPort::Auto);
+        assert_eq!(a.game_kind, GameKind::Offline);
+        assert!(!a.game_kind_set);
+        assert!(a.game_menu);
+        assert_eq!(a.reload_message, Some(DEFAULT_RELOAD_MESSAGE));
+        assert_eq!(a.end_game_message, None);
+    }
+
+    #[test]
+    fn game_menu_flags() {
+        // The kind: as given, else offline, or social with a session.
+        for k in GameKind::ALL {
+            let a = parse(["--game-kind", k.key()]).unwrap();
+            assert_eq!((a.game_kind, a.game_kind_set), (k, true));
+            let a = parse(["--session", "m.txt", &format!("--game-kind={}", k.key())]).unwrap();
+            assert_eq!((a.game_kind, a.game_kind_set), (k, true));
+        }
+        // With --live and no --game-kind, the server's match decides.
+        assert!(!parse(["--live", "127.0.0.1"]).unwrap().game_kind_set);
+        assert_eq!(parse(["--offline"]).unwrap().game_kind, GameKind::Offline);
+        assert_eq!(
+            parse(["--session", "m.txt"]).unwrap().game_kind,
+            GameKind::Social
+        );
+        assert_eq!(
+            parse(["--live", "127.0.0.1"]).unwrap().game_kind,
+            GameKind::Social
+        );
+        assert_eq!(
+            parse(["--game-kind", "Custom", "--session", "m.txt"])
+                .unwrap()
+                .game_kind,
+            GameKind::Custom
+        );
+        let a = parse([
+            "--no-game-menu",
+            "--reload-message",
+            "7",
+            "--end-game-message=0x10",
+        ])
+        .unwrap();
+        assert!(!a.game_menu);
+        assert_eq!(a.reload_message, Some(7));
+        assert_eq!(a.end_game_message, Some(16));
+        // The reload message is 5 unless given; 0 or off turn it off.
+        assert_eq!(parse(Vec::<String>::new()).unwrap().reload_message, Some(5));
+        for off in ["0", "off", "OFF", "0x0"] {
+            let a = parse(["--reload-message", off]).unwrap();
+            assert_eq!(a.reload_message, None, "{off}");
+            let a = parse([format!("--reload-message={off}")]).unwrap();
+            assert_eq!(a.reload_message, None, "{off}");
+        }
+        for bad in [
+            vec!["--game-kind"],
+            vec!["--game-kind", "campaign"],
+            vec!["--game-kind", ""],
+            vec!["--no-game-menu=yes"],
+            vec!["--reload-message"],
+            vec!["--reload-message", "five"],
+            vec!["--reload-message", "-1"],
+            vec!["--end-game-message", "0x100000000"],
+        ] {
+            assert!(parse(&bad).is_err(), "{bad:?} should fail");
+        }
     }
 
     #[test]
