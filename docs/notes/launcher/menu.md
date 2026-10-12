@@ -1983,6 +1983,35 @@ had crisp rails, window lights on the hull and building outlines.
 4. If it looks off, `H2LOBBY_VEIL=13,26,60,0,0,2.15,0.005` with other
    numbers (the seventh the softness) and send the ones that look right.
 
+**Re-check on the owner's PC (2026-10-12, about 17:00 UTC, afd799e):
+passed; the veil needs no more tuning.**
+
+1. `scene_shot` at 1920x1080: whole frames (8, 15, 35) at 10 s, (10,
+   19, 44) at 40 s and (10, 20, 46) at 70 s, each within one level of
+   the container's. The top 30 %: (9.7, 19.3, 44.6), (8.6, 17.1, 39.5)
+   and (8.3, 16.4, 37.8), on average (8.9, 17.6, 40.6) against the Xbox
+   video's (8.7, 17.7, 40.3). The three frames took 4.8, 0.9 and 0.8 ms
+   to draw and 2.4, 1.3 and 1.4 ms to read back.
+2. In the maximised window (2560x1351): the scene 1.1 ms to draw and 3.0
+   ms to read back at its first measurement after waking, the main menu
+   4.9 ms a frame, the start screen 3.9 ms, awake in 411 ms. The blur
+   costs nothing that shows.
+3. Next to the Xbox video: the same family of navy at the same
+   brightness, the darks a near-black navy, the shapes soft silhouettes
+   (a faint hint of the hull's window lights in one place; the Xbox may
+   be a little softer still, so `0.007` as the seventh number of
+   `H2LOBBY_VEIL` is the one to try if the owner sees the lights). The
+   glyph bands show, two bright strips on either side of the logo row,
+   and the dotted line runs faintly near the bottom; no band across the
+   logo row is missing. What differs is content: the Xbox's five rows
+   against our ONLINE and SETTINGS, and its logo about 40 % of the
+   width of its 4:3 frame against about 45 % of ours.
+4. A build note: on the PC, after a checkout, `cargo build` left an
+   older h2launch.exe in place twice (it reported the older commit);
+   `cargo clean -p h2launch -p h2scene -p h2ui` fixed it. Briefs for the
+   PC now check that `h2launch --version` names the checked-out commit
+   before testing.
+
 #### What Phase 2.6 built (2026-10-12)
 
 Every screen after the main menu sits in Halo 2's shell (1.3): the navy
