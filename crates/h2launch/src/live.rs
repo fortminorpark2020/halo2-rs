@@ -4,7 +4,10 @@
 //! match forms (LAUNCHER_MATCH) writes the session from it: the relay beside
 //! the server, the match's room and this PC's key for it, one machine per
 //! player, and who hosts. The engine then starts on the match's map and
-//! variant as it does with `--session`.
+//! variant as it does with `--session`. It sends no password: the PC must
+//! be one its account knows (the lobby signs a new PC in once with the
+//! password), and the server must have the key pinned for it, if one is
+//! (`crate::pins`).
 //!
 //! While the engine plays, a thread keeps the sign-in alive and tells the
 //! server what the engine does: HOSTING once the host's engine is running
@@ -17,9 +20,14 @@
 
 use crate::controls::{Controls, KEYS};
 use crate::gamemenu::Leave;
+use crate::pins::Pins;
 use crate::session::{Player, Session};
-use h2live::client::{LiveClient, LiveEvent, Profile};
-use h2net::live::{LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer};
+use h2live::client::{Access, LiveClient, LiveEvent, Profile};
+use h2net::live::{
+    AccountOp, LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer, LIVE_PROTOCOL,
+    PASSWORD_NEEDED, SIGNED_OUT, UPDATE_YOUR_LAUNCHER,
+};
+use h2net::Connection;
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
@@ -145,33 +153,69 @@ pub struct Lobby {
 }
 
 impl Lobby {
-    /// Dial `url` and sign in as the holder of the key at `key_path` (made
-    /// the first time), with the stat card at `card_path`, as `profile`
-    /// says. Waits up to `timeout` for the server's welcome.
+    /// Dial `server` and sign in as the holder of the key kept in `folder`
+    /// (`live-key.bin`, made the first time), with the stat card kept
+    /// there, as `profile` says. The server must have the identity key
+    /// pinned for it in `folder` (`crate::pins`), if one is; no password
+    /// is sent, so the account must know this PC already (the lobby signs
+    /// a new PC in with its password). Waits up to `timeout` for the
+    /// server's welcome.
     pub fn sign_in(
-        url: &str,
-        key_path: &Path,
-        card_path: &Path,
+        server: &str,
+        folder: &Path,
         profile: &Profile,
         log: Log,
         timeout: Duration,
     ) -> Result<Lobby, String> {
-        let key = h2live::client::identity(key_path)
+        Lobby::sign_in_with(server, folder, profile, log, timeout, |url| {
+            h2net::dial(url, timeout)
+                .recv()
+                .map_err(|_| "dialling stopped".to_string())?
+        })
+    }
+
+    /// `sign_in`, over the connection `dial` makes to the URL it's given
+    /// (a test's own, there).
+    fn sign_in_with(
+        server: &str,
+        folder: &Path,
+        profile: &Profile,
+        log: Log,
+        timeout: Duration,
+        dial: impl FnOnce(&str) -> Result<Connection, String>,
+    ) -> Result<Lobby, String> {
+        let key_path = folder.join("live-key.bin");
+        let key = h2live::client::identity(&key_path)
             .map_err(|e| format!("the key at {}: {e}", key_path.display()))?;
-        let conn = h2net::dial(url, timeout)
-            .recv()
-            .map_err(|_| "dialling stopped".to_string())??;
+        let mut pins = Pins::load(folder).map_err(|e| {
+            let path = crate::pins::path(folder);
+            format!("the server keys at {}: {e}", path.display())
+        })?;
+        for note in pins.notes() {
+            log(&note);
+        }
+        let url = server_url(server);
+        let conn = dial(&url)?;
         let start = Instant::now();
-        let client = LiveClient::launcher(conn, key, profile, crate::BUILD, card_path, 0.0);
+        let card_path = folder.join("live-card.txt");
+        let mut client = LiveClient::launcher(conn, key, profile, crate::BUILD, &card_path, 0.0);
+        client.set_access(Access {
+            pin: pins.get(server),
+            password: None,
+            computer: h2net::computer_name(),
+        });
         let mut lobby = Lobby {
             client,
             start,
             log,
             pending: VecDeque::new(),
         };
+        // (A refusal ends any wait: see `read_until`.)
         lobby.wait(timeout, |e| match e {
-            LiveEvent::Welcomed => Some(Ok(())),
-            LiveEvent::Refused(why) => Some(Err(format!("the server turned us away: {why}"))),
+            LiveEvent::Welcomed => Some(Ok::<(), String>(())),
+            LiveEvent::KeyChanged { .. } => Some(Err(
+                "the server's key changed; open the lobby to check it".into(),
+            )),
             _ => None,
         })??;
         if let Some(w) = &lobby.client.view.welcome {
@@ -179,6 +223,22 @@ impl Lobby {
                 "live: signed in to {url} as {:?} (account {:#018x})",
                 w.gamertag, w.account
             ));
+        }
+        // The server proved it holds this key: pin it, as the lobby does.
+        if let Some(key) = lobby.client.view.server_key {
+            if pins.get(server) != Some(key) {
+                pins.set(server, key);
+                match pins.save(folder) {
+                    Ok(()) => (lobby.log)(&format!(
+                        "live: pinned the server's key {}",
+                        h2live::seal::short_code(&key)
+                    )),
+                    Err(e) => (lobby.log)(&format!(
+                        "live: the server's key couldn't be pinned in {}: {e}",
+                        crate::pins::path(folder).display()
+                    )),
+                }
+            }
         }
         Ok(lobby)
     }
@@ -301,11 +361,9 @@ pub fn prepare(
         maps,
         guests: 0,
     };
-    let url = server_url(server);
     let mut lobby = Lobby::sign_in(
-        &url,
-        &folder.join("live-key.bin"),
-        &folder.join("live-card.txt"),
+        server,
+        folder,
         &profile,
         log.clone(),
         Duration::from_secs(15),
@@ -324,8 +382,30 @@ pub fn prepare(
     })
 }
 
+/// What `--live` says when the server turns it away for `why`: a PC the
+/// account doesn't know (or no longer knows) must sign in once from the
+/// lobby with the password, since `--live` sends none. A server at another
+/// live protocol says to update the launcher, though it may be the server
+/// that's older: said as the lobby says it.
+fn refusal(why: &str) -> String {
+    if why == PASSWORD_NEEDED || why == SIGNED_OUT {
+        "this PC isn't signed in to that account: sign in once from the lobby (same --instance) \
+         with your password"
+            .into()
+    } else if why == UPDATE_YOUR_LAUNCHER {
+        format!(
+            "the server runs a different version from this launcher (live protocol \
+             {LIVE_PROTOCOL}); ask its owner for the right one"
+        )
+    } else {
+        format!("the server turned us away: {why}")
+    }
+}
+
 /// Read `events` in order, logging each, until `pick` takes one or one
-/// says the server is lost. What comes after it stays in `events`, unread.
+/// says the server is lost or turned us away (signed out by an admin, say:
+/// nothing can come after it). What comes after it stays in `events`,
+/// unread.
 fn read_until<T>(
     events: &mut VecDeque<LiveEvent>,
     log: &Log,
@@ -335,6 +415,9 @@ fn read_until<T>(
         log_event(log, &e);
         if let LiveEvent::Lost(why) = &e {
             return Some(Err(format!("lost the server: {why}")));
+        }
+        if let LiveEvent::Refused(why) = &e {
+            return Some(Err(refusal(why)));
         }
         if let Some(t) = pick(&e) {
             return Some(Ok(t));
@@ -763,6 +846,22 @@ pub fn describe(m: &ToServer) -> String {
             r.finished,
             r.players.len()
         ),
+        ToServer::ProvePassword { computer, .. } => {
+            format!("PROVE_PASSWORD from {computer:?} (password sealed)")
+        }
+        ToServer::Account { seq, op, .. } => {
+            let what = match op {
+                AccountOp::List => "LIST".to_string(),
+                AccountOp::Create { gamertag, .. } => format!("CREATE {gamertag} (sealed)"),
+                AccountOp::SetPassword { account, .. } => {
+                    format!("SET_PASSWORD {account:016x} (sealed)")
+                }
+                AccountOp::SignOut { account } => format!("SIGN_OUT {account:016x}"),
+                AccountOp::Remove { account } => format!("REMOVE {account:016x}"),
+                AccountOp::ChangePassword { .. } => "CHANGE_PASSWORD (sealed)".to_string(),
+            };
+            format!("account request {seq}: {what}")
+        }
         other => format!("{other:?}"),
     }
 }
@@ -788,6 +887,14 @@ pub fn log_event(log: &Log, e: &LiveEvent) {
             m.id, m.counted, m.reason
         ),
         LiveEvent::Welcomed => "live: welcomed".to_string(),
+        LiveEvent::KeyChanged { was, now } => format!(
+            "live: the server's key is {}, not {} as pinned",
+            h2live::seal::short_code(now),
+            h2live::seal::short_code(was)
+        ),
+        LiveEvent::Accounts { answers, ok, .. } => {
+            format!("live: accounts (answering {answers}, ok {ok})")
+        }
         other => format!("live: {other:?}"),
     };
     log(&line);
@@ -797,6 +904,7 @@ pub fn log_event(log: &Log, e: &LiveEvent) {
 mod tests {
     use super::*;
     use h2net::live::{LauncherPlayer, RelaySeat};
+    use std::thread::JoinHandle;
 
     fn game(me: u64, host: u64, teams: bool) -> LauncherMatch {
         let player = |id: u64, team: u8, tag: &str| LauncherPlayer {
@@ -824,6 +932,232 @@ mod tests {
             countdown: 20,
             players: vec![player(0x1111, 1, "Alpha"), player(0x2222, 0, "Bravo")],
         }
+    }
+
+    #[test]
+    fn a_pc_the_account_doesnt_know_is_sent_to_the_lobby() {
+        for why in [PASSWORD_NEEDED, SIGNED_OUT] {
+            let said = refusal(why);
+            assert!(
+                said.starts_with("this PC isn't signed in to that account"),
+                "{said}"
+            );
+            assert!(said.contains("from the lobby (same --instance)"), "{said}");
+        }
+        assert_eq!(
+            refusal(h2net::live::SERVER_FULL),
+            "the server turned us away: SERVER FULL"
+        );
+    }
+
+    #[test]
+    fn a_server_at_another_version_is_said_to_be_one() {
+        // An older server tells a newer launcher to update: not said so.
+        let said = refusal(UPDATE_YOUR_LAUNCHER);
+        assert_eq!(
+            said,
+            format!(
+                "the server runs a different version from this launcher (live protocol \
+                 {LIVE_PROTOCOL}); ask its owner for the right one"
+            )
+        );
+        assert!(!said.contains("UPDATE"));
+    }
+
+    #[test]
+    fn server_keys_that_cannot_be_read_stop_live_before_it_dials() {
+        let dir = std::env::temp_dir().join(format!("h2launch-live-pins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Saved as UTF-16, say.
+        std::fs::write(crate::pins::path(&dir), [0xFF, 0xFE, b'h', 0, b'2', 0]).unwrap();
+        let profile = Profile {
+            gamertag: "Alpha".into(),
+            look: Default::default(),
+            maps: Vec::new(),
+            guests: 0,
+        };
+        let log: Log = Arc::new(|_: &str| {});
+        // (Port 9 is never dialled: it gives up first.)
+        let wait = Duration::from_millis(200);
+        let Err(e) = Lobby::sign_in("127.0.0.1:9", &dir, &profile, log, wait) else {
+            panic!("signed in");
+        };
+        assert!(e.starts_with("the server keys at "), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A test folder of its own, emptied.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("h2launch-live-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn alpha() -> Profile {
+        Profile {
+            gamertag: "Alpha".into(),
+            look: Default::default(),
+            maps: Vec::new(),
+            guests: 0,
+        }
+    }
+
+    /// Play a server with the identity key made from `n`, on a thread of
+    /// its own: wait for the launcher's LOGIN, then send what such a server
+    /// says to a launcher that signs in by its key: the key to seal to
+    /// (signed over the LOGIN's nonce), the challenge, and WELCOME. A
+    /// launcher takes them in that order. Joined: the server's end, with
+    /// the LOGIN left on it to be received again, and the identity key.
+    fn sign_in_by_hand(mut server_end: Connection, n: u8) -> JoinHandle<(Connection, [u8; 32])> {
+        use ed25519_dalek::{Signer, SigningKey};
+        use h2net::live::{LoginClient, ToPc, Welcome};
+        std::thread::spawn(move || {
+            let given_up = Instant::now() + Duration::from_secs(10);
+            let (got, theirs) = loop {
+                let got = server_end.receive().unwrap();
+                let theirs = got.iter().find_map(|(k, b)| match ToServer::read(*k, b) {
+                    Ok(ToServer::Login(login)) => match login.client {
+                        LoginClient::Launcher { nonce, .. } => Some(nonce),
+                        LoginClient::Viewer { .. } => None,
+                    },
+                    _ => None,
+                });
+                if let Some(theirs) = theirs {
+                    break (got, theirs);
+                }
+                assert!(got.is_empty() && Instant::now() < given_up, "no LOGIN");
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            let identity = SigningKey::from_bytes(&[n; 32]);
+            let nonce = [9; 32];
+            let key = h2live::seal::public(&[7; 32]);
+            let sig = identity.sign(&h2live::seal::key_proof(&theirs, &nonce, &key));
+            let server = identity.verifying_key().to_bytes();
+            let sig = sig.to_bytes();
+            ToPc::SealKey { key, server, sig }.send(&mut server_end);
+            let motd = String::new();
+            ToPc::Challenge { nonce, motd }.send(&mut server_end);
+            let welcome = Welcome {
+                account: 1,
+                gamertag: "ALPHA".into(),
+                card: String::new(),
+                best: 1,
+                levels: Vec::new(),
+            };
+            ToPc::Welcome(welcome).send(&mut server_end);
+            // (A launcher that hangs up at the key may be gone already.)
+            let _ = server_end.flush();
+            server_end.put_back(got);
+            (server_end, server)
+        })
+    }
+
+    /// The kinds of message the launcher sent the server (pings left out).
+    fn sent(server_end: &mut Connection) -> Vec<u8> {
+        use h2net::live::kind;
+        let got = server_end.receive().unwrap_or_default();
+        got.into_iter()
+            .map(|(k, _)| k)
+            .filter(|&k| k != kind::PING && k != kind::PONG)
+            .collect()
+    }
+
+    /// `--live`'s sign-in to `server` over a connection of the test's own.
+    fn live_sign_in(
+        dir: &Path,
+        server: &str,
+        log: Log,
+        pc_end: Connection,
+    ) -> Result<Lobby, String> {
+        let wait = Duration::from_secs(5);
+        Lobby::sign_in_with(server, dir, &alpha(), log, wait, |_| Ok(pc_end))
+    }
+
+    #[test]
+    fn live_checks_the_servers_key_and_pins_it_the_first_time() {
+        use h2net::live::kind;
+        // Written as host and port: the pin is found however it's written.
+        const SERVER: &str = "127.0.0.1:9";
+        let said = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = said.clone();
+        let log: Log = Arc::new(move |line: &str| kept.lock().unwrap().push(line.into()));
+        // Another key pinned: given up on before anything but the LOGIN is
+        // sent, and the pin is kept as it was.
+        let dir = scratch("pin-changed");
+        let mut pins = Pins::default();
+        pins.set(SERVER, [0x12; 32]);
+        pins.save(&dir).unwrap();
+        let before = std::fs::read(crate::pins::path(&dir)).unwrap();
+        let (server_end, pc_end) = Connection::pair();
+        let by_hand = sign_in_by_hand(server_end, 3);
+        let Err(e) = live_sign_in(&dir, SERVER, log.clone(), pc_end) else {
+            panic!("signed in to a server with another key");
+        };
+        assert!(e.starts_with("the server's key changed"), "{e}");
+        let (mut server_end, _) = by_hand.join().unwrap();
+        assert_eq!(sent(&mut server_end), [kind::LOGIN]);
+        assert_eq!(std::fs::read(crate::pins::path(&dir)).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+        // No key yet: the first sign-in pins the server's.
+        let dir = scratch("pin-first");
+        let (server_end, pc_end) = Connection::pair();
+        let by_hand = sign_in_by_hand(server_end, 3);
+        let lobby = live_sign_in(&dir, SERVER, log.clone(), pc_end).unwrap();
+        let (mut server_end, key) = by_hand.join().unwrap();
+        assert_eq!(lobby.client.view.server_key, Some(key));
+        assert_eq!(sent(&mut server_end), [kind::LOGIN, kind::PROVE]);
+        let pins = Pins::load(&dir).unwrap();
+        assert_eq!(pins.get(SERVER), Some(key));
+        assert_eq!(pins.get("ws://127.0.0.1:9/live"), Some(key));
+        assert!(said
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.starts_with("live: pinned the server's key ")));
+        drop(lobby);
+        // The same key again: signed in, and the file is as it was.
+        let before = std::fs::read(crate::pins::path(&dir)).unwrap();
+        let (server_end, pc_end) = Connection::pair();
+        let by_hand = sign_in_by_hand(server_end, 3);
+        live_sign_in(&dir, SERVER, log, pc_end).unwrap();
+        by_hand.join().unwrap();
+        assert_eq!(std::fs::read(crate::pins::path(&dir)).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_stops_searching_when_the_server_turns_it_away() {
+        use h2net::live::ToPc;
+        let dir = scratch("refused-searching");
+        let log: Log = Arc::new(|_: &str| {});
+        let (server_end, pc_end) = Connection::pair();
+        let by_hand = sign_in_by_hand(server_end, 3);
+        let mut lobby = live_sign_in(&dir, "127.0.0.1:9", log, pc_end).unwrap();
+        let (mut server_end, _) = by_hand.join().unwrap();
+        // An admin signs the account out of all PCs while it searches: it
+        // says so at once, not when the wait is up.
+        ToPc::Refused(SIGNED_OUT.into()).send(&mut server_end);
+        server_end.flush().unwrap();
+        let start = Instant::now();
+        let Err(e) = lobby.find_match(11, Duration::from_secs(60)) else {
+            panic!("a match");
+        };
+        assert!(start.elapsed() < Duration::from_secs(10));
+        assert_eq!(e, refusal(SIGNED_OUT));
+        assert!(e.contains("sign in once from the lobby"), "{e}");
+        // So for any wait, and whatever the refusal.
+        let log: Log = Arc::new(|_: &str| {});
+        let mut pick = |e: &LiveEvent| match e {
+            LiveEvent::LauncherMatch(m) => Some(m.id),
+            _ => None,
+        };
+        let why = h2net::live::ACCOUNT_REMOVED;
+        let mut events: VecDeque<LiveEvent> = [LiveEvent::Refused(why.into())].into();
+        let picked = read_until(&mut events, &log, &mut pick);
+        assert_eq!(picked, Some(Err(refusal(why))));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

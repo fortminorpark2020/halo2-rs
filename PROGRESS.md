@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 19:05 UTC. Any assistant that works on the project
+Last updated 2026-10-12 13:55 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -40,6 +40,9 @@ Milestones:
   2026-10-09.
 - Controllers: Halo 2's button and thumbstick layouts, plus Bumper Jumper and
   Recon (not in the original, added on request).
+- 2026-10-11: accounts on his server are made by him, for the MVP "a simple
+  username and password I create for my test users": a gamertag and a
+  password, typed once on each PC. Signing in with Steam may come later.
 
 ## The owner's PC (where all launcher testing happens)
 
@@ -139,6 +142,98 @@ player is on `hunt-wip` (6822f71) in `C:\h2work\hunt`, notes in
 assists and the team offset aren't. The PC's own log of the day is
 `reports\2026-10-10_mcc-pivot_pc-work-log.md` in the Cartographer folder.
 
+Owner-made accounts (2026-10-11) are built and tested on
+`launcher-accounts` (on `launcher-menu` f0b718b: stage 1 16e80d5, h2live
+and `LIVE_PROTOCOL` 4; stage 2 3323850, the launcher; stage 3, docs and
+the install script; then seven rounds of review fixes. The fourth
+(2026-10-12): a wrong password costs the same hash and locks the same way
+whatever gamertag it names, launchers take nothing from a server before it
+proves its key, pins are kept by the address dialled, `--live` stops on a
+refusal, and the install script puts the new program in last. The fifth
+(2026-10-12): a gamertag no account has is never logged (it may be a
+password in the wrong box), and the launcher neither logs nor saves a
+gamertag typed with a password before the server welcomes it; argon2 wipes
+its own copies (`zeroize`); the stand-in hash follows the settings most
+kept hashes have, so a cost change doesn't give accounts away; the admin
+socket opens before the router is asked for the port; the install script
+keeps the program from before accounts as `h2live.before-accounts` and
+shows the log when the new server isn't running. The sixth (2026-10-12):
+the launcher's LOGIN carries a random nonce that SEAL_KEY's signature
+covers, so a SEAL_KEY and CHALLENGE recorded from another sign-in don't
+get past the pin; a command-line request the server didn't take in time
+is never carried out later; the command line acts only on the account
+called exactly what was typed; NEW PASSWORD ignores A and B for its first
+second; a malformed `H2LAUNCH_SERVER_KEY` fails the build; the sign-in log
+and notice never repeat the gamertag typed; Sign out and Remove say a
+host's game ends for everyone; the docs give the order for a leaked
+password (a new one first, then sign out) and keep the version 3
+launchers for a rollback. The seventh (2026-10-12): an account request the
+launcher gave up on after 10 s is still acted on if its answer comes (a
+password made up for it shown, CHANGE PASSWORD closed), and a player isn't
+told to check a list they don't have; a removal whose friends.txt can't be
+written is refused and changes nothing; the rollback docs say the version
+3 server lets signed-out PCs and removed accounts back in, and that a
+backup goes in place of the data folder, not over it), pushed, not
+deployed. After the seventh round the docs were checked against the code;
+`accounts.md` now also says what happens when the server can't save its
+files (a change that lets someone in is undone; one that shuts someone
+out holds until the next start and says so) and lists the server's
+account log lines.
+`launcher-menu` with the in-game GAME MENU (PR #9, below) is merged into
+it up to 18279ad (the lobby's console echo fix, merged 2026-10-12), so its
+builds carry both; the GAME MENU changes neither protocol, and
+`LIVE_PROTOCOL` stays 4 there.
+`PROTOCOL` stays 26, so the
+hold on the Proxmox server's `PROTOCOL` 27 update is unchanged. Design and
+details: `docs/notes/launcher/accounts.md`. Each account is a gamertag and
+a password; a PC types it once and is remembered (up to 5 PCs); h2live
+keeps hashes in `logins.txt`; sign-up is `open`, `closed` or `auto`;
+admins make accounts from the launcher's Accounts row or with `h2live
+user ...` on the server; launchers pin the server's key. Tested on Linux
+with a closed local server, the command line and headless lobbies (the
+run is at the end of `lobby.md`). A v3 launcher can't sign in to a v4
+server, nor the other way round, so the deploy goes in this order, each
+step with the owner's go-ahead:
+1. The server: build h2live (static musl) from the merged branch and run
+   the updated `deploy/proxmox/install-h2live.sh` in container 102. It
+   keeps `/opt/h2live/h2live.prev`, the version 3 program for good as
+   `/opt/h2live/h2live.before-accounts`, and a dated copy of `/var/lib/h2live`,
+   sets sign-up closed, and installs the `/usr/local/bin/h2live` wrapper.
+   Existing accounts (the owner's, FRIENDTEST, MENUTEST and any friends')
+   are kept and sign in from their PCs as before. Then `h2live user list`,
+   `h2live user admin <OWNER> on`, `h2live user passwd <OWNER>` (note
+   "hashing took N ms"; if the cost is lowered for it, set the owner's
+   password again after the new build is installed), and `h2live user
+   key`.
+2. First keep the version 3 launchers for a rollback: copy
+   `C:\Games\Halo 2 Live` to `C:\Games\Halo 2 Live v3` and
+   `C:\Games\H2-Live-friends.zip` to `C:\Games\H2-Live-friends-v3.zip`
+   (or build them again later from `launcher-menu`, live protocol 3,
+   18279ad). Then rebuild the owner's launcher (`C:\Games\Halo 2 Live`)
+   and the friends' zip with `H2LAUNCH_SERVER_KEY` set to that key (the 64
+   hex digits; anything else fails the build), and rewrite the zip's
+   READ ME on his PC ("type the gamertag and password John gave you, once
+   on each PC"). The READ ME isn't in the repository. The built-in key
+   covers h2.mohnjorrow.com only (written with or without `:47050`, or as
+   its `ws://` URL); the desktop build, on 192.168.8.102,
+   learns the key the first time it signs in (on his own network).
+3. The owner makes his friends' accounts from his launcher's Accounts row.
+Rollback: `install -m755 /opt/h2live/h2live.before-accounts
+/opt/h2live/h2live && systemctl restart h2live`, and the owner's PC and
+friends go back to the version 3 launchers kept in step 2 (`Halo 2 Live
+v3`, `H2-Live-friends-v3.zip`). (h2live.prev is only the program before
+the latest install, so after a second install it's an accounts build too.
+The program from before accounts has no command line: `h2live user ...`
+says so until the newer one is back.) The version 3 server ignores
+logins.txt: PCs signed out (revoke, or Sign out of all PCs) get back in to
+accounts their own keys made, and removed accounts of that kind come back
+when their PCs sign in, so don't roll back while a lost or stolen PC
+matters. To roll forward, run `install-h2live.sh` again with the accounts
+build beside it: a rollback leaves none in `/opt/h2live`. Signed-out PCs
+stay out then, but a removed account that came back is adopted: check
+`h2live user list`. A dated backup goes in place of `/var/lib/h2live`, not
+over it (accounts.md, "Deploy and rollback").
+
 After the MVP: clans, keyboard and mouse, the other layouts, and the
 owner's idea (2026-10-11) of Halo 2 Anniversary weapon and Spartan models
 in classic multiplayer. There's no switch for that: MCC's remastered look
@@ -150,7 +245,8 @@ step, when the owner says so: one weapon.
 ## In progress
 
 - In-game GAME MENU (Start or Esc in a match, as Halo 2's screen 0xC3), on
-  `launcher-gamemenu` off `launcher-menu` f0b718b. Stage 1 done
+  `launcher-gamemenu` off `launcher-menu` f0b718b, merged into
+  `launcher-menu` (PR #9) and from there into `launcher-accounts`. Stage 1 done
   (2026-10-11): the menu's logic, pad edges and input gate in
   `crates/h2launch/src/gamemenu/` (plain Rust, Linux-tested; no Windows,
   wire or lobby changes yet), and its opaque panel with the players column
@@ -211,9 +307,12 @@ step, when the owner says so: one weapon.
   no HOST LEFT wording and the host gets the carnage report too (h2live
   unchanged; a new server test covers it); before the server's GO (a
   guest still joining) it goes as LEFT_MATCH alone and the host gets "You
-  ended the game." instead (`Told::ended_before_go`). Next: check 14 again on the
-  PC with this build (both lobbies on the carnage report), and checks 16
-  and 17.
+  ended the game." instead (`Told::ended_before_go`). Re-checked on the
+  owner's PC at 76414d6 (2026-10-11 23:40; menu.md 9.5, "Re-check"):
+  check 14 through h2.mohnjorrow.com passed (both lobbies on the carnage
+  report, no HOST LEFT wording), as did reload message 5 by default and
+  one controls save a visit; the "You ended the game." path is still
+  unseen there. Next: checks 16 and 17.
 - Milestone 1 is done (2026-10-10 02:50 UTC): `h2launch` started MCC's
   halo2.dll on the owner's PC and played offline Slayer on Lockout (HUD,
   60 fps, mouse and controller). Code is on `h2launch-m1`, then

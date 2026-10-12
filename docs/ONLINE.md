@@ -42,6 +42,11 @@ Good to know:
   person to sign in after that waits up to a minute while it wakes up.
 - It forgets everything when it restarts, but nothing is lost: each PC keeps a
   signed copy of its own levels and hands it back when it signs in.
+- So leave its sign-up as it is (auto, which stays open while no account
+  is an admin; see "Who gets an account" below). A closed server needs a
+  data folder that survives restarts, which Render's free plan doesn't
+  have: its data is in /tmp, so the accounts made by hand and their
+  passwords would be gone at the next restart.
 - When Claude changes the server, Render updates it by itself a few minutes
   later. A game being played right then ends.
 - Render's free plan only carries TCP, so the launcher's games (which go
@@ -64,13 +69,23 @@ internet address.
    - `relay on UDP port 47050`: the relay for the launcher's games is
      running beside it.
    - `accounts are kept in ...`: the folder (`h2live-data`) holding everyone's
-     accounts. Back it up now and then. Besides `accounts.txt` (accounts,
+     accounts. Back up the whole folder now and then, and before every
+     update. Besides `accounts.txt` (accounts,
      levels, and kills, assists, deaths, betrayals and suicides in each
      ranked playlist) it holds `friends.txt` (launcher players' friends and
-     friend requests) and `games.log` (every match played). A server from
-     before friends opens the folder as it is; once a newer server has
-     written to it, an older one can't read it, so keep a copy before
-     updating.
+     friend requests), `games.log` (every match played), `logins.txt`
+     (password hashes and the PCs each account signs in from; private: on
+     Linux only h2live's own user may read it, and on Windows it's only as
+     private as its folder, so keep that inside your own user folder) and
+     `secret.txt` (the key that signs
+     players' stat cards; launchers also check the server by a key made
+     from it, so a new one makes every launcher say SERVER KEY CHANGED).
+     Neither of the last two can be made again from anything else. A
+     server from before friends opens the folder as it is; once a newer
+     server has written to it, an older one can't read it, so keep a copy
+     before updating.
+   - `sign-up: open ...` or `sign-up: closed ...`: who gets an account (see
+     "Who gets an account" below).
    - Then one of these:
      - `READY: ws://203.0.113.5:47050`: players can reach it. Paste that
        address to Claude. (The router opened UDP 47050 for the relay too,
@@ -113,7 +128,44 @@ it from your PC.
 - `deploy/proxmox/install-h2live.sh`, run as root inside the container next
   to a Linux build of `h2live`, installs it as the `h2live` service (program
   in `/opt/h2live`, accounts in `/var/lib/h2live`). Running it again updates
-  the program and keeps every account.
+  the program and keeps every account. Each time, it stops the service,
+  keeps the program it replaces as `/opt/h2live/h2live.prev` (only the one
+  before the latest install) and copies the data folder to
+  `/var/lib/h2live.backup-<date>-<time>` (old copies pile up; delete them
+  by hand), then starts the new one. The last program from before accounts
+  (live protocol 3) is also kept, for good, as
+  `/opt/h2live/h2live.before-accounts`. If the new server isn't running
+  after the start, the script shows its log and ends with an error. The new program goes in
+  last, after the settings, the unit and the wrapper, so if a step fails
+  and the script starts the service again, it runs the old program or the
+  new one with sign-up closed, never the new one with sign-up open.
+- It sets sign-up closed twice (`signup=closed` in `/opt/h2live/h2live.txt`
+  and `H2LIVE_SIGNUP=closed` in the unit), so only the server's owner makes
+  accounts there, and `UMask=0077`, so the files the server writes
+  (`logins.txt`, the admin socket) are its own alone.
+- It installs `/usr/local/bin/h2live`, which runs the server's command line
+  as the h2live user: `h2live user list`, `h2live user add <gamertag>` and
+  the rest (below), in a root shell in the container (over ssh), or from
+  the Proxmox host with `pct exec 102 -- h2live user list`. On its own,
+  `h2live` only says how to use it: the server is the service.
+- To go back to the program before the latest update: `install -m755
+  /opt/h2live/h2live.prev /opt/h2live/h2live && systemctl restart h2live`.
+  To go back to the server from before accounts, whatever was installed
+  since, use `/opt/h2live/h2live.before-accounts` in place of
+  `h2live.prev`. For the data as it was too, first stop the service and
+  put that update's backup in place of the folder, not over it (files the
+  backup doesn't have, such as `logins.txt` in the one from before
+  accounts, must go too): `mv /var/lib/h2live
+  /var/lib/h2live.replaced-$(date +%Y%m%d-%H%M%S)`, then `cp -a
+  /var/lib/h2live.backup-<date>-<time> /var/lib/h2live`. A server from
+  before accounts (live protocol 3) ignores `logins.txt` and `signup=`, so it is
+  open sign-up again, PCs signed out with `h2live user revoke` (or Sign out
+  of all PCs) get back in to accounts their own keys made, removed accounts
+  of that kind come back when their PCs sign in, and accounts made by hand
+  can't sign in to it until the newer one is back. So don't go back to it
+  while a lost or stolen PC matters (see `docs/notes/launcher/accounts.md`,
+  "Deploy and rollback"). It has no command line either: until then,
+  `h2live user ...` says so and does nothing.
 - `journalctl -u h2live` shows its log, with the `relay on UDP port 47050`
   line and the READY, FORWARD or CGNAT line described in option B. FORWARD
   means the router needs port forwards for TCP 47050 and UDP 47050 to the
@@ -127,6 +179,55 @@ it from your PC.
 - On the same network, games reach it at `ws://<container address>:47050`
   (a `server=` line in `profile.txt`, below), and launchers send their game
   traffic to UDP 47050 at the same address.
+
+## Who gets an account
+
+`signup=` in `h2live.txt` (or `H2LIVE_SIGNUP`, which wins) decides:
+
+- `open`: every new PC that signs in gets an account of its own, named by
+  the gamertag it asks for. That's how it always was.
+- `closed`: only the server's owner makes accounts, each a gamertag and a
+  password he hands out. A launcher types the password once on each PC (up
+  to 5 PCs an account), and that PC is remembered. A launcher on a PC no
+  account knows is asked for a password; a game (h2viewer) whose
+  `identity.key` the server doesn't know is told THIS SERVER IS INVITE
+  ONLY.
+- `auto`, the default: open until some account is an admin, then closed.
+  Local servers, tests and Render stay open with no setting.
+
+The owner's accounts are made with h2live's command line on the server's
+machine, or from an admin's launcher (Accounts, the playlists' last row):
+
+```
+h2live user list                       every account, its PCs, admin or not
+h2live user add <GAMERTAG> [--admin]   a new account; its made-up password is shown once
+h2live user passwd <GAMERTAG>          a new password (its PCs stay signed in)
+h2live user revoke <GAMERTAG>          sign it out of all PCs (a leaked password: passwd first)
+h2live user remove <GAMERTAG> --yes    remove it (for good while sign-up is closed)
+h2live user admin <GAMERTAG> on|off    make it an admin, or not
+h2live user rename <GAMERTAG> <NEW>    give it another gamertag
+h2live user key                        the server's key, for H2LAUNCH_SERVER_KEY
+```
+
+They find the data folder as the server does (or `--data <folder>`), work
+while it's stopped and, on Linux (the Proxmox container), while it runs
+too (on Windows, close h2live first), and never take a password as an
+argument (`--password-stdin` reads one instead of making one up). A
+gamertag starting with `-` goes after `--` (`h2live user admin -- -KAT-
+on`). With sign-up open, a removed account that a PC made by signing in
+comes back when that PC signs in again, its levels too. Accounts
+from before (live protocol 3) keep signing in from the PC that made them,
+with no password until the owner gives them one.
+
+If the server can't write its files (a full disk, say), a command or the
+launcher's Accounts screen says so:
+- "THE SERVER COULDN'T SAVE ITS FILES" means nothing changed.
+- What was done followed by "BUT THE SERVER COULDN'T SAVE ITS FILES, SO
+  IT'S UNDONE WHEN THE SERVER NEXT STARTS" (a new password, a sign-out,
+  unmaking an admin) holds only until h2live restarts.
+
+Either way, free the space and do it again. The whole design is in
+`docs/notes/launcher/accounts.md`.
 
 ## Moving or turning off the relay
 
@@ -156,3 +257,9 @@ like `server=https://h2live-abcd.onrender.com`.
 The file `identity.key` in that same folder is your online account. Keep a
 copy: without it, your gamertag and levels can't be signed in to again. On a
 new PC, copy it into the same folder.
+
+On a server whose owner makes the accounts (sign-up closed, like the
+Proxmox one), `identity.key` is one remembered PC of its account: an
+account the game made before keeps signing in with it (copied to a new PC
+too), but a game with a new `identity.key` is told THIS SERVER IS INVITE
+ONLY, as the game can't type a password.

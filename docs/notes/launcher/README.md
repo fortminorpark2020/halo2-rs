@@ -284,8 +284,11 @@ Later runs there (2026-10-10) showed:
 ## Matchmaking through h2live (milestone 3, being built)
 
 With `--live <server>` the launcher signs in to h2live (its own key is kept
-as `live-key.bin` in its log folder, so each `--instance` is its own
-account), searches a launcher playlist (`--playlist`, default 11, Head to
+as `live-key.bin` in its log folder, so each `--instance` is its own PC:
+on an open server its own account, as before; on one whose owner makes
+the accounts, one of an account's up to 5 remembered PCs, added once by
+signing in from the lobby with the password, as `--live` never sends one;
+see `accounts.md`), searches a launcher playlist (`--playlist`, default 11, Head to
 Head) and waits for the match the server makes. The match names the map,
 the variant, who hosts, the room on the relay beside the server and this
 PC's key for it; the launcher writes the session from that and starts the
@@ -314,9 +317,10 @@ h2launch --live 127.0.0.1 --instance b --name Bravo --pad none
 
 `h2launch` with no flags (or `--lobby`) opens a window of its own on Halo
 2's start screen; A (or Start) opens the main menu, with ONLINE and
-SETTINGS. ONLINE shows the sign-in screen the first time (a gamertag
-and the server, h2.mohnjorrow.com by default, kept in `lobby.txt`) and
-signs in at once after that, then the playlists with your level in each
+SETTINGS. ONLINE shows the sign-in screen the first time (a gamertag,
+the password the server's owner gave, which is never kept, and the
+server, h2.mohnjorrow.com by default, kept in `lobby.txt` with the
+gamertag) and signs in at once after that, by this PC's key, then the playlists with your level in each
 and the party. A searches (party leader), X lists the players online to
 invite or join, B goes back to the main menu. When the server makes a
 match the pregame lobby shows the map, the game and the players for five

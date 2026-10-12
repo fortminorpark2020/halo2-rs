@@ -1097,6 +1097,74 @@ fn a_player_who_quits_loses_and_comes_last() {
     assert!(log.contains(&quit), "{log}");
 }
 
+/// The owner removes account `id` from the command line.
+fn remove(a: &mut Arena, id: u64) {
+    let remove = crate::server::Command::Remove { account: id };
+    let actor = crate::server::Actor::Console;
+    a.w.server.command(actor, remove, a.w.now).unwrap();
+}
+
+#[test]
+fn a_removed_account_stops_searching() {
+    let mut a = Arena::new("removed-searching", 3, None);
+    let status = |a: &Arena, i: usize| a.w.pcs[i].view.status.map(|s| (s.stage, s.have));
+    // Alpha and Bravo search Rumble Pit, which needs three.
+    a.send(0, ToServer::Search(RUMBLE_PIT));
+    a.send(1, ToServer::Search(RUMBLE_PIT));
+    a.until(5.0, |a| status(a, 0) == Some((Stage::Gathering, 2)));
+    // Bravo is removed: Alpha searches alone again.
+    let bravo = a.id(1);
+    remove(&mut a, bravo);
+    a.until(5.0, |a| a.w.refused(1).is_some());
+    assert_eq!(a.w.refused(1), Some(live::ACCOUNT_REMOVED));
+    a.until(5.0, |a| status(a, 0) == Some((Stage::Searching, 1)));
+    // So Charlie searching makes two, not the three a match needs.
+    a.send(2, ToServer::Search(RUMBLE_PIT));
+    a.until(5.0, |a| status(a, 0) == Some((Stage::Gathering, 2)));
+    a.run(10.0);
+    assert!(a.gamers.iter().all(|g| g.info.is_none()));
+    assert_eq!(a.w.party(0).activity, Activity::Searching);
+    assert_eq!(a.w.party(2).activity, Activity::Searching);
+}
+
+#[test]
+fn a_player_removed_in_a_match_is_out_of_it_and_the_rest_play_on() {
+    // Rumble Pit, all at level 10.
+    let mut a = Arena::new("removed-playing", 3, Some(("ffa", &[10, 10, 10])));
+    a.search(RUMBLE_PIT);
+    let m = a.formed();
+    a.playing(&m, 3);
+    let gone = (0..3).find(|&i| a.id(i) != m.host).unwrap();
+    let id = a.id(gone);
+    // Its PC goes quiet as the owner removes its account.
+    a.stop(gone, true);
+    remove(&mut a, id);
+    // The game goes on without it, to its end, and counts for the others.
+    let stayed: Vec<usize> = (0..3).filter(|&i| i != gone).collect();
+    a.until(300.0, |a| {
+        stayed
+            .iter()
+            .all(|&i| a.gamers[i].over.iter().any(|o| o.id == m.id))
+    });
+    for &i in &stayed {
+        assert!(a.over(i, m.id).counted);
+    }
+    // A win over the one who left each, and first beat second (+100 and
+    // 0) or they tied (+50 each), as when a player quits.
+    let mut xp: Vec<u32> = stayed.iter().map(|&i| a.rank(i, "ffa").xp).collect();
+    xp.sort_unstable();
+    assert!(xp == [900, 1000] || xp == [950, 950], "{xp:?}");
+    // The account stays gone: nothing of the match brings it back.
+    assert_eq!(a.w.server.account(id), None);
+    assert!(!a.w.accounts_txt().contains(&format!("{id:016x}")));
+    // games.log has it last, as having left, with no level of its own.
+    let (counted, players) = a.logged(m.id);
+    assert_eq!(counted, 1);
+    let logged = players.iter().find(|p| p.account == id).unwrap();
+    assert_eq!((logged.place, logged.left), (2, true));
+    assert_eq!((logged.old, logged.new), (Rank::default(), Rank::default()));
+}
+
 #[test]
 fn a_player_the_host_gives_up_on_loses_and_comes_last() {
     // Rumble Pit, all at level 10.

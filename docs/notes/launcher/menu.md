@@ -55,7 +55,12 @@ Earlier work this builds on:
 - **The server stays as it is.** Phases 1 to 3 change only how the lobby
   looks and moves between screens: no new message kinds, and `LIVE_PROTOCOL`
   stays 3. Anything that would need the server (a CLOSED party, delaying a
-  countdown) is marked as later.
+  countdown) is marked as later. One exception came in between: the
+  owner's accounts (gamertag and password, made by the server's owner)
+  shipped on `launcher-accounts` as `LIVE_PROTOCOL` 4 (`accounts.md`),
+  with the sign-in form's password field, the server-key check and the
+  ACCOUNTS screen. The phases build on version 4 from then on and add
+  nothing more to it.
 
 ## 1. The target
 
@@ -724,6 +729,12 @@ list skins, dialogs and the overlay dimming.
 
 - Select Player and the gamertag keyboard. An on-screen keyboard is needed
   for controller-only players; `controller-wip` has one to borrow from.
+  It also takes over the fields `accounts.md` added, which need a real
+  keyboard until then: the sign-in password, a new account's gamertag
+  (NEW ACCOUNT) and CHANGE PASSWORD's three fields. All of them take their
+  typing through one place (`edit()` with an `Entry` kind in the lobby),
+  so the keyboard attaches there; a password's keys must stay masked on
+  screen.
 - "Please Wait" while connecting, then the XBOX LIVE screen:
   - **Quickmatch** searches at once. The Xbox code doesn't say which
     playlist; we take the party's last one, or the one with the most
@@ -781,6 +792,9 @@ in this playlist" from the server's searching and playing counts.
 - BUTTON LAYOUT is Halo 2's screen (layout below).
 - PC rows: mouse sensitivity, and the server address (which moves here
   from the sign-in screen).
+- The settings hub takes over the playlists' Accounts / My account row
+  (`accounts.md`): Change my password for everyone, and the owner's
+  account list. Until then that row stays the playlists' last.
 - Appearance (model, colours, emblem) only if the profile bytes are shown
   to work (`USE_ELITE`, the colour fields), and without the 3D model.
 

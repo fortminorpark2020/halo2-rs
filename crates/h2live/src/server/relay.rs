@@ -185,7 +185,7 @@ impl Server {
                 .any(|l| !l.over && theirs(l.id, &l.accounts))
     }
 
-    fn gamertag(&self, account: u64) -> String {
+    pub(super) fn gamertag(&self, account: u64) -> String {
         self.accounts
             .get(&account)
             .map_or(String::new(), |a| a.gamertag.clone())

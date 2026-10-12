@@ -30,13 +30,26 @@
 //! `LiveEvent::Friends`), and asks for players' service records
 //! (`ToServer::Record`, answered with `LiveEvent::ServiceRecord`). The game
 //! is never sent either.
+//!
+//! On a server whose owner makes the accounts, a launcher on a PC the
+//! account doesn't know yet signs in with the account's password
+//! (`set_access`, before the first poll). The server first proves who it is
+//! (SEAL_KEY: a key made for this connection, signed with the server's
+//! identity key, which the launcher may pin), and the password goes sealed
+//! to that key (`crate::seal`), never in clear. From then on the PC signs
+//! in by its key alone. The accounts it may see come as
+//! `LiveEvent::Accounts` (in `View::accounts`), and an admin changes them
+//! with `ask_account`.
 
 use crate::levels::{self, Finish};
+use crate::password::{self, Secret};
+use crate::seal;
 use crate::store;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use h2net::live::{
-    self, Friend, LauncherMatch, LinkInfo, Login, LoginClient, MatchInfo, MatchOver, OnlinePlayer,
-    PartyInfo, PlayerResult, PlaylistInfo, SearchStatus, ServiceRecord, ToPc, ToServer, Welcome,
+    self, AccountOp, Accounts, Friend, LauncherMatch, LinkInfo, Login, LoginClient, MatchInfo,
+    MatchOver, OnlinePlayer, PartyInfo, PlayerResult, PlaylistInfo, Sealed, SearchStatus,
+    ServiceRecord, ToPc, ToServer, Welcome,
 };
 use h2net::Connection;
 use h2relay::{ClientConfig, MemberKey, RelayClient};
@@ -52,6 +65,51 @@ const NOTICES: usize = 10;
 const INVITES: usize = 16;
 /// Pings that can be on their way back at once.
 const PINGS: usize = 16;
+/// Why a launcher gave up on a server that didn't sign its SEAL_KEY, or
+/// sent anything but a refusal or a ping before it had.
+pub const SERVER_UNPROVEN: &str = "THE SERVER DIDN'T PROVE WHO IT IS";
+
+/// How a launcher signs in (`LiveClient::set_access`). The default: any
+/// server, and no password (the PC signs in by its key alone). Its Debug
+/// doesn't show the password.
+#[derive(Debug, Clone, Default)]
+pub struct Access {
+    /// The identity key the server must have (the one it had last time);
+    /// with another, the launcher gives up (`LiveEvent::KeyChanged`).
+    pub pin: Option<[u8; 32]>,
+    /// The account's password, for a PC the account doesn't know yet.
+    pub password: Option<Secret>,
+    /// This PC's name, as the account's list of PCs shows it.
+    pub computer: String,
+}
+
+/// What a launcher asks of the accounts (`LiveClient::ask_account`). Every
+/// ask but `ChangePassword` is an admin's. (Its Debug doesn't show
+/// passwords.)
+#[derive(Debug, Clone)]
+pub enum AccountAsk {
+    /// Send the accounts again.
+    List,
+    Create {
+        gamertag: String,
+        password: Secret,
+    },
+    SetPassword {
+        account: u64,
+        password: Secret,
+    },
+    SignOut {
+        account: u64,
+    },
+    Remove {
+        account: u64,
+    },
+    /// Our own account's.
+    ChangePassword {
+        old: Secret,
+        new: Secret,
+    },
+}
 
 /// Who signs in, as the PC's profile has it.
 #[derive(Debug, Clone, Default)]
@@ -91,6 +149,11 @@ pub struct View {
     /// A launcher's friends list, as the server last sent it: requests to
     /// us (oldest first), friends (by gamertag), then requests we sent.
     pub friends: Vec<Friend>,
+    /// A launcher's: the accounts it may see, as the server last sent them.
+    pub accounts: Option<Accounts>,
+    /// A launcher's: the server's identity key, once it proved it holds it
+    /// (to pin next time).
+    pub server_key: Option<[u8; 32]>,
 }
 
 /// What happened, for the game to act on.
@@ -138,6 +201,23 @@ pub enum LiveEvent {
     /// A player's service record, as asked for (`ToServer::Record`). The
     /// view doesn't keep them.
     ServiceRecord(ServiceRecord),
+    /// A launcher's accounts came (they're in `View::accounts`, as last
+    /// sent), maybe answering an `ask_account`: `answers` its number (0
+    /// for none), whether it was done, and what to show. (Each message's
+    /// own, so an answer isn't lost under a list that came after it in
+    /// the same poll.)
+    Accounts {
+        answers: u32,
+        ok: bool,
+        text: String,
+    },
+    /// The server's identity key isn't the one pinned (`Access::pin`), so
+    /// the launcher gave up before sending anything after its LOGIN (no
+    /// password, no proof of its key): a new server, or someone in between.
+    KeyChanged {
+        was: [u8; 32],
+        now: [u8; 32],
+    },
 }
 
 /// One end of a game relayed through the server: a connection to the
@@ -252,6 +332,25 @@ pub struct LiveClient {
     pinged: f64,
     pings: VecDeque<(u32, f64)>,
     gone: bool,
+    /// A launcher, not the game.
+    launcher: bool,
+    /// The gamertag our LOGIN named, as sent.
+    gamertag: String,
+    access: Access,
+    /// A launcher's: the random nonce its LOGIN carried, which SEAL_KEY's
+    /// signature must be over.
+    login_nonce: [u8; 32],
+    /// The SEAL_KEY that came before the challenge (key, server, sig).
+    seal_key: Option<([u8; 32], [u8; 32], [u8; 64])>,
+    /// Once the server proved it holds its identity key: the key to seal
+    /// passwords to on this connection, and the challenge.
+    seal: Option<([u8; 32], [u8; 32])>,
+    /// The number of our last account request.
+    account_seq: u32,
+    /// The server's challenge came. A server sends one SEAL_KEY and one
+    /// CHALLENGE on a connection, so another of either after it is someone
+    /// else's (one in between, offering their own key to seal to).
+    challenged: bool,
 }
 
 /// The key this PC signs in with, kept at `path` (identity.key, next to
@@ -292,7 +391,11 @@ impl LiveClient {
         while version.len() > live::MAX_NAME {
             version.pop();
         }
-        let client = LoginClient::Launcher { version };
+        // New for each sign-in: the server's SEAL_KEY must sign it, so one
+        // recorded from another connection doesn't check.
+        let mut nonce = [0; 32];
+        getrandom::fill(&mut nonce).expect("random numbers");
+        let client = LoginClient::Launcher { version, nonce };
         LiveClient::sign_in(conn, key, profile, client, card_path, now)
     }
 
@@ -305,6 +408,11 @@ impl LiveClient {
         now: f64,
     ) -> LiveClient {
         let card = std::fs::read_to_string(card_path).unwrap_or_default();
+        let launcher = client.kind() == live::ClientKind::Launcher;
+        let login_nonce = match &client {
+            LoginClient::Launcher { nonce, .. } => *nonce,
+            LoginClient::Viewer { .. } => [0; 32],
+        };
         let maps = profile
             .maps
             .iter()
@@ -323,6 +431,7 @@ impl LiveClient {
             maps: maps.take(live::MAX_MAPS).cloned().collect(),
             guests: profile.guests.min(live::MAX_GUESTS),
         };
+        let gamertag = login.gamertag.clone();
         ToServer::Login(login).send(&mut conn);
         // Errors surface as Lost on the first poll.
         let _ = conn.flush();
@@ -336,7 +445,22 @@ impl LiveClient {
             pinged: now,
             pings: VecDeque::new(),
             gone: false,
+            launcher,
+            gamertag,
+            access: Access::default(),
+            login_nonce,
+            seal_key: None,
+            seal: None,
+            account_seq: 0,
+            challenged: false,
         }
+    }
+
+    /// How a launcher signs in: the server key it must have, and the
+    /// password for a PC the account doesn't know yet. Set it right after
+    /// `launcher`, before the first poll. (The game has no say.)
+    pub fn set_access(&mut self, access: Access) {
+        self.access = access;
     }
 
     /// Signed in, and still connected.
@@ -444,12 +568,63 @@ impl LiveClient {
     }
 
     fn take(&mut self, message: ToPc, now: f64, events: &mut Vec<LiveEvent>) {
+        // One SEAL_KEY, then one CHALLENGE, per connection: anything more
+        // is bad data, and nothing is answered or sealed to it.
+        let again = match message {
+            ToPc::Challenge { .. } => std::mem::replace(&mut self.challenged, true),
+            ToPc::SealKey { .. } => self.challenged || self.seal_key.is_some(),
+            _ => false,
+        };
+        if again {
+            self.gone = true;
+            events.push(LiveEvent::Lost("bad data from the server".into()));
+            return;
+        }
+        // Until the server proved its key (the challenge answered), a
+        // launcher takes nothing else from it but a refusal and pings: a
+        // WELCOME, playlists or a match from a server that never signed
+        // this sign-in's SEAL_KEY with the pinned key would get past the
+        // pin. (Someone in the middle who passes the real server's
+        // messages on still can, as with any session taken over on the
+        // plain link; they can't open sealed passwords or forge account
+        // requests.)
+        let early = !matches!(
+            message,
+            ToPc::SealKey { .. }
+                | ToPc::Challenge { .. }
+                | ToPc::Refused(_)
+                | ToPc::Ping(_)
+                | ToPc::Pong(_)
+        );
+        if self.launcher && self.seal.is_none() && early {
+            self.gone = true;
+            events.push(LiveEvent::Lost(SERVER_UNPROVEN.into()));
+            return;
+        }
         let view = &mut self.view;
         match message {
             ToPc::Challenge { nonce, motd } => {
+                view.motd = motd;
+                if self.launcher {
+                    return self.answer_challenge(nonce, events);
+                }
                 let proof = live::proof(&nonce, self.key.verifying_key().as_bytes());
                 ToServer::Prove(self.key.sign(&proof).to_bytes()).send(&mut self.conn);
-                view.motd = motd;
+            }
+            // A launcher's: the key to seal its passwords to, which comes
+            // before the challenge.
+            ToPc::SealKey { key, server, sig } => {
+                if self.launcher {
+                    self.seal_key = Some((key, server, sig));
+                }
+            }
+            ToPc::Accounts(accounts) => {
+                events.push(LiveEvent::Accounts {
+                    answers: accounts.answers,
+                    ok: accounts.ok,
+                    text: accounts.text.clone(),
+                });
+                view.accounts = Some(accounts);
             }
             ToPc::Welcome(welcome) => {
                 self.keep_card(&welcome.card);
@@ -524,6 +699,103 @@ impl LiveClient {
         }
     }
 
+    /// A launcher answers the challenge `nonce`, once the server proved who
+    /// it is: with the password, if it has one, sealed; else as the game
+    /// does.
+    fn answer_challenge(&mut self, nonce: [u8; 32], events: &mut Vec<LiveEvent>) {
+        let proven = self.seal_key.take().filter(|(key, server, sig)| {
+            let Ok(server) = VerifyingKey::from_bytes(server) else {
+                return false;
+            };
+            // Over our LOGIN's nonce too: a SEAL_KEY and CHALLENGE the
+            // server sent on another connection (recorded, and played back
+            // by someone else) don't check.
+            let proof = seal::key_proof(&self.login_nonce, &nonce, key);
+            server
+                .verify_strict(&proof, &Signature::from_bytes(sig))
+                .is_ok()
+        });
+        let Some((key, server, _)) = proven else {
+            self.gone = true;
+            events.push(LiveEvent::Lost(SERVER_UNPROVEN.into()));
+            return;
+        };
+        if let Some(was) = self.access.pin.filter(|&pin| pin != server) {
+            self.gone = true;
+            events.push(LiveEvent::KeyChanged { was, now: server });
+            return;
+        }
+        self.view.server_key = Some(server);
+        // Any other key this connection is offered must be this one.
+        self.access.pin = Some(server);
+        self.seal = Some((key, nonce));
+        let me = self.key.verifying_key().to_bytes();
+        // The password goes once, and isn't kept after it's sealed.
+        let Some(typed) = self.access.password.take() else {
+            let signature = self.key.sign(&live::proof(&nonce, &me)).to_bytes();
+            return ToServer::Prove(signature).send(&mut self.conn);
+        };
+        let aad = seal::aad(seal::SIGN_IN, &nonce, &me, self.gamertag.as_bytes());
+        let Some(password) = seal_passwords(&key, &aad, &[&typed]) else {
+            // Too long to be anyone's.
+            self.gone = true;
+            events.push(LiveEvent::Refused(live::WRONG_PASSWORD.into()));
+            return;
+        };
+        let computer = cut(&self.access.computer, live::MAX_NAME);
+        let proof = live::password_proof(&nonce, &me, &self.gamertag, &computer, &password);
+        let signature = self.key.sign(&proof).to_bytes();
+        let prove = ToServer::ProvePassword {
+            signature,
+            computer,
+            password,
+        };
+        prove.send(&mut self.conn);
+    }
+
+    /// Ask the server to change the accounts (or list them again), sealing
+    /// any passwords to this connection's key. The answer comes as
+    /// `LiveEvent::Accounts` whose `answers` is the number returned. None if
+    /// we're not signed in on a launcher, or a password is too long to be
+    /// anyone's.
+    pub fn ask_account(&mut self, ask: AccountAsk) -> Option<u32> {
+        if !self.signed_in() {
+            return None;
+        }
+        let (key, nonce) = self.seal?;
+        let me = self.key.verifying_key().to_bytes();
+        let sealed = |purpose: u8, target: &[u8], passwords: &[&Secret]| {
+            let aad = seal::aad(purpose, &nonce, &me, target);
+            seal_passwords(&key, &aad, passwords)
+        };
+        let op = match ask {
+            AccountAsk::List => AccountOp::List,
+            AccountAsk::Create { gamertag, password } => {
+                let gamertag = cut(&gamertag, live::MAX_NAME);
+                let password = sealed(seal::CREATE, gamertag.as_bytes(), &[&password])?;
+                AccountOp::Create { gamertag, password }
+            }
+            AccountAsk::SetPassword { account, password } => {
+                let target = account.to_le_bytes();
+                let password = sealed(seal::SET_PASSWORD, &target, &[&password])?;
+                AccountOp::SetPassword { account, password }
+            }
+            AccountAsk::SignOut { account } => AccountOp::SignOut { account },
+            AccountAsk::Remove { account } => AccountOp::Remove { account },
+            AccountAsk::ChangePassword { old, new } => {
+                let target = self.account()?.to_le_bytes();
+                let passwords = sealed(seal::CHANGE_PASSWORD, &target, &[&old, &new])?;
+                AccountOp::ChangePassword { passwords }
+            }
+        };
+        self.account_seq += 1;
+        let seq = self.account_seq;
+        let sig = self.key.sign(&live::account_proof(&nonce, seq, &op));
+        let sig = sig.to_bytes();
+        self.send(ToServer::Account { seq, op, sig });
+        Some(seq)
+    }
+
     /// Keep the stat card the server sent, for next time.
     fn keep_card(&self, card: &str) {
         if card.is_empty() {
@@ -536,4 +808,25 @@ impl LiveClient {
             );
         }
     }
+}
+
+/// `passwords`, as typed, sealed to `key` for `aad`. None if one is too
+/// long to be anyone's.
+fn seal_passwords(key: &[u8; 32], aad: &[u8], passwords: &[&Secret]) -> Option<Sealed> {
+    let typed: Vec<Secret> = passwords
+        .iter()
+        .map(|p| Secret::new(password::normalize(p.as_str())))
+        .collect();
+    let typed: Vec<&str> = typed.iter().map(Secret::as_str).collect();
+    let plain = seal::pad(&typed)?;
+    seal::seal(key, aad, &plain)
+}
+
+/// `text` cut to at most `max` bytes, on a character's edge.
+fn cut(text: &str, max: usize) -> String {
+    let mut text = text.to_string();
+    while text.len() > max {
+        text.pop();
+    }
+    text
 }

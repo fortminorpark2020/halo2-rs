@@ -1,5 +1,7 @@
 # Live v3: kills, service records, friends and rank icons
 
+(Version 4, owner-made accounts with passwords, is in `accounts.md`.)
+
 The design for the next batch on `launcher-friends` (based on
 `launcher-lobby`): four things a Halo 2 Xbox Live player had that the
 lobby lacks.

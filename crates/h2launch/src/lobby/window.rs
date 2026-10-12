@@ -194,13 +194,22 @@ impl ApplicationHandler for Shell {
                     _ => None,
                 };
                 // Keys go through `key`, which leaves alone the ones meant
-                // for the engine's window while it plays.
+                // for the engine's window while it plays (and repeats of a
+                // key held down through `key_repeated`).
+                let held = event.repeat;
+                let mut key = |i| {
+                    if held {
+                        self.app.key_repeated(i);
+                    } else {
+                        self.app.key(i);
+                    }
+                };
                 match i {
-                    Some(i) => self.app.key(i),
+                    Some(i) => key(i),
                     None => {
                         let typed = event.text.as_deref().unwrap_or("");
                         for c in typed.chars().filter(|c| !c.is_control()) {
-                            self.app.key(Input::Char(c));
+                            key(Input::Char(c));
                         }
                     }
                 }

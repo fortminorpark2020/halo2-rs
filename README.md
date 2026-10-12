@@ -54,9 +54,12 @@ install. No game files are included in this repository.
   or click) for the main menu, which has ONLINE and SETTINGS (up and
   down to pick, A to choose, B to go back). Its pictures and fonts are
   read from your MCC install; without them it is plain shapes. ONLINE
-  takes you to its lobby: pick a gamertag the first time (after that it
-  signs you in by itself), form a party (the sign-in screen offers the
-  project's server, h2.mohnjorrow.com, by default), search a playlist,
+  takes you to its lobby. The first time on each PC, type the gamertag and
+  the password the server's owner gave you (a keyboard is needed for that
+  until the on-screen keyboard comes; the password shows as stars and is
+  never saved); after that ONLINE signs you in by itself on that PC. The
+  sign-in screen offers the project's server, h2.mohnjorrow.com, by
+  default. Then form a party, search a playlist,
   play the match on the real engine, and see the carnage report with your
   new level afterwards. Custom Game (under
   the playlists) lets the party leader pick any game type and map for the
@@ -77,7 +80,19 @@ install. No game files are included in this repository.
   a keyboard, Q and E (or Page Up and Page Down) are LB and RB. Levels show
   as Halo 2's own level icons, read from your MCC install (or from a Halo 2
   Vista install if MCC's can't be read); without either they are numbers. Friends and service records need the matching
-  server: an older launcher signing in to it is told UPDATE YOUR LAUNCHER.
+  server: an older launcher signing in to it is told UPDATE YOUR LAUNCHER,
+  and a launcher newer than the server says the server runs a different
+  version. The playlists' last row is Accounts for the server's owner and
+  My account for everyone else. There the owner makes accounts for
+  friends (the password is made up and shown once, to hand on), gives an
+  account a new password, signs it out of all its PCs, or removes it; and
+  anyone changes their own password (the current one, then the new one
+  twice; your PCs stay signed in). If the launcher ever says SERVER KEY
+  CHANGED, the server answered with another key than the one this PC
+  knows it by: choose Trust the new key only if the server's owner told
+  you it changed, otherwise Cancel (only the sign-in request with your
+  gamertag went out, never your password). See
+  `docs/notes/launcher/accounts.md`.
   Its text is in Halo 2's own fonts, read from your MCC install.
   Settings (SETTINGS on the main menu, the row after Custom Game, or X on
   a controller at the sign-in screen) holds Halo 2's controller settings,
@@ -472,12 +487,35 @@ folder up), asks the router to open the port (UPnP), and says how players
 reach it: `READY: ws://<address>:47050`, `FORWARD TCP AND UDP 47050 TO
 <this PC>` when the router needs port forwards set by hand, or `CGNAT: USE
 THE HOSTED OPTION` when the internet provider makes that impossible. Ctrl+C
-stops it. An `h2live.txt` next to it can set `port=`, `data=` and `relay=`
-(the relay's UDP port, or `off`). On a host online, `PORT`, `H2LIVE_DATA`,
-`H2LIVE_RELAY` and `H2LIVE_SECRET` (what signs players' stat cards) set the
-same; `/health` answers health checks, and `/` says how many players are
-online. `H2LIVE_UPNP=0` leaves the router alone. The relay only lets in
-the players of matches h2live sets up. `h2relay.exe` runs a relay on its
+stops it. An `h2live.txt` next to it can set `port=`, `data=`, `relay=`
+(the relay's UDP port, or `off`), `bind=` and `signup=`. On a host online,
+`PORT`, `H2LIVE_DATA`, `H2LIVE_RELAY`, `H2LIVE_SIGNUP` and `H2LIVE_SECRET`
+(what signs players' stat cards) set the same; `/health` answers health
+checks, and `/` says how many players are online. `H2LIVE_UPNP=0` leaves
+the router alone. The relay only lets in
+the players of matches h2live sets up.
+
+Accounts can be made by the server's owner alone. Then each account is a
+gamertag and a password he hands out; a launcher types the password once
+on each PC, and that PC is remembered (up to 5 per account). `signup=open`,
+`closed` or `auto` decides (in `h2live.txt`, or `H2LIVE_SIGNUP`, which
+wins): open gives every new PC an account of its own, as before; closed
+leaves it to the owner; auto, the default, is open until some account is
+an admin, then closed. Password hashes and each account's PCs are kept in
+`logins.txt` in the data folder (private on Linux; on Windows keep the
+folder inside your own user folder; back it up with the rest). With
+arguments h2live is its own command line: `h2live user list`, `h2live user
+add <gamertag>` (`--admin` makes an admin, whose launcher can make
+accounts; the made-up password is shown once), `h2live user passwd
+<gamertag>` (a new password), `revoke <gamertag>` (sign out of all PCs;
+if the password leaked, run `passwd` first, then `revoke`),
+`remove <gamertag> --yes`, `admin <gamertag> on|off`, `rename <gamertag>
+<new>`, and `h2live user key`, the server's key that launchers check (for
+building them with `H2LAUNCH_SERVER_KEY`). A password is never typed as
+an argument: it's made up, or read with `--password-stdin`. The commands
+work while the server is stopped and, on Linux only, while it runs
+(through a private socket in the data folder; on Windows close h2live
+first), and only one h2live runs on a data folder at a time. See `docs/notes/launcher/accounts.md`. `h2relay.exe` runs a relay on its
 own for tests on one PC or a home network (`h2relay [port]`); it lets
 anyone in, so don't forward its port.
 

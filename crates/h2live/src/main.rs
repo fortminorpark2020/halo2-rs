@@ -15,10 +15,20 @@
 //! H2LIVE_DATA (the folder accounts are kept in, `h2live-data` unless set),
 //! H2LIVE_SECRET (what stat cards are signed with; without it, a key kept in
 //! `secret.txt` there), H2LIVE_RELAY (the relay's UDP port, or `off`),
-//! H2LIVE_UPNP=0 to leave the router alone, and H2LIVE_BIND (the address to
+//! H2LIVE_UPNP=0 to leave the router alone, H2LIVE_BIND (the address to
 //! listen on, all of this PC's unless set; 127.0.0.1 keeps it to this PC,
-//! for tests). So a double-click is enough at home, an `h2live.txt` next to
-//! the program can hold `port=`, `data=`, `relay=` and `bind=` lines too.
+//! for tests), and H2LIVE_SIGNUP (`open`, `closed` or `auto`, the default:
+//! whether PCs the server doesn't know get accounts of their own; auto
+//! closes once any account is an admin). So a double-click is enough at
+//! home, an `h2live.txt` next to the program can hold `port=`, `data=`,
+//! `relay=`, `bind=` and `signup=` lines too (the environment wins).
+//!
+//! Only one h2live serves a data folder at a time (it holds
+//! `h2live.lock` there). With arguments, it's the server's command line
+//! instead: `h2live user add KAT` makes an account, and so on (see `cli`).
+//! While the server runs, the command line asks it over a Unix socket in
+//! the data folder (`admin.sock`, for the folder's owner only); while it's
+//! stopped, it opens the folder itself.
 //!
 //! At home it asks the router to pass the ports on to this PC (UPnP), and
 //! says how players reach it: READY with the address, FORWARD when the
@@ -28,7 +38,8 @@
 //! so they close by themselves however h2live stops. A host online sets
 //! PORT, and has its own way in.
 
-use h2live::server::{flush_log, log, log_in_background, say, Route, Server};
+use h2live::admin;
+use h2live::server::{flush_log, log, log_in_background, say, Route, Server, SignUp};
 use h2net::Request;
 use h2relay::{Admission, RelayServer, RelayThread, ServerConfig, RELAY_PROTOCOL};
 use igd_next::{AddPortError, Gateway, PortMappingProtocol, SearchOptions};
@@ -43,6 +54,8 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+mod cli;
 
 /// The port and the data folder unless told otherwise.
 const PORT: u16 = 47050;
@@ -90,6 +103,8 @@ struct Settings {
     /// so they're from where the proxy says, and there's no router to ask.
     hosted: bool,
     upnp: bool,
+    /// Whether PCs the server doesn't know get accounts.
+    signup: SignUp,
 }
 
 impl Default for Settings {
@@ -102,12 +117,14 @@ impl Default for Settings {
             relay: Relay::SamePort,
             hosted: false,
             upnp: true,
+            signup: SignUp::Auto,
         }
     }
 }
 
 impl Settings {
-    /// Take on the `port=`, `data=`, `relay=` and `bind=` lines of h2live.txt's
+    /// Take on the `port=`, `data=`, `relay=`, `bind=` and `signup=` lines of
+    /// h2live.txt's
     /// `text`, in any case. A data folder that isn't a whole path is in
     /// `folder`, the program's. The lines it didn't take (but for blank
     /// ones and # comments), to say so.
@@ -129,6 +146,7 @@ impl Settings {
                 "data" => self.data = folder.join(value),
                 "relay" => self.relay = relay(value)?,
                 "bind" => self.bind = bind(value)?,
+                "signup" => self.signup = signup(value)?,
                 _ => ignored.push(line),
             }
         }
@@ -148,6 +166,17 @@ fn bind(text: &str) -> Result<Ipv4Addr, String> {
         .map_err(|_| format!("{text} isn't an IPv4 address"))
 }
 
+/// Whether PCs the server doesn't know get accounts: `open`, `closed` or
+/// `auto`.
+fn signup(text: &str) -> Result<SignUp, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "open" => Ok(SignUp::Open),
+        "closed" => Ok(SignUp::Closed),
+        "auto" => Ok(SignUp::Auto),
+        _ => Err(format!("{text} isn't open, closed or auto")),
+    }
+}
+
 /// The relay's port, or `off`.
 fn relay(text: &str) -> Result<Relay, String> {
     match text.trim().to_ascii_lowercase().as_str() {
@@ -160,6 +189,15 @@ fn relay(text: &str) -> Result<Relay, String> {
 }
 
 fn main() {
+    // With arguments, it's the command line (`h2live user ...`); without,
+    // the server, as systemd and a double-click start it.
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if !args.is_empty() {
+        std::process::exit(cli::main(args));
+    }
     // So a console that stops taking what's said (one with text selected,
     // on Windows) holds no game up.
     log_in_background();
@@ -189,6 +227,13 @@ fn run() -> Result<(), String> {
         h2net::live::LIVE_PROTOCOL
     ));
     let settings = settings()?;
+    let folder = &settings.data;
+    std::fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    // Held until the program ends: one server per folder.
+    let held = lock(folder, true).map_err(|e| format!("{}: {e}", folder.display()))?;
+    let Some(_lock) = held else {
+        return Err(format!("another h2live is using {}", folder.display()));
+    };
     let listener = TcpListener::bind((settings.bind, settings.port)).map_err(|e| {
         let port = settings.port;
         match e.kind() {
@@ -200,8 +245,27 @@ fn run() -> Result<(), String> {
     // As it is: port 0 is any that's free.
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let mut server = Server::open(&settings.data, settings.secret.as_deref())?;
+    server.set_sign_up(settings.signup);
     let data = std::path::absolute(&settings.data).unwrap_or(settings.data);
     log(format_args!("accounts are kept in {}", data.display()));
+    // The command line's way in, open before the relay starts and the
+    // router is asked for the port (which waits out UPNP_TIMEOUT when the
+    // router doesn't answer, and longer for one that answers slowly): it
+    // holds h2live.lock, so the command line takes it this way from now
+    // on. What it asks waits until `serve` takes it; one not taken within
+    // the socket's ANSWER_TIMEOUT is answered THE SERVER DIDN'T ANSWER and
+    // never carried out.
+    #[cfg(unix)]
+    let admin = admin_socket::open(&data);
+    #[cfg(unix)]
+    let asks = admin.as_ref().map(|a| &a.asks);
+    #[cfg(not(unix))]
+    let asks = None;
+    // (Said once the admin socket is open.)
+    for line in server.sign_up_line().lines() {
+        log(line);
+    }
+    server.prepare_stand_in();
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = stop.clone();
     ctrlc::set_handler(move || stopping.store(true, Ordering::SeqCst))
@@ -218,10 +282,12 @@ fn run() -> Result<(), String> {
         Vec::new()
     };
 
-    serve(&listener, &mut server, &stop, settings.hosted);
+    serve(&listener, &mut server, &stop, settings.hosted, asks);
 
     // Accounts are saved as they change, so there's nothing left to save.
     let players = server.players_online();
+    #[cfg(unix)]
+    drop(admin);
     drop(server);
     drop(relay);
     for open in open {
@@ -286,12 +352,19 @@ fn settings() -> Result<Settings, String> {
             log(format_args!("settings from {}", file.display()));
             for line in ignored {
                 log(format_args!(
-                    "ignored {line:?} (only port=, data=, relay= and bind= lines count)"
+                    "ignored {line:?} (only port=, data=, relay=, bind= and signup= lines count)"
                 ));
             }
         }
     }
-    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    from_env(&mut settings, |name| std::env::var(name).ok())?;
+    Ok(settings)
+}
+
+/// Take on the settings in the environment, as `env` has it (the
+/// variable's value if it's set).
+fn from_env(settings: &mut Settings, env: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+    let env = |name: &str| env(name).filter(|v| !v.trim().is_empty());
     if let Some(p) = env("PORT") {
         settings.port = port(&p).map_err(|why| format!("PORT: {why}"))?;
         settings.hosted = true;
@@ -305,18 +378,45 @@ fn settings() -> Result<Settings, String> {
     if let Some(b) = env("H2LIVE_BIND") {
         settings.bind = bind(&b).map_err(|why| format!("H2LIVE_BIND: {why}"))?;
     }
+    if let Some(s) = env("H2LIVE_SIGNUP") {
+        settings.signup = signup(&s).map_err(|why| format!("H2LIVE_SIGNUP: {why}"))?;
+    }
     settings.secret = env("H2LIVE_SECRET");
     // Kept to this PC, there's nothing for the router to pass on.
     settings.upnp = !settings.hosted
         && !settings.bind.is_loopback()
         && env("H2LIVE_UPNP").as_deref() != Some("0");
-    Ok(settings)
+    Ok(())
+}
+
+/// `<folder>/h2live.lock`, held for as long as the file returned is kept;
+/// None if another program holds it. With `create` the file is made if it
+/// isn't there; without, that's an error (`ErrorKind::NotFound`).
+fn lock(folder: &Path, create: bool) -> std::io::Result<Option<std::fs::File>> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(create)
+        .create(create)
+        .truncate(false)
+        .open(folder.join("h2live.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 /// Serve until `stop`: take connections, each saying what it wants on a
-/// thread of its own (so a slow one holds no one up), answer web requests,
-/// and hand games to `server`. A host's proxy says where each is from.
-fn serve(listener: &TcpListener, server: &mut Server, stop: &AtomicBool, hosted: bool) {
+/// thread of its own (so a slow one holds no one up), answer web requests
+/// and the command line's requests (`commands`, from the admin socket), and
+/// hand games to `server`. A host's proxy says where each is from.
+fn serve(
+    listener: &TcpListener,
+    server: &mut Server,
+    stop: &AtomicBool,
+    hosted: bool,
+    commands: Option<&mpsc::Receiver<admin::Ask>>,
+) {
     let start = Instant::now();
     let (asked, asks) = mpsc::channel();
     // Connections still saying what they want: how many, how many from
@@ -370,6 +470,11 @@ fn serve(listener: &TcpListener, server: &mut Server, stop: &AtomicBool, hosted:
                 Err(why) => log(format_args!("{from}: {why}")),
             }
         }
+        for ask in commands.into_iter().flat_map(|c| c.try_iter()) {
+            // (One the command line gave up on, and was told failed, isn't
+            // carried out.)
+            ask.answer_with(|request| admin::answer(server, request, now));
+        }
         server.poll(now);
         std::thread::sleep(NAP);
         // Connections still saying what they want come by channel, which
@@ -393,6 +498,117 @@ fn wait(listener: &TcpListener, server: &Server, idle: Duration) {
             log(format_args!("waiting: {e}"));
             std::thread::sleep(idle);
         }
+    }
+}
+
+/// The admin socket: `admin.sock` in the data folder, which only the
+/// folder's owner can open, where the command line asks the server while it
+/// runs. Each connection is one request line and its answer.
+#[cfg(unix)]
+mod admin_socket {
+    use super::{admin, log};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Longest request line.
+    const MAX_LINE: u64 = 4096;
+    /// How long a request may take to come, and its answer.
+    const READ_TIMEOUT: Duration = Duration::from_secs(5);
+    const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// The socket, open; removed when dropped.
+    pub struct AdminSocket {
+        /// The requests that came, for the server's thread to answer.
+        pub asks: mpsc::Receiver<admin::Ask>,
+        path: PathBuf,
+    }
+
+    impl Drop for AdminSocket {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// Open the socket in `folder`. Without one (a path too long for a
+    /// socket, say), it's logged and the server goes on: the command line
+    /// can't reach it then.
+    pub fn open(folder: &Path) -> Option<AdminSocket> {
+        let path = folder.join("admin.sock");
+        match listen(&path) {
+            Ok(listener) => {
+                let (ask, asks) = mpsc::channel();
+                std::thread::spawn(move || accept(listener, ask));
+                Some(AdminSocket { asks, path })
+            }
+            Err(e) => {
+                log(format_args!(
+                    "no admin socket ({}: {e}): \"h2live user\" works only while h2live is stopped",
+                    path.display()
+                ));
+                None
+            }
+        }
+    }
+
+    /// Listen at `path`, which only its owner may open. (It's made beside
+    /// it, made private, then moved there, so no one gets in before.)
+    fn listen(path: &Path) -> std::io::Result<UnixListener> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut temp = path.as_os_str().to_owned();
+        temp.push(".tmp");
+        let temp = PathBuf::from(temp);
+        // Left by a server that stopped without removing them.
+        let _ = std::fs::remove_file(&temp);
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(&temp)?;
+        let private = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
+            .and_then(|()| std::fs::rename(&temp, path));
+        if let Err(e) = private {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
+        Ok(listener)
+    }
+
+    /// Take connections (waiting for each, so it costs nothing while none
+    /// come), each answered on a thread of its own.
+    fn accept(listener: UnixListener, ask: mpsc::Sender<admin::Ask>) {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else {
+                continue;
+            };
+            let ask = ask.clone();
+            std::thread::spawn(move || answer(stream, &ask));
+        }
+    }
+
+    /// Read one request from `stream`, have the server answer it, and send
+    /// the answer back.
+    fn answer(stream: UnixStream, ask: &mpsc::Sender<admin::Ask>) {
+        let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
+        let mut line = String::new();
+        let mut reader = BufReader::new((&stream).take(MAX_LINE));
+        let lines = match reader.read_line(&mut line) {
+            Ok(_) => match admin::Request::parse(&line) {
+                Some(request) => {
+                    let (asked, waiting) = admin::ask(request);
+                    // (Not sent: the wait ends at once.)
+                    let _ = ask.send(asked);
+                    waiting
+                        .wait(ANSWER_TIMEOUT)
+                        .unwrap_or_else(|| vec!["error\tTHE SERVER DIDN'T ANSWER".to_string()])
+                }
+                None => vec!["error\tTHAT ISN'T A REQUEST".to_string()],
+            },
+            Err(_) => return,
+        };
+        let mut text = lines.join("\n");
+        text.push('\n');
+        let _ = (&stream).write_all(text.as_bytes());
     }
 }
 
@@ -590,6 +806,41 @@ mod tests {
     }
 
     #[test]
+    fn signup_is_open_closed_or_auto() {
+        let folder = Path::new("/games/h2live");
+        let mut s = Settings::default();
+        assert_eq!(s.signup, SignUp::Auto);
+        s.read("SignUp = Closed\n", folder).unwrap();
+        assert_eq!(s.signup, SignUp::Closed);
+        s.read("signup=open\n", folder).unwrap();
+        assert_eq!(s.signup, SignUp::Open);
+        s.read("signup=auto\n", folder).unwrap();
+        assert_eq!(s.signup, SignUp::Auto);
+        let why = Settings::default().read("signup=invite\n", folder).err();
+        assert_eq!(why.as_deref(), Some("invite isn't open, closed or auto"));
+        assert_eq!(signup(" CLOSED "), Ok(SignUp::Closed));
+        assert!(signup("").is_err());
+        // H2LIVE_SIGNUP wins over h2live.txt.
+        let mut s = Settings::default();
+        s.read("signup=open\n", folder).unwrap();
+        let env = |value: &'static str| {
+            move |name: &str| (name == "H2LIVE_SIGNUP").then(|| value.to_string())
+        };
+        from_env(&mut s, env("closed")).unwrap();
+        assert_eq!(s.signup, SignUp::Closed);
+        from_env(&mut s, env("Auto")).unwrap();
+        assert_eq!(s.signup, SignUp::Auto);
+        // Set but empty is as unset.
+        from_env(&mut s, env(" ")).unwrap();
+        assert_eq!(s.signup, SignUp::Auto);
+        let why = from_env(&mut s, env("yes")).err();
+        assert_eq!(
+            why.as_deref(),
+            Some("H2LIVE_SIGNUP: yes isn't open, closed or auto")
+        );
+    }
+
+    #[test]
     fn the_relay_follows_the_port_unless_told_otherwise() {
         let folder = Path::new("/games/h2live");
         let mut s = Settings::default();
@@ -677,7 +928,7 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let stopping = stop.clone();
             let thread =
-                std::thread::spawn(move || serve(&listener, &mut server, &stopping, hosted));
+                std::thread::spawn(move || serve(&listener, &mut server, &stopping, hosted, None));
             Serving {
                 address,
                 stop,

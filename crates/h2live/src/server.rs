@@ -7,10 +7,19 @@
 //!
 //! Signing in: a PC sends LOGIN with its public key, the server answers
 //! with a random challenge, and the PC signs it (PROVE). An account is
-//! named by its key, so only the PC holding the key can sign in as it, and
-//! no two accounts have the same gamertag, whatever the case. Then the PC
-//! and the server ping each other every second, and each gives up on the
-//! other after 15 seconds without a word.
+//! named by a key, and the PCs that sign in to it without a password (its
+//! "devices", kept in logins.txt) are known by theirs; no two accounts
+//! have the same gamertag, whatever the case. Then the PC and the server
+//! ping each other every second, and each gives up on the other after 15
+//! seconds without a word.
+//!
+//! Who gets an account (see `accounts`): while sign-up is open, a PC the
+//! server doesn't know gets a new account named by its key, as it always
+//! has. Once it's closed (an admin's server), only the server's owner
+//! makes accounts, each a gamertag and a password: a launcher on a PC new
+//! to the account proves the password once (PROVE_PASSWORD, sealed to a
+//! key made for the connection: see `seal`), and from then on that PC
+//! signs in by its key alone.
 //!
 //! Two programs sign in (see `h2net::live`): the game, taken only at the
 //! server's own game `PROTOCOL`, and the launcher, taken at the service's
@@ -29,10 +38,13 @@
 
 use crate::card;
 use crate::friends::Friends;
+use crate::logins::Logins;
 use crate::matchmaker::Matchmaker;
+use crate::password::{Cost, Settings};
 use crate::playlists::{self, Playlist};
+use crate::seal;
 use crate::store::{self, Account};
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use h2net::live::{
     self, Activity, ClientKind, Login, LoginClient, LoginHeader, PlaylistInfo, Privacy, ToPc,
     ToServer, Welcome,
@@ -44,11 +56,15 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::net::{IpAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
+pub use accounts::{Actor, Command, SignUp, PASSWORD_CHANGED, WRONG_OLD_PASSWORD};
+
+mod accounts;
 mod matches;
 mod party;
 mod relay;
@@ -93,6 +109,15 @@ struct Pc {
     /// While signing in: what it signed in with, and the challenge it must
     /// sign.
     login: Option<(Login, [u8; 32])>,
+    /// The key its LOGIN named, and the challenge it was sent (kept once
+    /// signed in: account requests are signed over it).
+    key: [u8; 32],
+    nonce: [u8; 32],
+    /// A launcher's: the secret of the X25519 key its passwords are sealed
+    /// to on this connection (SEAL_KEY).
+    seal: Option<Zeroizing<[u8; 32]>>,
+    /// The number of its last account request.
+    account_seq: u32,
     /// Signed in as this account, in this party, from this program.
     account: Option<u64>,
     party: u64,
@@ -125,6 +150,10 @@ impl Pc {
             since: now,
             heard: now,
             login: None,
+            key: [0; 32],
+            nonce: [0; 32],
+            seal: None,
+            account_seq: 0,
             account: None,
             party: 0,
             client: ClientKind::Viewer,
@@ -179,8 +208,35 @@ pub struct Server {
     dir: PathBuf,
     /// Signs stat cards.
     key: SigningKey,
+    /// Proves to launchers that this is the server they know (SEAL_KEY).
+    identity: SigningKey,
     playlists: Vec<Playlist>,
     accounts: BTreeMap<u64, Account>,
+    /// Who may sign in to each account (logins.txt; see `accounts`).
+    logins: Logins,
+    /// Whether PCs the server doesn't know get accounts.
+    sign_up: SignUp,
+    /// How hard the password hashes made here are.
+    cost: Cost,
+    /// When the passwords checked or hashed in the last minute were, and
+    /// the wrong passwords of the last 10 minutes, by account and by
+    /// address, the passwords checked to sign in to each account (right or
+    /// wrong) and those players changed, in the last 10 minutes. Each
+    /// drops what is older than its window as it goes.
+    hashes: VecDeque<f64>,
+    wrong_by_account: HashMap<u64, Vec<f64>>,
+    wrong_by_ip: HashMap<IpAddr, Vec<f64>>,
+    /// Wrong passwords for gamertags no account has, by gamertag (as
+    /// `clean_name` makes it), so they lock as accounts do.
+    wrong_by_name: HashMap<String, Vec<f64>>,
+    checks_by_account: HashMap<u64, Vec<f64>>,
+    changes_by_account: HashMap<u64, Vec<f64>>,
+    /// A hash of a password no one has, and the settings it was made with
+    /// (those most kept hashes have, else `cost`'s): checked when a box
+    /// opens but there's no password to check it against, so the answer
+    /// takes as long (`accounts::prove_password`). Made at start, and again
+    /// when needed with other settings.
+    stand_in: Option<(Settings, String)>,
     /// Sent with every challenge.
     motd: String,
     pcs: Vec<Pc>,
@@ -254,7 +310,11 @@ impl Server {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let key = card::server_key(dir, secret)?;
         let playlists = playlists::load(&dir.join("playlists.txt"))?;
-        let accounts = store::load(&dir.join("accounts.txt"))?;
+        let accounts: BTreeMap<u64, Account> = store::load(&dir.join("accounts.txt"))?
+            .into_iter()
+            .map(|a| (a.id, a))
+            .collect();
+        let logins = accounts::open_logins(dir, &accounts)?;
         let friends = Friends::load(&dir.join("friends.txt"))?;
         let motd = std::fs::read_to_string(dir.join("motd.txt")).unwrap_or_default();
         let epoch = std::time::SystemTime::now()
@@ -264,11 +324,22 @@ impl Server {
         getrandom::fill(&mut seed).expect("random numbers");
         Ok(Server {
             dir: dir.to_path_buf(),
+            identity: seal::identity(&key),
             key,
             matchmaker: Matchmaker::new(playlists.clone(), u64::from_le_bytes(seed)),
             counts_sent: vec![(0, 0); playlists.len()],
             playlists,
-            accounts: accounts.into_iter().map(|a| (a.id, a)).collect(),
+            accounts,
+            logins,
+            sign_up: SignUp::Auto,
+            cost: Cost::Real,
+            hashes: VecDeque::new(),
+            wrong_by_account: HashMap::new(),
+            wrong_by_ip: HashMap::new(),
+            wrong_by_name: HashMap::new(),
+            checks_by_account: HashMap::new(),
+            changes_by_account: HashMap::new(),
+            stand_in: None,
             motd: motd.trim().to_string(),
             pcs: Vec::new(),
             legs: Vec::new(),
@@ -411,6 +482,7 @@ impl Server {
             .retain_mut(|(conn, until)| conn.flush().is_ok() && now < *until);
         self.sign_ins
             .retain(|_, times| times.last().is_some_and(|&t| now - t < 60.0));
+        self.forget_old_tries(now);
     }
 
     /// Keep a dropped connection a moment, to send what's left.
@@ -546,8 +618,23 @@ impl Server {
             (None, ToServer::Login(login)) if pc.login.is_none() => {
                 let mut nonce = [0; 32];
                 getrandom::fill(&mut nonce).expect("random numbers");
+                // A launcher is sent the key to seal passwords to first (the
+                // game, which can't, never hears of it), signed over its
+                // LOGIN's nonce, so the signature is for this sign-in only.
+                if let LoginClient::Launcher { nonce: theirs, .. } = &login.client {
+                    let mut secret = Zeroizing::new([0; 32]);
+                    getrandom::fill(&mut *secret).expect("random numbers");
+                    let key = seal::public(&secret);
+                    let sig = self.identity.sign(&seal::key_proof(theirs, &nonce, &key));
+                    let server = self.identity.verifying_key().to_bytes();
+                    let sig = sig.to_bytes();
+                    ToPc::SealKey { key, server, sig }.send(&mut pc.conn);
+                    pc.seal = Some(secret);
+                }
                 let motd = self.motd.clone();
                 ToPc::Challenge { nonce, motd }.send(&mut pc.conn);
+                pc.key = login.key;
+                pc.nonce = nonce;
                 pc.login = Some((login, nonce));
             }
             (None, ToServer::Prove(signature)) => {
@@ -555,10 +642,39 @@ impl Server {
                     return false;
                 };
                 if signed(&login.key, &nonce, &signature) {
-                    self.sign_in(k, login, now);
+                    self.prove(k, login, now);
                 } else {
                     self.refuse(k, live::BAD_SIGNATURE);
                 }
+            }
+            // Launchers' only: the game can't seal a password.
+            (
+                None,
+                ToServer::ProvePassword {
+                    signature,
+                    computer,
+                    password,
+                },
+            ) => {
+                let Some((login, nonce)) = pc.login.take() else {
+                    return false;
+                };
+                if login.client.kind() != ClientKind::Launcher {
+                    return false;
+                }
+                // Over this LOGIN's gamertag and this box too, so no one
+                // in between can send their own account's password with
+                // this PC's proof.
+                let proof =
+                    live::password_proof(&nonce, &login.key, &login.gamertag, &computer, &password);
+                if signed_over(&login.key, &proof, &signature) {
+                    self.prove_password(k, login, &computer, &password, now);
+                } else {
+                    self.refuse(k, live::BAD_SIGNATURE);
+                }
+            }
+            (Some(me), ToServer::Account { seq, op, sig }) if launcher => {
+                return self.account_request(k, me, seq, op, &sig, now);
             }
             (Some(_), ToServer::Profile { gamertag, look }) => pc.profile = Some((gamertag, look)),
             (Some(me), ToServer::Invite(who)) => self.invite(me, who),
@@ -598,34 +714,55 @@ impl Server {
         true
     }
 
-    /// Sign PC `k` in, now that it proved it holds `login.key`.
-    fn sign_in(&mut self, k: usize, login: Login, now: f64) {
-        let id = store::account_id(&login.key);
+    /// Sign PC `k` in as account `id`, now that it proved it may (see
+    /// `prove` and `prove_password`). With sign-up open, `id` may be a new
+    /// account, named by `login.key`. `new_pc` if the account's PCs just
+    /// changed (its password let this one in).
+    fn sign_in(&mut self, k: usize, id: u64, login: Login, new_pc: bool, now: f64) {
+        let closed = self.sign_up_closed();
         let existing = self.accounts.get(&id);
-        // A card newer than what's here brings back what this server lost.
+        // A card newer than what's here brings back what this server lost:
+        // only the account signing in, and (closed) only one it has. One
+        // the server has keeps its gamertag.
         let restored = card::verify(&login.card, &self.key.verifying_key())
-            .filter(|a| a.key == login.key && a.seq > existing.map_or(0, |e| e.seq));
+            .filter(|a| a.id == id && a.seq > existing.map_or(0, |e| e.seq))
+            .filter(|_| existing.is_some() || !closed)
+            .map(|mut a| {
+                if let Some(e) = existing {
+                    a.gamertag = e.gamertag.clone();
+                }
+                a
+            });
         if let Some(a) = &restored {
             log(format_args!(
                 "live: {} restored from a stat card",
                 a.gamertag
             ));
         }
-        let mut account = restored
+        let Some(mut account) = restored
             .or_else(|| existing.cloned())
-            .unwrap_or_else(|| Account::new(login.key, self.epoch + now as u64));
-        // The gamertag asked for if it's free; otherwise the one it had.
-        let names = [
-            clean_name(&login.gamertag),
-            account.gamertag.clone(),
-            existing.map_or(String::new(), |a| a.gamertag.clone()),
-        ];
+            .or_else(|| (!closed).then(|| Account::new(login.key, self.epoch + now as u64)))
+        else {
+            return self.refuse(k, live::NO_ACCOUNT);
+        };
+        // The gamertag asked for if it may be renamed and the name is free;
+        // otherwise the one it had.
+        let asked = clean_name(&login.gamertag);
+        let may_rename = self.may_rename(id);
+        let mut names = Vec::new();
+        if may_rename {
+            names.push(asked.clone());
+        }
+        names.push(account.gamertag.clone());
+        names.push(existing.map_or(String::new(), |a| a.gamertag.clone()));
         let Some(gamertag) = names.into_iter().find(|n| self.free(n, id)) else {
             return self.refuse(k, live::GAMERTAG_TAKEN);
         };
         account.gamertag = gamertag;
         account.look = login.look;
         self.update(account);
+        // A new account (sign-up open) signs in from this PC from now on.
+        let adopted = self.adopt(id);
         // One PC per account: the newest.
         if let Some(j) = self.pc_of(id) {
             self.refuse(j, live::SIGNED_IN_ELSEWHERE);
@@ -639,19 +776,39 @@ impl Server {
         pc.pinged = now - live::PING_EVERY;
         let program = match &login.client {
             LoginClient::Viewer { .. } => String::new(),
-            LoginClient::Launcher { version } => format!(" (launcher {})", printable(version)),
+            LoginClient::Launcher { version, .. } => {
+                format!(" (launcher {})", printable(version))
+            }
         };
         log(format_args!(
             "live: {} signed in from {}{program}",
             self.accounts[&id].gamertag, pc.ip
         ));
+        let game = pc.client == ClientKind::Viewer;
         if pc.client == ClientKind::Launcher {
             self.friends_changed(id);
         }
         self.welcome(id);
+        // The game asked for another gamertag it can't have here: it's told
+        // why. (A launcher's is the name it signs in with, and its lobby
+        // says so itself.)
+        if game
+            && !may_rename
+            && !asked.is_empty()
+            && !asked.eq_ignore_ascii_case(&self.accounts[&id].gamertag)
+        {
+            self.tell(id, &ToPc::Notice(live::ASK_TO_RENAME.into()));
+        }
         let playlists = ToPc::Playlists(self.playlists_for(id, &self.playlist_counts()));
         self.tell(id, &playlists);
         self.new_party(id);
+        if new_pc || adopted {
+            // The accounts changed: every launcher signed in hears (this
+            // one too), the PC already counted and online.
+            self.accounts_changed();
+        } else {
+            self.send_accounts(id, 0, true, String::new());
+        }
     }
 
     /// Take on the gamertags and looks PCs asked for, each PC's at most
@@ -675,7 +832,12 @@ impl Server {
             return;
         };
         let wanted = clean_name(gamertag);
-        if self.free(&wanted, me) {
+        if !self.may_rename(me) {
+            // Only the server's owner renames accounts here.
+            if wanted != account.gamertag {
+                self.tell(me, &ToPc::Notice(live::ASK_TO_RENAME.into()));
+            }
+        } else if self.free(&wanted, me) {
             account.gamertag = wanted;
         } else {
             self.tell(me, &ToPc::Notice(live::GAMERTAG_TAKEN.into()));
@@ -713,11 +875,8 @@ impl Server {
                 changed = true;
             }
         }
-        let path = self.dir.join("accounts.txt");
         if changed {
-            if let Err(e) = store::save(&path, self.accounts.values()) {
-                log(format_args!("live: can't save {}: {e}", path.display()));
-            }
+            self.save_accounts();
         }
         changed
     }
@@ -818,12 +977,16 @@ fn printable(text: &str) -> String {
 
 /// `signature` is `key`'s, over the proof for `nonce`.
 fn signed(key: &[u8; 32], nonce: &[u8; 32], signature: &[u8; 64]) -> bool {
+    signed_over(key, &live::proof(nonce, key), signature)
+}
+
+/// `signature` is `key`'s, over `message`.
+fn signed_over(key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
     let Ok(key) = VerifyingKey::from_bytes(key) else {
         return false;
     };
     let signature = Signature::from_bytes(signature);
-    key.verify_strict(&live::proof(nonce, key.as_bytes()), &signature)
-        .is_ok()
+    key.verify_strict(message, &signature).is_ok()
 }
 
 /// Where log lines go once they go out in the background, and how many
@@ -831,6 +994,9 @@ fn signed(key: &[u8; 32], nonce: &[u8; 32], signature: &[u8; 64]) -> bool {
 static LOG_LINES: OnceLock<SyncSender<String>> = OnceLock::new();
 static LOGGED: AtomicUsize = AtomicUsize::new(0);
 static WRITTEN: AtomicUsize = AtomicUsize::new(0);
+/// What's said goes to the standard error, not the standard output (the
+/// command line's, whose output is its answer).
+static TO_STDERR: AtomicBool = AtomicBool::new(false);
 
 /// Tell whoever runs the server something, on a line that starts with the
 /// date and time (UTC).
@@ -850,8 +1016,16 @@ pub fn say(line: impl std::fmt::Display) {
                 LOGGED.fetch_add(1, Ordering::SeqCst);
             }
         }
+        None if TO_STDERR.load(Ordering::Relaxed) => eprint!("{line}"),
         None => print!("{line}"),
     }
+}
+
+/// From now on, say what's said on the standard error (unless it goes out
+/// in the background): for the command line, which answers on the standard
+/// output.
+pub fn log_to_stderr() {
+    TO_STDERR.store(true, Ordering::Relaxed);
 }
 
 /// From now on, write what's said out on a thread of its own, so the
@@ -881,6 +1055,11 @@ pub fn flush_log() {
     {
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// A Unix time's date (UTC), as "2026-10-04".
+pub fn date(unix: u64) -> String {
+    utc(unix)[..10].to_string()
 }
 
 /// A Unix time as a date and time, as "2026-10-04 12:34:56".
