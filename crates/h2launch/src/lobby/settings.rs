@@ -92,14 +92,18 @@ impl Settings {
 /// (Project Cartographer) folder or its maps folder, or `off`
 /// (`sources::find`; `H2LOBBY_VISTA` wins over it, unless it names a
 /// folder without a mainmenu.map); `menu_sound = on` or `off`, the
-/// menus' music and sounds (`sound::silent`; on unless it says off); and
+/// menus' music and sounds (`sound::silent`; on unless it says off);
 /// `intro = on` or `off`, the intro movie as the lobby opens
-/// (`intro::skip_reason`; on unless it says off).
+/// (`intro::skip_reason`; on unless it says off); and `background =
+/// scene` or `still`, what is behind the start screen and main menu: the
+/// flythrough (unless it says still) or the still background.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MenuPrefs {
     pub vista: Option<PathBuf>,
     pub sound: Option<bool>,
     pub intro: Option<bool>,
+    /// `background`: Some(true) for the scene, Some(false) for still.
+    pub scene: Option<bool>,
 }
 
 /// `on` or `off` (any case); anything else is unsaid.
@@ -127,6 +131,13 @@ impl MenuPrefs {
             "vista" => self.vista = (!value.is_empty()).then(|| PathBuf::from(value)),
             "menu_sound" => self.sound = on_off(value),
             "intro" => self.intro = on_off(value),
+            "background" => {
+                self.scene = match value.to_ascii_lowercase().as_str() {
+                    "scene" => Some(true),
+                    "still" => Some(false),
+                    _ => None,
+                }
+            }
             _ => return false,
         }
         true
@@ -143,6 +154,10 @@ impl MenuPrefs {
         }
         if let Some(on) = self.intro {
             out.push_str(&format!("intro = {}\n", on_off_word(on)));
+        }
+        if let Some(scene) = self.scene {
+            let word = if scene { "scene" } else { "still" };
+            out.push_str(&format!("background = {word}\n"));
         }
         out
     }
@@ -269,6 +284,18 @@ mod tests {
             assert_eq!(Settings::parse(line).menu.intro, None, "{line:?}");
         }
         assert!(!Settings::default().to_text().contains("intro"));
+        // The background: scene or still, written after the intro.
+        let mut s = Settings::parse("background = Still\nintro = on\n");
+        assert_eq!(s.menu.scene, Some(false));
+        assert!(s.to_text().ends_with("intro = on\nbackground = still\n"));
+        assert_eq!(Settings::parse(&s.to_text()), s);
+        s.menu.scene = Some(true);
+        assert!(s.to_text().ends_with("background = scene\n"));
+        assert_eq!(Settings::parse(&s.to_text()).menu.scene, Some(true));
+        for line in ["", "background =\n", "background = movie\n"] {
+            assert_eq!(Settings::parse(line).menu.scene, None, "{line:?}");
+        }
+        assert!(!Settings::default().to_text().contains("background"));
     }
 
     #[test]

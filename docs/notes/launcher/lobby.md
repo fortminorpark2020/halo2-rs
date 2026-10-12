@@ -148,9 +148,10 @@ the launcher doesn't do.
   sloppy diagonal push doesn't also change the value on a row.
 - The start screen and the main menu are Halo 2's own (menu.md, phase 1),
   drawn by `crates/h2ui` into the same pixels in place of the lobby's
-  chrome (no gradient, title, header or keyboard line): the still
-  background (the navy and the framing; drawn once for a window size and
-  copied in under each frame, `cpu::Kept`), then the screen. Their
+  chrome (no gradient, title, header or keyboard line): the main menu's
+  flythrough when it can be drawn (the next bullet but two), else the
+  still background (the navy and the framing; drawn once for a window
+  size and copied in under each frame, `cpu::Kept`), then the screen. Their
   layouts and pictures come from the first `mainmenu.map` that gives
   pictures, looked for where the rank icons are (Halo 2 Vista's first,
   then MCC's, then `maps\mainmenu.map` beside the launcher);
@@ -237,10 +238,49 @@ the launcher doesn't do.
   `intro: <why>; skipped` (for example `intro: Media Foundation isn't
   installed (no mfplat.dll: ...; Windows N needs the Media Feature
   Pack); skipped`).
+- The flythrough (menu.md "What Phase 2.5 built"; `crates/h2scene`'s
+  `Backdrop`, `App::scene_frame`): with Halo 2 Vista's files, Vista's
+  `mainmenu.map` is read on a thread of its own as the lobby opens
+  (about 0.1 s once the file is cached), and the start screen and main
+  menu ask that thread for a frame of the window's size at each draw.
+  It draws the scene on the GPU, offscreen, darkened and tinted navy
+  (the veil), reads it back and keeps only the newest; the lobby copies
+  that in where the still background would go. The first frame fades in
+  over the still background in 0.25 s (an estimate). The flythrough's
+  clock runs only while those two screens are up, and moves on at most
+  0.25 s a frame, so a stall doesn't jump it. On any other screen, from the
+  moment a match is made (before its engine starts) and while a match
+  is on, the thread is told to sleep: it lets go of the GPU device and
+  everything on it, keeping the scene's data, and wakes in about
+  0.1 s when the menus ask again; the frame drawn last stays, so the
+  main menu comes back where it left off. A window of a new size shows
+  the still background until a frame of that size comes. Not started
+  without Vista's files, with `H2LOBBY_SCENE=off`, with `background =
+  still` in `lobby.txt`, or headless (unless `H2LOBBY_SCENE=on`, which
+  also lets a software GPU such as lavapipe or WARP draw it; a player's
+  PC with only a software GPU gets the still background). Anything that
+  goes wrong (no GPU adapter, a device that can't be made, a GPU error,
+  a lost device, a damaged map, a panic on its thread) leaves the still
+  background for the rest of the run, logged once. `H2LOBBY_VEIL=r,g,b,k`
+  (or `r,g,b,k,s`) changes the veil for a look check, `off` leaves it
+  out; `H2LOBBY_SCENE_FPS=60` has the window draw every 16 ms instead of
+  33 while the flythrough shows (the scene then gets asked twice as
+  often). `WGPU_BACKEND` (`dx12`, `vulkan`, `gl`) picks wgpu's backend.
+  The log says `scene: none (<why>); the menus have the still
+  background`, or `scene: <path> read in 0.1 s (45919 triangles, 39
+  textures, a 99.7 s flythrough)`, `scene: drawing on <GPU> (<kind>,
+  <backend>)` once, `scene: awake in <n> ms` at each wake, `scene:
+  asleep (its GPU device closed)` at each sleep, `scene: 1920x1080, <n>
+  ms to draw a frame and <m> ms to read it back (on its own thread)`
+  once per size (30 frames after the first), and on a failure `menus:
+  the scene can't be drawn (<why>); the still background from now on`.
 - Every screen's CPU time is logged once per window size, averaged over
   its first 30 frames there (menu.md's CPU budget): the menus as `menus:
   1920x1080, start screen 3.4 ms a frame on the CPU (background 20 ms
-  once)`, the others as `lobby: 1920x1080, playlists 2.7 ms a frame on
+  once)`, with `the scene's frame copied in 1.2 ms; ` before the
+  background when frames of the flythrough were copied in (the
+  background part only if the still background was drawn at that size),
+  the others as `lobby: 1920x1080, playlists 2.7 ms a frame on
   the CPU`. The intro's counts only frames that draw a new picture (not
   the black ones before the first, nor one drawn again), so it is the
   cost of one picture, logged after its first 30 (about half a second
@@ -267,7 +307,8 @@ the launcher doesn't do.
   controller settings: `button_layout`, `thumbstick_layout`,
   `look_sensitivity`, `look_inversion`, `auto_look_centering`, `vibration`,
   `mouse_sensitivity` and `mouse_inversion`; then the menus' own lines,
-  `vista`, then `menu_sound` and `intro` (`on` or `off`), so far; a file from before them reads with Halo 2's defaults,
+  `vista`, then `menu_sound` and `intro` (`on` or `off`), then
+  `background` (`scene` or `still`), so far; a file from before them reads with Halo 2's defaults,
   and unknown lines are skipped), `lobby.log` (the lobby's log, with the
   engine's lines as `engine:`), `live-key.bin` and `live-card.txt` (the same
   account as `--live`), `match-session.txt` (the last match's session),
@@ -510,6 +551,25 @@ container's copy) the WAV held 23 s of music from its first 0.05 s, and
 taking away a second run's with no presses left only the select and two
 cursor sounds, where the presses were (A on the start screen now gives
 `select`, `advance` and `transport`). Keep such WAVs on the PC: they are the game's sound.
+
+To see the flythrough headless (2026-10-12, the container's copy), give
+the Cartographer folder and lavapipe: `H2LOBBY_VISTA='<...>/Halo 2
+Project Cartographer' H2LOBBY_SCENE=on
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+WGPU_BACKEND=vulkan`, with the script `6 shot start-scene`, `0 a`, `0
+wait main 10`, `6 shot main-scene`, `0 down`, `0 a`, `0 wait settings
+10`, `2 shot settings`, `0 b`, `0 wait main 10`, `3 shot main-again`, `0
+quit`. The log said `scene: drawing on llvmpipe (...) (software,
+Vulkan)`, `scene: awake in 109 ms`, `menus: 1280x720, main menu 17.9 ms
+a frame on the CPU (the scene's frame copied in 2.1 ms; background 21
+ms once)` (lavapipe draws on the same CPU, about 110 to 280 ms a frame,
+so the container's times say nothing about a PC's), `scene: asleep (its
+GPU device closed)` on the settings and `scene: awake in 104 ms` back on
+the main menu; the shots had the carrier and the city behind the menus.
+`WGPU_BACKEND=metal` (no Metal here) gave `menus: the scene can't be
+drawn (no GPU adapter (...)); the still background from now on` once,
+and the still background. The shots are the game's pictures: keep them
+on the PC.
 
 Two lobbies on one machine against a local server:
 

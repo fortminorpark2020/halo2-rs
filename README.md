@@ -62,7 +62,16 @@ install. No game files are included in this repository.
   folders under Program Files; if yours is somewhere else, add the line
   `vista = <folder>` (the Cartographer folder or its `maps` folder) to
   `%LOCALAPPDATA%\h2launch\lobby.txt`, or set `H2LOBBY_VISTA` to it. With
-  Cartographer's files the menus also have Halo 2's sound: its main menu
+  Cartographer's files, Halo 2's main menu flythrough (the Covenant
+  carrier over New Mombasa, darkened navy as on the Xbox) plays behind the
+  start screen and the main menu: it fades in over a moment once your
+  graphics card has its first picture, carries on where it left off when
+  you come back to the main menu, and stops while you are on any other
+  screen or in a match, so the game has the graphics card to itself.
+  Without Cartographer, without a graphics card that can draw it, or with
+  `background = still` in `lobby.txt` (or `H2LOBBY_SCENE=off`), the menus
+  have a still navy background instead. With Cartographer's files the
+  menus also have Halo 2's sound: its main menu
   music on the start screen and the main menu, as loud as Halo 2's own
   sound settings in the map make it (its first seconds are quiet: the
   music itself starts softly), (as on the Xbox it fades
@@ -187,8 +196,9 @@ install. No game files are included in this repository.
   menu music and sounds from Cartographer's only.
 - `h2scene`: the 3D scene behind Halo 2's main menu (the Covenant carrier
   over New Mombasa, flown through by the map's own camera path), read
-  from your Halo 2 Vista (Project Cartographer) `mainmenu.map` for the
-  launcher's menus. The launcher doesn't draw it yet.
+  from your Halo 2 Vista (Project Cartographer) `mainmenu.map` and drawn
+  on your graphics card, off screen, behind the launcher's start screen
+  and main menu.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines (and the
   launcher's menu music), ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).

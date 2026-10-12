@@ -3,7 +3,9 @@
 //! in, the party and the playlists, searching, custom games, the pregame
 //! lobby, the match (its engine runs in a second copy of the launcher, see
 //! `child`), the carnage report, the friends list and players' service
-//! records.
+//! records. Behind the start screen and main menu goes the main menu's
+//! flythrough when it can be drawn (`h2scene`, `Config::scene`), else a
+//! still background.
 //! Nothing here opens a window: `window`, or the headless loop in
 //! `mod.rs`, gives it input and time and shows what it draws.
 
@@ -26,6 +28,7 @@ use h2net::live::{
     CUSTOM_GAME, GAMERTAG_TAKEN, MAX_FRIENDS, QUICKMATCH,
 };
 use h2net::Connection;
+use h2scene::{Frame, SceneSource, SceneState};
 use h2ui::anim::{Animation, Focus};
 use h2ui::art::ImageRef;
 use h2ui::cpu::Kept;
@@ -111,6 +114,13 @@ const CUES_KEPT: usize = 16;
 /// about 30 (the menus' animations and the lobby's screens).
 const FRAME_MOVIE: Duration = Duration::from_millis(16);
 const FRAME: Duration = Duration::from_millis(33);
+/// The flythrough's first frame fades in over the still background in
+/// this long (seconds): our estimate, so the scene doesn't pop in once
+/// the GPU has it (Halo 2 had it from the start).
+const SCENE_FADE: f64 = 0.25;
+/// The flythrough's clock goes on at most this much (seconds) between two
+/// frames, so a stall (the window dragged, a slow PC) doesn't jump it.
+const SCENE_STEP: f64 = 0.25;
 
 /// The start screen's and main menu's layouts, pictures and fonts
 /// (`h2ui`), read once when the lobby opens.
@@ -161,6 +171,13 @@ pub struct Config {
     /// (`H2LOBBY_ENGINE_ARGS`: `--set-option`, `--pad`, a control flag),
     /// read once when the lobby starts.
     pub engine_args: String,
+    /// The main menu's flythrough behind the start screen and main menu
+    /// (`h2scene::Backdrop`, which `mod.rs` starts when it can be drawn);
+    /// None, or a scene that fails, leaves the still background.
+    pub scene: Option<Arc<dyn SceneSource>>,
+    /// `H2LOBBY_SCENE_FPS=60`: the window draws about 60 frames a second
+    /// while the flythrough shows, not 30.
+    pub scene_fast: bool,
 }
 
 /// A key, button or typed character.
@@ -403,6 +420,19 @@ pub struct App {
     menu_opened: f64,
     /// The menus' still background, drawn once for a window size.
     backdrop: Kept<u32>,
+    /// The flythrough (`Config::scene`): how far into it the menus are
+    /// (seconds; its clock runs only while the start screen or main menu
+    /// is up), the menus' clock at its last step, when its first frame
+    /// showed (it fades in from then; None until a frame of the window's
+    /// size comes), whether it was told to sleep, whether it failed (the
+    /// still background for the rest of the run), and whether its frame
+    /// is on screen (`frame_interval`).
+    scene_seconds: f64,
+    scene_step: Option<f64>,
+    scene_since: Option<f64>,
+    scene_asleep: bool,
+    scene_failed: bool,
+    scene_shown: bool,
     /// The window's size in pixels at the last draw of the start screen
     /// or main menu: the main menu's rows are found under the mouse at it.
     size: (usize, usize),
@@ -529,6 +559,34 @@ fn music_rule(screen: Screen, current: bool) -> bool {
     }
 }
 
+/// How far (0 to 1) the flythrough has faded in over the still
+/// background `elapsed` seconds after its first frame showed.
+fn scene_alpha(elapsed: f64) -> f32 {
+    (elapsed / SCENE_FADE).clamp(0.0, 1.0) as f32
+}
+
+/// `top` over `under` (0x00RRGGBB pixels, the same count), `alpha` of the
+/// way (0 keeps `under`, 1 is `top`).
+fn blend_px(under: &mut [u32], top: &[u32], alpha: f32) {
+    let a = (alpha.clamp(0.0, 1.0) * 256.0).round() as u32;
+    if a == 0 {
+        return;
+    }
+    if a == 256 {
+        under.copy_from_slice(top);
+        return;
+    }
+    let b = 256 - a;
+    for (u, t) in under.iter_mut().zip(top) {
+        // Red and blue together, then green: each lane's sum stays below
+        // its 8 bits times 256 (plus a half for the rounding).
+        // Rounded to nearest.
+        let rb = (((*u & 0xFF_00FF) * b + (*t & 0xFF_00FF) * a + 0x80_0080) >> 8) & 0xFF_00FF;
+        let g = (((*u & 0x00_FF00) * b + (*t & 0x00_FF00) * a + 0x00_8000) >> 8) & 0x00_FF00;
+        *u = rb | g;
+    }
+}
+
 /// How long each screen takes to draw on the CPU, for the log (menu.md,
 /// phase 1's "Done when" and phase 2's CPU budget): the menus' kept
 /// background once for each window size, and each screen's frames (by
@@ -544,6 +602,9 @@ struct MenuTimes {
     kept: (usize, usize),
     /// Each size's background time (ms), the first time it was drawn.
     backgrounds: Vec<((usize, usize), f64)>,
+    /// The flythrough's frames copied in (`draw_menu`) in the frames timed
+    /// at this size: how many, and their total time (ms).
+    copies: (u32, f64),
     /// The sizes and screens already logged.
     logged: Vec<((usize, usize), &'static str)>,
 }
@@ -609,6 +670,13 @@ impl App {
             drawn_screen: None,
             menu_opened: 0.0,
             backdrop: Kept::default(),
+            scene_seconds: 0.0,
+            scene_step: None,
+            scene_since: None,
+            // Nothing to put to sleep until the menus first ask for it.
+            scene_asleep: true,
+            scene_failed: false,
+            scene_shown: false,
             size: (0, 0),
             menu_times: MenuTimes::default(),
             last_click: None,
@@ -699,10 +767,12 @@ impl App {
     }
 
     /// How long the window waits between frames: shorter while the intro
-    /// movie plays.
+    /// movie plays, and while the flythrough shows if `Config::scene_fast`
+    /// asks for 60 frames a second.
     pub fn frame_interval(&self) -> Duration {
         match self.screen {
             Screen::Intro => FRAME_MOVIE,
+            Screen::Start | Screen::Main if self.cfg.scene_fast && self.scene_shown => FRAME_MOVIE,
             _ => FRAME,
         }
     }
@@ -972,6 +1042,61 @@ impl App {
     /// The start screen or the main menu is up.
     fn on_menus(&self) -> bool {
         matches!(self.screen, Screen::Start | Screen::Main)
+    }
+
+    /// The flythrough may be drawn: the start screen or main menu is up
+    /// and no match is on (its engine has the GPU to itself).
+    fn scene_wanted(&self) -> bool {
+        self.on_menus() && self.game.is_none()
+    }
+
+    /// Tell the flythrough to let go of the GPU (once), and stop its
+    /// clock until the menus are back.
+    fn scene_sleep(&mut self) {
+        self.scene_step = None;
+        self.scene_shown = false;
+        if self.scene_asleep {
+            return;
+        }
+        self.scene_asleep = true;
+        if let Some(s) = &self.cfg.scene {
+            s.sleep();
+        }
+    }
+
+    /// The flythrough's newest frame of the window's size `w` by `h`, and
+    /// how far it has faded in (0 to 1), after moving its clock on to the
+    /// menus' `clock` and asking for the next; None for the still
+    /// background (no scene, not drawn yet, a frame of another size, or
+    /// it failed, which is logged once).
+    fn scene_frame(&mut self, w: usize, h: usize, clock: f64) -> Option<(Arc<Frame>, f32)> {
+        if self.scene_failed || !self.scene_wanted() {
+            return None;
+        }
+        let scene = self.cfg.scene.clone()?;
+        if let SceneState::Failed(why) = scene.state() {
+            self.scene_failed = true;
+            self.scene_since = None;
+            self.scene_shown = false;
+            self.log(&format!(
+                "menus: the scene can't be drawn ({why}); the still background from now on"
+            ));
+            return None;
+        }
+        if let Some(last) = self.scene_step {
+            self.scene_seconds += (clock - last).clamp(0.0, SCENE_STEP);
+        }
+        self.scene_step = Some(clock);
+        scene.ask(w, h, self.scene_seconds);
+        self.scene_asleep = false;
+        // The newest frame is the last good one: until one of this size
+        // comes (after the window's size changes), the still background.
+        let Some(frame) = scene.latest(w, h).filter(|f| f.px.len() == w * h) else {
+            self.scene_since = None;
+            return None;
+        };
+        let since = *self.scene_since.get_or_insert(clock);
+        Some((frame, scene_alpha(clock - since)))
     }
 
     /// The player is on the start screen or the main menu, or in the
@@ -1267,6 +1392,8 @@ impl App {
     // ------------------------------------------------------------- match
 
     fn on_match(&mut self, m: LauncherMatch) {
+        // The engine is about to start: the GPU is all its own.
+        self.scene_sleep();
         let ip = self.client.as_ref().and_then(|c| c.server_ip());
         let made = ip
             .ok_or_else(|| "the server's address is unknown".to_string())
@@ -1776,6 +1903,9 @@ impl App {
             .retain(|(_, at)| now.saturating_duration_since(*at) < RECORD_WAIT);
         self.ask_member_records();
         self.music_on = !self.engine_running() && music_rule(self.screen, self.music_on);
+        if !self.scene_wanted() {
+            self.scene_sleep();
+        }
         // A new invitation on show sounds once. One that has gone from the
         // list (declined, accepted, taken back) is forgotten, so the same
         // party inviting again sounds again; one only hidden (a popup, a
@@ -2862,7 +2992,7 @@ impl App {
             self.drawn_screen = Some(Screen::Intro);
             let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
             // Only a new picture's draw is timed (`draw_intro`).
-            self.time_frame((c.w, c.h), frame_ms, new_picture);
+            self.time_frame((c.w, c.h), frame_ms, new_picture, None);
             return;
         }
         let (w, h) = (c.w as f32, c.h as f32);
@@ -2905,14 +3035,15 @@ impl App {
         self.view = (s, ox, oy);
         if !menus {
             let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
-            self.time_frame((c.w, c.h), frame_ms, true);
+            self.time_frame((c.w, c.h), frame_ms, true, None);
         }
     }
 
-    /// The start screen or the main menu, drawn by `h2ui` over the still
-    /// background (drawn once for a window size), with the strings shown
-    /// put in `drawn`. The first frames at each size are timed for the
-    /// log.
+    /// The start screen or the main menu, drawn by `h2ui` over the
+    /// flythrough's newest frame (`scene_frame`) or, without one, the
+    /// still background (drawn once for a window size), which the
+    /// flythrough's first frame fades in over. The strings shown are put
+    /// in `drawn`. The first frames at each size are timed for the log.
     fn draw_menu(&mut self, c: &mut Canvas, drawn: &mut Vec<String>) {
         let started = Instant::now();
         let clock = self.menu_clock();
@@ -2924,19 +3055,40 @@ impl App {
         self.size = (w, h);
         let space = Space::new(w as u32, h as u32);
         let framing = &shell.main.framing;
-        let behind = screens::background(clock, Backdrop::Still, framing, art, fonts, space);
-        // Drawn again only at a new size (`Kept`): that frame isn't timed,
-        // and its time is the background's.
-        let fresh = self.menu_times.kept != (w, h);
-        self.backdrop.draw(&behind, &mut c.px, w, h, &res);
-        let background_ms = started.elapsed().as_secs_f64() * 1000.0;
-        if fresh {
-            let t = &mut self.menu_times;
-            t.kept = (w, h);
-            if !t.backgrounds.iter().any(|b| b.0 == (w, h)) {
-                t.backgrounds.push(((w, h), background_ms));
+        let scene = self.scene_frame(w, h, clock);
+        self.scene_shown = scene.is_some();
+        let mut fresh = false;
+        let mut copy_ms = None;
+        match &scene {
+            Some((frame, alpha)) if *alpha >= 1.0 => {
+                // The flythrough in place of the still background (with
+                // `Backdrop::Scene` the background's list is empty).
+                let copied = Instant::now();
+                c.px.copy_from_slice(&frame.px);
+                copy_ms = Some(copied.elapsed().as_secs_f64() * 1000.0);
+            }
+            _ => {
+                let behind =
+                    screens::background(clock, Backdrop::Still, framing, art, fonts, space);
+                // Drawn again only at a new size (`Kept`): that frame isn't
+                // timed, and its time is the background's.
+                fresh = self.menu_times.kept != (w, h);
+                self.backdrop.draw(&behind, &mut c.px, w, h, &res);
+                let background_ms = started.elapsed().as_secs_f64() * 1000.0;
+                if fresh {
+                    let t = &mut self.menu_times;
+                    t.kept = (w, h);
+                    if !t.backgrounds.iter().any(|b| b.0 == (w, h)) {
+                        t.backgrounds.push(((w, h), background_ms));
+                    }
+                }
+                if let Some((frame, alpha)) = &scene {
+                    // The flythrough fading in over it.
+                    blend_px(&mut c.px, &frame.px, *alpha);
+                }
             }
         }
+        drop(scene);
         let small_print = self.small_print();
         // Its text counts as drawn (for `see`) once it has faded in.
         let shown = clock - self.menu_opened >= self.menu_intro();
@@ -2966,7 +3118,7 @@ impl App {
         };
         h2ui::cpu::draw_u32(&list, &mut c.px, w, h, &res);
         let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
-        self.time_frame((w, h), frame_ms, !fresh);
+        self.time_frame((w, h), frame_ms, !fresh, copy_ms);
     }
 
     /// How long (seconds) the start screen or main menu on show takes to
@@ -3044,18 +3196,30 @@ impl App {
     /// Count a frame's time on the screen shown (`timer_name`) at window
     /// size `size`, unless it isn't `timed`, and log the average once its
     /// first `MENU_FRAMES` there are timed: once per screen and size. The
-    /// first frame after the size changes isn't timed either.
-    fn time_frame(&mut self, size: (usize, usize), frame_ms: f64, timed: bool) {
+    /// first frame after the size changes isn't timed either. `copy_ms` is
+    /// the part of it spent copying the flythrough's frame in, if it was.
+    fn time_frame(
+        &mut self,
+        size: (usize, usize),
+        frame_ms: f64,
+        timed: bool,
+        copy_ms: Option<f64>,
+    ) {
         let name = self.timer_name();
         let menus = self.on_menus();
         let t = &mut self.menu_times;
         if t.size != size {
             t.size = size;
             t.frames.clear();
+            t.copies = (0, 0.0);
             return;
         }
         if !timed || t.logged.contains(&(size, name)) {
             return;
+        }
+        if let Some(ms) = copy_ms {
+            t.copies.0 += 1;
+            t.copies.1 += ms;
         }
         let k = match t.frames.iter().position(|f| f.0 == name) {
             Some(k) => k,
@@ -3074,13 +3238,19 @@ impl App {
         let average = *total / f64::from(MENU_FRAMES);
         let (w, h) = size;
         let line = if menus {
-            let background = t
-                .backgrounds
-                .iter()
-                .find(|b| b.0 == size)
-                .map_or(0.0, |b| b.1);
+            let background = t.backgrounds.iter().find(|b| b.0 == size).map(|b| b.1);
+            let mut parts = Vec::new();
+            if t.copies.0 > 0 {
+                let copy = t.copies.1 / f64::from(t.copies.0);
+                parts.push(format!("the scene's frame copied in {copy:.1} ms"));
+            }
+            if background.is_some() || parts.is_empty() {
+                let background = background.unwrap_or(0.0);
+                parts.push(format!("background {background:.0} ms once"));
+            }
             format!(
-                "menus: {w}x{h}, {name} {average:.1} ms a frame on the CPU (background {background:.0} ms once)"
+                "menus: {w}x{h}, {name} {average:.1} ms a frame on the CPU ({})",
+                parts.join("; ")
             )
         } else {
             format!("lobby: {w}x{h}, {name} {average:.1} ms a frame on the CPU")
@@ -4805,6 +4975,8 @@ mod tests {
             vista: None,
             intro: None,
             engine_args: String::new(),
+            scene: None,
+            scene_fast: false,
         })
     }
 
@@ -7002,6 +7174,329 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A flythrough (`SceneSource`) whose frames are all one colour and
+    /// come as soon as they are asked for, once it is `ready`; it keeps
+    /// what it was asked.
+    struct FakeScene {
+        colour: u32,
+        ready: Mutex<bool>,
+        state: Mutex<SceneState>,
+        asks: Mutex<Vec<(usize, usize, f64)>>,
+        sleeps: Mutex<u32>,
+        frame: Mutex<Option<Arc<Frame>>>,
+    }
+
+    impl FakeScene {
+        fn new(colour: u32) -> Arc<FakeScene> {
+            Arc::new(FakeScene {
+                colour,
+                ready: Mutex::new(true),
+                state: Mutex::new(SceneState::Ready),
+                asks: Mutex::new(Vec::new()),
+                sleeps: Mutex::new(0),
+                frame: Mutex::new(None),
+            })
+        }
+
+        fn asks(&self) -> Vec<(usize, usize, f64)> {
+            self.asks.lock().unwrap().clone()
+        }
+
+        fn sleeps(&self) -> u32 {
+            *self.sleeps.lock().unwrap()
+        }
+    }
+
+    impl SceneSource for FakeScene {
+        fn ask(&self, w: usize, h: usize, seconds: f64) {
+            self.asks.lock().unwrap().push((w, h, seconds));
+            if *self.ready.lock().unwrap() {
+                *self.frame.lock().unwrap() = Some(Arc::new(Frame {
+                    w,
+                    h,
+                    seconds,
+                    px: vec![self.colour; w * h],
+                }));
+            }
+        }
+
+        fn latest(&self, w: usize, h: usize) -> Option<Arc<Frame>> {
+            let frame = self.frame.lock().unwrap().clone();
+            frame.filter(|f| f.w == w && f.h == h)
+        }
+
+        fn sleep(&self) {
+            *self.sleeps.lock().unwrap() += 1;
+        }
+
+        fn state(&self) -> SceneState {
+            self.state.lock().unwrap().clone()
+        }
+    }
+
+    /// The lobby with `scene` behind its menus, and the lines it logs.
+    fn scene_app(dir: &std::path::Path, scene: &Arc<FakeScene>) -> (App, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let source: Arc<dyn SceneSource> = scene.clone();
+        let a = App::new(Config {
+            log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
+            scene: Some(source),
+            ..app(dir).cfg
+        });
+        (a, lines)
+    }
+
+    /// How many of `px` are `colour`.
+    fn count_of(px: &[u32], colour: u32) -> usize {
+        px.iter().filter(|&&p| p == colour).count()
+    }
+
+    /// The flythrough's colour in the fakes: no still background or menu
+    /// art has it.
+    const SCENE_COLOUR: u32 = 0x0012_3456;
+
+    #[test]
+    fn the_flythrough_fades_in_behind_the_start_screen_and_main_menu() {
+        let dir = scratch("scene-menus");
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let (mut a, _) = scene_app(&dir, &scene);
+        let (w, h) = (320, 180);
+        let mut c = Canvas::new(w, h);
+        for label in ["start", "main"] {
+            assert_eq!(a.label(), label);
+            a.drawn_screen = Some(a.screen);
+            a.menu_opened = a.menu_clock() - 5.0;
+            a.main_focus = Focus::on(a.main_focus.item, a.menu_opened);
+            // The first frame has come: it starts to fade in, so this
+            // draw is still the still background.
+            a.scene_since = None;
+            a.draw_menu(&mut c, &mut Vec::new());
+            assert_eq!(scene.asks().last().map(|k| (k.0, k.1)), Some((w, h)));
+            assert_eq!(count_of(&c.px, SCENE_COLOUR), 0, "{label}");
+            let still = c.px.clone();
+            // Half way: neither the still background nor the scene.
+            a.scene_since = Some(a.menu_clock() - SCENE_FADE / 2.0);
+            a.draw_menu(&mut c, &mut Vec::new());
+            assert_eq!(count_of(&c.px, SCENE_COLOUR), 0, "{label}");
+            assert_ne!(c.px, still, "{label}");
+            // Faded in: the scene is behind the screen, which is still
+            // drawn over it.
+            a.scene_since = Some(a.menu_clock() - 1.0);
+            let mut drawn = Vec::new();
+            a.draw_menu(&mut c, &mut drawn);
+            let n = count_of(&c.px, SCENE_COLOUR);
+            assert!(n > w * h / 2 && n < w * h, "{label}: {n}");
+            assert!(a.scene_shown, "{label}");
+            match label {
+                "start" => assert_eq!(drawn, [screens::PRESS_START]),
+                _ => assert_eq!(drawn, MAIN_ROWS),
+            }
+            a.input(Input::A);
+        }
+        // The flythrough's clock: on with the menus' clock, at most
+        // `SCENE_STEP` a frame.
+        a.screen = Screen::Main;
+        let before = scene.asks().last().unwrap().2;
+        a.scene_step = Some(a.menu_clock() - 10.0);
+        a.draw_menu(&mut c, &mut Vec::new());
+        let after = scene.asks().last().unwrap().2;
+        assert!(after > before && after - before <= SCENE_STEP + 1e-9);
+        // Another size: the still background until a frame of it comes.
+        *scene.ready.lock().unwrap() = false;
+        let mut big = Canvas::new(400, 200);
+        a.draw_menu(&mut big, &mut Vec::new());
+        assert_eq!(count_of(&big.px, SCENE_COLOUR), 0);
+        assert!(!a.scene_shown);
+        assert_eq!(a.scene_since, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_flythrough_sleeps_away_from_the_menus() {
+        let dir = scratch("scene-sleep");
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let (mut a, _) = scene_app(&dir, &scene);
+        let (w, h) = (320, 180);
+        let mut c = Canvas::new(w, h);
+        let mut text = Text::none();
+        // Not asked for before the menus show, nor put to sleep.
+        a.tick(Instant::now());
+        assert!(scene.asks().is_empty());
+        assert_eq!(scene.sleeps(), 0);
+        a.input(Input::A);
+        assert_eq!(a.label(), "main");
+        a.draw(&mut c, &mut text);
+        a.scene_since = Some(a.menu_clock() - 1.0);
+        a.draw(&mut c, &mut text);
+        assert!(count_of(&c.px, SCENE_COLOUR) > w * h / 2);
+        assert_eq!(a.frame_interval(), FRAME);
+        // The settings: no scene behind them, and it sleeps (once).
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        let asked = scene.asks().len();
+        a.tick(Instant::now());
+        a.draw(&mut c, &mut text);
+        a.tick(Instant::now());
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        assert_eq!(scene.asks().len(), asked);
+        assert_eq!(scene.sleeps(), 1);
+        assert!(!a.scene_shown);
+        // Back on the main menu it wakes: its last frame is there at once,
+        // and its clock went on from where it stopped.
+        let stopped = scene.asks().last().unwrap().2;
+        a.input(Input::B);
+        assert_eq!(a.label(), "main");
+        a.draw(&mut c, &mut text);
+        assert!(count_of(&c.px, SCENE_COLOUR) > w * h / 2);
+        assert!((scene.asks().last().unwrap().2 - stopped).abs() < 1e-9);
+        a.tick(Instant::now());
+        assert_eq!(scene.sleeps(), 1);
+        // ONLINE's screens have none either.
+        let (mut a, _server) = live_app(&dir);
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let source: Arc<dyn SceneSource> = scene.clone();
+        a.cfg.scene = Some(source);
+        a.draw(&mut c, &mut text);
+        assert_eq!(a.label(), "live");
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        assert!(scene.asks().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_match_puts_the_flythrough_to_sleep_before_its_engine_starts() {
+        let dir = scratch("scene-match");
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let source: Arc<dyn SceneSource> = scene.clone();
+        // A match needs the server's address: a real connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ours = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _theirs = listener.accept().unwrap();
+        let mut a = live_app_over(&dir, Connection::tcp(ours).unwrap());
+        a.cfg.scene = Some(source);
+        // On the main menu (signed in), drawing the scene.
+        a.screen = Screen::Main;
+        let mut c = Canvas::new(64, 36);
+        a.draw_menu(&mut c, &mut Vec::new());
+        assert_eq!(scene.asks().len(), 1);
+        a.on_event(LiveEvent::LauncherMatch(a_match()));
+        assert_eq!(a.label(), "pregame");
+        assert_eq!(scene.sleeps(), 1);
+        // While the match is on, nothing is asked for, even on the menus.
+        a.screen = Screen::Main;
+        a.draw_menu(&mut c, &mut Vec::new());
+        assert_eq!(scene.asks().len(), 1);
+        assert_eq!(scene.sleeps(), 1);
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_flythrough_that_fails_leaves_the_still_background_and_says_why_once() {
+        let dir = scratch("scene-failed");
+        let scene = FakeScene::new(SCENE_COLOUR);
+        *scene.state.lock().unwrap() = SceneState::Failed("no GPU".into());
+        let (mut a, lines) = scene_app(&dir, &scene);
+        let mut c = Canvas::new(64, 36);
+        for _ in 0..3 {
+            a.draw_menu(&mut c, &mut Vec::new());
+            a.tick(Instant::now());
+        }
+        assert!(scene.asks().is_empty());
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        let said: Vec<String> = lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("scene"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            said,
+            ["menus: the scene can't be drawn (no GPU); the still background from now on"]
+        );
+        // Not read yet: the still background, while it is asked for.
+        let scene = FakeScene::new(SCENE_COLOUR);
+        *scene.state.lock().unwrap() = SceneState::Loading;
+        *scene.ready.lock().unwrap() = false;
+        let (mut a, _) = scene_app(&dir, &scene);
+        a.draw_menu(&mut c, &mut Vec::new());
+        assert_eq!(scene.asks().len(), 1);
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_window_draws_faster_behind_the_flythrough_only_when_asked() {
+        let dir = scratch("scene-fps");
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let (mut a, _) = scene_app(&dir, &scene);
+        let mut c = Canvas::new(64, 36);
+        a.draw_menu(&mut c, &mut Vec::new());
+        assert!(a.scene_shown);
+        assert_eq!(a.frame_interval(), FRAME);
+        a.cfg.scene_fast = true;
+        assert_eq!(a.frame_interval(), FRAME_MOVIE);
+        // Not on the other screens, nor before the scene shows.
+        a.screen = Screen::Settings;
+        assert_eq!(a.frame_interval(), FRAME);
+        a.screen = Screen::Start;
+        a.scene_shown = false;
+        assert_eq!(a.frame_interval(), FRAME);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_flythrough_cross_fades_in_over_a_quarter_second() {
+        assert_eq!(scene_alpha(-1.0), 0.0);
+        assert_eq!(scene_alpha(0.0), 0.0);
+        assert!((scene_alpha(SCENE_FADE / 2.0) - 0.5).abs() < 1e-6);
+        assert_eq!(scene_alpha(SCENE_FADE), 1.0);
+        assert_eq!(scene_alpha(60.0), 1.0);
+        let under = [0x0000_0000, 0x00FF_FFFF, 0x0010_2030];
+        let top = [0x00FF_8040, 0x0000_0000, 0x0010_2030];
+        let blend = |alpha: f32| {
+            let mut px = under;
+            blend_px(&mut px, &top, alpha);
+            px
+        };
+        assert_eq!(blend(0.0), under);
+        assert_eq!(blend(1.0), top);
+        assert_eq!(blend(0.5), [0x0080_4020, 0x0080_8080, 0x0010_2030]);
+        assert_eq!(blend(0.25)[0], 0x0040_2010);
+    }
+
+    #[test]
+    fn the_menus_log_line_says_how_long_the_scenes_copy_took() {
+        let dir = scratch("scene-timer");
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let mut a = App::new(Config {
+            log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
+            ..app(&dir).cfg
+        });
+        a.screen = Screen::Main;
+        a.menu_times.backgrounds.push(((640, 360), 20.0));
+        for _ in 0..=MENU_FRAMES {
+            a.time_frame((640, 360), 3.0, true, Some(1.5));
+        }
+        a.screen = Screen::Start;
+        for _ in 0..MENU_FRAMES {
+            a.time_frame((1280, 720), 3.0, true, Some(1.5));
+        }
+        a.time_frame((1280, 720), 3.0, true, Some(1.5));
+        assert_eq!(
+            *lines.lock().unwrap(),
+            [
+                "menus: 640x360, main menu 3.0 ms a frame on the CPU (the scene's frame copied in 1.5 ms; background 20 ms once)",
+                "menus: 1280x720, start screen 3.0 ms a frame on the CPU (the scene's frame copied in 1.5 ms)",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn each_screen_is_timed_once_per_window_size() {
         let dir = scratch("timer");
@@ -7014,7 +7509,7 @@ mod tests {
         let frames = |a: &mut App, screen: Screen, size: (usize, usize), n: u32| {
             a.screen = screen;
             for _ in 0..n {
-                a.time_frame(size, 1.0, true);
+                a.time_frame(size, 1.0, true, None);
             }
         };
         let logged = || lines.lock().unwrap().clone();
@@ -7032,7 +7527,7 @@ mod tests {
         // Frames that aren't timed don't count.
         a.screen = Screen::Party;
         for _ in 0..MENU_FRAMES {
-            a.time_frame((640, 360), 9.0, false);
+            a.time_frame((640, 360), 9.0, false, None);
         }
         frames(&mut a, Screen::Party, (640, 360), MENU_FRAMES - 1);
         assert_eq!(logged().len(), 1);

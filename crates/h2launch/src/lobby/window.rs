@@ -270,7 +270,8 @@ impl ApplicationHandler for Shell {
 
 /// Whether to draw at `now`, with the next frame due at `next`, and when
 /// the frame after is due: one frame each `interval` (the app's,
-/// `App::frame_interval`: shorter while the intro movie plays), and none
+/// `App::frame_interval`: shorter while the intro movie plays, and behind
+/// the flythrough with `H2LOBBY_SCENE_FPS=60`), and none
 /// in between however often the loop wakes (a redraw, the mouse moving, a
 /// pad). The lobby polls the server and the engine as often.
 fn next_wake(now: Instant, next: Instant, interval: Duration) -> (bool, Instant) {

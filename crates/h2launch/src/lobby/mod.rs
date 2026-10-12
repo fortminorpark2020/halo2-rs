@@ -12,7 +12,8 @@
 //! icons (`ranks`, `H2LOBBY_RANKS`), and the start screen and main menu,
 //! drawn by `h2ui` from a mainmenu.map (`H2LOBBY_MENU`), and plain shapes
 //! without one. With a window on Windows, Vista's intro movie plays first
-//! (`intro`, `H2LOBBY_INTRO`).
+//! (`intro`, `H2LOBBY_INTRO`), and Vista's main menu flythrough goes
+//! behind the start screen and main menu (`h2scene`, `H2LOBBY_SCENE`).
 
 pub mod app;
 pub mod audio;
@@ -157,6 +158,7 @@ pub fn run(args: &Args) -> i32 {
             "intro: none ({why}); the lobby opens on the start screen"
         )),
     }
+    let scene = start_scene(vista.as_ref(), &prefs, no_window, &log);
     let cfg = Config {
         folder,
         exe,
@@ -170,6 +172,8 @@ pub fn run(args: &Args) -> i32 {
         vista,
         intro: intro.ok(),
         engine_args: std::env::var("H2LOBBY_ENGINE_ARGS").unwrap_or_default(),
+        scene,
+        scene_fast: std::env::var(SCENE_FPS_ENV).is_ok_and(|v| v.trim() == "60"),
     };
     let app = App::new(cfg);
     if no_window {
@@ -251,6 +255,80 @@ fn intro_plan(
         (_, Some(_), false) => format!("{why}: no movie player (Windows only)"),
         (_, Some(v), true) => format!("{why} in {}", v.movies().display()),
     })
+}
+
+/// `on` draws the main menu's flythrough behind the start screen and main
+/// menu even headless and on a software GPU (lavapipe, WARP: tests and
+/// checks); `off` leaves the still background.
+const SCENE_ENV: &str = "H2LOBBY_SCENE";
+/// `r,g,b,k` (or `r,g,b,k,s`): the flythrough's veil (`h2scene::Veil::parse`);
+/// `off` for none.
+const VEIL_ENV: &str = "H2LOBBY_VEIL";
+/// `60`: the window draws 60 frames a second while the flythrough shows.
+const SCENE_FPS_ENV: &str = "H2LOBBY_SCENE_FPS";
+
+/// Why the flythrough won't go behind the menus, or None if it will: no
+/// Halo 2 Vista folder (its mainmenu.map is the scene), `H2LOBBY_SCENE`
+/// (`env`) `off`, `background = still` in lobby.txt (`pref`), or a
+/// headless lobby without `H2LOBBY_SCENE=on`.
+fn scene_skip_reason(
+    vista: bool,
+    headless: bool,
+    env: Option<&str>,
+    pref: Option<bool>,
+) -> Option<&'static str> {
+    let env = env.map(str::trim);
+    if !vista {
+        Some("no Halo 2 Vista folder")
+    } else if env == Some("off") {
+        Some("H2LOBBY_SCENE=off")
+    } else if pref == Some(false) {
+        Some("background = still in lobby.txt")
+    } else if headless && env != Some("on") {
+        Some("headless")
+    } else {
+        None
+    }
+}
+
+/// The main menu's flythrough, read and drawn on a thread of its own
+/// (`h2scene::Backdrop`), unless `scene_skip_reason` says why not, which
+/// is logged.
+fn start_scene(
+    vista: Option<&Vista>,
+    prefs: &settings::MenuPrefs,
+    headless: bool,
+    log: &Log,
+) -> Option<Arc<dyn h2scene::SceneSource>> {
+    let env = std::env::var(SCENE_ENV).ok();
+    if let Some(why) = scene_skip_reason(vista.is_some(), headless, env.as_deref(), prefs.scene) {
+        log(&format!(
+            "scene: none ({why}); the menus have the still background"
+        ));
+        return None;
+    }
+    let vista = vista?;
+    let veil = match std::env::var(VEIL_ENV) {
+        Ok(v) if v.trim() == "off" => h2scene::Veil::NONE,
+        Ok(v) => h2scene::Veil::parse(&v).unwrap_or_else(|| {
+            log(&format!(
+                "scene: {VEIL_ENV}={v} isn't r,g,b,k or r,g,b,k,s; the usual veil"
+            ));
+            h2scene::Veil::menu()
+        }),
+        Err(_) => h2scene::Veil::menu(),
+    };
+    let options = h2scene::Options {
+        // Only for tests and checks: a software GPU draws it far too
+        // slowly for a player.
+        allow_cpu: env.as_deref().map(str::trim) == Some("on"),
+        veil,
+    };
+    Some(Arc::new(h2scene::Backdrop::start(
+        vista.mainmenu(),
+        options,
+        log.clone(),
+    )))
 }
 
 /// The variable that names the mainmenu.map the start screen and main
@@ -844,6 +922,8 @@ mod tests {
             vista: None,
             intro: None,
             engine_args: String::new(),
+            scene: None,
+            scene_fast: false,
         });
         let script = parse_script(script).unwrap();
         let sound = MenuSound::off(&log);
@@ -867,6 +947,31 @@ mod tests {
         }
         // `quit` ends the run itself.
         assert_eq!(run("0 wait start 5\n0.1 quit\n").0, 0);
+    }
+
+    #[test]
+    fn the_flythrough_needs_vista_a_window_and_nothing_switching_it_off() {
+        assert_eq!(scene_skip_reason(true, false, None, None), None);
+        assert_eq!(scene_skip_reason(true, false, Some(""), Some(true)), None);
+        assert_eq!(
+            scene_skip_reason(false, false, Some("on"), Some(true)),
+            Some("no Halo 2 Vista folder")
+        );
+        assert_eq!(
+            scene_skip_reason(true, false, Some("off"), Some(true)),
+            Some("H2LOBBY_SCENE=off")
+        );
+        assert_eq!(
+            scene_skip_reason(true, false, None, Some(false)),
+            Some("background = still in lobby.txt")
+        );
+        assert_eq!(
+            scene_skip_reason(true, false, Some("on"), Some(false)),
+            Some("background = still in lobby.txt")
+        );
+        // Headless only when asked for (tests and checks).
+        assert_eq!(scene_skip_reason(true, true, None, None), Some("headless"));
+        assert_eq!(scene_skip_reason(true, true, Some(" on "), None), None);
     }
 
     #[test]

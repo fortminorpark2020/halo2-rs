@@ -1,6 +1,7 @@
 # Progress and handoff
 
-Last updated 2026-10-12 (menu 2.4: the menu scene as data, in the new
+Last updated 2026-10-12 (menu 2.5: the flythrough behind the start
+screen and main menu; before it 2.4, the menu scene as data in the new
 `crates/h2scene`, and its review fixes, rounds 1 and 2; P3 passed). Any assistant that works on the
 project should update this file before it stops, so the next one can pick
 up. Read AGENTS.md first for the rules.
@@ -221,8 +222,28 @@ Next, in order:
    counted once, not once for each section that uses it; a `camera_set`
    to no point (-1) is skipped, as Halo 2 skips it, where it flew to the
    first point; the old roll notes in `docs/notes/mainmenu-plan.md` are
-   marked superseded. Next: 2.5, the scene drawn behind the start screen
-   and main menu (wgpu offscreen).
+   marked superseded. 2.5 is done (2026-10-12; menu.md "What Phase 2.5
+   built"): with Cartographer's files the darkened navy flythrough plays
+   behind the start screen and main menu, drawn by `h2scene`'s own wgpu
+   renderer offscreen on a thread of its own (`render.rs`,
+   `backdrop.rs`), read back and copied under the menus; it fades in
+   over 0.25 s, sleeps (no GPU device at all) on every other screen and
+   from the moment a match is made, and any failure leaves the still
+   background with one log line. The veil (grey, multiply by a navy, add
+   a little) is our estimate, fitted on lavapipe to the owner's
+   Cartographer screenshot's mean colour (within 1 level); its numbers
+   and the departure from the brief (a post pass that greys first) are
+   in menu.md. `background = still` in `lobby.txt` or
+   `H2LOBBY_SCENE=off` switches it off; `H2LOBBY_SCENE=on` allows it
+   headless and on a software GPU, `H2LOBBY_VEIL` and
+   `H2LOBBY_SCENE_FPS=60` are for checks. Still missing from the look:
+   the gravity-lift beam, particles, engine glow, bloom; the 70-degree
+   field of view is unverified. On the owner's PC: menu.md's P5 list
+   (the flythrough plays, at most about 9 ms a frame on the UI thread
+   at 1080p, nothing on the GPU during a match, the still background
+   with `H2LOBBY_VISTA=off`, `H2LOBBY_SCENE=off` or the forced failure
+   `WGPU_BACKEND=metal`). Next: 2.6, Halo 2's shell on every lobby
+   screen.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.
