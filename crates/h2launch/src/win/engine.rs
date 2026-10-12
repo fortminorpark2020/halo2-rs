@@ -403,6 +403,14 @@ pub fn build_options(data_access: *mut c_void, s: &Setup) -> Result<*mut u8, Str
             format!("variant {variant_path} could not be applied ({e}); pass --no-variant to try without one")
         })?;
         log!("variant loaded: {name:?}");
+        // Read back from our own options buffer, as --variants does: the
+        // game menu's players column colours teams only in a team game.
+        let teams = opts.get_i32(super::variants::FLAGS) & super::variants::FLAG_TEAMS != 0;
+        super::VARIANT_TEAMS.store(teams, Ordering::SeqCst);
+        log!(
+            "variant: {}",
+            if teams { "a team game" } else { "free for all" }
+        );
     }
 
     // These win over whatever the variant wrote.

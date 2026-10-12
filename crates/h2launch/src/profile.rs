@@ -159,6 +159,27 @@ pub fn build_profile(s: &ProfileSettings) -> Vec<u8> {
     p
 }
 
+/// The profile for the live controls `live` (the game menu changes them
+/// mid-match) in an engine started with `launch`: everything from `live`
+/// except the controller's look inversion (0x1D), which keeps its launch
+/// value for the whole process, because the launcher flips the look stick
+/// itself when the live value differs (`gamemenu::gate::look_flip`) and the
+/// engine must never flip it a second time. The mouse's flag (0x1E) stays
+/// 0, as always. `key_bindings` as `ProfileSettings::key_bindings`.
+pub fn profile_for(
+    live: &crate::controls::Controls,
+    launch: &crate::controls::Controls,
+    key_bindings: bool,
+) -> Vec<u8> {
+    let c = crate::controls::Controls {
+        look_inverted: launch.look_inverted,
+        ..*live
+    };
+    let mut ps = ProfileSettings::from_controls(&c);
+    ps.key_bindings = key_bindings;
+    build_profile(&ps)
+}
+
 /// Offsets in the input state.
 pub mod input {
     /// i32: 1 when keyboard and mouse is this player's active device.
@@ -475,6 +496,48 @@ mod tests {
         let p = build_profile(&ps);
         let table = prof::KEYBOARD_MOUSE_MAPPING..prof::MASTER_VOLUME;
         assert!(p[table].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn a_live_profile_keeps_the_launch_look_inversion() {
+        use crate::controls::{ButtonLayout, Controls};
+        let launch = Controls::default();
+        let live = Controls {
+            look_sensitivity: 9,
+            look_inverted: true,
+            auto_center: true,
+            vibration: false,
+            mouse_sensitivity: 4.0,
+            mouse_inverted: true,
+            buttons: ButtonLayout::Recon,
+            ..launch
+        };
+        let p = profile_for(&live, &launch, true);
+        let f = |at: usize| f32::from_le_bytes(p[at..at + 4].try_into().unwrap());
+        // 0x1D follows the launch value; 0x1E stays 0.
+        assert_eq!(p[prof::LOOK_INVERTED], 0);
+        assert_eq!(p[prof::MOUSE_LOOK_INVERTED], 0);
+        // The rest follows the live controls.
+        assert_eq!(p[prof::VERTICAL_LOOK_SENSITIVITY], 9);
+        assert_eq!(p[prof::HORIZONTAL_LOOK_SENSITIVITY], 9);
+        assert_eq!(p[prof::AUTO_CENTER], 1);
+        assert_eq!(p[prof::VIBRATION_DISABLED], 1);
+        assert_eq!(f(prof::MOUSE_SENSITIVITY), 4.0);
+        // Launched inverted, switched to normal: still 1.
+        let inverted = Controls {
+            look_inverted: true,
+            ..launch
+        };
+        let p = profile_for(&launch, &inverted, true);
+        assert_eq!(
+            (p[prof::LOOK_INVERTED], p[prof::MOUSE_LOOK_INVERTED]),
+            (1, 0)
+        );
+        // Nothing changed: the same bytes as at launch.
+        let mut ps = ProfileSettings::from_controls(&launch);
+        assert_eq!(profile_for(&launch, &launch, true), build_profile(&ps));
+        ps.key_bindings = false;
+        assert_eq!(profile_for(&launch, &launch, false), build_profile(&ps));
     }
 
     #[test]

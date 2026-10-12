@@ -11,10 +11,22 @@
 //! no-hook answer the brief picks is AttachThreadInput: the engine thread
 //! shares the window thread's input state. `Attach` retries it until the
 //! engine thread has a message queue.
+//!
+//! The in-game GAME MENU (`super::menu`) takes player 0's Start and Esc
+//! once it is ready, and while it is open every poll for player 0 hands
+//! the engine a neutral frame; what was held when it closed stays away
+//! from the engine until released (`crate::gamemenu::gate`). With the
+//! menu closed and nothing held that costs a few atomic loads; only then
+//! is the gate's lock taken. Players 1 to 3 are untouched. The live
+//! controls (`super::controls()`) give the mouse's scale, the thumbstick
+//! layout, the look flip and vibration, so the menu's changes apply at
+//! once.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering,
+};
+use std::sync::{Mutex, MutexGuard};
 
 use windows::Win32::Foundation::{HANDLE, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
@@ -30,6 +42,8 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{ClipCursor, GetClientRect, GetForegroundWindow};
 
 use super::log::log;
+use crate::gamemenu::gate::{self, Hold, Troughs};
+use crate::gamemenu::vk;
 use crate::padpick::{self, Reading, Watch};
 use crate::profile::{mouse, mouse_motion, mouse_to_stick, InputFrame, INPUT_STATE_SIZE};
 
@@ -90,6 +104,19 @@ pub fn on_key(vk: u32, lparam: isize, down: bool) {
     }
     if down {
         KM_LAST.store(true, Ordering::SeqCst);
+        // The game menu's keys. A held key's auto-repeat moves along a
+        // list (the arrows) but doesn't choose, go back or close again.
+        let code = u32::from(vk);
+        let repeat = (lparam >> 30) & 1 != 0;
+        let arrow = matches!(code, vk::UP | vk::DOWN | vk::LEFT | vk::RIGHT);
+        let once = matches!(code, vk::ESCAPE | vk::RETURN | vk::BACK);
+        if arrow || (once && !repeat) {
+            if let Ok(mut q) = MENU_KEYS.lock() {
+                if q.len() < 32 {
+                    q.push(code);
+                }
+            }
+        }
     }
 }
 
@@ -174,6 +201,14 @@ pub fn set_focus(focused: bool) {
         MOUSE_DX.store(0, Ordering::SeqCst);
         MOUSE_DY.store(0, Ordering::SeqCst);
         WHEEL.store(0, Ordering::SeqCst);
+        // Their releases won't be seen now: the game menu's hold lets go
+        // of them.
+        if GATE_ACTIVE.load(Ordering::SeqCst) {
+            lock_gate().clear_keys_mouse();
+        }
+        if let Ok(mut q) = MENU_KEYS.lock() {
+            q.clear();
+        }
     }
     if was != focused {
         log!("window {}", if focused { "focused" } else { "lost focus" });
@@ -342,6 +377,29 @@ fn player0_pad() -> (Option<XINPUT_GAMEPAD>, bool) {
     (Some(g), used)
 }
 
+/// Player 0's pad for the game menu, read on the window thread: the one
+/// the engine's polls picked, as it is now, without changing which pad is
+/// picked or whether keyboard and mouse were used last.
+pub fn menu_pad() -> Option<(i32, Reading)> {
+    let i = PAD.load(Ordering::SeqCst);
+    if !(0..4).contains(&i) {
+        return None;
+    }
+    let g = read_pad(i as u32)?;
+    Some((
+        i,
+        Reading {
+            buttons: g.wButtons.0,
+            left_trigger: g.bLeftTrigger,
+            right_trigger: g.bRightTrigger,
+            lx: g.sThumbLX,
+            ly: g.sThumbLY,
+            rx: g.sThumbRX,
+            ry: g.sThumbRY,
+        },
+    ))
+}
+
 pub fn pad_line() -> String {
     match PAD.load(Ordering::SeqCst) {
         -1 => "pad=none".into(),
@@ -363,11 +421,20 @@ pub fn fill(player: i32, out: *mut u8, pad_only: bool) -> bool {
         return false;
     }
     let mut f = InputFrame::default();
+    let pad_was = PAD.load(Ordering::SeqCst);
     let (pad, used) = match player {
         0 => player0_pad(),
         1..=3 => (read_pad(player as u32), false),
         _ => (None, false),
     };
+    if player == 0 && PAD.load(Ordering::SeqCst) != pad_was {
+        // Another pad is player 1's: its triggers rest where they rest,
+        // and the old one's releases won't be seen.
+        reset_troughs();
+        if GATE_ACTIVE.load(Ordering::SeqCst) {
+            lock_gate().clear_pad();
+        }
+    }
     if let Some(g) = &pad {
         f.pad_buttons = g.wButtons.0;
         f.left_trigger = g.bLeftTrigger;
@@ -436,46 +503,73 @@ pub fn fill(player: i32, out: *mut u8, pad_only: bool) -> bool {
                 log!("input script is now driving player 1 (script time {t:.2} s)");
             }
         }
-        // The mouse sensitivity and the mouse's look inversion are done
-        // here, as HaloX does them, before the motion is copied into the
-        // right stick (the profile has them too, for vehicles).
-        let c = setup.map(|s| s.controls).unwrap_or_default();
-        (f.mouse_dx, f.mouse_dy) =
-            mouse_motion(mouse_dx, mouse_dy, c.mouse_sensitivity, c.mouse_inverted);
     }
-    // The thumbstick layout (player 0's: the only one with our profile):
-    // which physical stick moves and which looks.
-    if let Some(s) = setup.filter(|_| player == 0) {
-        let ((lx, ly), (rx, ry)) = s
-            .controls
-            .sticks
-            .apply((f.thumb_lx, f.thumb_ly), (f.thumb_rx, f.thumb_ry));
-        (f.thumb_lx, f.thumb_ly, f.thumb_rx, f.thumb_ry) = (lx, ly, rx, ry);
+    // The game menu's gate. While it is open the frame is neutral (the
+    // mouse's motion and the wheel were still taken above, so nothing
+    // builds up), and nothing below applies. Where the triggers rest is
+    // kept on every poll, open or not.
+    if player == 0 {
+        observe_troughs(&f);
     }
-    if full && f.is_km {
-        // HaloX copies mouse motion into the right stick in keyboard
-        // and mouse mode, because Halo 2 reads the stick when zoomed
-        // and in vehicles.
-        let (rx, ry) = mouse_to_stick(f.mouse_dx, f.mouse_dy);
-        if rx != 0 || ry != 0 {
-            f.thumb_rx = rx;
-            f.thumb_ry = ry;
+    let neutral = player == 0 && gate_player0(&mut f, full);
+    if !neutral {
+        let live = super::controls();
+        if full {
+            // The mouse sensitivity and the mouse's look inversion are
+            // done here, as HaloX does them, before the motion is copied
+            // into the right stick (the profile has them too, for
+            // vehicles).
+            (f.mouse_dx, f.mouse_dy) = mouse_motion(
+                mouse_dx,
+                mouse_dy,
+                live.mouse_sensitivity,
+                live.mouse_inverted,
+            );
+        }
+        // The thumbstick layout (player 0's: the only one with our
+        // profile): which physical stick moves and which looks. Then the
+        // look flip, when the game menu changed the look inversion the
+        // engine's profile keeps from the launch.
+        if let Some(s) = setup.filter(|_| player == 0) {
+            let ((lx, ly), (rx, ry)) = live
+                .sticks
+                .apply((f.thumb_lx, f.thumb_ly), (f.thumb_rx, f.thumb_ry));
+            (f.thumb_lx, f.thumb_ly, f.thumb_rx, f.thumb_ry) = (lx, ly, rx, ry);
+            gate::look_flip(&mut f, &live, &s.controls);
+        }
+        if full && f.is_km {
+            // HaloX copies mouse motion into the right stick in keyboard
+            // and mouse mode, because Halo 2 reads the stick when zoomed
+            // and in vehicles.
+            let (rx, ry) = mouse_to_stick(f.mouse_dx, f.mouse_dy);
+            if rx != 0 || ry != 0 {
+                f.thumb_rx = rx;
+                f.thumb_ry = ry;
+            }
+        }
+        if full {
+            LAST_IS_KM.store(f.is_km, Ordering::SeqCst);
         }
     }
+    // The logs describe the frame as the engine gets it.
     let empty = f
         == InputFrame {
             is_km: f.is_km,
             ..InputFrame::default()
         };
-    if player == 0 && !empty && !FIRST_NONEMPTY.swap(true, Ordering::SeqCst) {
+    if player == 0 && !empty && !neutral && !FIRST_NONEMPTY.swap(true, Ordering::SeqCst) {
         log!("first input sent to the engine: {}", f.describe());
     }
-    if player == 0 && !empty && setup.is_some_and(|s| s.args.diag) {
+    if player == 0 && (!empty || neutral) && setup.is_some_and(|s| s.args.diag) {
         let t = super::now();
         if let Ok(mut last) = LAST_LOG.try_lock() {
             if t - *last >= 1.0 {
                 *last = t;
-                log!("input: {}", f.describe());
+                log!(
+                    "input: {}{}",
+                    f.describe(),
+                    if neutral { " (game menu open)" } else { "" }
+                );
             }
         }
     }
@@ -484,6 +578,150 @@ pub fn fill(player: i32, out: *mut u8, pad_only: bool) -> bool {
     // SAFETY: the engine passes a 0x130-byte s_input_state.
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, INPUT_STATE_SIZE) };
     true
+}
+
+// ---------------------------------------------------------------- the game menu's gate
+
+/// The game menu is open: every poll for player 0 is neutral.
+static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+/// `is_km` frozen at its value when the menu opened, while it is open or
+/// its hold is pending: 0 none, 1 pad, 2 keyboard and mouse.
+static KM_FROZEN: AtomicU8 = AtomicU8::new(0);
+/// The `is_km` slot 36 last gave player 0 outside the menu.
+static LAST_IS_KM: AtomicBool = AtomicBool::new(true);
+/// What was held when the menu closed (and while it was open), kept from
+/// the engine until released.
+static GATE: Mutex<Hold> = Mutex::new(Hold::new());
+/// The menu is open or `GATE` may hold something: the polls take its
+/// lock only then.
+static GATE_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The menu keys pressed in our window since the menu last took them, in
+/// order (virtual-key codes).
+static MENU_KEYS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// Player 0's triggers' lowest readings since the pad was picked
+/// (`gate::Troughs`: left, right), so the hold lets go of a trigger near
+/// where it rests. Atomics, so a poll with nothing lower only loads them.
+static TROUGHS: [AtomicU16; 2] = [const { AtomicU16::new(gate::NO_TROUGH) }; 2];
+
+fn observe_troughs(f: &InputFrame) {
+    for (t, v) in TROUGHS.iter().zip([f.left_trigger, f.right_trigger]) {
+        let v = u16::from(v);
+        if v < t.load(Ordering::Relaxed) {
+            t.fetch_min(v, Ordering::SeqCst);
+        }
+    }
+}
+
+fn troughs() -> Troughs {
+    Troughs {
+        lt: TROUGHS[0].load(Ordering::SeqCst),
+        rt: TROUGHS[1].load(Ordering::SeqCst),
+    }
+}
+
+fn reset_troughs() {
+    for t in &TROUGHS {
+        t.store(gate::NO_TROUGH, Ordering::SeqCst);
+    }
+}
+
+fn lock_gate() -> MutexGuard<'static, Hold> {
+    GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn km_frozen() -> Option<bool> {
+    match KM_FROZEN.load(Ordering::SeqCst) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
+/// Player 0's frame through the gate (`gate::gate`); true when it is
+/// neutral (the menu is open).
+fn gate_player0(f: &mut InputFrame, full: bool) -> bool {
+    let ready = super::menu::ready();
+    if !MENU_OPEN.load(Ordering::SeqCst) && !GATE_ACTIVE.load(Ordering::SeqCst) {
+        if ready {
+            gate::strip(f);
+        }
+        return false;
+    }
+    let mut hold = lock_gate();
+    let open = MENU_OPEN.load(Ordering::SeqCst);
+    // Slot 37's frames never carry the device mode: left as they were.
+    let frozen = if full { km_frozen() } else { None };
+    let troughs = troughs();
+    if open || full {
+        gate::gate(f, ready, open, &mut hold, frozen, troughs);
+    } else {
+        // Slot 37 has no keys, mouse or script in its frame: it masks
+        // what is held, but can't see those released.
+        let mut copy = *hold;
+        gate::gate(f, ready, open, &mut copy, frozen, troughs);
+    }
+    if !open && hold.is_empty() {
+        GATE_ACTIVE.store(false, Ordering::SeqCst);
+        KM_FROZEN.store(0, Ordering::SeqCst);
+    }
+    open
+}
+
+/// The game menu opened: from the next poll on, player 0 gets neutral
+/// frames, in the device mode it had.
+pub fn open_menu() {
+    let _hold = lock_gate();
+    let km = LAST_IS_KM.load(Ordering::SeqCst);
+    KM_FROZEN.store(if km { 2 } else { 1 }, Ordering::SeqCst);
+    GATE_ACTIVE.store(true, Ordering::SeqCst);
+    MENU_OPEN.store(true, Ordering::SeqCst);
+}
+
+/// The game menu closed. `reading` is what the window thread read held
+/// as it closed (the pad, the keys, the script); it goes into the hold
+/// before the menu counts as closed, so any poll that sees it closed also
+/// sees the hold.
+pub fn close_menu(reading: &InputFrame) {
+    observe_troughs(reading);
+    let mut hold = lock_gate();
+    hold.add(reading, troughs());
+    GATE_ACTIVE.store(true, Ordering::SeqCst);
+    MENU_OPEN.store(false, Ordering::SeqCst);
+}
+
+pub fn menu_open() -> bool {
+    MENU_OPEN.load(Ordering::SeqCst)
+}
+
+/// The menu keys pressed in our window since the last call, oldest first;
+/// none while the window is out of focus.
+pub fn take_menu_keys() -> Vec<u32> {
+    let keys = MENU_KEYS
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default();
+    if FOCUSED.load(Ordering::SeqCst) {
+        keys
+    } else {
+        Vec::new()
+    }
+}
+
+/// Adds the keys and mouse buttons held in our window now (none while it
+/// is out of focus) to `f`, for the menu's closing reading.
+pub fn add_held_keys(f: &mut InputFrame) {
+    if !FOCUSED.load(Ordering::SeqCst) {
+        return;
+    }
+    for (i, w) in KEYS.iter().enumerate() {
+        let bits = w.load(Ordering::SeqCst);
+        for b in 0..64 {
+            if bits & (1u64 << b) != 0 {
+                f.keys[i * 64 + b] = true;
+            }
+        }
+    }
+    f.mouse_buttons |= MOUSE_BUTTONS.load(Ordering::SeqCst);
 }
 
 static RUMBLE_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -511,22 +749,28 @@ pub fn rumble(player: i32, state: *const u8) {
     if !(0..4).contains(&index) {
         return;
     }
-    // Vibration off: the profile says so, and none goes to the pad here
-    // even if the engine asks.
-    if super::setup().is_some_and(|s| !s.controls.vibration) {
-        return;
-    }
-    if !RUMBLE_LOGGED.swap(true, Ordering::SeqCst) {
+    // Vibration off (the live setting: the game menu may have turned it
+    // off since the launch): the motors get zeros whatever the engine
+    // asks. Zeros rather than nothing, so that a request racing the menu's
+    // `stop_rumble` (read as on, written after the stop) is undone by the
+    // engine's next call instead of buzzing for the rest of the match.
+    let on = super::controls().vibration;
+    if on && !RUMBLE_LOGGED.swap(true, Ordering::SeqCst) {
         log!("first rumble: player {player} pad {index} left {left} right {right}");
     }
-    let v = XINPUT_VIBRATION {
-        wLeftMotorSpeed: left,
-        wRightMotorSpeed: right,
+    let v = if on {
+        XINPUT_VIBRATION {
+            wLeftMotorSpeed: left,
+            wRightMotorSpeed: right,
+        }
+    } else {
+        XINPUT_VIBRATION::default()
     };
     // SAFETY: plain call with our struct.
     unsafe { XInputSetState(index as u32, &v) };
 }
 
+/// Stops every pad's motors (vibration turned off, or the run ending).
 pub fn stop_rumble() {
     let v = XINPUT_VIBRATION::default();
     for i in 0..4 {

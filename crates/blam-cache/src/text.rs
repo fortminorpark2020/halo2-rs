@@ -2,7 +2,7 @@
 //! objectives, subtitles), whose strings live in the map's language tables
 //! (English here).
 
-use crate::mapset::{Map, MapSet};
+use crate::mapset::{Map, MapSet, Source};
 use crate::{u32_at, DatumIndex, Error, GroupTag, Result};
 
 /// The English language table in `matg`: string count, data size, index
@@ -13,17 +13,18 @@ const UNIC_RANGES: usize = 0x10;
 /// Language table offsets with this bit are in the shared map.
 const SHARED: u32 = 0x8000_0000;
 
-/// Every English string in a map's language table, with its string id.
+/// Every English string in a map's language table, with its string id. A
+/// multiplayer map's globals (and so its table) are in the shared map.
 pub fn language_table(set: &mut MapSet) -> Result<Vec<(u32, String)>> {
     let matg = GroupTag::parse("matg").unwrap();
-    let tag = set
+    let datum = set
         .map
         .tags
         .iter()
         .find(|t| t.group == matg)
-        .cloned()
+        .map(|t| t.datum)
         .ok_or_else(|| Error::Corrupt("no globals tag".into()))?;
-    let data = set.map.read_tag_data(&tag)?;
+    let (source, _, data) = set.tag_data(datum)?;
     if data.len() < MATG_ENGLISH + 0x10 {
         return Err(Error::Corrupt("globals tag too small".into()));
     }
@@ -34,12 +35,12 @@ pub fn language_table(set: &mut MapSet) -> Result<Vec<(u32, String)>> {
     if count == 0 || count > 1 << 20 || size > 1 << 26 {
         return Ok(Vec::new());
     }
-    let file: &mut Map = if index & SHARED != 0 {
+    let file: &mut Map = if index & SHARED != 0 || source == Source::Shared {
         set.shared
             .as_mut()
             .ok_or_else(|| Error::Corrupt("language table in a missing shared map".into()))?
     } else {
-        &mut set.map
+        set.get(source)
     };
     let index = file.read_raw((index & !SHARED) as u64, count * 8)?;
     let strings = file.read_raw((strings & !SHARED) as u64, size)?;

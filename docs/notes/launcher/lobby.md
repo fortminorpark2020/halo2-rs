@@ -20,16 +20,38 @@ the launcher doesn't do.
 ## Shape
 
 - `h2launch` with no arguments (or `--lobby`) opens the lobby: a window of
-  our own. It signs in to h2live and stays signed in between matches.
+  our own, on Halo 2's start screen. It signs in to h2live when the player
+  picks ONLINE on the main menu, and stays signed in between matches
+  (and on the main menu).
 - For each match it starts a second copy of itself for the engine:
-  `h2launch --session <file> --me <n> --map <m> --variant <v> --events`.
-  The session file is written from LAUNCHER_MATCH (`live::session_from`).
-  The child joins the relay room and plays the match exactly as `--live`
-  does, but tells the lobby what the engine does on its standard output
-  (`H2EVENT running`, `maploaded`, `ended <players>`, `closing`) instead of
-  talking to the server. The lobby turns those into HOSTING, JOINED,
-  LAUNCHER_RESULT and LEFT_MATCH with the same rules `--live` uses
-  (`live::Told`), and shows the carnage report when MATCH_OVER comes.
+  `h2launch --session <file> --me <n> --map <m> --variant <v> --events
+  --game-kind <ranked|social|custom>` (plus the player's name, controls
+  and instance). The session file is written from LAUNCHER_MATCH
+  (`live::session_from`). The child joins the relay room and plays the
+  match exactly as `--live` does, but tells the lobby what the engine does
+  on its standard output (`H2EVENT running`, `maploaded`, `ended
+  <players>`, `closing`; from the in-game GAME MENU also `controls
+  <key=value ...>`, once the player leaves CONTROLLER SETTINGS or the
+  menu, a second after the last change, or before a quit, which the
+  lobby saves (only what changed from the controls the engine runs
+  with; every one after `controls defaults`, Use Default Settings);
+  `left game`, after which the engine closes without `ended`; `left
+  end` (End Game, the host's), after which `ended` comes with the result
+  the host's engine gives as it quits; and `menu off` when the menu
+  turned itself off, after which the in-game screen stops saying Start
+  opens it) instead of talking to the server. The lobby turns those into
+  HOSTING, JOINED, LAUNCHER_RESULT and LEFT_MATCH with the same rules
+  `--live` uses (`live::Told`), and shows the carnage report when
+  MATCH_OVER comes. An `ended` after `left end` goes as LAUNCHER_RESULT
+  with `finished` false (the game was cut short), then LEFT_MATCH at
+  once: h2live then takes the host as leaving once the game was over,
+  not as a host who left, so the match ends with no reason, counts for
+  no one (custom games are unranked), and the host gets the carnage
+  report like everyone else. That needs the server's GO for the match:
+  before it (a guest still joining, up to 20 s) h2live drops results, so
+  an `ended` after `left end` then goes as LEFT_MATCH alone
+  (`Told::ended_before_go`), and the host gets "You ended the game."
+  rather than a carnage report saying the host left.
 - A fresh engine process per match: halo2.dll is loaded once per process,
   as MCC does, and a crash in a match doesn't take the lobby with it.
 - The lobby writes `quit` on the child's standard input to close the
@@ -103,6 +125,23 @@ the launcher doesn't do.
   controller works either way.
 - The left stick moves the selection by its stronger axis only, so a
   sloppy diagonal push doesn't also change the value on a row.
+- The start screen and the main menu are Halo 2's own (menu.md, phase 1),
+  drawn by `crates/h2ui` into the same pixels in place of the lobby's
+  chrome (no gradient, title, header or keyboard line): the still
+  background (the navy and the framing; drawn once for a window size and
+  copied in under each frame, `cpu::Kept`), then the screen. Their
+  layouts and pictures come from the first `mainmenu.map` that gives
+  pictures, looked for where the rank icons are (MCC's first, then the
+  Halo 2 Vista folders, then `maps\mainmenu.map` beside the launcher);
+  `H2LOBBY_MENU` names one map or its folder instead, or `off` for the
+  flat look (plain shapes in Halo 2's colours, which is what Linux and
+  the tests get). Their text is in Halo 2's fonts from the same folder
+  as the lobby's, else in `h2ui`'s built-in font. The log says where each
+  piece came from (lines starting `menus:`) and, once per window size and
+  screen, how long a frame takes on the CPU averaged over its first 30
+  frames there: `menus: 1920x1080, start screen 3.4 ms a frame on the CPU
+  (background 20 ms once)`. Popups and notices are drawn over them as on
+  every screen.
 - Levels are drawn with Halo 2's own level icons (the 50 rank icons, big
   and small) from a `mainmenu.map` (`lobby/ranks.rs`). MCC's own comes
   first: `halo2\h2_maps_win64_dx11\mainmenu.map` in the MCC folder the
@@ -138,8 +177,31 @@ the launcher doesn't do.
 
 ## Screens
 
+0. Start and main menu. The lobby opens on the start screen: the logo
+   and the pulsing PRESS START. A (Enter, Space, the controller's A or
+   Start) or a click anywhere opens the main menu; B asks before quitting
+   (Y there signs out, while signed in). The main menu has ONLINE and
+   SETTINGS (the original Xbox wording; split screen and system link
+   aren't offered), up and down (or the mouse wheel) move the focus,
+   which fades as Halo 2's did, and a click focuses a row, or picks it if
+   it had the focus (but not the second click of a double-click that
+   opened the main menu: a double-click on PRESS START, which lies over
+   ONLINE, stops on the main menu). The row picked last keeps the focus when the player
+   comes back. The gamertag signed in (else the one saved) is the small
+   print at the bottom right. ONLINE goes to the playlists when signed
+   in, to the signing-in screen while that goes on, else signs in with
+   the gamertag and server last signed in with (not what was typed in the
+   form and left with B), or opens the sign-in form when there is none.
+   SETTINGS opens the controller settings. B goes back to the start
+   screen. If the server is lost while the player is on either screen, or
+   in the settings opened from the main menu, they stay there and the
+   reason is a notice; ONLINE signs in again. An invitation pops up
+   over the main menu (A accepts and shows the playlists), and a match the
+   party is put in opens the pregame lobby from either, as from any
+   screen.
 1. Sign in: type a gamertag the first time; kept in `lobby.txt` in the
-   launcher's folder with the server's address.
+   launcher's folder with the server's address. B goes back to the main
+   menu, and so does B while signing in (which calls it off).
 2. Xbox Live: the playlists (name, your level in it, people searching and
    playing) and the party (members and their levels in the playlist
    selected, or the one searched while searching; their highest on the
@@ -149,13 +211,14 @@ the launcher doesn't do.
    reads the level there (level 1 in one they haven't played; "-" until
    the record comes). A searches (party leader only), X opens the players list, Y
    the party screen, RB the friends list ("Friends (2)" while two friend
-   requests wait for an answer), LB your own service record, B quits.
+   requests wait for an answer), LB your own service record, B goes back
+   to the main menu (still signed in, the party kept).
 3. Players: everyone signed in. A invites them, X joins their open party,
    Y sends them a friend request (unless they are a friend or a request is
    waiting either way), LB opens their service record, RB the friends
    list, B goes back. An invitation pops up over the party screens (the
-   playlists, players, party, friends and service record): A accepts, B
-   declines.
+   main menu, playlists, players, party, friends and service record): A
+   accepts (from the main menu it then shows the playlists), B declines.
 4. Searching: the playlist, the stage the server reports and the level
    range; B cancels. LB and RB still open the service record and the
    friends list, and the search goes on; B there comes back to it.
@@ -174,7 +237,11 @@ the launcher doesn't do.
    friend request. A (or B) goes back to the party (the leader of a custom
    game goes back to the custom game screen, to pick the next).
 
-8. Custom game: the row after the playlists, for the party leader. Left
+8. Custom game: the row after the playlists, for the party leader (with
+   the eight launcher playlists of `playlists.txt`, eight downs from the
+   first playlist, where the lobby starts after signing in: a headless
+   run of this build, 2026-10-11; a script counts from the row it is on
+   and the playlists its server sends). Left
    and right pick the game type (one of each kind the launcher playlists
    play, `names::CUSTOM_GAMES`) and the map (those on this PC), A starts
    it. The server (LAUNCHER_CUSTOM, `LIVE_PROTOCOL` 2) checks the game is
@@ -192,8 +259,7 @@ the launcher doesn't do.
    record. It goes back to the playlists while the party searches.
 10. Offline: the server couldn't be reached or was lost. A tries again, Y
    goes back to the sign-in screen, X opens the controller settings, B
-   quits. B on the party screen asks
-   before quitting, and offers Y to sign out.
+   goes back to the main menu.
 11. Friends (RB; `LIVE_PROTOCOL` 3, `docs/notes/launcher/live-v3.md`):
    requests to you first, then friends on the launcher (a green dot),
    friends on the game (a grey dot), friends offline, then the requests
@@ -227,10 +293,11 @@ the launcher doesn't do.
    says the server didn't answer (A tries again). The end of a match drops
    the kept records of everyone in it. B goes back.
 
-13. Controller settings ("Settings", the row after Custom Game, for
-   anyone; or the controller's X on the sign-in and offline screens, and
-   the hint there can be clicked): CONTROLLER, with the rows of Halo 2's
-   CONTROLLER screen (in a profile's settings) in its order and words:
+13. Controller settings (SETTINGS on the main menu; "Settings", the row
+   after Custom Game, for anyone; or the controller's X on the sign-in and
+   offline screens, and the hint there can be clicked): CONTROLLER, with
+   the rows of Halo 2's CONTROLLER screen (in a profile's settings) in its
+   order and words:
    Thumbstick Layout (Default, Southpaw, Legacy, Legacy Southpaw), Button
    Layout (Default, Southpaw, Boxer, Green Thumb, Bumper Jumper, Recon),
    Look Sensitivity (1 to 10, "3 (Default)"), Look Inversion (the
@@ -259,6 +326,20 @@ that are the same on every PC, so the server counts them
 (`H2LOBBY_FAKE_QUIT=1` quits halfway instead). On Linux the lobby always
 uses it; `H2LOBBY_FAKE=1` makes it do so on Windows too.
 
+`H2LOBBY_FAKE_MENU` gives the stand-in keys for the in-game GAME MENU, as
+`<seconds> <key>` separated by `;` and counted from the map loading
+(`1.0 start;1.5 a;2.0 up;2.5 a` opens the menu and leaves the game; the
+keys are `start back a b y up down left right`). It runs the real menu
+(`gamemenu::GameMenu`) for the game `--game-kind` and the session say,
+and says what the real engine's copy would: `H2EVENT controls ...` for
+the settings changed, once the player leaves CONTROLLER SETTINGS or the
+menu, a second after the last change, or before the stand-in closes
+(the lobby saves them; `controls defaults ...` for Use Default
+Settings, when it saves every one); `H2EVENT left game`, then closing
+without a result; or `left end` for End Game, then `ended` with its
+made-up results (the host's engine gives its result as it quits), then
+closing.
+
 `--fake-engine`'s results are the same on every PC and plausible: player
 `i` of `n` scores `n - i`, the last one killed themselves once, each one's
 kills are their score plus their suicides, and each one's kills are the
@@ -266,11 +347,18 @@ next one's deaths (alone, no one is killed).
 
 `H2LOBBY_HEADLESS=1` runs the lobby without a window, driven by
 `H2LOBBY_SCRIPT`, and `H2LOBBY_SHOTS=<folder>` saves a PNG each time the
-screen changes. `H2LOBBY_ENGINE_ARGS` adds flags to the engine's command
+screen changes (on the start screen and main menu once they have faded
+in, about 1.5 s and 0.3 s, with the script held until then).
+`H2LOBBY_ENGINE_ARGS` adds flags to the engine's command
 line (`--set-option 0x354=i32:60 --pad none`, say). A script line is
 `<seconds> <command>`, the seconds counted from the step before:
 
 ```
+0 wait start 5        # the lobby opens on the start screen
+0.3 a                 # PRESS START: the main menu
+0 see ONLINE 5
+0.3 a                 # ONLINE: the sign-in form (no gamertag saved yet)
+0 wait signin 5
 0 type ALPHA          # typed into the focused field
 0.3 a                 # a key: up down left right a b x y lb rb tab back
 0 wait live 20        # until the screen is "live" (at most 20 s)
@@ -287,15 +375,19 @@ line (`--set-option 0x354=i32:60 --pad none`, say). A script line is
 ```
 
 `see` takes its last word as the seconds when it is a number (so
-`see 12 of 100 120` waits for "12 of 100"), and fails the run as `wait`
+`see 12 of 100 120` waits for "12 of 100"; the start screen's and main
+menu's text counts once it has faded in), and fails the run as `wait`
 does; `pick` fails it when there is no such row, and `set` when the
 setting or its value is wrong.
 
-The screens are `signin`, `connecting`, `live`, `searching`, `players`,
-`party`, `custom`, `pregame`, `ingame`, `carnage-waiting`, `carnage`,
-`failed`, `friends`, `record` and `settings`, and the popups `invite`, `quit`,
-`leave`, `remove` (a party member), `addfriend`, `friend` (a friend's
-options) and `unfriend`.
+With a gamertag saved, ONLINE signs in at once (`wait connecting`,
+then `wait live`), without the form.
+
+The screens are `start`, `main`, `signin`, `connecting`, `live`,
+`searching`, `players`, `party`, `custom`, `pregame`, `ingame`,
+`carnage-waiting`, `carnage`, `failed`, `friends`, `record` and
+`settings`, and the popups `invite`, `quit`, `leave`, `remove` (a party
+member), `addfriend`, `friend` (a friend's options) and `unfriend`.
 
 Two lobbies on one machine against a local server:
 
@@ -322,6 +414,19 @@ engine and showed the carnage report with "Unranked: levels don't change",
 and ALPHA was back on the custom game screen after it. The server's side
 is also covered by `a_launcher_party_plays_custom_games` in
 `crates/h2live/src/server/tests.rs`.
+
+Leaving from the game menu the same way (2026-10-11), with
+`H2LOBBY_FAKE_MENU='1.0 start;1.5 a;2.0 up;2.5 a'` set for BRAVO's lobby
+only: when BRAVO joined, its log said `the engine says H2EVENT left
+game`, then the engine closed, the notice was "You left the game." and
+the screen went to `live`; ALPHA's game ran on, ended and counted, and
+ALPHA saw the carnage report. When BRAVO hosted, leaving ended the game
+for both: ALPHA got "THE HOST LEFT. THE GAME DIDN'T COUNT." and BRAVO's
+counted as a loss (the server's existing rules). (That was Leave Game.
+End Game, since 2026-10-11, sends the host's result first, so a custom
+game ended that way shows both PCs the carnage report with no reason;
+`a_launcher_host_ending_a_custom_game_leaves_at_its_end` in
+`crates/h2live/src/server/tests.rs` covers the server's side.)
 
 The party screen the same way (2026-10-10), with three lobbies: ALPHA
 invited BRAVO and CHARLIE, made the party invite only, removed BRAVO (who

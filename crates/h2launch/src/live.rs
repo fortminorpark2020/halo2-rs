@@ -15,6 +15,8 @@
 //! player's team, standing, score, kills, assists, deaths, betrayals and
 //! suicides from them), and LEFT_MATCH if the launcher closes before that.
 
+use crate::controls::{Controls, KEYS};
+use crate::gamemenu::Leave;
 use crate::session::{Player, Session};
 use h2live::client::{LiveClient, LiveEvent, Profile};
 use h2net::live::{LauncherMatch, LauncherPlayerResult, LauncherResult, ToServer};
@@ -270,6 +272,9 @@ pub struct Ready {
     pub me: usize,
     pub map: String,
     pub variant: String,
+    /// What kind of game the match is, for the GAME MENU (ranked, custom
+    /// or social, by the lobby's rule).
+    pub game_kind: crate::gamemenu::GameKind,
     pub link: Link,
 }
 
@@ -312,6 +317,7 @@ pub fn prepare(
     Ok(Ready {
         session,
         me,
+        game_kind: crate::lobby::child::game_kind(&game),
         map: game.map,
         variant: game.variant,
         link,
@@ -350,11 +356,43 @@ pub enum Engine {
     Ended(Vec<LauncherPlayerResult>),
     /// The launcher is closing.
     Closing,
+    /// The player left the game from the in-game GAME MENU (Leave Game),
+    /// or its host ended it (End Game); the engine closes next.
+    Left(Leave),
+    /// The player changed their controls in the GAME MENU: every control
+    /// as `(lobby.txt's name, value)`, in `KEYS` order, for the lobby to
+    /// save. Text, not `Controls`, as `Engine` is `Eq` and the mouse
+    /// sensitivity is an f32. `defaults`: they are Use Default Settings',
+    /// so every one is saved, even those the engine already ran with (a
+    /// control flag given for one run may have put them there); the
+    /// values alone can't say so, as an ordinary change can land on them.
+    Controls {
+        pairs: Vec<(String, String)>,
+        defaults: bool,
+    },
+    /// The GAME MENU turned itself off for the rest of the run (its
+    /// overlay failed, or its panel wasn't drawn three times): Start and
+    /// Esc reach the game again.
+    MenuOff,
+}
+
+impl Engine {
+    /// The GAME MENU's controls `c` as the event says them (`defaults`:
+    /// Use Default Settings).
+    pub fn controls(c: Controls, defaults: bool) -> Engine {
+        Engine::Controls {
+            pairs: c.pairs(),
+            defaults,
+        }
+    }
 }
 
 /// How an engine event is written on the standard output with
 /// `--events`, for the lobby that started this launcher: `H2EVENT running`,
-/// `maploaded`, `closing`, or `ended` and then each player as
+/// `maploaded`, `closing`, `left game`, `left end`, `menu off`; `controls`,
+/// `defaults` for Use Default Settings, and then the eight controls as
+/// `key=value` in `KEYS` order (`lobby.txt`'s names and values); or
+/// `ended` and then each player as
 /// `<relay id>,<team>,<place>,<score>,<kills>,<assists>,<deaths>,<betrayals>,<suicides>,<left>`
 /// (LAUNCHER_RESULT's order).
 pub fn event_line(e: &Engine) -> String {
@@ -362,6 +400,19 @@ pub fn event_line(e: &Engine) -> String {
         Engine::Running => format!("{EVENT} running"),
         Engine::MapLoaded => format!("{EVENT} maploaded"),
         Engine::Closing => format!("{EVENT} closing"),
+        Engine::Left(Leave::Game) => format!("{EVENT} left game"),
+        Engine::Left(Leave::End) => format!("{EVENT} left end"),
+        Engine::MenuOff => format!("{EVENT} menu off"),
+        Engine::Controls { pairs, defaults } => {
+            let mut line = format!("{EVENT} controls");
+            if *defaults {
+                line += " defaults";
+            }
+            for (k, v) in pairs {
+                line += &format!(" {k}={v}");
+            }
+            line
+        }
         Engine::Ended(players) => {
             let mut line = format!("{EVENT} ended");
             for p in players {
@@ -389,9 +440,11 @@ pub const EVENT: &str = "H2EVENT";
 
 /// Reads a line `event_line` wrote; `None` for any other line (the log
 /// goes to the same output). The lobby and the engine's copy are the same
-/// build, so only the 10-field form is read.
+/// build, so only the 10-field form of `ended` is read, and `controls`
+/// only with all eight controls in `KEYS` order, each with a value
+/// `Controls::set` takes (after `defaults`, for Use Default Settings).
 pub fn parse_event_line(line: &str) -> Option<Engine> {
-    let mut words = line.split_whitespace();
+    let mut words = line.split_whitespace().peekable();
     if words.next()? != EVENT {
         return None;
     }
@@ -399,6 +452,28 @@ pub fn parse_event_line(line: &str) -> Option<Engine> {
         "running" => Engine::Running,
         "maploaded" => Engine::MapLoaded,
         "closing" => Engine::Closing,
+        "left" => match words.next()? {
+            "game" => Engine::Left(Leave::Game),
+            "end" => Engine::Left(Leave::End),
+            _ => return None,
+        },
+        "menu" => match words.next()? {
+            "off" => Engine::MenuOff,
+            _ => return None,
+        },
+        "controls" => {
+            let defaults = words.next_if_eq(&"defaults").is_some();
+            let mut check = Controls::default();
+            let mut pairs = Vec::new();
+            for key in KEYS {
+                let (k, v) = words.next()?.split_once('=')?;
+                if k != key || check.set(k, v) != Ok(true) {
+                    return None;
+                }
+                pairs.push((k.to_string(), v.to_string()));
+            }
+            Engine::Controls { pairs, defaults }
+        }
         "ended" => {
             let mut players = Vec::new();
             for w in words.by_ref() {
@@ -472,6 +547,12 @@ pub fn install_events() {
     let _ = SINK.set(Sink::Lobby);
 }
 
+/// The engine's events go to a lobby that started it (`--events`), which
+/// saves the game menu's controls itself; otherwise the engine saves them.
+pub fn to_lobby() -> bool {
+    matches!(SINK.get(), Some(Sink::Lobby))
+}
+
 fn say(what: &Engine) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
@@ -514,6 +595,12 @@ pub struct Told {
     over: bool,
     /// The server's MATCH_OVER came.
     verdict: bool,
+    /// The player ended the game for everyone from the GAME MENU (End
+    /// Game): the result that follows is a game cut short.
+    ended_from_menu: bool,
+    /// The server's GO for the match came: it started the game, and takes
+    /// results for it from now on.
+    went: bool,
 }
 
 impl Told {
@@ -532,6 +619,17 @@ impl Told {
         self.over
     }
 
+    /// The player ended the game from the GAME MENU (End Game) before the
+    /// server's GO came: the engine's game ran, but h2live hadn't started
+    /// the match (a guest was still joining; it waits up to 20 s for them)
+    /// and would drop the result. That result, given as the engine quits,
+    /// isn't passed on then: this PC only leaves (LEFT_MATCH, which h2live
+    /// takes as the host leaving), and the lobby shows "You ended the
+    /// game." rather than a carnage report saying the host left.
+    pub fn ended_before_go(&self) -> bool {
+        self.ended_from_menu && !self.went
+    }
+
     /// What to send after `event` (from the server) or `engine` (from the
     /// launcher), for match `id`, which this PC hosts if `host`.
     pub fn next(
@@ -544,6 +642,7 @@ impl Told {
         let mut out = Vec::new();
         match event {
             Some(LiveEvent::HostMatch(m)) if *m == id => self.asked_to_host = true,
+            Some(LiveEvent::Go(m)) if *m == id => self.went = true,
             Some(LiveEvent::MatchOver(m)) if m.id == id => {
                 self.over = true;
                 self.verdict = true;
@@ -559,6 +658,15 @@ impl Told {
                 self.joined = true;
                 out.push(ToServer::Joined(id));
             }
+            // End Game before GO: the server would drop the result, so
+            // this PC only leaves, as when its engine closes.
+            Some(Engine::Ended(_)) if !self.over && self.ended_before_go() => {
+                self.over = true;
+                out.push(ToServer::LeftMatch {
+                    id,
+                    host_lost: false,
+                });
+            }
             Some(Engine::Ended(players)) if !self.over => {
                 self.over = true;
                 self.reported = true;
@@ -566,10 +674,21 @@ impl Told {
                 // places teams by their players' standings.
                 out.push(ToServer::LauncherResult(LauncherResult {
                     id,
-                    finished: true,
+                    finished: !self.ended_from_menu,
                     team_scores: Vec::new(),
                     players,
                 }));
+                // End Game's result came as the engine quits: the game was
+                // cut short, and this PC has left it. Said in that order,
+                // h2live takes the host as leaving once the game was over
+                // (not HOST_LEFT): the match ends with no reason, and
+                // counts for no one, as an unranked custom game doesn't.
+                if self.ended_from_menu {
+                    out.push(ToServer::LeftMatch {
+                        id,
+                        host_lost: false,
+                    });
+                }
             }
             Some(Engine::Closing) if !self.over => {
                 self.over = true;
@@ -578,6 +697,15 @@ impl Told {
                     host_lost: false,
                 });
             }
+            // End Game: its result follows as the engine quits, and goes
+            // as a game cut short.
+            Some(Engine::Left(Leave::End)) => self.ended_from_menu = true,
+            // Nothing new goes to the server: a player who leaves from the
+            // game menu is told as LEFT_MATCH when the engine closes, as
+            // before (or after End Game's result), the controls are the
+            // lobby's to save, and the menu turning off is the lobby's to
+            // show.
+            Some(Engine::Left(Leave::Game) | Engine::Controls { .. } | Engine::MenuOff) => {}
             _ => {}
         }
         if host && self.asked_to_host && self.running && !self.hosting {
@@ -598,6 +726,9 @@ fn run(mut lobby: Lobby, id: u64, host: bool, rx: Receiver<Engine>, done: Sender
             log_event(&lobby.log, &e);
             out.extend(told.next(id, host, Some(&e), None));
         }
+        // The game menu's Left, Controls and MenuOff change nothing here:
+        // a player who leaves is told as LEFT_MATCH when the launcher
+        // closes, and the controls were saved by the engine's copy.
         while let Ok(what) = rx.try_recv() {
             closing |= what == Engine::Closing;
             out.extend(told.next(id, host, None, Some(what)));
@@ -814,11 +945,57 @@ mod tests {
             left,
         };
         let ended = Engine::Ended(vec![player(0xB5A9, -2, false), player(0x5977, 7, true)]);
-        for e in [Engine::Running, Engine::MapLoaded, Engine::Closing, ended] {
+        let changed = Controls {
+            buttons: crate::controls::ButtonLayout::BumperJumper,
+            sticks: crate::controls::StickLayout::LegacySouthpaw,
+            look_sensitivity: 10,
+            look_inverted: true,
+            auto_center: true,
+            vibration: false,
+            mouse_sensitivity: 0.1,
+            mouse_inverted: true,
+        };
+        for e in [
+            Engine::Running,
+            Engine::MapLoaded,
+            Engine::Closing,
+            ended,
+            Engine::Left(Leave::Game),
+            Engine::Left(Leave::End),
+            Engine::MenuOff,
+            Engine::controls(Controls::default(), false),
+            Engine::controls(changed, false),
+            Engine::controls(Controls::default(), true),
+        ] {
             let line = event_line(&e);
             assert!(line.starts_with("H2EVENT "), "{line}");
             assert_eq!(parse_event_line(&line), Some(e), "{line}");
         }
+        assert_eq!(event_line(&Engine::Left(Leave::Game)), "H2EVENT left game");
+        assert_eq!(event_line(&Engine::Left(Leave::End)), "H2EVENT left end");
+        assert_eq!(event_line(&Engine::MenuOff), "H2EVENT menu off");
+        assert_eq!(
+            event_line(&Engine::controls(changed, false)),
+            "H2EVENT controls button_layout=bumper_jumper thumbstick_layout=legacy_southpaw \
+             look_sensitivity=10 look_inversion=on auto_look_centering=on vibration=off \
+             mouse_sensitivity=0.1 mouse_inversion=on"
+        );
+        // Use Default Settings says so before the eight.
+        assert!(event_line(&Engine::controls(Controls::default(), true))
+            .starts_with("H2EVENT controls defaults button_layout=default "));
+        // The pairs read back as the same controls.
+        let Some(Engine::Controls {
+            pairs,
+            defaults: false,
+        }) = parse_event_line(&event_line(&Engine::controls(changed, false)))
+        else {
+            panic!("no controls");
+        };
+        let mut back = Controls::default();
+        for (k, v) in &pairs {
+            assert_eq!(back.set(k, v), Ok(true), "{k}={v}");
+        }
+        assert_eq!(back, changed);
         assert_eq!(
             event_line(&Engine::Ended(vec![player(0xB5A9, -2, false)])),
             "H2EVENT ended b5a9,1,2,-2,3,5,4,6,7,0"
@@ -839,8 +1016,112 @@ mod tests {
             "H2EVENT ended b5a9,1,2,-2,3,5,4,6,7,0,1",
             "H2EVENT ended zz,1,2,3,4,5,6,7,8,0",
             "H2EVENT ended b5a9,1,2,-2,3,-5,4,6,7,0",
+            // The game menu's: one word after left, of two.
+            "H2EVENT left",
+            "H2EVENT left now",
+            "H2EVENT left game now",
+            "H2EVENT left Game",
+            // The menu turning off: exactly two words.
+            "H2EVENT menu",
+            "H2EVENT menu on",
+            "H2EVENT menu off now",
         ] {
             assert_eq!(parse_event_line(other), None, "{other:?}");
+        }
+        // Controls: exactly the eight, in KEYS order, each a value
+        // Controls::set takes.
+        let good: Vec<String> = Controls::default()
+            .pairs()
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        let line = |words: &[String]| format!("H2EVENT controls {}", words.join(" "));
+        assert!(parse_event_line(&line(&good)).is_some());
+        let with = |word: &str, at: usize| {
+            let mut w = good.clone();
+            w.insert(at, word.into());
+            line(&w)
+        };
+        assert_eq!(
+            parse_event_line(&with("defaults", 0)),
+            Some(Engine::controls(Controls::default(), true))
+        );
+        // `defaults` only once, only first, and only that word.
+        for l in [
+            with("defaults", 8),
+            with("defaults", 3),
+            format!("H2EVENT controls defaults defaults {}", good.join(" ")),
+            with("default", 0),
+            with("Defaults", 0),
+            "H2EVENT controls defaults".into(),
+        ] {
+            assert_eq!(parse_event_line(&l), None, "{l:?}");
+        }
+        let mut bad: Vec<Vec<String>> = Vec::new();
+        // Too few, too many, none.
+        bad.push(good[..7].to_vec());
+        bad.push([good.clone(), vec!["vibration=on".into()]].concat());
+        bad.push(Vec::new());
+        // Out of order.
+        let mut swapped = good.clone();
+        swapped.swap(0, 1);
+        bad.push(swapped);
+        // An unknown key, a short name set takes, a word with no '='.
+        for (i, w) in [
+            (5, "rumble=on"),
+            (0, "layout=default"),
+            (3, "look_inversion"),
+            (3, "look_inversion="),
+        ] {
+            let mut b = good.clone();
+            b[i] = w.into();
+            bad.push(b);
+        }
+        // Values set refuses.
+        for (i, w) in [
+            (0, "button_layout=claw"),
+            (1, "thumbstick_layout=inverted"),
+            (2, "look_sensitivity=11"),
+            (2, "look_sensitivity=0"),
+            (3, "look_inversion=maybe"),
+            (6, "mouse_sensitivity=0"),
+            (6, "mouse_sensitivity=fast"),
+            (6, "mouse_sensitivity=NaN"),
+        ] {
+            let mut b = good.clone();
+            b[i] = w.into();
+            bad.push(b);
+        }
+        for b in bad {
+            let l = line(&b);
+            assert_eq!(parse_event_line(&l), None, "{l:?}");
+        }
+    }
+
+    #[test]
+    fn the_game_menus_events_tell_the_server_nothing_new() {
+        for host in [false, true] {
+            let mut t = Told::default();
+            t.next(7, host, Some(&LiveEvent::HostMatch(7)), None);
+            t.next(7, host, None, Some(Engine::MapLoaded));
+            for e in [
+                Engine::Left(Leave::Game),
+                Engine::Left(Leave::End),
+                Engine::MenuOff,
+                Engine::controls(Controls::default(), false),
+                Engine::controls(Controls::default(), true),
+            ] {
+                assert!(t.next(7, host, None, Some(e.clone())).is_empty(), "{e:?}");
+            }
+            assert!(!t.over());
+            // The engine closing after a leave is the LEFT_MATCH.
+            assert_eq!(
+                t.next(7, host, None, Some(Engine::Closing)),
+                vec![ToServer::LeftMatch {
+                    id: 7,
+                    host_lost: false
+                }]
+            );
         }
     }
 
@@ -870,5 +1151,121 @@ mod tests {
             .next(7, true, None, Some(Engine::Ended(Vec::new())))
             .is_empty());
         assert!(t.next(7, true, None, Some(Engine::Closing)).is_empty());
+    }
+
+    /// End Game once the server's GO came: the host's result as its
+    /// engine quits goes as a game cut short, then LEFT_MATCH at once, in
+    /// that order (h2live then takes the host as leaving at the end, not
+    /// HOST_LEFT); the engine's closing says nothing more. Leave Game's
+    /// never goes this way: its quit-time result isn't passed on
+    /// (`gamemenu::result_is_the_games`).
+    #[test]
+    fn end_games_result_goes_cut_short_before_left_match() {
+        let player = |relay_id: u64, score: i32| LauncherPlayerResult {
+            relay_id,
+            team: 0,
+            place: 0,
+            score,
+            kills: score.max(0) as u16,
+            assists: 0,
+            deaths: 0,
+            betrayals: 0,
+            suicides: 0,
+            left: false,
+        };
+        let mut t = Told::default();
+        t.next(7, true, Some(&LiveEvent::HostMatch(7)), None);
+        assert_eq!(
+            t.next(7, true, None, Some(Engine::MapLoaded)),
+            vec![ToServer::Hosting(7)]
+        );
+        assert!(t.next(7, true, Some(&LiveEvent::Go(7)), None).is_empty());
+        assert!(t
+            .next(7, true, None, Some(Engine::Left(Leave::End)))
+            .is_empty());
+        assert!(!t.over() && !t.ended_before_go());
+        let both = vec![player(0x1111, 4), player(0x2222, 2)];
+        let out = t.next(7, true, None, Some(Engine::Ended(both.clone())));
+        let [ToServer::LauncherResult(r), ToServer::LeftMatch { id, host_lost }] = out.as_slice()
+        else {
+            panic!("{out:?}");
+        };
+        assert_eq!((r.id, r.finished), (7, false));
+        assert_eq!(r.players, both);
+        assert_eq!((*id, *host_lost), (7, false));
+        assert!(t.over() && t.reported());
+        assert!(t.next(7, true, None, Some(Engine::Closing)).is_empty());
+        // A game that ended by itself, with no End Game, still finished.
+        let mut t = Told::default();
+        let out = t.next(7, true, None, Some(Engine::Ended(both)));
+        let [ToServer::LauncherResult(r)] = out.as_slice() else {
+            panic!("{out:?}");
+        };
+        assert!(r.finished);
+    }
+
+    /// End Game before the server's GO (a guest still joining): h2live
+    /// hasn't started the match and would drop the result, so End Game's
+    /// result goes nowhere and this PC only leaves, as when its engine
+    /// closes; the closing after it says nothing more. Another match's GO
+    /// doesn't count, and a GO that came between End Game and its result
+    /// lets the result go as a game cut short.
+    #[test]
+    fn end_game_before_go_only_leaves() {
+        let player = LauncherPlayerResult {
+            relay_id: 0x1111,
+            team: 0,
+            place: 0,
+            score: 1,
+            kills: 1,
+            assists: 0,
+            deaths: 0,
+            betrayals: 0,
+            suicides: 0,
+            left: false,
+        };
+        let hosting = |t: &mut Told| {
+            t.next(7, true, Some(&LiveEvent::HostMatch(7)), None);
+            assert_eq!(
+                t.next(7, true, None, Some(Engine::MapLoaded)),
+                vec![ToServer::Hosting(7)]
+            );
+        };
+        let mut t = Told::default();
+        hosting(&mut t);
+        assert!(t.next(7, true, Some(&LiveEvent::Go(8)), None).is_empty());
+        assert!(!t.ended_before_go());
+        assert!(t
+            .next(7, true, None, Some(Engine::Left(Leave::End)))
+            .is_empty());
+        assert!(t.ended_before_go());
+        assert_eq!(
+            t.next(7, true, None, Some(Engine::Ended(vec![player]))),
+            vec![ToServer::LeftMatch {
+                id: 7,
+                host_lost: false
+            }]
+        );
+        assert!(t.over() && !t.reported());
+        assert!(t.next(7, true, None, Some(Engine::Closing)).is_empty());
+        // GO after End Game, before its result: the match started, and
+        // the result goes as a game cut short.
+        let mut t = Told::default();
+        hosting(&mut t);
+        t.next(7, true, None, Some(Engine::Left(Leave::End)));
+        assert!(t.next(7, true, Some(&LiveEvent::Go(7)), None).is_empty());
+        assert!(!t.ended_before_go());
+        let out = t.next(7, true, None, Some(Engine::Ended(vec![player])));
+        let [ToServer::LauncherResult(r), ToServer::LeftMatch { .. }] = out.as_slice() else {
+            panic!("{out:?}");
+        };
+        assert!(!r.finished);
+        assert!(t.reported());
+        // A game that ended by itself before GO is still reported as
+        // before (End Game alone is held back).
+        let mut t = Told::default();
+        hosting(&mut t);
+        let out = t.next(7, true, None, Some(Engine::Ended(vec![player])));
+        assert!(matches!(out.as_slice(), [ToServer::LauncherResult(r)] if r.finished));
     }
 }

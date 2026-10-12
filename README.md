@@ -49,10 +49,16 @@ install. No game files are included in this repository.
   widen, even teams, map choice and host choice).
 - `h2launch`: the launcher (Windows only, work in progress) that starts MCC's
   own classic Halo 2 engine from your Master Chief Collection install,
-  without running MCC. Double-click it to open its lobby: pick a gamertag,
-  form a party (the sign-in screen offers the project's server,
-  h2.mohnjorrow.com, by default), search a playlist, play the match on the real engine, and
-  see the carnage report with your new level afterwards. Custom Game (under
+  without running MCC. Double-click it and it opens on Halo 2's start
+  screen, as on the Xbox: press A or Start (Enter or Space on a keyboard,
+  or click) for the main menu, which has ONLINE and SETTINGS (up and
+  down to pick, A to choose, B to go back). Its pictures and fonts are
+  read from your MCC install; without them it is plain shapes. ONLINE
+  takes you to its lobby: pick a gamertag the first time (after that it
+  signs you in by itself), form a party (the sign-in screen offers the
+  project's server, h2.mohnjorrow.com, by default), search a playlist,
+  play the match on the real engine, and see the carnage report with your
+  new level afterwards. Custom Game (under
   the playlists) lets the party leader pick any game type and map for the
   party, unranked; it works alone too. Y on the playlists opens the party:
   its leader can hand the lead to another member, remove someone, or make
@@ -73,9 +79,9 @@ install. No game files are included in this repository.
   Vista install if MCC's can't be read); without either they are numbers. Friends and service records need the matching
   server: an older launcher signing in to it is told UPDATE YOUR LAUNCHER.
   Its text is in Halo 2's own fonts, read from your MCC install.
-  Settings (the row after Custom Game, or X on a controller at the sign-in
-  screen) holds Halo 2's controller settings, in the order of its
-  CONTROLLER screen: Thumbstick Layout (Default, Southpaw, Legacy, Legacy
+  Settings (SETTINGS on the main menu, the row after Custom Game, or X on
+  a controller at the sign-in screen) holds Halo 2's controller settings,
+  in the order of its CONTROLLER screen: Thumbstick Layout (Default, Southpaw, Legacy, Legacy
   Southpaw), Button Layout (Halo 2's Default, Southpaw, Boxer and Green
   Thumb, plus Halo 3's Bumper Jumper, with jump on LB and melee on RB, and
   MCC's Recon), Look Sensitivity (1 to 10, 3 by default), Look Inversion
@@ -93,15 +99,51 @@ install. No game files are included in this repository.
   1 to switch weapons, 2 to swap grenades, 4 for the flashlight, C to
   dual wield) are given to the game too, but may do nothing. When a match
   starts the game's window comes to the front by itself; if it doesn't,
-  click it. While the game is on, the
+  click it. In a match, Start (or Esc on the keyboard) opens Halo 2's GAME
+  MENU over the game, which keeps running behind it: Leave Game, Settings,
+  and End Game if you host a custom game (or in an offline run), with the
+  game's players listed beside them (the host marked). Up and down pick,
+  A (or Enter) chooses, and B, Back or Start (or Esc or Backspace) closes
+  it; while it is open your Spartan stands still, and a button you were
+  still holding when it closed does nothing in the game until you let go.
+  Settings opens CONTROLLER SETTINGS: the lobby's settings in the same
+  order and saved the same way, under Halo 2's in-game names (Auto Look
+  Centering, and Use Default Settings last, which asks first). A on a
+  setting opens its choices, and A on one picks it; Left, Right or A
+  change the two mouse rows. On these pages B, Back, Esc or Backspace goes
+  back one page, and Start does nothing. Thumbstick Layout, Look
+  Inversion, Controller Vibration and the two mouse settings change at
+  once; Button Layout, Look Sensitivity and Auto Look Centering change in
+  the game you're in when you close the menu (the launcher asks the game
+  to read them again). Only turning vibration on in a game that started
+  with it off waits for your next game, and is marked NEXT GAME. Your
+  changes are saved for the next match when you leave CONTROLLER
+  SETTINGS or close the menu (or a second after the last one). Leave Game asks first, closes the game
+  and takes you back to ONLINE (a custom game's party leader goes back to
+  Custom Game); leaving a ranked game still counts toward your level, and
+  leaving a game you host ends it for everyone. End Game ends a custom game
+  for everyone, and everyone, you too, gets the carnage report; it doesn't
+  count. (Ended in its first seconds, while someone is still joining, there
+  is no carnage report: you're told you ended the game.) If the menu can't be shown on your PC, it turns itself off for the
+  rest of that game and Start goes back to the game (the lobby window
+  stops saying Start opens it). If it misbehaves, setting
+  `H2LOBBY_ENGINE_ARGS=--no-game-menu` before
+  starting the launcher turns it off and gives Start back to the game. While the game is on, the
   lobby window ignores the controller and the keys that could leave the
   game (Esc, Enter, Backspace, letters), so leaving takes a click. In the
-  lobby, Enter or Space is A and Esc or Backspace is B.
+  lobby, Enter or Space is A and Esc or Backspace is B. B on the playlists
+  goes back to the main menu (you stay signed in and in your party), and
+  B on the start screen asks before closing the launcher.
   `--offline` starts
   an offline Slayer match on Lockout instead (with the controls saved in
   Settings, or flags such as `--layout bumper_jumper`). It reads the game's
   `halo2.dll` and never changes any MCC file. It is not part of the game
   above. See `docs/notes/launcher/README.md`.
+- `h2ui`: the original Xbox Halo 2 menus for the launcher (work in
+  progress): the start screen and main menu the launcher opens on, laid
+  out from your `mainmenu.map`'s menu tags and pictures (MCC's or Halo 2
+  Vista's), drawn without a graphics card; plain shapes in Halo 2's colours when the files
+  aren't there.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
 - `h2viewer`: the game: Halo 2 style menus and lobby, Halo 2's maps with their

@@ -7,9 +7,13 @@ use crate::mapset::{pointer_offset, MapSet};
 use crate::{f32_at, i16_at, i32_at, u32_at, DatumIndex, Error, Result};
 use std::io::Read;
 
-const BITM_SEQUENCES: usize = 0x3C;
-const SEQUENCE_SIZE: usize = 0x3C;
-const SPRITE_SIZE: usize = 0x20;
+/// In a bitm tag: the sequences block, each sequence's size, and the
+/// size of a sprite in a sequence's sprites block (at 0x34 in it). MCC's
+/// format-13 maps are expected to keep these (`mcc`).
+pub(crate) const BITM_SEQUENCES: usize = 0x3C;
+pub(crate) const SEQUENCE_SIZE: usize = 0x3C;
+pub(crate) const SEQUENCE_SPRITES: usize = 0x34;
+pub(crate) const SPRITE_SIZE: usize = 0x20;
 const BITM_BITMAPS: usize = 68;
 const BITMAP_DATA_SIZE: usize = 116;
 
@@ -53,17 +57,43 @@ impl From<i16> for Format {
 }
 
 impl Format {
-    /// Bytes needed for the top mip level.
-    pub(crate) fn top_level_size(self, w: usize, h: usize) -> Option<usize> {
-        let blocks = w.div_ceil(4) * h.div_ceil(4);
+    /// The format's number in a bitmap entry (the inverse of `from`).
+    pub fn number(self) -> i16 {
+        match self {
+            Format::A8 => 0,
+            Format::Y8 => 1,
+            Format::AY8 => 2,
+            Format::A8Y8 => 3,
+            Format::R5G6B5 => 6,
+            Format::A1R5G5B5 => 8,
+            Format::A4R4G4B4 => 9,
+            Format::X8R8G8B8 => 10,
+            Format::A8R8G8B8 => 11,
+            Format::Dxt1 => 14,
+            Format::Dxt3 => 15,
+            Format::Dxt5 => 16,
+            Format::P8Bump => 17,
+            Format::Other(n) => n,
+        }
+    }
+
+    /// A level's stored rows: the bytes in one row and how many rows (a
+    /// row of 4 by 4 blocks for DXT), packed with no padding; None for a
+    /// format this crate can't decode.
+    pub(crate) fn rows(self, w: usize, h: usize) -> Option<(usize, usize)> {
         Some(match self {
-            Format::A8 | Format::Y8 | Format::AY8 | Format::P8Bump => w * h,
-            Format::A8Y8 | Format::R5G6B5 | Format::A1R5G5B5 | Format::A4R4G4B4 => w * h * 2,
-            Format::X8R8G8B8 | Format::A8R8G8B8 => w * h * 4,
-            Format::Dxt1 => blocks * 8,
-            Format::Dxt3 | Format::Dxt5 => blocks * 16,
+            Format::A8 | Format::Y8 | Format::AY8 | Format::P8Bump => (w, h),
+            Format::A8Y8 | Format::R5G6B5 | Format::A1R5G5B5 | Format::A4R4G4B4 => (w * 2, h),
+            Format::X8R8G8B8 | Format::A8R8G8B8 => (w * 4, h),
+            Format::Dxt1 => (w.div_ceil(4) * 8, h.div_ceil(4)),
+            Format::Dxt3 | Format::Dxt5 => (w.div_ceil(4) * 16, h.div_ceil(4)),
             Format::Other(_) => return None,
         })
+    }
+
+    /// Bytes needed for the top mip level.
+    pub(crate) fn top_level_size(self, w: usize, h: usize) -> Option<usize> {
+        self.rows(w, h).map(|(row, rows)| row * rows)
     }
 }
 
@@ -95,16 +125,25 @@ pub struct Sequence {
     pub sprites: Vec<Sprite>,
 }
 
-pub fn read_sequences(set: &mut MapSet, bitmap: DatumIndex) -> Result<Vec<Sequence>> {
-    let (src, _, data) = set.tag_data(bitmap)?;
-    let file = set.get(src);
-    let region = file.meta_region();
-    let raw = file.read_block(region, &data, BITM_SEQUENCES, SEQUENCE_SIZE)?;
-    let mut out = Vec::new();
-    for s in raw.as_chunks::<SEQUENCE_SIZE>().0 {
-        let name_end = s[..0x20].iter().position(|&b| b == 0).unwrap_or(0x20);
-        let sprites = file
-            .read_block(region, s, 0x34, SPRITE_SIZE)?
+impl Sprite {
+    /// Its rectangle in pixels of an image `width` by `height`: left, top,
+    /// width and height, kept inside the image.
+    pub fn pixels(&self, width: u32, height: u32) -> [u32; 4] {
+        let at = |v: f32, size: u32| (v.clamp(0.0, 1.0) * size as f32).round() as u32;
+        let (l, r) = (at(self.left, width), at(self.right, width));
+        let (t, b) = (at(self.top, height), at(self.bottom, height));
+        [l.min(r), t.min(b), l.abs_diff(r), t.abs_diff(b)]
+    }
+}
+
+/// A sequence from its 0x3C bytes and its sprites block's bytes.
+pub(crate) fn parse_sequence(s: &[u8], sprites: &[u8]) -> Sequence {
+    let name_end = s[..0x20].iter().position(|&b| b == 0).unwrap_or(0x20);
+    Sequence {
+        name: String::from_utf8_lossy(&s[..name_end]).into_owned(),
+        first_bitmap: i16_at(s, 0x20),
+        bitmap_count: i16_at(s, 0x22),
+        sprites: sprites
             .as_chunks::<SPRITE_SIZE>()
             .0
             .iter()
@@ -116,15 +155,47 @@ pub fn read_sequences(set: &mut MapSet, bitmap: DatumIndex) -> Result<Vec<Sequen
                 bottom: f32_at(p, 0x14),
                 registration: [f32_at(p, 0x18), f32_at(p, 0x1C)],
             })
-            .collect();
-        out.push(Sequence {
-            name: String::from_utf8_lossy(&s[..name_end]).into_owned(),
-            first_bitmap: i16_at(s, 0x20),
-            bitmap_count: i16_at(s, 0x22),
-            sprites,
-        });
+            .collect(),
+    }
+}
+
+pub fn read_sequences(set: &mut MapSet, bitmap: DatumIndex) -> Result<Vec<Sequence>> {
+    let (src, _, data) = set.tag_data(bitmap)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let raw = file.read_block(region, &data, BITM_SEQUENCES, SEQUENCE_SIZE)?;
+    let mut out = Vec::new();
+    for s in raw.as_chunks::<SEQUENCE_SIZE>().0 {
+        let sprites = file.read_block(region, s, SEQUENCE_SPRITES, SPRITE_SIZE)?;
+        out.push(parse_sequence(s, &sprites));
     }
     Ok(out)
+}
+
+/// One image's size and format, as its bitmap tag gives them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageInfo {
+    pub width: u32,
+    pub height: u32,
+    pub format: Format,
+}
+
+/// Every image of a bitmap tag: its size and format, without its pixels.
+pub fn image_infos(set: &mut MapSet, bitmap: DatumIndex) -> Result<Vec<ImageInfo>> {
+    let (src, _, data) = set.tag_data(bitmap)?;
+    let file = set.get(src);
+    let region = file.meta_region();
+    let entries = file.read_block(region, &data, BITM_BITMAPS, BITMAP_DATA_SIZE)?;
+    Ok(entries
+        .as_chunks::<BITMAP_DATA_SIZE>()
+        .0
+        .iter()
+        .map(|e| ImageInfo {
+            width: i16_at(e, 4).max(1) as u32,
+            height: i16_at(e, 6).max(1) as u32,
+            format: Format::from(i16_at(e, 12)),
+        })
+        .collect())
 }
 
 /// How many images a bitmap tag holds.

@@ -18,7 +18,9 @@
 //! be a string, null or a small id (host-interface.verify A5/E11).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{LPARAM, WPARAM};
@@ -613,6 +615,8 @@ unsafe extern "system" fn set_game_state(_this: *mut c_void, state: i32) -> usiz
         if state == 1 {
             super::mark(&super::STATE1_AT);
             crate::live::tell(crate::live::Engine::MapLoaded);
+            // The game menu's fonts load now, off this thread.
+            super::menu::prepare();
         }
     });
     0
@@ -697,12 +701,26 @@ fn game_result(block: usize) {
     }
     // The game ended (every PC gets this at the end), unless we asked the
     // engine to quit: then it is our own result as a quitter (seen on the
-    // owner's PC), and closing says we left.
+    // owner's PC), and closing says we left. End Game's is the exception:
+    // on the host it holds every player's standing and score (PC check
+    // 14), and goes to the lobby as the game's, which says it was cut
+    // short (`live::Told`).
     let quitting = matches!(
         super::QUIT.load(Ordering::SeqCst),
         super::QUIT_USER | super::QUIT_CONSOLE
     );
+    let left = super::ENDED_FROM_MENU
+        .load(Ordering::SeqCst)
+        .then_some(crate::gamemenu::Leave::End);
+    if quitting && crate::gamemenu::result_is_the_games(quitting, left) {
+        log!("result: End Game's, given as the engine quits: it goes as the game's, cut short");
+    }
     if !quitting {
+        // The game menu closes, and can't open again.
+        super::GAME_ENDED.store(true, Ordering::SeqCst);
+        super::wake();
+    }
+    if crate::gamemenu::result_is_the_games(quitting, left) {
         // Kills reach the server only when this game bore them out (see
         // `results::COUNTS_SEEN`).
         let players = crate::results::players(bytes);
@@ -808,7 +826,11 @@ unsafe extern "system" fn get_audio_setting(_this: *mut c_void, out: *mut u8) ->
 unsafe extern "system" fn get_player_profile(_this: *mut c_void, xuid: u64) -> *const u8 {
     record(34, xuid as usize, 0, 0, 0);
     panic_guard(34, move || match super::setup() {
-        Some(s) if xuid == s.xuid => profile_buffer().as_ptr() as usize,
+        Some(s) if xuid == s.xuid => {
+            let g = profile_now();
+            note_served(34, &PROFILE_SERVED, g, "profile");
+            g.bytes.as_ptr() as usize
+        }
         _ => {
             note_other_xuid(34, xuid);
             0
@@ -816,44 +838,193 @@ unsafe extern "system" fn get_player_profile(_this: *mut c_void, xuid: u64) -> *
     }) as *const u8
 }
 
-/// The profile bytes, built once and kept for the run.
-fn profile_buffer() -> &'static [u8] {
-    static BUF: OnceLock<Vec<u8>> = OnceLock::new();
-    BUF.get_or_init(|| {
-        let mut ps = match super::setup() {
-            Some(s) => profile::ProfileSettings::from_controls(&s.controls),
-            None => profile::ProfileSettings::default(),
-        };
-        ps.key_bindings = super::setup().is_none_or(|s| s.args.key_bindings);
+// ---------------------------------------------------------------- generations
+
+/// One generation of the profile (slot 34) or the gamepad mapping (slot
+/// 116). Generation 0 is built at the first call, from the controls the
+/// engine was started with; the game menu adds one when it closes having
+/// changed them (`publish_controls`). They are never freed, so a pointer
+/// the engine kept stays valid; at most `MAX_GENERATIONS` of each kind are
+/// made in a run.
+struct Gen {
+    n: u64,
+    bytes: Box<[u8]>,
+}
+
+static PROFILE_GEN0: OnceLock<Gen> = OnceLock::new();
+static MAPPING_GEN0: OnceLock<Gen> = OnceLock::new();
+/// The newest generation past 0 (null: generation 0 is the newest).
+static PROFILE_LIVE: AtomicPtr<Gen> = AtomicPtr::new(std::ptr::null_mut());
+static MAPPING_LIVE: AtomicPtr<Gen> = AtomicPtr::new(std::ptr::null_mut());
+/// The newest generation served, plus 1 (0: none yet).
+static PROFILE_SERVED: AtomicU64 = AtomicU64::new(0);
+static MAPPING_SERVED: AtomicU64 = AtomicU64::new(0);
+/// Generations past 0 made in this run, of each kind.
+static PROFILE_GENERATIONS: AtomicU32 = AtomicU32::new(0);
+static MAPPING_GENERATIONS: AtomicU32 = AtomicU32::new(0);
+const MAX_GENERATIONS: u32 = 64;
+
+/// The newest of a kind's generations.
+fn newest(live: &AtomicPtr<Gen>, gen0: impl FnOnce() -> &'static Gen) -> &'static Gen {
+    let p = live.load(Ordering::Acquire);
+    if p.is_null() {
+        gen0()
+    } else {
+        // SAFETY: only `publish_controls` stores here, a leaked `Gen` that
+        // is never freed.
+        unsafe { &*p }
+    }
+}
+
+fn profile_now() -> &'static Gen {
+    newest(&PROFILE_LIVE, || {
+        PROFILE_GEN0.get_or_init(|| Gen {
+            n: 0,
+            bytes: profile_buffer().into_boxed_slice(),
+        })
+    })
+}
+
+fn mapping_now(s: &Setup) -> &'static Gen {
+    newest(&MAPPING_LIVE, || {
+        MAPPING_GEN0.get_or_init(|| Gen {
+            n: 0,
+            bytes: Box::new(mapping_buffer(s)),
+        })
+    })
+}
+
+/// Logs the first time the engine is handed a generation past 0: whether
+/// and when the engine asks again mid-match is what PC check 7 looks for.
+fn note_served(slot: usize, served: &AtomicU64, g: &Gen, what: &str) {
+    if g.n > 0 && served.fetch_max(g.n + 1, Ordering::SeqCst) < g.n + 1 {
         log!(
-            "player profile ({:#x} bytes): stick look sensitivity {} (1-10; the scale is an estimate), mouse sensitivity {}, zoom/vehicle look multipliers {}/{}, volumes {}, FOV 0 (game default), look inverted {} (mouse {}), auto look centering {}, vibration {}, keyboard and mouse bindings {}",
-            profile::PROFILE_SIZE,
-            ps.look_sensitivity,
-            ps.mouse_sensitivity,
-            ps.zoom_look_multiplier,
-            ps.vehicle_look_multiplier,
-            ps.volume,
-            ps.look_inverted,
-            ps.mouse_inverted,
-            ps.auto_center,
-            ps.vibration,
-            if ps.key_bindings {
-                "halo2.dll's own keys plus MCC's (an estimate)"
-            } else {
-                "empty (--no-key-bindings)"
-            }
+            "{what} generation {} first served at call #{} ({:.3} s)",
+            g.n,
+            COUNTS[slot].load(Ordering::Relaxed),
+            super::now()
         );
-        let mut p = profile::build_profile(&ps);
-        if let Some(s) = super::setup() {
-            for w in &s.args.set_profile {
-                match w.apply(&mut p) {
-                    Ok(()) => log!("profile override applied: {}", w.text),
-                    Err(e) => log!("profile override skipped: {e}"),
-                }
+    } else if g.n == 0 {
+        served.fetch_max(1, Ordering::SeqCst);
+    }
+}
+
+/// A new generation of a kind (`made` counts them), leaked; None past the
+/// cap (logged once a kind).
+fn leak_gen(made: &AtomicU32, what: &str, n: u64, bytes: Vec<u8>) -> Option<*mut Gen> {
+    let count = made.fetch_add(1, Ordering::SeqCst);
+    if count >= MAX_GENERATIONS {
+        if count == MAX_GENERATIONS {
+            log!("the game menu changed the {what} {MAX_GENERATIONS} times: the engine keeps the last one for the rest of this run (the launcher's own use of the controls still follows)");
+        }
+        return None;
+    }
+    Some(Box::into_raw(Box::new(Gen {
+        n,
+        bytes: bytes.into_boxed_slice(),
+    })))
+}
+
+/// Whether the engine's newest profile and gamepad mapping are the ones
+/// for the controls `publish_controls` was given (false past a kind's
+/// cap).
+#[derive(Clone, Copy, Debug)]
+pub struct Published {
+    pub profile: bool,
+    pub mapping: bool,
+}
+
+/// The game menu closed having changed the controls to `c`: a new profile
+/// (with the launch's look inversion, see `profile::profile_for`, and the
+/// `--set-profile` overrides) and a new gamepad mapping (all zero stays
+/// all zero with `--pad-map zero`), each only if its bytes changed. The
+/// engine gets them the next time it asks. Window thread.
+pub fn publish_controls(c: &crate::controls::Controls) -> Published {
+    let mut now = Published {
+        profile: true,
+        mapping: true,
+    };
+    let Some(s) = super::setup() else { return now };
+    let mut p = profile::profile_for(c, &s.controls, s.args.key_bindings);
+    for w in &s.args.set_profile {
+        // Each was logged when generation 0 was built.
+        let _ = w.apply(&mut p);
+    }
+    let cur = profile_now();
+    if *cur.bytes != p[..] {
+        let made = leak_gen(&PROFILE_GENERATIONS, "profile", cur.n + 1, p);
+        now.profile = made.is_some();
+        if let Some(g) = made {
+            PROFILE_LIVE.store(g, Ordering::Release);
+            log!(
+                "profile generation {}: look sensitivity {}, auto look centering {}, vibration {}, mouse sensitivity {} (look inversion stays {} from the launch)",
+                cur.n + 1,
+                c.look_sensitivity,
+                if c.auto_center { "on" } else { "off" },
+                if c.vibration { "on" } else { "off" },
+                c.mouse_sensitivity,
+                if s.controls.look_inverted { "on" } else { "off" }
+            );
+        }
+    }
+    let m = s.args.pad_map.mapping(c.buttons);
+    let cur = mapping_now(s);
+    if *cur.bytes != m[..] {
+        let made = leak_gen(
+            &MAPPING_GENERATIONS,
+            "gamepad mapping",
+            cur.n + 1,
+            m.to_vec(),
+        );
+        now.mapping = made.is_some();
+        if let Some(g) = made {
+            MAPPING_LIVE.store(g, Ordering::Release);
+            log!(
+                "gamepad mapping generation {}: {}",
+                cur.n + 1,
+                c.buttons.name()
+            );
+        }
+    }
+    now
+}
+
+/// The profile bytes for generation 0, from the controls the engine was
+/// started with.
+fn profile_buffer() -> Vec<u8> {
+    let mut ps = match super::setup() {
+        Some(s) => profile::ProfileSettings::from_controls(&s.controls),
+        None => profile::ProfileSettings::default(),
+    };
+    ps.key_bindings = super::setup().is_none_or(|s| s.args.key_bindings);
+    log!(
+        "player profile ({:#x} bytes): stick look sensitivity {} (1-10; the scale is an estimate), mouse sensitivity {}, zoom/vehicle look multipliers {}/{}, volumes {}, FOV 0 (game default), look inverted {} (mouse {}), auto look centering {}, vibration {}, keyboard and mouse bindings {}",
+        profile::PROFILE_SIZE,
+        ps.look_sensitivity,
+        ps.mouse_sensitivity,
+        ps.zoom_look_multiplier,
+        ps.vehicle_look_multiplier,
+        ps.volume,
+        ps.look_inverted,
+        ps.mouse_inverted,
+        ps.auto_center,
+        ps.vibration,
+        if ps.key_bindings {
+            "halo2.dll's own keys plus MCC's (an estimate)"
+        } else {
+            "empty (--no-key-bindings)"
+        }
+    );
+    let mut p = profile::build_profile(&ps);
+    if let Some(s) = super::setup() {
+        for w in &s.args.set_profile {
+            match w.apply(&mut p) {
+                Ok(()) => log!("profile override applied: {}", w.text),
+                Err(e) => log!("profile override skipped: {e}"),
             }
         }
-        p
-    })
+    }
+    p
 }
 
 unsafe extern "system" fn get_input_state(_this: *mut c_void, player: i32, out: *mut u8) -> usize {
@@ -1240,7 +1411,11 @@ unsafe extern "system" fn chud_blend_color(_this: *mut c_void, player: i32, rgba
 unsafe extern "system" fn get_player_gamepad_mapping(_this: *mut c_void, xuid: u64) -> *const u8 {
     record(116, xuid as usize, 0, 0, 0);
     panic_guard(116, move || match super::setup() {
-        Some(s) if xuid == s.xuid => mapping_buffer(s).as_ptr() as usize,
+        Some(s) if xuid == s.xuid => {
+            let g = mapping_now(s);
+            note_served(116, &MAPPING_SERVED, g, "gamepad mapping");
+            g.bytes.as_ptr() as usize
+        }
         _ => {
             note_other_xuid(116, xuid);
             0
@@ -1248,20 +1423,17 @@ unsafe extern "system" fn get_player_gamepad_mapping(_this: *mut c_void, xuid: u
     }) as *const u8
 }
 
-/// The gamepad mapping, built once from the run's button layout (or all
-/// zero with `--pad-map zero`) and kept for the run.
-fn mapping_buffer(s: &Setup) -> &'static [u8] {
-    static BUF: OnceLock<[u8; profile::GAMEPAD_MAPPING_SIZE]> = OnceLock::new();
-    BUF.get_or_init(|| {
-        let m = s.args.pad_map.mapping(s.controls.buttons);
-        let which = match s.args.pad_map {
-            crate::controls::PadMap::Layout => s.controls.buttons.name(),
-            crate::controls::PadMap::Zero => "all zero (--pad-map zero)",
-        };
-        log!(
-            "gamepad mapping: {which}: {}",
-            crate::controls::describe_mapping(&m)
-        );
-        m
-    })
+/// The gamepad mapping for generation 0, from the run's button layout (or
+/// all zero with `--pad-map zero`).
+fn mapping_buffer(s: &Setup) -> [u8; profile::GAMEPAD_MAPPING_SIZE] {
+    let m = s.args.pad_map.mapping(s.controls.buttons);
+    let which = match s.args.pad_map {
+        crate::controls::PadMap::Layout => s.controls.buttons.name(),
+        crate::controls::PadMap::Zero => "all zero (--pad-map zero)",
+    };
+    log!(
+        "gamepad mapping: {which}: {}",
+        crate::controls::describe_mapping(&m)
+    );
+    m
 }

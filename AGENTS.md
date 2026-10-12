@@ -69,6 +69,9 @@ and mouse or an Xbox controller, and just runs the .exe.
   splitscreen, LAN and online clients.
 - `crates/h2launch` (new, Windows only): the launcher that hosts MCC's
   halo2.dll. Design notes in `docs/notes/launcher/`.
+- `crates/h2ui`: the launcher's Halo 2 menus as draw lists (layout,
+  animations, text, pictures, CPU backend). Plan in
+  `docs/notes/launcher/menu.md`.
 - `docs/notes/`: design notes and research behind larger features (controller
   layouts, the main menu, the decompilation findings). Paths there that start
   with `$SP` or `scratchpad` refer to a scratch folder that no longer exists.

@@ -1,0 +1,17 @@
+[package]
+name = "h2ui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Halo 2's menus as draw lists: its UI space, animations, text in its fonts, pictures from a source, and a CPU backend; no GPU and no game files"
+
+[dependencies]
+# Halo 2's font files and mainmenu.map's UI tags and pictures, read from
+# the player's own install at run time.
+blam-cache = { path = "../blam-cache" }
+
+[dev-dependencies]
+# Made-up format-13 maps and textures.dat files for the tests.
+blam-cache = { path = "../blam-cache", features = ["synthetic"] }
+# examples/menu_png.rs writes the screens it draws as PNGs.
+png = "0.17"
