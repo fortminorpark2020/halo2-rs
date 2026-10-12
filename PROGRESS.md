@@ -1,10 +1,11 @@
 # Progress and handoff
 
-Last updated 2026-10-12 (menu 2.6: Halo 2's shell, header and button
-legend on every lobby screen after the main menu, legends by the device
-used last, the stick at 90% and held directions repeating; before it
-2.5, the flythrough behind the start screen and main menu, and its
-review fixes; P3 passed). Any assistant that works on the
+Last updated 2026-10-12 (P4, the owner's check of 2.5, passed, and its
+follow-ups: the flythrough's veil darker, bluer and soft; before them
+menu 2.6: Halo 2's shell, header and button legend on every lobby
+screen after the main menu, legends by the device used last, the stick
+at 90% and held directions repeating; 2.5, the flythrough behind the
+start screen and main menu, and its review fixes; P3 passed). Any assistant that works on the
 project should update this file before it stops, so the next one can pick
 up. Read AGENTS.md first for the rules.
 
@@ -278,7 +279,19 @@ Next, in order:
    owner's PC: the list after "What Phase 2.6 built" (every screen in
    the shell, the legend switching between the pad and the keys, a held
    d-pad repeating, at most about 10 ms a frame at 1080p, every flow
-   working). Next: 2.7, `h2ui` drawing any screen from its tags.
+   working). P4 passed on the owner's PC (2026-10-12, RTX 5080,
+   2560x1351; menu.md "Results on the owner's PC (P4)"): the scene
+   5.0 ms to draw and 2.8 to read back, the main menu 4.9 ms a frame,
+   asleep through a match with the lobby's GPU at 0 %. Next to a video
+   of his original Xbox the flythrough was too grey, bright and sharp,
+   so (menu.md "After P4") the veil's navy is now (13, 26, 60), fitted
+   so the frame's top 30 % comes out as the Xbox's (about (9, 18, 40)),
+   and the scene is blurred first (a spread of 0.5 % of the height:
+   boxed down, 5 by 5 taps, stretched back; `H2LOBBY_VEIL`'s seventh
+   number). The menu layer's glyph bands and dotted lines show over it;
+   nothing in Vista's tags lights the logo row itself (left to a look
+   side by side on the PC). On the owner's PC: the short list after
+   "After P4". Next: 2.7, `h2ui` drawing any screen from its tags.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

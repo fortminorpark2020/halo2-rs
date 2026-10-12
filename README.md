@@ -63,7 +63,7 @@ install. No game files are included in this repository.
   `vista = <folder>` (the Cartographer folder or its `maps` folder) to
   `%LOCALAPPDATA%\h2launch\lobby.txt`, or set `H2LOBBY_VISTA` to it. With
   Cartographer's files, Halo 2's main menu flythrough (the Covenant
-  carrier over New Mombasa, darkened navy as on the Xbox) plays behind the
+  carrier over New Mombasa, dark, soft and navy as on the Xbox) plays behind the
   start screen and the main menu: your graphics card draws its first
   picture while the intro plays, so it is there as the start screen
   opens (without the intro it fades in over a moment), carries on where

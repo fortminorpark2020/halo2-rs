@@ -1639,7 +1639,8 @@ the still background, and nothing touches the GPU while a match runs.
   every brightness. Saturation 0 because the screenshot is all one hue:
   multiplying the colours alone left the brown sky brown-black and the
   water purple. `H2LOBBY_VEIL=r,g,b,k`, `r,g,b,k,s` or
-  `r,g,b,k,s,gain` tries others (`off` for none).
+  `r,g,b,k,s,gain` tries others (`off` for none). (Retuned after P4:
+  a darker, bluer navy and a blur first; see "After P4" below.)
 - **Departure from the brief.** It asked for the veil as two blended
   draws over the scene (multiply by the navy, then add it). That can't
   grey the picture first, which the fit needed, so the scene is drawn
@@ -1799,12 +1800,14 @@ about 1080p (step 3).
     scene_shot -- "C:\Games\Halo 2 Project Cartographer\maps"
     C:\h2work\scene 1920x1080 10 40 70` writes three PNGs (keep them on
     the PC) and prints each frame's mean; the container's lavapipe gave
-    about (25, 32, 51), (32, 40, 64) and (33, 42, 67) at those times. A
-    real GPU should be within a few levels; if the PC's screen looks
-    lighter, darker or off-hue next to the Xbox's or Cartographer's
-    menu, try `H2LOBBY_VEIL=44,55,88,0,0,2.15` with other numbers (the
-    last, the gain, brightens all but the brightest; the first three are
-    the brightest colour) and send the ones that look right.
+    about (25, 32, 51), (32, 40, 64) and (33, 42, 67) at those times
+    (since P4's follow-ups, (8, 15, 36), (10, 19, 44) and (10, 20, 46)).
+    A real GPU should be within a few levels; if the PC's screen looks
+    lighter, darker, off-hue, sharper or softer next to the Xbox's
+    menu, try `H2LOBBY_VEIL=13,26,60,0,0,2.15,0.005` with other numbers
+    (the sixth, the gain, brightens all but the brightest; the first
+    three are the brightest colour; the seventh is the softness, from 0
+    to 0.02) and send the ones that look right.
 11. Optional: `H2LOBBY_SCENE_FPS=60` makes the flythrough smoother; its
     frame time is in the same log line.
 
@@ -1854,6 +1857,120 @@ about 1080p (step 3).
   taskbar and its title bar, so it never logs exactly 1920x1080. The
   steps now note the size the log gives and judge the budget against
   1080p by the pixel count.
+
+**Results on the owner's PC (P4, 2026-10-12, about 14:30 UTC,
+e2f4e22).** Steps 1 to 7 passed, on an RTX 5080 with a 2560x1440 screen
+(the maximised window 2560x1351); steps 8 to 11 weren't reported.
+
+1. `scene_info` on Cartographer's mainmenu.map gave exactly the counts
+   above, loaded in 65 ms; on MCC's, the "no geometry reader yet" error.
+2. Read in 0.1 s, drawn on the RTX 5080 (discrete, Vulkan), awake in 365
+   to 381 ms (632 ms once, maximised), each time logged before the
+   intro's last line (played to the end: 18.0 s, 540 pictures, 1 late).
+3. The intro: 15.1 ms a frame at 2560x1351 (8.0 at 1600x900), about
+   9.1 ms at 1080p by the pixel count.
+4. The main menu 4.9 ms a frame at 2560x1351 (the scene's frame copied
+   in 0.6 ms); the scene 5.0 ms to draw and 2.8 ms to read back on its
+   own thread; the start screen 3.9 ms. The main menu's line came about
+   2 s after the menu opened (its first measurement), not after the half
+   minute the step said.
+5. SETTINGS: asleep (its GPU device closed), the settings 4.7 ms a frame;
+   back: awake in 254 ms.
+6. A custom game alone against a local h2live: asleep at sign-in (4.79 s
+   in), well before the engine started (17.8 s); the lobby's GPU at 0 %
+   for 8 s mid-match (the engine 7.3 to 7.8 %); after the match awake
+   in 227 ms.
+7. The three `scene: none (...)` lines (no Vista folder,
+   `H2LOBBY_SCENE=off`, `background = still`), each with the still
+   background.
+
+A side note: messages posted to the window as typed characters
+(`WM_CHAR`) don't reach the sign-in field, as winit wants real key
+events, so the session wrote `lobby.txt` itself. Not a fault of the
+lobby.
+
+The look, against a video of the owner's original Xbox's main menu
+(`scene_shot` at 1920x1080 at 10, 40 and 70 s; the frames deleted
+after): the same places (at 10 s the bridge's rails running down to the
+left with the city and towers behind, at 70 s the city from above with
+the carrier's hull), but ours too grey and too bright, and too sharp.
+Ours averaged (26, 32, 51), (32, 40, 64) and (34, 42, 67) over the
+frame; the top 30 % of the Xbox's frames averaged (7, 15, 37), (7, 14,
+33) and (12, 24, 51), a deep navy with almost no red: ours was about
+twice as bright, with three to four times the red and green for its
+blue. And where the Xbox's shapes are soft, defocused silhouettes, ours
+had crisp rails, window lights on the hull and building outlines.
+
+**After P4: the veil darker, bluer and soft (2026-10-12).**
+
+- **The navy is (13, 26, 60).** Each channel of the old navy was scaled
+  so the top 30 % of our frames comes out as the Xbox's does. In the
+  container (lavapipe, Cartographer's map, the same three times at
+  1920x1080, with the blur below) the top 30 % now average (8.8, 17.7,
+  40.9) against the Xbox's (8.7, 17.7, 40.3); one by one (9.7, 19.4,
+  44.9), (8.5, 17.1, 39.6) and (8.2, 16.5, 38.2) against (7, 15, 37),
+  (7, 14, 33) and (12, 24, 51), the frames' tops holding different
+  things (sky at 10 s, the city at 70 s). Whole frames come to (8, 15,
+  36), (10, 19, 44) and (10, 20, 46), and nothing is brighter than the
+  navy. The gain (2.15), `k` (0) and saturation (0) are kept. All still
+  estimates (`MENU_NAVY`'s comment says how they were reached).
+- **The scene is softened before the grade** (`Veil::softness`,
+  `MENU_SOFTNESS` 0.005): a blur whose spread is half a percent of the
+  frame's height (about 5 pixels at 1080p, 7 at 1351), chosen by eye on
+  the container's frames: the rails, the window lights and the
+  outlines go, the shapes stay. Two passes on the scene's own thread
+  before the veil (`Soft`): the scene boxed down into a small frame of
+  half-precision floats (each texel the mean of `f` by `f` pixels, `f`
+  the power of two nearest the spread, 2 to 64, from bilinear taps
+  between two by two pixels), then blurred there by 5 by 5 bilinear taps
+  with binomial weights; the veil reads the small frame stretched back
+  with bilinear filtering. The taps' step makes the box, the taps and
+  the stretch add up to the spread asked for, and is never more than
+  about 1.3 small texels, so thin lines don't flicker through gaps as
+  the camera moves. A sharp veil (softness 0: `Veil::NONE`,
+  `Veil::navy`) reads the scene's own pixels as before. `H2LOBBY_VEIL`
+  takes a seventh number for the softness (0 to 0.02, `MAX_SOFTNESS`;
+  `MENU_SOFTNESS` when left out).
+- **Cost.** On lavapipe a 1280x720 or 1920x1080 frame took about the
+  same with the blur as without (85 to 110 ms and 165 to 220 ms; the
+  container's noise is bigger than the difference). On a GPU the two
+  passes read the frame once and the small frame 25 times, little next
+  to the scene itself.
+- **Tests.** The blur's plan at every size from 90 to 4320 pixels high
+  (a power of two from 2 to 64, the taps at most 1.5 small texels apart,
+  the spreads adding up to the one asked for, the small frame covering
+  the frame, the uniform carrying it; the menus' box 2, 4 or 8 at the
+  usual sizes); the seven-number form and its limits; and a GPU test
+  (on lavapipe with `H2LOBBY_SCENE=on`): with the softest veil, the
+  middle of the made-up green square keeps its colour and its sharp edge
+  becomes a ramp over several pixels each way; set sharp again, the edge
+  is a step. The ignored real-map test still passes with the new veil
+  (on lavapipe at 640x360: (7, 15, 35), (9, 19, 44) and (9, 19, 46), 56
+  to 88 colours, the blues spread 28 to 46 levels).
+- **The menu layer over the flythrough** (a headless lobby with
+  Cartographer's files and the scene on lavapipe, 1280x720): the main
+  menu's glyph bands at five heights scroll over the darker scene and
+  stay visible, the two brightest bracketing the logo (three strips
+  overlapping just above it, two just below); the dotted timeline lines
+  run near the bottom; the logo, the rows and the small print are as
+  before. Nothing in Vista's main menu tags lights the logo row itself:
+  on the still navy, the rows between those two bands are as dark as the
+  gradient there. So between the bands the scene shows as it is; if the
+  Xbox video's brighter band across the logo row is more than those two
+  glyph bands, it is the Xbox's own art or scene, left for a look side
+  by side on the PC.
+
+**On the owner's PC (after P4's follow-ups):**
+
+1. The main menu next to the Xbox video: a dark, deep navy with almost
+   no red, the shapes soft; the glyph bands and the dotted lines over
+   it.
+2. `scene_shot ... 1920x1080 10 40 70` (step 10 above): means within a
+   few levels of (8, 15, 36), (10, 19, 44) and (10, 20, 46).
+3. Step 4's scene line in the maximised window: the scene's draw time
+   still about 5 ms at 2560x1351 (the blur adds little).
+4. If it looks off, `H2LOBBY_VEIL=13,26,60,0,0,2.15,0.005` with other
+   numbers (the seventh the softness) and send the ones that look right.
 
 #### What Phase 2.6 built (2026-10-12)
 

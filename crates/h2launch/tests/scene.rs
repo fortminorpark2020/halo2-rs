@@ -109,7 +109,7 @@ fn count(lines: &[String], want: &str) -> usize {
 fn a_lobby_asked_for_the_scene_starts_it_on_vistas_mainmenu_map() {
     let dir = folder("on");
     let lines = lobby(&dir, Some("on"), Some("junk"));
-    let veil = "scene: H2LOBBY_VEIL=junk isn't r,g,b,k[,s[,gain]]; the usual veil";
+    let veil = "scene: H2LOBBY_VEIL=junk isn't r,g,b,k[,s[,gain[,soft]]]; the usual veil";
     assert_eq!(count(&lines, veil), 1, "{lines:#?}");
     // The scene was started on mainmenu.map itself (not its folder), and
     // the menus said once that it can't be drawn.

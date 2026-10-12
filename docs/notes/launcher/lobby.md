@@ -303,8 +303,9 @@ the launcher doesn't do.
   goes wrong (no GPU adapter, a device that can't be made, a GPU error,
   a lost device, a damaged map, a panic on its thread) leaves the still
   background for the rest of the run, logged once. `H2LOBBY_VEIL=r,g,b,k`
-  (or `r,g,b,k,s` or `r,g,b,k,s,gain`) changes the veil for a look check, `off` leaves it
-  out; `H2LOBBY_SCENE_FPS=60` has the window draw every 16 ms instead of
+  (or `r,g,b,k,s`, `r,g,b,k,s,gain` or `r,g,b,k,s,gain,soft`, the last
+  the blur's spread as a share of the height, 0 to 0.02) changes the
+  veil for a look check, `off` leaves it out; `H2LOBBY_SCENE_FPS=60` has the window draw every 16 ms instead of
   33 while the flythrough shows (the scene then gets asked twice as
   often). `WGPU_BACKEND` (`dx12`, `vulkan`, `gl`) picks wgpu's backend.
   The log says `scene: none (<why>); the menus have the still

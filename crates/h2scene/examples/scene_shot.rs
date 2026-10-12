@@ -4,8 +4,9 @@
 //!
 //!   cargo run --release -p h2scene --example scene_shot -- <mainmenu.map or its folder> <out folder> [WxH] [seconds ...]
 //!
-//! `H2LOBBY_VEIL=r,g,b,k[,s[,gain]]` changes the veil (`render::Veil::parse`), `off`
-//! leaves it out. A software adapter (lavapipe, WARP) is allowed here.
+//! `H2LOBBY_VEIL=r,g,b,k[,s[,gain[,soft]]]` changes the veil
+//! (`render::Veil::parse`), `off` leaves it out. A software adapter
+//! (lavapipe, WARP) is allowed here.
 //! The PNGs are pictures of the game's files: keep them on the PC, never
 //! in the repository.
 
@@ -37,7 +38,7 @@ fn main() {
     let veil = match std::env::var("H2LOBBY_VEIL") {
         Ok(v) if v == "off" => Veil::NONE,
         Ok(v) => Veil::parse(&v).unwrap_or_else(|| {
-            eprintln!("H2LOBBY_VEIL: want r,g,b,k[,s[,gain]]");
+            eprintln!("H2LOBBY_VEIL: want r,g,b,k[,s[,gain[,soft]]]");
             std::process::exit(2);
         }),
         Err(_) => Veil::menu(),

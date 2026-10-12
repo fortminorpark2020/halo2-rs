@@ -73,16 +73,17 @@ pub fn srgb_decode(c: f32) -> f32 {
     }
 }
 
-/// The last pass over the scene, as the menus darken and tint the
-/// flythrough navy behind the logo and rows. It works on sRGB-encoded
-/// values, as Halo 2 Vista's Direct3D 9 blending did (its screen's hue is
-/// the same at every brightness in sRGB bytes, which a multiply in linear
-/// light can't give): each pixel keeps `saturation` of its colour (the
-/// rest is its grey), is brightened by `gain` and clipped at white, is
-/// multiplied by one colour, then has another added. Halo 2 Vista's own
-/// numbers for this aren't known; `Veil::menu`'s are estimates chosen
-/// against the owner's Cartographer screenshot
-/// (docs/notes/launcher/menu.md, "What Phase 2.5 built").
+/// The last pass over the scene, as the menus darken, tint and soften the
+/// flythrough behind the logo and rows. The scene is first blurred by
+/// `softness` (none at 0), then graded on sRGB-encoded values, as Halo 2
+/// Vista's Direct3D 9 blending did (its screen's hue is the same at every
+/// brightness in sRGB bytes, which a multiply in linear light can't give):
+/// each pixel keeps `saturation` of its colour (the rest is its grey), is
+/// brightened by `gain` and clipped at white, is multiplied by one colour,
+/// then has another added. Halo 2's own numbers for this aren't known;
+/// `Veil::menu`'s are estimates, chosen against the owner's Cartographer
+/// screenshot and then against his original Xbox's main menu
+/// (docs/notes/launcher/menu.md, "What Phase 2.5 built" and "P4").
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Veil {
     /// Factors per channel, on sRGB-encoded values.
@@ -95,6 +96,10 @@ pub struct Veil {
     /// How much each pixel is brightened before the multiply (what passes
     /// white is clipped there, so white comes out as the multiply).
     pub gain: f32,
+    /// How soft the scene is made before the rest: the blur's spread (its
+    /// standard deviation) as a fraction of the frame's height, so the
+    /// same at every size; 0 leaves it sharp.
+    pub softness: f32,
 }
 
 /// Linear light's luminance weights (Rec. 709), for a pixel's grey (its
@@ -108,10 +113,11 @@ impl Veil {
         add: [0.0; 3],
         saturation: 1.0,
         gain: 1.0,
+        softness: 0.0,
     };
 
-    /// A veil that keeps `saturation` of the colour, brightens it by
-    /// `gain` (clipped at white), multiplies by `navy` (sRGB bytes) and
+    /// A sharp veil that keeps `saturation` of the colour, brightens it
+    /// by `gain` (clipped at white), multiplies by `navy` (sRGB bytes) and
     /// adds `navy` times `k`.
     pub fn navy(navy: [u8; 3], k: f32, saturation: f32, gain: f32) -> Veil {
         let m = navy.map(|c| f32::from(c) / 255.0);
@@ -120,25 +126,38 @@ impl Veil {
             add: m.map(|c| c * k.max(0.0)),
             saturation: saturation.clamp(0.0, 1.0),
             gain: gain.max(0.0),
+            softness: 0.0,
+        }
+    }
+
+    /// This veil with the scene blurred first by `softness` (a fraction
+    /// of the frame's height, at most `MAX_SOFTNESS`).
+    pub fn with_softness(self, softness: f32) -> Veil {
+        let softness = if softness.is_finite() { softness } else { 0.0 };
+        Veil {
+            softness: softness.clamp(0.0, MAX_SOFTNESS),
+            ..self
         }
     }
 
     /// The menus' veil, by estimate (`MENU_NAVY`, `MENU_K`,
-    /// `MENU_SATURATION`, `MENU_GAIN`).
+    /// `MENU_SATURATION`, `MENU_GAIN`, `MENU_SOFTNESS`).
     pub fn menu() -> Veil {
-        Veil::navy(MENU_NAVY, MENU_K, MENU_SATURATION, MENU_GAIN)
+        Veil::navy(MENU_NAVY, MENU_K, MENU_SATURATION, MENU_GAIN).with_softness(MENU_SOFTNESS)
     }
 
-    /// `r,g,b,k`, `r,g,b,k,s` or `r,g,b,k,s,gain` (the navy as sRGB
-    /// bytes, how much of it is added, the colour kept and the
-    /// brightening, `MENU_SATURATION` and `MENU_GAIN` when left out), as
-    /// `H2LOBBY_VEIL` gives it; None if it doesn't read.
+    /// `r,g,b,k`, `r,g,b,k,s`, `r,g,b,k,s,gain` or
+    /// `r,g,b,k,s,gain,soft` (the navy as sRGB bytes, how much of it is
+    /// added, the colour kept, the brightening and the softness;
+    /// `MENU_SATURATION`, `MENU_GAIN` and `MENU_SOFTNESS` when left out),
+    /// as `H2LOBBY_VEIL` gives it; None if it doesn't read.
     pub fn parse(text: &str) -> Option<Veil> {
         let parts: Vec<&str> = text.split(',').map(str::trim).collect();
-        let (r, g, b, k, s, gain) = match parts.as_slice() {
-            [r, g, b, k] => (r, g, b, k, None, None),
-            [r, g, b, k, s] => (r, g, b, k, Some(s), None),
-            [r, g, b, k, s, gain] => (r, g, b, k, Some(s), Some(gain)),
+        let (r, g, b, k, s, gain, soft) = match parts.as_slice() {
+            [r, g, b, k] => (r, g, b, k, None, None, None),
+            [r, g, b, k, s] => (r, g, b, k, Some(s), None, None),
+            [r, g, b, k, s, gain] => (r, g, b, k, Some(s), Some(gain), None),
+            [r, g, b, k, s, gain, soft] => (r, g, b, k, Some(s), Some(gain), Some(soft)),
             _ => return None,
         };
         let byte = |s: &str| s.parse::<u8>().ok();
@@ -152,10 +171,17 @@ impl Veil {
             Some(g) => number(g)?,
             None => MENU_GAIN,
         };
-        Some(Veil::navy([byte(r)?, byte(g)?, byte(b)?], k, s, gain))
+        let soft = match soft {
+            Some(v) => number(v).filter(|v| *v <= MAX_SOFTNESS)?,
+            None => MENU_SOFTNESS,
+        };
+        let veil = Veil::navy([byte(r)?, byte(g)?, byte(b)?], k, s, gain);
+        Some(veil.with_softness(soft))
     }
 
-    /// A linear colour after the veil (the GPU's pass, on the CPU).
+    /// A linear colour after the veil's grade (the GPU's pass, on the
+    /// CPU; the blur, which mixes a pixel with its neighbours, is left
+    /// out, as it leaves an even colour as it is).
     pub fn apply(&self, linear: [f32; 3]) -> [f32; 3] {
         let grey = srgb_encode((0..3).map(|c| linear[c] * LUMA[c]).sum());
         let mut out = [0.0; 3];
@@ -172,19 +198,84 @@ impl Veil {
         self.apply(px.map(srgb_to_linear)).map(linear_to_srgb)
     }
 
-    /// The veil pass's uniform: the multiply with the saturation, then the
-    /// add with the gain.
-    fn uniform(&self) -> [f32; 8] {
+    /// The veil passes' uniform for a frame `h` high: the multiply with
+    /// the saturation, the add with the gain, then the blur's `Soft`
+    /// (its factor 0 when sharp).
+    fn uniform(&self, h: u32) -> [f32; 12] {
         let ([mr, mg, mb], [ar, ag, ab]) = (self.multiply, self.add);
-        [mr, mg, mb, self.saturation, ar, ag, ab, self.gain]
+        let (factor, step) =
+            Soft::plan(self.softness, h).map_or((0.0, 0.0), |s| (s.factor as f32, s.step));
+        [
+            mr,
+            mg,
+            mb,
+            self.saturation,
+            ar,
+            ag,
+            ab,
+            self.gain,
+            factor,
+            step,
+            0.0,
+            0.0,
+        ]
     }
 }
 
-/// The menus' navy, as sRGB bytes: the colour the owner's Cartographer
-/// screenshot clips at (an eighth of its upper half, the lit carrier,
-/// the lift's beam and the flak, is exactly it, and nothing is
-/// brighter), so white comes out as it. Its darker pixels are the same hue, scaled.
-pub const MENU_NAVY: [u8; 3] = [44, 55, 88];
+/// How the scene is blurred for a veil's softness: boxed down by
+/// `factor` (each texel of a small frame the mean of `factor` by `factor`
+/// pixels), blurred there by 5 by 5 taps with binomial weights `step`
+/// small texels apart, then stretched back over the frame with
+/// bilinear filtering. The factor is the power of two nearest the
+/// spread in pixels (2 to 64), so the taps are never more than about 1.3
+/// small texels apart (no gaps for thin lines to flicker through as the
+/// camera moves); the step makes the three steps' spreads add up to the
+/// one asked for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Soft {
+    factor: u32,
+    step: f32,
+}
+
+impl Soft {
+    /// The blur for `softness` (a fraction of the height) in a frame
+    /// `h` high; None when sharp.
+    fn plan(softness: f32, h: u32) -> Option<Soft> {
+        let spread = softness * h as f32;
+        if !spread.is_finite() || spread <= 0.0 {
+            return None;
+        }
+        let factor = 1u32 << (spread.log2().round().clamp(1.0, 6.0) as u32);
+        let f = factor as f32;
+        // Variances in pixels squared: the box's (f^2 - 1) / 12 and the
+        // bilinear stretch's (a tent f each way) f^2 / 6; the binomial
+        // taps' is the step squared (in pixels).
+        let rest = spread * spread - (f * f - 1.0) / 12.0 - f * f / 6.0;
+        Some(Soft {
+            factor,
+            step: rest.max(0.0).sqrt() / f,
+        })
+    }
+
+    /// The small frame's size for a `w` by `h` frame.
+    fn size(&self, w: u32, h: u32) -> (u32, u32) {
+        (w.div_ceil(self.factor), h.div_ceil(self.factor))
+    }
+}
+
+/// The menus' navy, as sRGB bytes: the brightest the scene comes out
+/// (white, and all that the gain takes past it); its darker pixels are
+/// the same hue, scaled. An estimate, in two steps. First (44, 55, 88),
+/// the colour the owner's Cartographer screenshot clips at. Then, after
+/// his PC check of Phase 2.5 against his original Xbox's main menu (a
+/// video), each channel was scaled so the top 30 % of the frame comes out
+/// as the Xbox's does: there, three frames' means were about (7, 15, 37),
+/// (7, 14, 33) and (12, 24, 51), deep navy with almost no red, and ours
+/// about three times the red and twice the green and brightness. Fitted
+/// in the container (lavapipe, Cartographer's mainmenu.map, the same
+/// frames at 1920x1080, `MENU_SOFTNESS` blur): our three average (9, 18,
+/// 41) against the Xbox's (9, 18, 40).
+pub const MENU_NAVY: [u8; 3] = [13, 26, 60];
 /// How much of the navy is added after the multiply: none (the
 /// screenshot's shadows go down to about (6, 6, 10)). An estimate.
 pub const MENU_K: f32 = 0.0;
@@ -198,8 +289,19 @@ pub const MENU_SATURATION: f32 = 0.0;
 /// screenshot's scene, away from the logo, the rows and the text: its
 /// mean is about (28, 35, 56) and 8 % of it is clipped at the navy; 20
 /// frames at 1280x720 came to (28, 35, 57) with 7 % clipped, and about
-/// the same spread of brightness.
+/// the same spread of brightness. Kept when the navy was refitted to the
+/// Xbox.
 pub const MENU_GAIN: f32 = 2.15;
+/// How soft the menus' scene is: a blur spreading about half a percent of
+/// the frame's height (5 pixels at 1080p). The Xbox's is soft and
+/// defocused, its shapes blurry silhouettes; at this the bridge rails,
+/// the hull's window lights and the buildings' outlines are gone and the
+/// shapes stay. An estimate, chosen by eye in the container.
+pub const MENU_SOFTNESS: f32 = 0.005;
+/// The softest veil there is: a blur of 2 % of the height (22 pixels at
+/// 1080p), as far as the blur's box (at most 64) keeps its taps close up
+/// to 4320 pixels high.
+pub const MAX_SOFTNESS: f32 = 0.02;
 
 /// Where the camera is and how it faces.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -537,7 +639,8 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
 "#;
 
 /// The veil: one triangle over the whole frame, each pixel of the scene
-/// read and graded (`Veil::apply`) on sRGB-encoded values, then decoded
+/// (or of its blurred small frame, stretched back over it, when the veil
+/// is soft) graded (`Veil::apply`) on sRGB-encoded values, then decoded
 /// for the sRGB target.
 const VEIL_SHADER: &str = r#"
 struct V {
@@ -545,9 +648,13 @@ struct V {
     multiply: vec4<f32>,
     // The add, and w: the gain.
     add: vec4<f32>,
+    // x: the blur's factor (0 when sharp), y: its taps' step.
+    soft: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> v: V;
 @group(0) @binding(1) var scene: texture_2d<f32>;
+@group(0) @binding(2) var blurred: texture_2d<f32>;
+@group(0) @binding(3) var clamped: sampler;
 
 fn encode(c: vec3<f32>) -> vec3<f32> {
     let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -570,13 +677,77 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
-    let c = textureLoad(scene, vec2<i32>(at.xy), 0).rgb;
+    var c: vec3<f32>;
+    if v.soft.x > 0.0 {
+        // The small frame covers its texels times the factor in pixels.
+        let covered = vec2<f32>(textureDimensions(blurred)) * v.soft.x;
+        c = textureSampleLevel(blurred, clamped, at.xy / covered, 0.0).rgb;
+    } else {
+        c = textureLoad(scene, vec2<i32>(at.xy), 0).rgb;
+    }
     let grey = encode(vec3<f32>(dot(c, vec3<f32>(0.2126, 0.7152, 0.0722))));
     let kept = grey + (encode(c) - grey) * v.multiply.w;
     let lit = clamp(kept * v.add.w, vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(decode(lit * v.multiply.rgb + v.add.rgb), 1.0);
 }
 "#;
+
+/// The soft veil's blur (`Soft`), in two passes into small frames of
+/// half-precision floats: `down` boxes the scene down by the factor, the
+/// mean of each texel's pixels from bilinear taps between two by two of
+/// them; `blur` then mixes each small texel with its neighbours, 5 by 5
+/// bilinear taps with binomial weights, the step apart.
+const SOFT_SHADER: &str = r#"
+struct V {
+    multiply: vec4<f32>,
+    add: vec4<f32>,
+    soft: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> v: V;
+@group(0) @binding(1) var source: texture_2d<f32>;
+@group(0) @binding(2) var clamped: sampler;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((i << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(i & 2u) * 2.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn down(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(source));
+    let pairs = u32(v.soft.x) / 2u;
+    let corner = floor(at.xy) * v.soft.x;
+    var sum = vec3<f32>(0.0);
+    for (var j = 0u; j < pairs; j++) {
+        for (var i = 0u; i < pairs; i++) {
+            let p = corner + vec2<f32>(f32(2u * i + 1u), f32(2u * j + 1u));
+            sum += textureSampleLevel(source, clamped, p / size, 0.0).rgb;
+        }
+    }
+    return vec4<f32>(sum / f32(max(pairs * pairs, 1u)), 1.0);
+}
+
+@fragment
+fn blur(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(source));
+    var weight = array<f32, 5>(1.0, 4.0, 6.0, 4.0, 1.0);
+    var sum = vec3<f32>(0.0);
+    for (var j = 0; j < 5; j++) {
+        for (var i = 0; i < 5; i++) {
+            let off = vec2<f32>(f32(i - 2), f32(j - 2)) * v.soft.y;
+            let c = textureSampleLevel(source, clamped, (at.xy + off) / size, 0.0).rgb;
+            sum += c * weight[i] * weight[j];
+        }
+    }
+    return vec4<f32>(sum / 256.0, 1.0);
+}
+"#;
+
+/// The small frames' format: half-precision floats, so the blur's
+/// gradients aren't stepped twice before the veil's grade.
+const SOFT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// A mesh on the GPU, and each batch's material bind group, index range
 /// and blending.
@@ -600,16 +771,25 @@ struct GpuScene {
     clear: [f32; 3],
 }
 
-/// The scene drawn into (`scene`, with its depth), the frame the veil
-/// makes of it (`color`), and where that is copied for reading.
+/// The scene drawn into (`scene`, with its depth), the small frames of
+/// a soft veil's blur, the frame the veil makes of it all (`color`), and
+/// where that is copied for reading.
 struct Target {
     w: u32,
     h: u32,
+    /// The soft veil's box factor (`Soft`), 0 when sharp.
+    factor: u32,
     scene: wgpu::TextureView,
     depth: wgpu::TextureView,
+    /// The scene boxed down, then blurred (one texel each when sharp).
+    small: wgpu::TextureView,
+    soft: wgpu::TextureView,
+    /// The blur's passes' uniform and sources: the scene, then `small`.
+    down: wgpu::BindGroup,
+    blur: wgpu::BindGroup,
     color: wgpu::Texture,
     view: wgpu::TextureView,
-    /// The veil's uniform and the scene, for its pass.
+    /// The veil's uniform, the scene and `soft`, for its pass.
     veil: wgpu::BindGroup,
     readback: wgpu::Buffer,
 }
@@ -629,11 +809,17 @@ pub struct Renderer {
     sky: wgpu::RenderPipeline,
     sky_alpha: wgpu::RenderPipeline,
     veil_pipeline: wgpu::RenderPipeline,
+    down_pipeline: wgpu::RenderPipeline,
+    blur_pipeline: wgpu::RenderPipeline,
     globals_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
     veil_layout: wgpu::BindGroupLayout,
+    soft_layout: wgpu::BindGroupLayout,
     repeat: wgpu::Sampler,
     clamp: wgpu::Sampler,
+    /// The veil, and its passes' uniform (written each frame, as the
+    /// blur's step depends on the frame's height).
+    veil: Veil,
     veil_buffer: wgpu::Buffer,
     /// Draw uniforms, a `SLOT` each, and their bind group.
     uniforms: Option<(wgpu::Buffer, wgpu::BindGroup, u64)>,
@@ -764,16 +950,17 @@ impl Renderer {
             label: Some("veil"),
             entries: &[
                 uniform_entry(0, false, None),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                texture_entry(1),
+                texture_entry(2),
+                sampler_entry(3),
+            ],
+        });
+        let soft_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("soft"),
+            entries: &[
+                uniform_entry(0, false, None),
+                texture_entry(1),
+                sampler_entry(2),
             ],
         });
         let repeat = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -806,6 +993,7 @@ impl Renderer {
         };
         let mesh_shader = module("mesh", MESH_SHADER);
         let veil_shader = module("veil", VEIL_SHADER);
+        let soft_shader = module("soft", SOFT_SHADER);
 
         let opaque_target = [Some(wgpu::ColorTargetState::from(SCENE_FORMAT))];
         let alpha_target = [Some(wgpu::ColorTargetState {
@@ -901,9 +1089,39 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let soft_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("soft"),
+            bind_group_layouts: &[Some(&soft_layout)],
+            immediate_size: 0,
+        });
+        let soft_pipeline = |label, entry| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&soft_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &soft_shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &soft_shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState::from(SOFT_FORMAT))],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let down_pipeline = soft_pipeline("soft down", "down");
+        let blur_pipeline = soft_pipeline("soft blur", "blur");
         let veil_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("veil"),
-            contents: bytemuck::bytes_of(&veil.uniform()),
+            contents: bytemuck::bytes_of(&veil.uniform(0)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let r = Renderer {
@@ -918,11 +1136,15 @@ impl Renderer {
             sky,
             sky_alpha,
             veil_pipeline,
+            down_pipeline,
+            blur_pipeline,
             globals_layout,
             material_layout,
             veil_layout,
+            soft_layout,
             repeat,
             clamp,
+            veil,
             veil_buffer,
             uniforms: None,
             staging: Vec::new(),
@@ -949,8 +1171,7 @@ impl Renderer {
 
     /// The veil for the frames from now on.
     pub fn set_veil(&mut self, veil: Veil) {
-        self.queue
-            .write_buffer(&self.veil_buffer, 0, bytemuck::bytes_of(&veil.uniform()));
+        self.veil = veil;
     }
 
     /// An error the device reported since, if any.
@@ -1150,9 +1371,13 @@ impl Renderer {
         texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    /// The frame, its depth and its read-back buffer at `w` by `h`.
+    /// The frame, its depth, the veil's small frames (for its blur at
+    /// this height) and its read-back buffer at `w` by `h`.
     fn target(&mut self, w: u32, h: u32) -> Result<&Target, String> {
-        if self.target.as_ref().is_some_and(|t| (t.w, t.h) == (w, h)) {
+        let soft = Soft::plan(self.veil.softness, h);
+        let factor = soft.map_or(0, |s| s.factor);
+        let same = |t: &Target| (t.w, t.h, t.factor) == (w, h, factor);
+        if self.target.as_ref().is_some_and(same) {
             return self.target.as_ref().ok_or_else(String::new);
         }
         let max = self.device.limits().max_texture_dimension_2d;
@@ -1209,6 +1434,50 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let (sw, sh) = soft.map_or((1, 1), |s| s.size(w, h));
+        let small_frame = |label| {
+            self.device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: sw,
+                        height: sh,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: SOFT_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let small = small_frame("menu scene boxed down");
+        let blurred = small_frame("menu scene blurred");
+        let soft_group = |label, source: &wgpu::TextureView| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &self.soft_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.veil_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(source),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.clamp),
+                    },
+                ],
+            })
+        };
+        let down = soft_group("soft down", &scene);
+        let blur = soft_group("soft blur", &small);
         let veil = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("veil"),
             layout: &self.veil_layout,
@@ -1221,13 +1490,26 @@ impl Renderer {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&scene),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&blurred),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.clamp),
+                },
             ],
         });
         self.target = Some(Target {
             w,
             h,
+            factor,
             scene,
             depth,
+            small,
+            soft: blurred,
+            down,
+            blur,
             color,
             view,
             veil,
@@ -1299,6 +1581,9 @@ impl Renderer {
             return Err("no uniforms".into());
         };
         self.queue.write_buffer(buffer, 0, &self.staging);
+        let veil = self.veil.uniform(h);
+        self.queue
+            .write_buffer(&self.veil_buffer, 0, bytemuck::bytes_of(&veil));
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -1371,6 +1656,31 @@ impl Renderer {
                 &meshes,
                 (&self.opaque, &self.alpha),
             );
+        }
+        // A soft veil's blur: the scene boxed down into `small`, then
+        // blurred into `soft`.
+        if t.factor > 0 {
+            for (label, pipeline, group, into) in [
+                ("soft down", &self.down_pipeline, &t.down, &t.small),
+                ("soft blur", &self.blur_pipeline, &t.blur, &t.soft),
+            ] {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: into,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
         // The veil over it all, into the frame read back.
         {
@@ -1654,10 +1964,11 @@ mod tests {
     }
 
     #[test]
-    fn veils_read_from_four_five_or_six_numbers() {
+    fn veils_read_from_four_to_seven_numbers() {
+        let soft = |v: Veil| Some(v.with_softness(MENU_SOFTNESS));
         assert_eq!(
             Veil::parse("100, 120,200,0.25"),
-            Some(Veil::navy(
+            soft(Veil::navy(
                 [100, 120, 200],
                 0.25,
                 MENU_SATURATION,
@@ -1666,20 +1977,32 @@ mod tests {
         );
         assert_eq!(
             Veil::parse("100,120,200,0.25,0.5"),
-            Some(Veil::navy([100, 120, 200], 0.25, 0.5, MENU_GAIN))
+            soft(Veil::navy([100, 120, 200], 0.25, 0.5, MENU_GAIN))
         );
         assert_eq!(
             Veil::parse("44,55,88,0,0,3"),
-            Some(Veil::navy([44, 55, 88], 0.0, 0.0, 3.0))
+            soft(Veil::navy([44, 55, 88], 0.0, 0.0, 3.0))
         );
         assert_eq!(
             Veil::parse("0,0,0,0"),
-            Some(Veil::navy([0; 3], 0.0, MENU_SATURATION, MENU_GAIN))
+            soft(Veil::navy([0; 3], 0.0, MENU_SATURATION, MENU_GAIN))
+        );
+        // The seventh, the softness: 0 is sharp.
+        assert_eq!(
+            Veil::parse("13,26,60,0,0,2.15,0.01"),
+            Some(Veil::navy([13, 26, 60], 0.0, 0.0, 2.15).with_softness(0.01))
+        );
+        assert_eq!(
+            Veil::parse("13,26,60,0,0,2.15,0"),
+            Some(Veil::navy([13, 26, 60], 0.0, 0.0, 2.15))
         );
         for bad in [
             "",
             "1,2,3",
             "1,2,3,4,5,6,7",
+            "1,2,3,4,1,2,0.5",
+            "1,2,3,4,1,2,-0.01",
+            "1,2,3,4,1,2,0.01,4",
             "1,2,3,4,1.5",
             "1,2,3,4,1,-2",
             "1,2,3,4,1,inf",
@@ -1693,8 +2016,62 @@ mod tests {
         // The menus' is the estimate.
         assert_eq!(
             Veil::menu(),
-            Veil::navy(MENU_NAVY, MENU_K, MENU_SATURATION, MENU_GAIN)
+            Veil::navy(MENU_NAVY, MENU_K, MENU_SATURATION, MENU_GAIN).with_softness(MENU_SOFTNESS)
         );
+        // Softness is kept to what the blur does.
+        assert_eq!(Veil::NONE.with_softness(-1.0).softness, 0.0);
+        assert_eq!(Veil::NONE.with_softness(f32::NAN).softness, 0.0);
+        assert_eq!(Veil::NONE.with_softness(1.0).softness, MAX_SOFTNESS);
+    }
+
+    #[test]
+    fn a_soft_veils_blur_spreads_as_asked_at_every_size() {
+        // Sharp: no blur, and the uniform says so.
+        assert_eq!(Soft::plan(0.0, 1080), None);
+        assert_eq!(Soft::plan(0.005, 0), None);
+        assert_eq!(Soft::plan(f32::NAN, 1080), None);
+        assert_eq!(Soft::plan(f32::INFINITY, 1080), None);
+        assert_eq!(Veil::NONE.uniform(1080)[8..], [0.0; 4]);
+        assert_eq!(Veil::menu().uniform(0)[8], 0.0);
+        let mut factors = Vec::new();
+        for h in [90u32, 360, 720, 900, 1080, 1351, 1440, 2160, 4320] {
+            for softness in [MENU_SOFTNESS, 0.01, MAX_SOFTNESS] {
+                let plan = Soft::plan(softness, h).unwrap();
+                let (f, spread) = (plan.factor as f32, softness * h as f32);
+                // A power of two from 2 to 64, near the spread.
+                assert!(plan.factor.is_power_of_two(), "{h} {softness}: {plan:?}");
+                assert!((2..=64).contains(&plan.factor), "{h} {softness}: {plan:?}");
+                // The taps never more than a texel and a half apart.
+                assert!(plan.step <= 1.5, "{h} {softness}: {plan:?}");
+                // The box, the stretch and the taps add up to the spread
+                // asked for (unless the box and stretch alone are more).
+                let total = (f * f - 1.0) / 12.0 + f * f / 6.0 + (plan.step * f).powi(2);
+                if plan.step > 0.0 {
+                    let got = total.sqrt();
+                    assert!(
+                        (got - spread).abs() < 0.01 * spread,
+                        "{h} {softness}: {got}"
+                    );
+                }
+                // The small frame covers the frame.
+                let (sw, sh) = plan.size(1920, h);
+                assert!(sw * plan.factor >= 1920 && sh * plan.factor >= h);
+                assert!((sw - 1) * plan.factor < 1920 && (sh - 1) * plan.factor < h);
+                // And the uniform carries it.
+                let u = Veil::NONE.with_softness(softness).uniform(h);
+                assert_eq!((u[8], u[9]), (f, plan.step));
+                if softness == MENU_SOFTNESS {
+                    factors.push(plan.factor);
+                }
+            }
+        }
+        // The menus' at 90 to 4320 pixels high: boxed more as frames grow.
+        assert_eq!(factors, [2, 2, 4, 4, 4, 8, 8, 8, 16]);
+        assert!(factors.windows(2).all(|w| w[0] <= w[1]));
+        // At 1080p a spread of 5.4 pixels: boxed by 4, taps 1.26 apart.
+        let at1080 = Soft::plan(MENU_SOFTNESS, 1080).unwrap();
+        assert_eq!(at1080.factor, 4);
+        assert!((at1080.step - 1.256).abs() < 0.01, "{at1080:?}");
     }
 
     #[test]
@@ -1763,15 +2140,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_textured_square_and_the_sky_draw_through_the_real_pipelines() {
-        let Some(mut r) = gpu(Veil::NONE) else {
-            return;
-        };
-        // The sky: a wide red square far off, unlit. The level: a small
-        // green square in front of it, lit by its vertices at exactly
-        // 1 (2.2 power, times the lightmaps' 4.59). Around them the clear
-        // colour, a dark grey.
+    /// Uploads the squares' scene: the sky, a wide red square far off,
+    /// unlit; the level, a small green square in front of it, lit by its
+    /// vertices at exactly 1 (2.2 power, times the lightmaps' 4.59);
+    /// around them the clear colour, a dark grey. The eye looks at them.
+    fn upload_squares(r: &mut Renderer) -> Eye {
         let unit = (1.0f32 / 4.59).powf(1.0 / 2.2);
         let sky = square(100.0, 60.0, [1.0; 4]);
         let level = square(10.0, 2.0, [unit, unit, unit, 0.0]);
@@ -1801,16 +2174,35 @@ mod tests {
             materials: &materials,
         };
         r.upload(parts).unwrap();
-        let eye = Eye {
+        Eye {
             at: Vec3::ZERO,
             forward: Vec3::X,
             up: Vec3::Z,
+        }
+    }
+
+    /// An sRGB pixel's bytes.
+    fn rgb(p: u32) -> [u8; 3] {
+        [(p >> 16) as u8, (p >> 8) as u8, p as u8]
+    }
+
+    /// The level's square's right edge in a 16:9 frame `w` wide (2
+    /// units across at 10, 70 degrees across).
+    fn square_edge(w: u32) -> f32 {
+        let half = w as f32 / 2.0;
+        half + (2.0 / 10.0) / (FOV.to_radians() * 0.5).tan() * half
+    }
+
+    #[test]
+    fn a_textured_square_and_the_sky_draw_through_the_real_pipelines() {
+        let Some(mut r) = gpu(Veil::NONE) else {
+            return;
         };
+        let eye = upload_squares(&mut r);
         let (w, h) = (160u32, 90u32);
         let frame = r.render(w, h, eye).unwrap();
         assert_eq!(frame.px.len(), (w * h) as usize);
         let at = |x: u32, y: u32| frame.px[(y * w + x) as usize];
-        let rgb = |p: u32| [(p >> 16) as u8, (p >> 8) as u8, p as u8];
         let near = |p: u32, want: [u8; 3]| {
             let got = rgb(p);
             (0..3).all(|c| got[c].abs_diff(want[c]) <= 2)
@@ -1825,9 +2217,8 @@ mod tests {
         assert!(near(at(0, 0), [grey; 3]), "{:06x}", at(0, 0));
         assert!(near(at(w - 1, h - 1), [grey; 3]));
         // The square sits in the middle: its edges are where the lens
-        // puts them (2 units across at 10, 70 degrees across 16:9).
-        let half = (2.0 / 10.0) / (FOV.to_radians() * 0.5).tan() * (w as f32 / 2.0);
-        let edge = (80.0 + half) as u32;
+        // puts them.
+        let edge = square_edge(w) as u32;
         assert!(near(at(edge - 2, 45), [0, 200, 0]));
         assert!(near(at(edge + 2, 45), [220, 0, 0]));
 
@@ -1849,6 +2240,42 @@ mod tests {
         let small = r.render(64, 36, eye).unwrap();
         assert_eq!(small.px.len(), 64 * 36);
         assert!(near(small.px[18 * 64 + 32], veil.apply_srgb([0, 200, 0])));
+    }
+
+    #[test]
+    fn a_soft_veil_blurs_edges_and_keeps_even_colours() {
+        let Some(mut r) = gpu(Veil::NONE.with_softness(MAX_SOFTNESS)) else {
+            return;
+        };
+        let eye = upload_squares(&mut r);
+        // A spread of 7.2 pixels in a frame 360 high: boxed by 8, then
+        // taps under a small texel apart.
+        let (w, h) = (640u32, 360u32);
+        let plan = Soft::plan(MAX_SOFTNESS, h).unwrap();
+        assert_eq!(plan.factor, 8);
+        let frame = r.render(w, h, eye).unwrap();
+        let at = |x: u32| rgb(frame.px[(180 * w + x) as usize]);
+        let green = |x: u32| at(x)[1];
+        // The square's middle, far from its edges, is its colour still.
+        let middle = at(320);
+        assert!(
+            middle[0] <= 2 && middle[1].abs_diff(200) <= 2 && middle[2] <= 2,
+            "{middle:?}"
+        );
+        // Its right edge, sharp from green to red, now a ramp: green
+        // falling and red rising over several pixels each way.
+        let edge = square_edge(w) as u32;
+        let ramp: Vec<u8> = (edge - 14..=edge + 14).map(green).collect();
+        assert!(ramp.windows(2).all(|p| p[1] <= p[0] + 1), "{ramp:?}");
+        assert!(green(edge - 14) > 150 && green(edge + 14) < 120, "{ramp:?}");
+        assert!((40..190).contains(&green(edge + 3)), "{ramp:?}");
+        assert!(at(edge - 3)[0] > 20 && at(edge + 3)[0] < 215, "{ramp:?}");
+        // Sharp again: the edge a step, the small frames made afresh.
+        r.set_veil(Veil::NONE);
+        let sharp = r.render(w, h, eye).unwrap();
+        let at = |x: u32| rgb(sharp.px[(180 * w + x) as usize]);
+        assert!(at(edge - 2)[1].abs_diff(200) <= 2 && at(edge - 2)[0] <= 2);
+        assert!(at(edge + 2)[0].abs_diff(220) <= 2 && at(edge + 2)[1] <= 2);
     }
 
     /// The real scene from `H2_MAPS` (Halo 2 Vista's mainmenu.map) at 10,
