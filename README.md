@@ -49,13 +49,15 @@ install. No game files are included in this repository.
   widen, even teams, map choice and host choice).
 - `h2launch`: the launcher (Windows only, work in progress) that starts MCC's
   own classic Halo 2 engine from your Master Chief Collection install,
-  without running MCC. Double-click it and it opens on Halo 2's start
-  screen, as on the Xbox: press A or Start (Enter or Space on a keyboard,
-  or click) for the main menu, which has ONLINE and SETTINGS (up and
-  down to pick, A to choose, B to go back). Its pictures and fonts are
-  read from your Halo 2 Vista (Project Cartographer) folder if the
-  launcher finds one, otherwise from MCC's own Halo 2 files; without
-  either the menus are plain shapes. It looks for Cartographer in
+  without running MCC. Double-click it and, as on the Xbox, it plays Halo
+  2's intro movie (when it finds Cartographer's `movie` folder; see
+  below), then opens on Halo 2's start screen: press A or Start (Enter
+  or Space on a keyboard, or click) for the main menu, which has ONLINE
+  and SETTINGS (up and down to pick, A to choose, B to go back). Its
+  pictures and fonts are read from your Halo 2 Vista (Project
+  Cartographer) folder if the launcher finds one, otherwise from MCC's
+  own Halo 2 files; without either the menus are plain shapes. It looks
+  for Cartographer in
   `C:\Games\Halo 2 Project Cartographer` and in Halo 2 Vista's usual
   folders under Program Files; if yours is somewhere else, add the line
   `vista = <folder>` (the Cartographer folder or its `maps` folder) to
@@ -80,10 +82,12 @@ install. No game files are included in this repository.
   `H2LOBBY_SOUND=off`), before the start screen, as the Xbox did each
   time it started: any button (A, B, X, Y, the bumpers, the triggers,
   Start, Back, Enter, Esc, Space or a letter) or a click skips it, but
-  not the stick, the d-pad or the arrow keys. At its end, or when
-  skipped, the start screen comes in and its music starts. It plays at
-  every start; `intro = off` in `lobby.txt` (or `H2LOBBY_INTRO=off`) goes
-  straight to the start screen. On Windows N without the Media Feature
+  not the stick, the d-pad or the arrow keys (a key held down skips only
+  the movie: in the menus only the arrows and typing repeat while held,
+  as only directions did in Halo 2). At its end, or when skipped, the
+  start screen comes in and its music starts. It plays at every start;
+  `intro = off` in `lobby.txt` (or `H2LOBBY_INTRO=off`) goes straight to
+  the start screen. On Windows N without the Media Feature
   Pack it can't be played, and the start screen comes at once (the
   launcher itself still starts). ONLINE
   takes you to its lobby: pick a gamertag the first time (after that it

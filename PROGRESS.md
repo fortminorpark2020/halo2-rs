@@ -188,8 +188,12 @@ Next, in order:
    picture at 25 ms at 1920x1080 by itself) and the end line's late
    count. On a Windows N PC without the Media Feature Pack, if one is
    at hand: the launcher starts, and the log says `intro: Media
-   Foundation isn't installed (...); skipped`. Next: 2.4, the menu
-   scene as data.
+   Foundation isn't installed (...); skipped`. Review fixes, round 2
+   (2026-10-12): a key held down repeats in the lobby only as a
+   direction or typing (`App::key_repeated`), so Enter held to skip the
+   intro no longer goes on to the main menu and signs in; the README
+   says the launcher opens on the intro; menu.md now has the full P3
+   list ("On the owner's PC (P3)"). Next: 2.4, the menu scene as data.
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

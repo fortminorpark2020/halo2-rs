@@ -1171,8 +1171,10 @@ Halo 2's menu music and sounds, from Cartographer's files (section 5).
   then advance, and with X, Y or a bumper advance alone; the playlists
   after signing in, a failure screen, the pregame lobby and the carnage
   report advance as they open;
-- holding Esc on the start screen (the quit popup opening and closing
-  with each repeat) never stops the music;
+- holding Esc on the start screen never stops the music (when P2 was
+  written the quit popup opened and closed with each of Windows'
+  repeats; since 2.3's review round 2 a held key's repeats are dropped
+  for every button, so it opens once and stays);
 - a friend request to us sounds as a message;
 - silence through a match (nothing of the menu music playing on after
   it, even when the match started within 6 s of the music starting), and
@@ -1328,7 +1330,55 @@ Halo 2's intro movie before the start screen, from Cartographer's
   width) through `App`, the mix at the tags' gains with nothing taken
   off, and a sound's own and class decibels (`sound_db`); the stall
   test waits for the last picture before moving the clock.
+- **Review fixes (round 2).** A key held down no longer goes on past
+  what it pressed. The window passed Windows' repeats of a held key
+  (`KeyEvent::repeat`) as presses, so Enter held about 0.6 s to skip
+  the intro went on to the main menu, then picked ONLINE and signed in
+  (with three menu sounds), and a held Esc opened and shut the Quit
+  popup with each repeat. Halo 2 sends a button only on its first frame
+  down and repeats only directions, every 250 ms
+  (`docs/notes/decomp/controller.md` section 7; the pad already behaved
+  so, as gilrs never repeats a button). Now `window.rs` sends repeats to
+  `App::key_repeated`, which drops A, B, LB and RB (Enter, Esc, PageUp,
+  PageDown) and, outside a field (`App::typing`: the sign-in form, the
+  Add Friend popup), the letters, Space and Backspace; the arrows, Tab
+  and typing in a field still repeat. `launcher-accounts` has the same
+  function; merged, it keeps that branch's popups in `typing` (its
+  password and new-account fields) and this one's LB and RB, which are
+  buttons (Halo 2's White and Black) and open screens. Test: a key held
+  to skip the intro leaves the start screen showing, with no popup and
+  no cue; on the main menu the arrows repeat and the buttons don't; in
+  the sign-in form letters and Backspace repeat. The README and the
+  launcher README now say it opens on the intro movie first.
 - Not here: the attract movie after idling, the credits, the scene.
+
+**On the owner's PC (P3)**, with Cartographer's `movie` folder found
+(`C:\Games\Halo 2 Project Cartographer\movie`):
+
+1. The intro plays with its sound, louder than the menu music, and
+   `lobby.log` has `intro: playing intro_60.wmv (<W>x<H> window)`
+   (`intro_low_60.wmv` in a window under 720 pixels tall) and `sound:
+   the intro's soundtrack, <n> s (gain 1.00)`.
+2. After a second or two, A skips it: the log has `intro: skipped at
+   <t> s`, no select or advance sound plays, the start screen comes in
+   and its music starts. The d-pad, the stick, the arrows and Tab don't
+   skip it; B, X, Y, the bumpers, the triggers, Enter, Esc, Space, a
+   letter and a click do. Holding Enter (or Esc) for a second or more
+   to skip it leaves the start screen showing, with no Quit popup.
+3. Left to play out, the log has `intro: played to the end (<t> s, <n>
+   pictures, <k> late ones passed over)`; a small late count is fine.
+4. After 30 new pictures the log has `lobby: 1920x1080, intro <n> ms a
+   frame on the CPU` (the container measured about 25 ms for one picture
+   at 1920x1080).
+5. With `H2LOBBY_INTRO=off` the log has `intro: none (H2LOBBY_INTRO=off);
+   the lobby opens on the start screen`; with `H2LOBBY_VISTA=off`,
+   `intro: none (no intro movie: no Halo 2 Vista folder); the lobby
+   opens on the start screen`; with `intro = off` in `lobby.txt`,
+   `intro: none (intro = off in lobby.txt); ...`. Each opens on the
+   start screen with its music.
+6. On a Windows N PC without the Media Feature Pack, if one is at hand:
+   the launcher still starts, and the log says `intro: Media Foundation
+   isn't installed (...); skipped`.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 

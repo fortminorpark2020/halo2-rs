@@ -122,7 +122,11 @@ the launcher doesn't do.
   player's) and RB the friends list. Where a gamertag is typed (the
   sign-in screen, the add friend popup) letters are typed, not buttons,
   and Backspace rubs one out. W A S D don't move the selection: A is a
-  button.
+  button. A key held down repeats (Windows' repeats, `App::key_repeated`)
+  only where it is a direction or typing: the arrows, Tab, and letters
+  and Backspace in a field; Enter, Esc, Page Up, Page Down and the
+  letters that are buttons act once per press, as Halo 2 repeats only
+  directions, so a key held to skip the intro skips only the movie.
 - While the engine plays (the in-game screen), the lobby ignores the
   controller, the letter keys, and Enter, Esc and Backspace (A and B) on
   that screen and in its Leave Game popup: its window may still be in

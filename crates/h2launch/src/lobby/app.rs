@@ -1871,6 +1871,23 @@ impl App {
         self.input(i)
     }
 
+    /// A key the window repeats while it's held down: the arrows and
+    /// typing repeat, but not a press that is a button (Enter, Esc,
+    /// PageUp and PageDown, or a letter or Backspace outside a field), as
+    /// Halo 2 repeats only directions. So a key held to skip the intro
+    /// skips only the movie, and a key held past a popup opening never
+    /// answers it.
+    pub fn key_repeated(&mut self, i: Input) {
+        let button = match i {
+            Input::A | Input::B | Input::Lb | Input::Rb => true,
+            Input::Backspace | Input::Char(_) => !self.typing(),
+            _ => false,
+        };
+        if !button {
+            self.key(i);
+        }
+    }
+
     /// A key that belongs to the game rather than the lobby: on the
     /// in-game screen the letters are the game's keys typed into the
     /// wrong window (Space jumps there, and is A here), and while the
@@ -1908,8 +1925,7 @@ impl App {
         }
         // Letters are buttons, except where a name is typed; Backspace is
         // B where it doesn't rub a letter out.
-        let typing = (self.screen == Screen::SignIn && self.popup.is_none())
-            || self.popup == Some(Popup::AddFriend);
+        let typing = self.typing();
         let i = match i {
             Input::Char(c) if !typing => match c.to_ascii_lowercase() {
                 'a' | ' ' => Input::A,
@@ -1995,6 +2011,16 @@ impl App {
                 Input::B => self.screen = Screen::Main,
                 _ => {}
             },
+        }
+    }
+
+    /// Text is typed where the screen or popup has a field with the
+    /// cursor: there letters aren't buttons, and Backspace rubs out.
+    fn typing(&self) -> bool {
+        match self.popup {
+            None => self.screen == Screen::SignIn,
+            Some(Popup::AddFriend) => true,
+            Some(_) => false,
         }
     }
 
@@ -7268,6 +7294,73 @@ mod tests {
         assert_eq!(a.label(), "start");
         assert!(a.music_on());
         assert_eq!(a.frame_interval(), FRAME);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_key_held_to_skip_the_intro_skips_only_the_movie() {
+        // Windows repeats a held key; Halo 2 repeats only directions, so
+        // the repeats of a key that is a button do nothing: Enter held
+        // through the intro leaves the start screen showing rather than
+        // going on to the main menu and signing in, and Esc held doesn't
+        // open and shut the Quit popup.
+        let dir = scratch("intro-held");
+        let buttons = [
+            Input::A,
+            Input::B,
+            Input::Lb,
+            Input::Rb,
+            Input::Backspace,
+            Input::Char(' '),
+            Input::Char('a'),
+            Input::Char('b'),
+            Input::Char('q'),
+            Input::Char('e'),
+        ];
+        for held in buttons {
+            let (mut a, _) = intro_app(&dir, intro::FakeSource::second());
+            let t0 = Instant::now();
+            a.tick(t0);
+            a.draw(&mut Canvas::new(64, 36), &mut Text::none());
+            tick_until(&mut a, t0, |a| intro_red(a).is_some());
+            a.key(held);
+            assert_eq!(a.label(), "start", "{held:?}");
+            a.take_sound();
+            for _ in 0..5 {
+                a.key_repeated(held);
+            }
+            assert_eq!(a.label(), "start", "{held:?}");
+            assert_eq!(a.popup, None, "{held:?}");
+            assert!(a.take_cues().is_empty(), "{held:?}");
+        }
+        // On the main menu the arrows still repeat, and the buttons don't.
+        let mut a = app(&dir);
+        a.key(Input::A);
+        assert_eq!(a.label(), "main");
+        let row = a.main_focus.item;
+        a.key_repeated(Input::Down);
+        assert_eq!(a.main_focus.item, row + 1);
+        a.key_repeated(Input::Up);
+        assert_eq!(a.main_focus.item, row);
+        a.take_cues();
+        for held in buttons {
+            a.key_repeated(held);
+            assert_eq!(a.label(), "main", "{held:?}");
+            assert_eq!(a.main_focus.item, row, "{held:?}");
+        }
+        assert!(a.take_cues().is_empty());
+        // Where a name is typed, the letters and Backspace repeat.
+        a.key(Input::A);
+        assert_eq!(a.label(), "signin");
+        a.field = 0;
+        for c in "kab".chars() {
+            a.key_repeated(Input::Char(c));
+        }
+        assert_eq!(a.fields[0], "KAB");
+        a.key_repeated(Input::Backspace);
+        assert_eq!(a.fields[0], "KA");
+        a.key_repeated(Input::A);
+        assert_eq!(a.label(), "signin");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
