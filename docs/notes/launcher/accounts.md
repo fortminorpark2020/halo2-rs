@@ -771,6 +771,9 @@ hand.
 
 None of the tests need the internet or game files.
 
+The check on the owner's PC, against a local server, is
+[accounts-pc-test.md](accounts-pc-test.md).
+
 - **h2net:** every message round-trips, every kind has its own number,
   bad lengths and too many rows are errors, and a sealed box's Debug shows
   only its length.
