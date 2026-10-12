@@ -202,6 +202,21 @@ mod tests {
     /// -50) with 4 rows showing, and whose skin fades its rows in over
     /// 300 ms. It has no start screen and no shell background.
     fn mainmenu(dat: &mut TexturesDat) -> MapBuilder {
+        menus(dat, false)
+    }
+
+    /// The made-up scrolling strip of `mainmenu_with_shell`.
+    const STRIP: &str = "ui\\test\\strip";
+
+    /// `mainmenu`, and a shell background (`tags::BACKGROUND`) of the
+    /// framing at its place (its 4 pixels a side scaled to cover the
+    /// window) and one strip scrolling 0.08 of its width a second, both
+    /// with pictures in textures.dat.
+    fn mainmenu_with_shell(dat: &mut TexturesDat) -> MapBuilder {
+        menus(dat, true)
+    }
+
+    fn menus(dat: &mut TexturesDat, shell: bool) -> MapBuilder {
         let bgra: Vec<u8> = [LOGO_RGB[2], LOGO_RGB[1], LOGO_RGB[0], 255].repeat(16);
         let logo = dat.push_record(4, 4, Format::A8R8G8B8, &bgra, 1, mcc::RecordLayout::Single);
         // Animations are numbered from 1 in the tags (0 is none).
@@ -254,20 +269,51 @@ mod tests {
         for o in [0x90, 0x98, 0xA0, 0xA8, 0xB0, 0x140, 0x1B8] {
             globals = globals.tag_ref(o, "snd!", "");
         }
+        let mut screens = vec![Struct::new(TAG_REF).tag_ref(0, "wgit", tags::MAIN_MENU)];
+        if shell {
+            screens.push(Struct::new(TAG_REF).tag_ref(0, "wgit", tags::BACKGROUND));
+        }
         let wgtz = Struct::new(0x20)
             .tag_ref(0, "wigl", "ui\\ui_shared_globals")
-            .block(
-                WGTZ_SCREENS,
-                vec![Struct::new(TAG_REF).tag_ref(0, "wgit", tags::MAIN_MENU)],
-            )
+            .block(WGTZ_SCREENS, screens)
             .tag_ref(0x10, "goof", "")
             .tag_ref(0x18, "unic", "");
-        MapBuilder::new(256)
+        let map = MapBuilder::new(256)
             .tag("bitm", crate::layout::LOGO, Meta::Bitmaps(vec![logo]))
             .tag("wgit", tags::MAIN_MENU, Meta::Struct(main_menu))
             .tag("skin", crate::layout::MAIN_MENU_SKIN, Meta::Struct(skin))
             .tag("wigl", "ui\\ui_shared_globals", Meta::Struct(globals))
-            .tag("wgtz", "ui\\main_menu", Meta::Struct(wgtz))
+            .tag("wgtz", "ui\\main_menu", Meta::Struct(wgtz));
+        if !shell {
+            return map;
+        }
+        let mut picture = |v: u8| {
+            let bgra = [v, v / 2, v / 4, 255].repeat(16);
+            dat.push_record(4, 4, Format::A8R8G8B8, &bgra, 1, mcc::RecordLayout::Single)
+        };
+        let (framing, strip) = (picture(200), picture(120));
+        let framing_widget = Struct::new(BITMAP_SIZE)
+            .i16(0xC, -1070)
+            .i16(0xE, 654)
+            .tag_ref(0x18, "bitm", crate::layout::FRAMING)
+            .i16(0x20, 10)
+            .f32(0x30, 600.0)
+            .f32(0x34, 600.0);
+        let strip_widget = Struct::new(BITMAP_SIZE)
+            .i16(0xC, -200)
+            .i16(0xE, 136)
+            .f32(0x10, 0.08)
+            .tag_ref(0x18, "bitm", STRIP)
+            .i16(0x20, 11)
+            .f32(0x30, 1.1)
+            .f32(0x34, 1.1);
+        let pane = Struct::new(PANE_SIZE).block(PANE_BITMAPS, vec![framing_widget, strip_widget]);
+        let background = Struct::new(WGIT_SIZE)
+            .tag_ref(0x18, "unic", "")
+            .block(WGIT_PANES, vec![pane]);
+        map.tag("bitm", crate::layout::FRAMING, Meta::Bitmaps(vec![framing]))
+            .tag("bitm", STRIP, Meta::Bitmaps(vec![strip]))
+            .tag("wgit", tags::BACKGROUND, Meta::Struct(background))
     }
 
     /// A fresh folder for files a test writes.
@@ -381,6 +427,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_shell_chrome_comes_from_the_maps_background_with_its_pictures() {
+        let dir = folder("chrome");
+        let mut dat = TexturesDat::default();
+        let map = mainmenu_with_shell(&mut dat).build();
+        std::fs::write(dir.join("mainmenu.map"), map).unwrap();
+        std::fs::write(dir.join("textures.dat"), &dat.bytes).unwrap();
+        let (shell, log) = open(&dir);
+        // Kept from the second pass: the framing still, the strip moving.
+        let c = &shell.chrome;
+        assert_eq!((c.still.len(), c.moving.len()), (1, 1), "{log:?}");
+        assert_eq!(c.still[0].name, crate::layout::FRAMING);
+        assert_eq!(c.moving[0].name, STRIP);
+        assert_eq!(c.moving[0].wraps_per_second, [0.08, 0.0]);
+        assert_eq!(c.moving[0].corner, [-200.0, 136.0]);
+        let from = format!(
+            "the shell's pictures from wgit {}: 1 still, 1 scrolling",
+            tags::BACKGROUND
+        );
+        assert!(log.iter().any(|l| l.ends_with(&from)), "{log:?}");
+        // The first pass asked for the strip's picture (only the chrome
+        // draws it): the logo's, the framing's and the strip's are found.
+        assert!(shell.art.picture(STRIP, 0).is_some());
+        assert!(
+            log.iter().any(|l| l.contains("pictures for 3 of")),
+            "{log:?}"
+        );
+        assert!(log
+            .iter()
+            .all(|l| !l.contains("drawn flat") || !l.contains("strip")));
+        // Drawn: the grey-navy under the framing's picture, and the strip
+        // as its picture, scrolling.
+        let fonts = Fonts::fallback();
+        let space = Space::new(640, 360);
+        let still = crate::chrome::still(0.0, c, shell.art(), &fonts, space);
+        let backdrop = crate::layout::colour::SHELL_BACKDROP;
+        assert_eq!(still.quads[0].color, [backdrop; 2]);
+        assert!(matches!(still.quads[1].texture, Texture::Art(_)));
+        let moving = crate::chrome::moving(1.0, c, shell.art(), &fonts, space);
+        assert_eq!(moving.quads.len(), 1);
+        assert!(matches!(moving.quads[0].texture, Texture::Art(_)));
+        assert_eq!(moving.quads[0].wrap, [true, false]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Checks the real menus as menu.md section 10 expects them: the logo
     /// at (-511, 90), the list in skin 11 at (-178, -80), the framing at
     /// (-1070, 654) at 1.08, and every picture of both screens found.
@@ -404,6 +495,34 @@ mod tests {
         let c = &shell.chrome;
         assert_eq!((c.still.len(), c.moving.len()), (2, 16));
         assert_eq!(c.headers[0].bounds, [-730.0, 567.0, 50.0, 520.0]);
+        // Its still layer on the CPU at 1080p: above the header band and
+        // below the legend band, the flat grey-navy of Cartographer's
+        // lobby, (23, 32, 56), lighter than the framing's inside.
+        let fonts = Fonts::fallback();
+        let space = Space::new(1920, 1080);
+        let still = crate::chrome::still(0.0, c, shell.art(), &fonts, space);
+        let mut px = vec![0u32; 1920 * 1080];
+        let res = Resources {
+            art: shell.art(),
+            fonts: &fonts,
+        };
+        crate::cpu::draw_u32(&still, &mut px, 1920, 1080, &res);
+        let rgb = |x: usize, y: usize| {
+            let p = px[y * 1920 + x];
+            [p >> 16, (p >> 8) & 0xFF, p & 0xFF]
+        };
+        for y in [5, 1069, 1076] {
+            for x in [192, 576, 960] {
+                let got = rgb(x, y);
+                let near = got
+                    .iter()
+                    .zip([23u32, 32, 56])
+                    .all(|(g, w)| g.abs_diff(w) <= 2);
+                assert!(near, "({x}, {y}): {got:?}");
+            }
+        }
+        let inside = rgb(960, 540);
+        assert!(inside.iter().zip(rgb(960, 1076)).all(|(i, o)| *i < o));
     }
 
     /// MCC's mainmenu.map in `H2_MCC_MAPS`.

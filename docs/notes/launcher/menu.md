@@ -2153,10 +2153,18 @@ usual:
    out), "1 friend request" in gold under the top right line on every
    screen. On SIGN IN after typing, the legend says CONTROLLER SETTINGS
    with no X before it, and a click on it opens them; during a match,
-   IN GAME's legend says LEAVE GAME with no ESC or B. With the match
-   played and the engine's window in front, Task Manager shows the lobby
-   (the h2launch.exe without the engine) using less CPU than before 2.6's
-   fixes; bringing the lobby forward, its lines scroll smoothly again.
+   IN GAME's legend says LEAVE GAME with no ESC or B. With a match
+   playing and the engine's window in front, find the lobby's
+   h2launch.exe (the one whose command line has no `--session`, as in
+   P4 step 6) in Resource Monitor's CPU tab, matched by its PID (Task
+   Manager's Details tab rounds to whole percents of all the
+   processors, too coarse here), and note its CPU. Then click the
+   lobby's window, the match still on: its CPU is several times higher
+   (it draws about 30 frames a second instead of 2) and its lines
+   scroll smoothly. Back on the engine's window it drops again. Above
+   the header band and below the legend band, the window's edge is one
+   flat grey-navy, a little lighter than the middle (as in
+   Cartographer's lobby), not near black.
 
 **Review fixes, round 1 (2026-10-12).**
 
@@ -2207,6 +2215,55 @@ usual:
   fresh still layer is left out. It now draws the main menu first at the
   same size, as when SETTINGS is picked from it, and checks that frame
   isn't timed.
+
+**Review fixes, round 2 (2026-10-12).**
+
+- **Halo 2's grey-navy above and below the bands.** `chrome::still`
+  laid the navy gradient (`NAVY_TOP` to `NAVY_BOTTOM`, made for the
+  start screen and main menu without the scene) under the framing, and
+  the framing is only partly opaque above the header band and below the
+  legend band, so those rows came out (9, 25, 48) at the top and a near
+  black (4, 12, 27) at the bottom (47 rows at 1080p). Cartographer's
+  lobby shows a flat (23, 32, 56) in both, the same across the width,
+  and the owner's Xbox screenshot about (21, 28, 50): lighter than the
+  framing's inside, where ours was darker at the bottom. Read from
+  Vista's map, the framing is a flat (9, 21, 42) at alpha 109/255 there
+  and 242/255 inside. Under the framing's picture the still layer now
+  fills the window with `colour::SHELL_BACKDROP`, (33, 40, 67), an
+  estimate: the colour under it that gives Cartographer's (23, 32, 56)
+  outside and (10, 22, 43) inside, drawn straight over. Measured with
+  `menu_png` and Vista's shell: (23, 32, 56) above the header band and
+  below the legend band at 1080p and 720p, (11, 22, 43) inside (was
+  (9, 21, 42)), and the glow under the bottom-left line now fades into
+  it as in Cartographer's. Without the framing's picture (the flat
+  look, or a map without it) the gradient stays: the built-in framing
+  has no flat shape, so a flat shell is the backdrop alone, and a
+  lighter field there would be wrong.
+- **Tests.**
+  - `h2ui`: the still layer's first quad is the grey-navy with the
+    framing's picture and the gradient without it (with or without the
+    other pictures); the framing's colour at alpha 109 and 242 over it
+    comes out on the CPU within a level of (23, 32, 56) and
+    (10, 22, 43); `Shell::open` on a made-up format-13 map with a
+    `game_shell_background` (the framing and one scrolling strip, their
+    pictures in textures.dat) keeps them as one still and one moving,
+    logs `the shell's pictures from wgit ...: 1 still, 1 scrolling`,
+    has the strip's picture (which only the chrome asks for) and draws
+    it scrolling. The real-map check (`#[ignore]`) also draws the still
+    layer at 1080p and wants the top and bottom rows within 2 of
+    (23, 32, 56).
+  - The lobby: a double-click on the invitation's DECLINE, whose second
+    click lands on the selected sixth playlist under it, only selects
+    that row (no search; a click a moment later searches), and two
+    quick clicks in the friend options popup, which stays up, select an
+    option and then pick it; on FRIENDS after the keyboard the legend
+    names X and Y, and under ADD FRIEND, where they type letters, it
+    gives DECLINE and ADD FRIEND alone (the glyphs again after the
+    pad).
+- **Step 7's CPU check** compared with a build the owner never ran (his
+  PC's last run was 2.5's P4, with the lobby's GPU measured, not its
+  CPU). It now compares the lobby behind the engine's window with the
+  lobby in front, in the same run.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 

@@ -15,9 +15,9 @@
 //! the keyboard or the mouse, and says where each button's part of it is,
 //! so a click on it can press it.
 
-use crate::art::ArtSource;
+use crate::art::{last_part, ArtSource};
 use crate::layout::{
-    colour, key_name, BitmapWidget, ChromeLayout, DialogSize, Face, LegendItem, Space,
+    self, colour, key_name, BitmapWidget, ChromeLayout, DialogSize, Face, LegendItem, Space,
 };
 use crate::paint::{Anchor, DrawList, Painter, TextStyle};
 use crate::text::{Fonts, Justify};
@@ -35,8 +35,11 @@ pub const KEY_ITEM_GAP: &str = "      ";
 /// shrunk to fit beyond it: our own margin.
 const LEGEND_ROOM: f32 = 0.96;
 
-/// The navy, then the still pictures (lower depths first), settled. The
-/// same list at any `clock`.
+/// What is under the framing, then the still pictures (lower depths
+/// first), settled. The same list at any `clock`. Under the framing's
+/// picture, Halo 2's flat grey-navy (`colour::SHELL_BACKDROP`), which
+/// shows through its clearer top and bottom; without it (the flat look),
+/// the navy gradient alone.
 pub fn still(
     clock: f64,
     c: &ChromeLayout,
@@ -45,9 +48,23 @@ pub fn still(
     space: Space,
 ) -> DrawList {
     let mut p = Painter::new(space, art, fonts, clock);
-    p.gradient_px(p.space.window(), colour::NAVY_TOP, colour::NAVY_BOTTOM);
+    let window = p.space.window();
+    if framed(c, art) {
+        p.fill_px(window, colour::SHELL_BACKDROP);
+    } else {
+        p.gradient_px(window, colour::NAVY_TOP, colour::NAVY_BOTTOM);
+    }
     settled(&mut p, &c.still);
     p.finish()
+}
+
+/// Whether the still pictures hold the framing (`layout::FRAMING`, by the
+/// last part of its name) and its picture is there.
+fn framed(c: &ChromeLayout, art: &dyn ArtSource) -> bool {
+    let framing = last_part(layout::FRAMING);
+    c.still.iter().any(|w| {
+        last_part(&w.name).eq_ignore_ascii_case(framing) && art.picture(&w.name, w.frame).is_some()
+    })
 }
 
 /// The pictures that scroll (the track strips), as they are at `clock`.
@@ -366,9 +383,11 @@ mod tests {
         let a = still(1.0, &c, &art, &fonts, space);
         let b = still(7.5, &c, &art, &fonts, space);
         assert_eq!(a, b, "the kept list is the same at any clock");
-        // The navy, then the framing (depth 10) under the still strip.
+        // Halo 2's flat grey-navy under the framing's picture, then the
+        // framing (depth 10) under the still strip.
         assert_eq!(a.quads.len(), 3);
-        assert_eq!(a.quads[0].color, [colour::NAVY_TOP, colour::NAVY_BOTTOM]);
+        assert_eq!(a.quads[0].color, [colour::SHELL_BACKDROP; 2]);
+        assert_eq!(a.quads[0].rect, space.window());
         assert_eq!(a.quads[1].texture, Texture::Art(0));
         let m1 = moving(1.0, &c, &art, &fonts, space);
         let m2 = moving(2.0, &c, &art, &fonts, space);
@@ -387,10 +406,68 @@ mod tests {
         crate::cpu::draw_u32(&a, &mut px, 640, 360, &res);
         crate::cpu::draw_u32(&m1, &mut px, 640, 360, &res);
         assert!(px.iter().all(|&p| p != 0));
+        // Without the framing's picture, the navy gradient is under the
+        // rest instead.
+        let mut strips = MemoryArt::new();
+        strips.add_image(
+            "track7a",
+            ArtImage {
+                width: 4,
+                height: 2,
+                rgba: [90, 90, 255, 200].repeat(8),
+            },
+        );
+        for art in [&FlatArt as &dyn ArtSource, &strips] {
+            let s = still(0.0, &c, art, &fonts, space);
+            assert_eq!(s.quads[0].color, [colour::NAVY_TOP, colour::NAVY_BOTTOM]);
+        }
         // Without the art, the built-in chrome is the navy alone.
         let flat = ChromeLayout::default();
         let s = still(0.0, &flat, &FlatArt, &fonts, space);
         assert_eq!(s.quads.len(), 1);
+        assert_eq!(s.quads[0].color, [colour::NAVY_TOP, colour::NAVY_BOTTOM]);
         assert!(moving(0.0, &flat, &FlatArt, &fonts, space).quads.is_empty());
+    }
+
+    /// The framing's flat colour at its alpha in the clearer top and
+    /// bottom of the shell, and inside it, over the backdrop, come out as
+    /// Cartographer's lobby shows them: (23, 32, 56) and (10, 22, 43).
+    #[test]
+    fn the_framing_over_the_backdrop_gives_halo_2s_grey_navy() {
+        let fonts = Fonts::fallback();
+        let space = Space::new(640, 360);
+        for (alpha, want) in [(109u8, [23u32, 32, 56]), (242, [10, 22, 43])] {
+            let mut art = MemoryArt::new();
+            art.add_image(
+                layout::FRAMING,
+                ArtImage {
+                    width: 8,
+                    height: 8,
+                    rgba: [9, 21, 42, alpha].repeat(64),
+                },
+            );
+            // Over the whole window.
+            let c = ChromeLayout {
+                still: vec![BitmapWidget {
+                    scale: [500.0, 500.0],
+                    ..BitmapWidget::new(layout::FRAMING, [-2000.0, 2000.0])
+                }],
+                ..ChromeLayout::default()
+            };
+            let list = still(0.0, &c, &art, &fonts, space);
+            let mut px = vec![0u32; 640 * 360];
+            let res = Resources {
+                art: &art,
+                fonts: &fonts,
+            };
+            crate::cpu::draw_u32(&list, &mut px, 640, 360, &res);
+            for (x, y) in [(5, 2), (320, 180), (600, 357)] {
+                let p = px[y * 640 + x];
+                let got = [p >> 16, (p >> 8) & 0xFF, p & 0xFF];
+                for k in 0..3 {
+                    assert!(got[k].abs_diff(want[k]) <= 1, "{alpha}: {got:?} {want:?}");
+                }
+            }
+        }
     }
 }

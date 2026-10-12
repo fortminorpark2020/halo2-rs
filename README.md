@@ -102,7 +102,8 @@ install. No game files are included in this repository.
   Pack it can't be played, and the start screen comes at once (the
   launcher itself still starts). Every screen after the main menu sits in
   Halo 2's own frame: the navy background with its bands at the top and
-  bottom and thin lines scrolling slowly across it, the screen's name at
+  bottom (a lighter grey-navy above and below them) and thin lines
+  scrolling slowly across it, the screen's name at
   the top left, and the buttons it takes at the bottom right (such as
   A SELECT and B BACK). Those show the controller's buttons after you
   used a controller (how it starts) and the keys, such as ENTER and ESC,

@@ -5944,6 +5944,135 @@ mod tests {
     }
 
     #[test]
+    fn a_double_click_that_shuts_a_popup_presses_nothing_under_it() {
+        let mut text = Text::none();
+        let dir = scratch("double-popup");
+        let (mut a, mut server) = live_app(&dir);
+        let mut c = Canvas::new(1280, 720);
+        // Seven playlists: rows 5 and 6 lie under the invitation's
+        // buttons. The sixth is selected, and we lead (no party).
+        view(&mut a).playlists = (0..7)
+            .map(|k| PlaylistInfo {
+                id: 20 + k,
+                key: format!("p{k}"),
+                name: format!("Playlist {k}"),
+                ranked: false,
+                teams: false,
+                guests: false,
+                min: 2,
+                max: 8,
+                party_max: 4,
+                searching: 0,
+                playing: 0,
+                level: 1,
+                maps: Vec::new(),
+            })
+            .collect();
+        a.sel = 5;
+        view(&mut a).invites.push((9, "BRAVO".into()));
+        a.draw(&mut c, &mut text);
+        assert_eq!(a.label(), "invite");
+        let (s, ox, oy) = a.view;
+        let find = |a: &App, top: bool, hit: Hit| {
+            let ar = a.areas.iter().find(|ar| ar.top == top && ar.hit == hit);
+            ar.copied().unwrap()
+        };
+        // The invitation's B DECLINE: a click shuts it.
+        let decline = find(&a, true, Hit::Press(Input::B));
+        let (ux, uy) = (decline.x + 3.0, decline.y + 3.0);
+        let (x, y) = (ox + ux * s, oy + uy * s);
+        a.click(x, y);
+        assert_eq!(a.label(), "live");
+        assert_eq!(sent(&mut server), [ToServer::Decline(9)]);
+        a.draw(&mut c, &mut text);
+        let row = find(&a, false, Hit::Row(5));
+        assert!(
+            ux >= row.x && ux < row.x + row.w && uy >= row.y && uy < row.y + row.h,
+            "the selected row is under the click: {row:?}"
+        );
+        // The double-click's second half only selects that row: no
+        // search.
+        a.click(x, y);
+        assert_eq!((a.label().as_str(), a.sel), ("live", 5));
+        assert!(sent(&mut server).is_empty());
+        // A click there a moment later searches it.
+        a.last_click = None;
+        a.click(x, y);
+        assert_eq!(sent(&mut server), [ToServer::Search(25)]);
+
+        // Two clicks in a popup that stays up both count: the first
+        // selects an option, the second picks it.
+        view(&mut a).friends = vec![friend(11, "BOB", Relation::Friend, Online::Offline)];
+        a.screen = Screen::Friends;
+        a.tick(a.now);
+        a.input(Input::A);
+        assert_eq!(a.label(), "friend");
+        // Remove friend selected; Service record above it.
+        a.input(Input::Down);
+        assert_eq!(a.osel, 1);
+        a.draw(&mut c, &mut text);
+        let record = find(&a, true, Hit::Row(0));
+        let (x, y) = (ox + (record.x + 3.0) * s, oy + (record.y + 3.0) * s);
+        a.last_click = None;
+        a.click(x, y);
+        assert_eq!((a.label().as_str(), a.osel), ("friend", 0));
+        a.click(x, y);
+        assert_eq!(a.label(), "record");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typing_a_friends_gamertag_leaves_x_and_y_keyless() {
+        let mut text = Text::none();
+        let dir = scratch("addfriend-keyless");
+        let (mut a, _server) = live_app(&dir);
+        let mut c = Canvas::new(1280, 720);
+        let shows = |a: &App, s: &str| a.drawn().iter().any(|d| d == s);
+        view(&mut a).friends = vec![friend(12, "YAN", Relation::AskedUs, Online::Offline)];
+        a.input(Input::Rb);
+        assert_eq!(a.label(), "friends");
+        // After the keyboard, the friends list names its keys: X and Y
+        // are buttons here.
+        a.key(Input::Down);
+        a.draw(&mut c, &mut text);
+        for s in [
+            "ENTER",
+            "ACCEPT",
+            "X",
+            "DECLINE",
+            "Y",
+            "ADD FRIEND",
+            "ESC",
+            "BACK",
+        ] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        // Under ADD FRIEND the X and Y keys type letters: the legend
+        // under it gives their words alone.
+        a.key(Input::Char('y'));
+        assert_eq!(a.label(), "addfriend");
+        a.draw(&mut c, &mut text);
+        for s in ["ENTER", "DECLINE", "ADD FRIEND", "ESC"] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        for s in ["X", "Y"] {
+            assert!(!shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        a.key(Input::Char('y'));
+        assert_eq!(a.friend_tag, "Y");
+        // After the pad, whose X and Y aren't letters, the glyphs show.
+        a.pad(Input::B);
+        a.pad(Input::Down);
+        a.input(Input::Y);
+        assert_eq!(a.label(), "addfriend");
+        a.draw(&mut c, &mut text);
+        for s in ["\u{e102}", "\u{e103}"] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_shells_still_background_is_kept_while_its_strips_scroll() {
         let mut text = Text::none();
         let dir = scratch("shell-kept");

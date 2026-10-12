@@ -130,6 +130,15 @@ pub mod colour {
     /// top to bottom (the overlay's navy, darkened downwards).
     pub const NAVY_TOP: Rgba = [0.03, 0.11, 0.21, 1.0];
     pub const NAVY_BOTTOM: Rgba = [0.0, 0.02, 0.06, 1.0];
+    /// One flat grey-navy behind the shell's framing picture (screens
+    /// after the main menu), (33, 40, 67). An estimate: Cartographer's
+    /// lobby shows a flat (23, 32, 56) above the header band and below
+    /// the legend band (the owner's Xbox screenshot about (21, 28, 50)),
+    /// where the framing's flat (9, 21, 42) is at alpha 109/255, and
+    /// (10, 22, 43) inside it, at 242/255; this is the colour under it
+    /// that gives both, drawn straight over (our CPU drawing gives
+    /// (23, 32, 56) and (11, 22, 43) with Vista's framing).
+    pub const SHELL_BACKDROP: Rgba = [33.0 / 255.0, 40.0 / 255.0, 67.0 / 255.0, 1.0];
     /// The logo's lettering without its picture: a chrome blue, light at
     /// the top.
     pub const CHROME_TOP: Rgba = [0.88, 0.93, 0.98, 1.0];

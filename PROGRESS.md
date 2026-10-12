@@ -1,6 +1,9 @@
 # Progress and handoff
 
-Last updated 2026-10-12 (menu 2.6's review fixes, round 1: double-clicks,
+Last updated 2026-10-12 (menu 2.6's review fixes, round 2: Halo 2's
+flat grey-navy above and below the shell's bands, tests for the popup
+double-click, the shell's tags and ADD FRIEND's legend, step 7's CPU
+check standing alone; round 1: double-clicks,
 legends naming only keys that work, the friend-request count, slow
 drawing behind a match, the legend's colours; P4, the owner's check of
 2.5, passed, and its follow-ups: the flythrough's veil darker, bluer and
@@ -287,13 +290,23 @@ Next, in order:
    no longer goes on twice (the legend's BACK sits in the same place on
    most screens); a legend item whose key or button does nothing there
    shows its words alone (IN GAME's LEAVE GAME while the engine plays,
-   SIGN IN's X and Y after the keyboard); the friend requests waiting
-   are counted under the top right status (the RB hint that counted
-   them is off the legend); the window draws twice a second while the
-   engine plays and the lobby hasn't the focus, still polling each
-   33 ms; the legend's words have their own colour (white, an estimate
-   from the Xbox screenshot) and Halo 2's button glyphs keep their own
-   colours. P4 passed on the owner's PC (2026-10-12, RTX 5080,
+   SIGN IN's X and ADD FRIEND's X and Y after the keyboard); the friend
+   requests waiting are counted under the top right status (the RB hint
+   that counted them is off the legend); the window draws twice a
+   second while the engine plays and the lobby hasn't the focus, still
+   polling each 33 ms; the legend's words have their own colour (white,
+   an estimate from the Xbox screenshot) and Halo 2's button glyphs keep
+   their own colours. Round 2 (menu.md "Review fixes, round 2"): under
+   the shell's framing picture the window is one flat grey-navy,
+   (33, 40, 67) (an estimate), so above the header band and below the
+   legend band it comes out as Cartographer's (23, 32, 56) where the
+   navy gradient had left it near black; the flat look keeps the
+   gradient. New tests: a double-click that shuts the invitation
+   presses nothing under it, two clicks in a popup that stays up both
+   count, `Shell::open` keeps the shell's pictures from a made-up
+   `game_shell_background`, and ADD FRIEND's legend names no X or Y
+   key; step 7's CPU check now compares the lobby behind the engine
+   with the lobby in front, in one run. P4 passed on the owner's PC (2026-10-12, RTX 5080,
    2560x1351; menu.md "Results on the owner's PC (P4)"): the scene
    5.0 ms to draw and 2.8 to read back, the main menu 4.9 ms a frame,
    asleep through a match with the lobby's GPU at 0 %. Next to a video

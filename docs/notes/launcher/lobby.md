@@ -111,9 +111,10 @@ the launcher doesn't do.
 - Layout is in units of 1/720 of the window's height, so it scales.
 - Every screen after the main menu sits in Halo 2's shell (menu.md,
   "What Phase 2.6 built"; `lobby/app/shell.rs`), drawn by `crates/h2ui`
-  around the screen's own body: `game_shell_background` behind (the navy
-  and the framing, drawn once for a window size and copied in, then its
-  16 track strips scrolling over them every frame), the screen's name as
+  around the screen's own body: `game_shell_background` behind (Halo 2's
+  flat grey-navy and the framing, drawn once for a window size and
+  copied in, then its 16 track strips scrolling over them every frame;
+  the flat look has the navy gradient instead), the screen's name as
   Halo 2's header at the top left (`App::screen_title`: SIGN IN, SIGNING
   IN, PLAYLISTS or MATCHMAKING, PLAYERS ONLINE, PARTY, CUSTOM GAME,
   PREGAME LOBBY, IN GAME, CARNAGE REPORT, OFFLINE, SERVICE RECORD,
