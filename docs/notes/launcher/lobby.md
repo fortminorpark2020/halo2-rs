@@ -357,8 +357,8 @@ the launcher doesn't do.
    level and a note. A on an account opens its options: Give a new
    password, Sign out of all PCs, Remove account, each asked first; on
    your own account or another admin's they are greyed ("Use the server's
-   command line for that."). A new password is shown once (NEW PASSWORD)
-   and forgotten. One request is out at a time ("Working..."); with no
+   command line for that."). A new password is shown once (NEW PASSWORD;
+   A or B closes it only after it has been up a second) and forgotten. One request is out at a time ("Working..."); with no
    answer in 10 s the lobby says "No answer from the server. Check the
    list." and asks for it again. The server's answers come as notices or
    in the popup. B goes back to the playlists. The gamertag and password

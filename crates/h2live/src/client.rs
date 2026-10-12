@@ -337,6 +337,9 @@ pub struct LiveClient {
     /// The gamertag our LOGIN named, as sent.
     gamertag: String,
     access: Access,
+    /// A launcher's: the random nonce its LOGIN carried, which SEAL_KEY's
+    /// signature must be over.
+    login_nonce: [u8; 32],
     /// The SEAL_KEY that came before the challenge (key, server, sig).
     seal_key: Option<([u8; 32], [u8; 32], [u8; 64])>,
     /// Once the server proved it holds its identity key: the key to seal
@@ -388,7 +391,11 @@ impl LiveClient {
         while version.len() > live::MAX_NAME {
             version.pop();
         }
-        let client = LoginClient::Launcher { version };
+        // New for each sign-in: the server's SEAL_KEY must sign it, so one
+        // recorded from another connection doesn't check.
+        let mut nonce = [0; 32];
+        getrandom::fill(&mut nonce).expect("random numbers");
+        let client = LoginClient::Launcher { version, nonce };
         LiveClient::sign_in(conn, key, profile, client, card_path, now)
     }
 
@@ -402,6 +409,10 @@ impl LiveClient {
     ) -> LiveClient {
         let card = std::fs::read_to_string(card_path).unwrap_or_default();
         let launcher = client.kind() == live::ClientKind::Launcher;
+        let login_nonce = match &client {
+            LoginClient::Launcher { nonce, .. } => *nonce,
+            LoginClient::Viewer { .. } => [0; 32],
+        };
         let maps = profile
             .maps
             .iter()
@@ -437,6 +448,7 @@ impl LiveClient {
             launcher,
             gamertag,
             access: Access::default(),
+            login_nonce,
             seal_key: None,
             seal: None,
             account_seq: 0,
@@ -570,8 +582,12 @@ impl LiveClient {
         }
         // Until the server proved its key (the challenge answered), a
         // launcher takes nothing else from it but a refusal and pings: a
-        // WELCOME, playlists or a match from a server that never proved
-        // who it is would get past the pin.
+        // WELCOME, playlists or a match from a server that never signed
+        // this sign-in's SEAL_KEY with the pinned key would get past the
+        // pin. (Someone in the middle who passes the real server's
+        // messages on still can, as with any session taken over on the
+        // plain link; they can't open sealed passwords or forge account
+        // requests.)
         let early = !matches!(
             message,
             ToPc::SealKey { .. }
@@ -691,7 +707,10 @@ impl LiveClient {
             let Ok(server) = VerifyingKey::from_bytes(server) else {
                 return false;
             };
-            let proof = seal::key_proof(&nonce, key);
+            // Over our LOGIN's nonce too: a SEAL_KEY and CHALLENGE the
+            // server sent on another connection (recorded, and played back
+            // by someone else) don't check.
+            let proof = seal::key_proof(&self.login_nonce, &nonce, key);
             server
                 .verify_strict(&proof, &Signature::from_bytes(sig))
                 .is_ok()

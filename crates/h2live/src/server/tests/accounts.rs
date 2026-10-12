@@ -119,9 +119,11 @@ fn secret(text: &str) -> Secret {
 /// is its own).
 fn launcher_by_hand(w: &mut World, n: u8, gamertag: &str) -> (Connection, [u8; 32], [u8; 32]) {
     let mut conn = w.raw(n);
+    let mine = [0x4E; 32];
     let login = Login {
         client: LoginClient::Launcher {
             version: "by hand".into(),
+            nonce: mine,
         },
         key: key(n).verifying_key().to_bytes(),
         gamertag: gamertag.into(),
@@ -142,12 +144,30 @@ fn launcher_by_hand(w: &mut World, n: u8, gamertag: &str) -> (Connection, [u8; 3
         panic!("no seal key and challenge");
     };
     assert_eq!(server, w.server.identity_key());
-    let proof = seal::key_proof(&nonce, &seal_key);
+    // Signed over our LOGIN's nonce, and so for no other sign-in.
+    let proof = seal::key_proof(&mine, &nonce, &seal_key);
     let identity = VerifyingKey::from_bytes(&server).unwrap();
     identity
         .verify_strict(&proof, &Signature::from_bytes(&sig))
         .unwrap();
     (conn, nonce, seal_key)
+}
+
+/// The nonce in the launcher LOGIN that came to `server_end` (a test
+/// playing the server), left there to be received again.
+fn login_nonce(server_end: &mut Connection) -> [u8; 32] {
+    let got = server_end.receive().unwrap();
+    let nonce = got
+        .iter()
+        .find_map(|(kind, body)| match ToServer::read(*kind, body) {
+            Ok(ToServer::Login(Login {
+                client: LoginClient::Launcher { nonce, .. },
+                ..
+            })) => Some(nonce),
+            _ => None,
+        });
+    server_end.put_back(got);
+    nonce.expect("no launcher LOGIN")
 }
 
 /// PC `n`'s signature over the challenge `nonce`.
@@ -1389,9 +1409,10 @@ fn a_launcher_gives_up_on_a_server_that_does_not_prove_its_key() {
     // Nor with a key signed by someone else.
     let (mut server_end, pc_end) = Connection::pair();
     let mut pc = LiveClient::launcher(pc_end, key(1), &profile("Kat"), "test", &card, 0.0);
+    let theirs = login_nonce(&mut server_end);
     let seal_key = seal::public(&[6; 32]);
     let sig = key(9)
-        .sign(&seal::key_proof(&[5; 32], &seal_key))
+        .sign(&seal::key_proof(&theirs, &[5; 32], &seal_key))
         .to_bytes();
     let server = key(8).verifying_key().to_bytes();
     ToPc::SealKey {
@@ -1417,10 +1438,10 @@ fn a_launcher_takes_one_seal_key_and_one_challenge_a_connection() {
     let w = World::new("one-challenge");
     let card = w.card_path(1);
     // A "server" holding identity key `identity` offers a key to seal to
-    // and a challenge.
-    let offer = |server_end: &mut Connection, identity: u8, nonce: [u8; 32]| {
+    // and a challenge, signed over the launcher's LOGIN nonce `theirs`.
+    let offer = |server_end: &mut Connection, identity: u8, nonce: [u8; 32], theirs: [u8; 32]| {
         let seal_key = seal::public(&[identity; 32]);
-        let proof = seal::key_proof(&nonce, &seal_key);
+        let proof = seal::key_proof(&theirs, &nonce, &seal_key);
         let sig = key(identity).sign(&proof).to_bytes();
         let server = key(identity).verifying_key().to_bytes();
         ToPc::SealKey {
@@ -1441,7 +1462,8 @@ fn a_launcher_takes_one_seal_key_and_one_challenge_a_connection() {
     // on first use)...
     let (mut server_end, pc_end) = Connection::pair();
     let mut pc = LiveClient::launcher(pc_end, key(1), &profile("Kat"), "test", &card, 0.0);
-    offer(&mut server_end, 8, [5; 32]);
+    let theirs = login_nonce(&mut server_end);
+    offer(&mut server_end, 8, [5; 32], theirs);
     assert_eq!(pc.poll(0.1), []);
     assert_eq!(kinds(&mut server_end), [kind::LOGIN, kind::PROVE]);
     let welcome = Welcome {
@@ -1458,7 +1480,7 @@ fn a_launcher_takes_one_seal_key_and_one_challenge_a_connection() {
     assert_eq!(pc.view.server_key, Some(first));
     // ...someone in between offers their own key and a challenge: it's bad
     // data. Nothing is signed for it, and no password is sealed to it.
-    offer(&mut server_end, 9, [6; 32]);
+    offer(&mut server_end, 9, [6; 32], theirs);
     let bad = LiveEvent::Lost("bad data from the server".into());
     assert_eq!(pc.poll(0.3), std::slice::from_ref(&bad));
     assert_eq!(pc.view.server_key, Some(first));
@@ -1471,9 +1493,10 @@ fn a_launcher_takes_one_seal_key_and_one_challenge_a_connection() {
     // A second key before the challenge is no better.
     let (mut server_end, pc_end) = Connection::pair();
     let mut pc = LiveClient::launcher(pc_end, key(1), &profile("Kat"), "test", &card, 0.0);
+    let theirs = login_nonce(&mut server_end);
     let seal_key = seal::public(&[9; 32]);
     let sig = key(9)
-        .sign(&seal::key_proof(&[5; 32], &seal_key))
+        .sign(&seal::key_proof(&theirs, &[5; 32], &seal_key))
         .to_bytes();
     let server = key(9).verifying_key().to_bytes();
     ToPc::SealKey {
@@ -1482,7 +1505,7 @@ fn a_launcher_takes_one_seal_key_and_one_challenge_a_connection() {
         sig,
     }
     .send(&mut server_end);
-    offer(&mut server_end, 8, [5; 32]);
+    offer(&mut server_end, 8, [5; 32], theirs);
     assert_eq!(pc.poll(0.1), [bad]);
     assert_eq!(kinds(&mut server_end), [kind::LOGIN]);
 }
@@ -1606,6 +1629,69 @@ fn admin_requests_parse_and_answer() {
         answer(&mut w, Request::List).last().unwrap(),
         "ok\t1 ACCOUNT"
     );
+}
+
+#[test]
+fn the_command_line_acts_only_on_the_account_called_what_was_typed() {
+    let mut w = closed("admin-exact");
+    let noble = make_account(&mut w, "Noble6", PASSWORD, false);
+    let sierra = make_account(&mut w, "Sierra117Sparta", PASSWORD, false);
+    make_account(&mut w, "Root", PASSWORD, true);
+    let files = |w: &World| {
+        let logins = std::fs::read(w.data.0.join("logins.txt")).unwrap();
+        (w.accounts_txt(), logins)
+    };
+    let before = files(&w);
+    let phc = password::hash(OTHER_PASSWORD, Cost::Cheap).unwrap();
+    // Names that clean up to NOBLE6 and SIERRA117SPARTA (a mark that isn't
+    // allowed dropped, a 16th letter cut off) but aren't theirs: as
+    // `remove` without --yes says, there's no such account, and nothing is
+    // done to the account the cleaned-up name would have found.
+    let tag = |t: &str| t.to_string();
+    let wrong = [
+        Request::Remove {
+            gamertag: tag("NOBLE_6"),
+        },
+        Request::Passwd {
+            gamertag: tag("SIERRA117SPARTAN"),
+            phc: phc.clone(),
+        },
+        Request::Revoke {
+            gamertag: tag("noble_6"),
+        },
+        Request::Admin {
+            gamertag: tag("NOBLE_6"),
+            on: true,
+        },
+        Request::Rename {
+            gamertag: tag("Sierra117Spartan"),
+            new: tag("Jun"),
+        },
+    ];
+    for request in wrong {
+        let typed = match &request {
+            Request::Remove { gamertag }
+            | Request::Passwd { gamertag, .. }
+            | Request::Revoke { gamertag }
+            | Request::Admin { gamertag, .. }
+            | Request::Rename { gamertag, .. } => gamertag.to_uppercase(),
+            _ => unreachable!(),
+        };
+        let said = admin::answer(&mut w.server, request, w.now);
+        assert_eq!(said, [format!("error\tNO ACCOUNT IS CALLED {typed}")]);
+    }
+    assert_eq!(files(&w), before);
+    assert_eq!(w.server.account(noble).unwrap().gamertag, "NOBLE6");
+    assert_eq!(
+        w.server.account(sierra).unwrap().gamertag,
+        "SIERRA117SPARTA"
+    );
+    // The name as it is, in any case and with spaces around it, still is.
+    let revoke = Request::Revoke {
+        gamertag: tag(" noble6 "),
+    };
+    let said = admin::answer(&mut w.server, revoke, w.now);
+    assert_eq!(said, ["ok\tNOBLE6 IS SIGNED OUT OF ALL PCS."]);
 }
 
 /// Make `file` in the server's folder impossible to save (until `fixed`):
@@ -2152,8 +2238,9 @@ fn a_launcher_takes_nothing_from_a_server_before_it_proves_its_key() {
     }
     // Nor with a key it proves and no challenge to prove it over.
     let (mut server_end, mut pc) = launcher(None);
+    let theirs = login_nonce(&mut server_end);
     let seal_key = seal::public(&[8; 32]);
-    let sig = key(8).sign(&seal::key_proof(&[5; 32], &seal_key));
+    let sig = key(8).sign(&seal::key_proof(&theirs, &[5; 32], &seal_key));
     ToPc::SealKey {
         key: seal_key,
         server: key(8).verifying_key().to_bytes(),
@@ -2180,6 +2267,75 @@ fn a_launcher_takes_nothing_from_a_server_before_it_proves_its_key() {
     ToPc::Welcome(welcome).send(&mut server_end);
     server_end.flush().unwrap();
     assert_eq!(game.poll(0.1), [LiveEvent::Welcomed]);
+}
+
+#[test]
+fn a_seal_key_and_challenge_played_back_from_another_sign_in_do_not_get_past_the_pin() {
+    let mut w = closed("replayed-seal-key");
+    let card = w.card_path(1);
+    // Someone signs in to the real server and records its SEAL_KEY and
+    // CHALLENGE, byte for byte.
+    let mut recorder = w.raw(9);
+    let login = Login {
+        client: LoginClient::Launcher {
+            version: "recorder".into(),
+            nonce: [0x33; 32],
+        },
+        key: key(9).verifying_key().to_bytes(),
+        gamertag: "Kat".into(),
+        look: Look::default(),
+        card: String::new(),
+        maps: Vec::new(),
+        guests: 0,
+    };
+    ToServer::Login(login).send(&mut recorder);
+    recorder.flush().unwrap();
+    w.step();
+    let recorded = recorder.receive().unwrap();
+    let kinds: Vec<u8> = recorded.iter().map(|(kind, _)| *kind).collect();
+    assert_eq!(kinds, [kind::SEAL_KEY, kind::CHALLENGE]);
+    // Then plays them back to a launcher that has the real server's key
+    // pinned: the signature isn't over this sign-in's nonce, so it hangs
+    // up as it would on a server that proved nothing, not KEY CHANGED, and
+    // sends nothing after its LOGIN.
+    let real = w.server.identity_key();
+    let (mut server_end, pc_end) = Connection::pair();
+    let mut pc = LiveClient::launcher(pc_end, key(1), &profile("Kat"), "test", &card, 0.0);
+    pc.set_access(Access {
+        pin: Some(real),
+        password: Some(secret(PASSWORD)),
+        computer: "PC 1".into(),
+    });
+    for (kind, body) in &recorded {
+        server_end.send(*kind, body);
+    }
+    server_end.flush().unwrap();
+    assert_eq!(pc.poll(0.1), [LiveEvent::Lost(SERVER_UNPROVEN.into())]);
+    assert!(pc.view.server_key.is_none() && !pc.signed_in());
+    let sent = server_end.receive().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, kind::LOGIN);
+    // So a WELCOME after them gets no further.
+    let welcome = Welcome {
+        account: 7,
+        gamertag: "KAT".into(),
+        card: String::new(),
+        best: 1,
+        levels: Vec::new(),
+    };
+    ToPc::Welcome(welcome).send(&mut server_end);
+    let _ = server_end.flush();
+    pc.poll(0.2);
+    assert!(pc.view.welcome.is_none() && !pc.signed_in());
+    // The real server signs a launcher's own sign-in, and it gets in.
+    make_account(&mut w, "Kat", PASSWORD, false);
+    let i = connect_launcher(&mut w, 1, "Kat", Some(PASSWORD));
+    w.pcs[i].set_access(Access {
+        pin: Some(real),
+        password: Some(secret(PASSWORD)),
+        computer: "PC 1".into(),
+    });
+    w.until(|w| w.pcs[i].signed_in());
 }
 
 #[test]

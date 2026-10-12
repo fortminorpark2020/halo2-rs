@@ -57,9 +57,6 @@ use std::time::{Duration, Instant};
 
 mod cli;
 
-/// A request from the command line, and where its answer goes.
-type AdminAsk = (admin::Request, mpsc::Sender<Vec<String>>);
-
 /// The port and the data folder unless told otherwise.
 const PORT: u16 = 47050;
 const DATA: &str = "h2live-data";
@@ -253,9 +250,11 @@ fn run() -> Result<(), String> {
     log(format_args!("accounts are kept in {}", data.display()));
     // The command line's way in, open before the relay starts and the
     // router is asked for the port (which waits out UPNP_TIMEOUT when the
-    // router doesn't answer): it holds h2live.lock, so the command line
-    // takes it this way from now on. What it asks waits until `serve`
-    // takes it, well within its timeouts.
+    // router doesn't answer, and longer for one that answers slowly): it
+    // holds h2live.lock, so the command line takes it this way from now
+    // on. What it asks waits until `serve` takes it; one not taken within
+    // the socket's ANSWER_TIMEOUT is answered THE SERVER DIDN'T ANSWER and
+    // never carried out.
     #[cfg(unix)]
     let admin = admin_socket::open(&data);
     #[cfg(unix)]
@@ -416,7 +415,7 @@ fn serve(
     server: &mut Server,
     stop: &AtomicBool,
     hosted: bool,
-    commands: Option<&mpsc::Receiver<AdminAsk>>,
+    commands: Option<&mpsc::Receiver<admin::Ask>>,
 ) {
     let start = Instant::now();
     let (asked, asks) = mpsc::channel();
@@ -471,9 +470,10 @@ fn serve(
                 Err(why) => log(format_args!("{from}: {why}")),
             }
         }
-        for (request, answer) in commands.into_iter().flat_map(|c| c.try_iter()) {
-            // One that gave up waiting is no matter.
-            let _ = answer.send(admin::answer(server, request, now));
+        for ask in commands.into_iter().flat_map(|c| c.try_iter()) {
+            // (One the command line gave up on, and was told failed, isn't
+            // carried out.)
+            ask.answer_with(|request| admin::answer(server, request, now));
         }
         server.poll(now);
         std::thread::sleep(NAP);
@@ -506,7 +506,7 @@ fn wait(listener: &TcpListener, server: &Server, idle: Duration) {
 /// runs. Each connection is one request line and its answer.
 #[cfg(unix)]
 mod admin_socket {
-    use super::{admin, log, AdminAsk};
+    use super::{admin, log};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
@@ -522,7 +522,7 @@ mod admin_socket {
     /// The socket, open; removed when dropped.
     pub struct AdminSocket {
         /// The requests that came, for the server's thread to answer.
-        pub asks: mpsc::Receiver<AdminAsk>,
+        pub asks: mpsc::Receiver<admin::Ask>,
         path: PathBuf,
     }
 
@@ -575,7 +575,7 @@ mod admin_socket {
 
     /// Take connections (waiting for each, so it costs nothing while none
     /// come), each answered on a thread of its own.
-    fn accept(listener: UnixListener, ask: mpsc::Sender<AdminAsk>) {
+    fn accept(listener: UnixListener, ask: mpsc::Sender<admin::Ask>) {
         for stream in listener.incoming() {
             let Ok(stream) = stream else {
                 continue;
@@ -587,7 +587,7 @@ mod admin_socket {
 
     /// Read one request from `stream`, have the server answer it, and send
     /// the answer back.
-    fn answer(stream: UnixStream, ask: &mpsc::Sender<AdminAsk>) {
+    fn answer(stream: UnixStream, ask: &mpsc::Sender<admin::Ask>) {
         let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
         let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
         let mut line = String::new();
@@ -595,13 +595,12 @@ mod admin_socket {
         let lines = match reader.read_line(&mut line) {
             Ok(_) => match admin::Request::parse(&line) {
                 Some(request) => {
-                    let (answer, answered) = mpsc::channel();
-                    let asked = ask.send((request, answer)).is_ok();
-                    let answer = answered.recv_timeout(ANSWER_TIMEOUT);
-                    match answer {
-                        Ok(lines) if asked => lines,
-                        _ => vec!["error\tTHE SERVER DIDN'T ANSWER".to_string()],
-                    }
+                    let (asked, waiting) = admin::ask(request);
+                    // (Not sent: the wait ends at once.)
+                    let _ = ask.send(asked);
+                    waiting
+                        .wait(ANSWER_TIMEOUT)
+                        .unwrap_or_else(|| vec!["error\tTHE SERVER DIDN'T ANSWER".to_string()])
                 }
                 None => vec!["error\tTHAT ISN'T A REQUEST".to_string()],
             },

@@ -194,7 +194,7 @@ machine, or from an admin's launcher (Accounts, the playlists' last row):
 h2live user list                       every account, its PCs, admin or not
 h2live user add <GAMERTAG> [--admin]   a new account; its made-up password is shown once
 h2live user passwd <GAMERTAG>          a new password (its PCs stay signed in)
-h2live user revoke <GAMERTAG>          sign it out of all PCs
+h2live user revoke <GAMERTAG>          sign it out of all PCs (a leaked password: passwd first)
 h2live user remove <GAMERTAG> --yes    remove it (for good while sign-up is closed)
 h2live user admin <GAMERTAG> on|off    make it an admin, or not
 h2live user rename <GAMERTAG> <NEW>    give it another gamertag

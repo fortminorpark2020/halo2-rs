@@ -730,16 +730,16 @@ impl App {
         self.settings.gamertag = gamertag;
         self.with_password = !self.password.is_empty();
         let url = live::server_url(&self.settings.server);
-        // Never the password itself. With one, not the gamertag either
-        // until the server has welcomed it (`keep_gamertag` logs it then):
-        // a password typed in the GAMERTAG box loses only its dashes there,
-        // and they don't count.
-        if self.with_password {
-            self.log(&format!("lobby: signing in to {url} with a password"));
+        // Never the password itself, nor the gamertag typed until the
+        // server has welcomed one (`signed_in` logs it then): a password
+        // typed in the GAMERTAG box (with the PASSWORD box empty, too)
+        // loses only its dashes there, and they don't count.
+        let with = if self.with_password {
+            " with a password"
         } else {
-            let gamertag = &self.settings.gamertag;
-            self.log(&format!("lobby: signing in to {url} as {gamertag:?}"));
-        }
+            ""
+        };
+        self.log(&format!("lobby: signing in to {url}{with}"));
         self.client = None;
         self.acc = AccountScreen::default();
         // Another server, maybe, with the same account numbers: nothing
@@ -903,11 +903,14 @@ impl App {
                 )),
             }
         }
-        self.log(&format!("lobby: signed in to {server}"));
         let tag = self.settings.gamertag.clone();
+        self.log(&format!("lobby: signed in to {server} as {tag}"));
+        // Not saying what was typed: it may be a password typed in the
+        // wrong box.
         if asked_other && !with_password && !tag.eq_ignore_ascii_case(&typed) {
             self.toast(format!(
-                "This PC is signed in as {tag}. To use {typed} here, type {typed}'s password."
+                "This PC is signed in as {tag}. To use another gamertag here, type its \
+                 password too."
             ));
         }
     }
@@ -5429,6 +5432,7 @@ mod tests {
             gamertag: "BRAVO".into(),
             password: Secret::new("TEST-ONLY-PASS"),
             reset: true,
+            at: a.now.checked_sub(accounts::TRUST_WAIT).unwrap(),
         });
         a.popup = Some(Popup::NewPassword);
         assert_eq!(a.label(), "newpassword");

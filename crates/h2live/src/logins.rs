@@ -552,6 +552,65 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_or_unreadable_logins_file_stops_the_server_and_is_left_as_it_was() {
+        // A server that went on without it would adopt every account again
+        // with its own key (PCs signed out signing in again, hashes and
+        // admin flags gone) and save over the file.
+        let dir = TempDir::new("broken");
+        let mut a = Account::new([1; 32], 1_700_000_001);
+        a.gamertag = "KAT".into();
+        let accounts = dir.0.join("accounts.txt");
+        store::save(&accounts, [&a]).unwrap();
+        let accounts_before = std::fs::read(&accounts).unwrap();
+        let phc = password::hash("K7MP-4QR9-XW2T", Cost::Cheap).unwrap();
+        let path = dir.0.join("logins.txt");
+        let id = a.id;
+        let good = format!(
+            "u {id:016x} 1 {phc}\nd {id:016x} {} 5 KAT PC\n",
+            "07".repeat(32)
+        );
+        // (It opens as it is.)
+        std::fs::write(&path, &good).unwrap();
+        drop(Server::open(&dir.0, Some("a secret")).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), good);
+        let broken: [(Vec<u8>, &str); 5] = [
+            (b"nonsense\n".to_vec(), "line 3: not a u or d line"),
+            (
+                format!("u {id:016x} 0 -\n").into_bytes(),
+                "line 3: an account listed twice",
+            ),
+            (
+                format!("d {id:016x} {} 6 X\n", "07".repeat(32)).into_bytes(),
+                "line 3: a PC listed twice",
+            ),
+            (
+                format!("u {:016x} 0 hunter2\n", id + 1).into_bytes(),
+                "line 3: not a password hash",
+            ),
+            // Not UTF-8 (saved by another program, say): it can't be read.
+            (vec![0xFF, 0xFE, b'\n'], "logins.txt: "),
+        ];
+        for (bad, error) in broken {
+            let mut bytes = good.clone().into_bytes();
+            bytes.extend_from_slice(&bad);
+            std::fs::write(&path, &bytes).unwrap();
+            let Err(said) = Server::open(&dir.0, Some("a secret")) else {
+                panic!("opened with {bad:?}");
+            };
+            assert!(said.contains("logins.txt"), "{said}");
+            assert!(said.contains(error), "{said}");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(std::fs::read(&accounts).unwrap(), accounts_before);
+        }
+        // Nor one that isn't a file.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(Server::open(&dir.0, Some("a secret")).is_err());
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read(&accounts).unwrap(), accounts_before);
+    }
+
+    #[test]
     fn a_folder_with_no_accounts_gets_no_logins_file() {
         let dir = TempDir::new("empty");
         let _server = Server::open(&dir.0, Some("a secret")).unwrap();

@@ -37,6 +37,10 @@ use crate::seal;
 use crate::server::{Actor, Command, Server};
 use crate::store::hex;
 use h2net::live::{ROW_ADMIN, ROW_ONLINE, ROW_PASSWORD};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// One request from the command line. (Its Debug doesn't show hashes.)
 #[derive(Clone, PartialEq, Eq)]
@@ -165,13 +169,82 @@ impl Request {
     }
 }
 
+/// A request on its way from the admin socket's thread to the server's
+/// (made by `ask`). Either the server answers it (`Ask::answer_with`) or
+/// its asker gives up waiting (`Waiting::wait`), never both: a request
+/// the command line was told failed is never carried out after.
+pub struct Ask {
+    request: Request,
+    answer: mpsc::Sender<Vec<String>>,
+    taken: Arc<AtomicBool>,
+}
+
+/// The asker's end of an `Ask`.
+pub struct Waiting {
+    answered: mpsc::Receiver<Vec<String>>,
+    taken: Arc<AtomicBool>,
+}
+
+/// `request`, to send to the server's thread, and the end to wait on.
+pub fn ask(request: Request) -> (Ask, Waiting) {
+    let (answer, answered) = mpsc::channel();
+    let taken = Arc::new(AtomicBool::new(false));
+    let waiting = Waiting {
+        answered,
+        taken: taken.clone(),
+    };
+    let ask = Ask {
+        request,
+        answer,
+        taken,
+    };
+    (ask, waiting)
+}
+
+impl Ask {
+    /// The server's: answer the request with `answer` (`admin::answer`,
+    /// say), unless its asker gave up on it already, when it isn't carried
+    /// out at all.
+    pub fn answer_with(self, answer: impl FnOnce(Request) -> Vec<String>) {
+        if self.taken.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // One who went away meanwhile is no matter.
+        let _ = self.answer.send(answer(self.request));
+    }
+}
+
+impl Waiting {
+    /// The answer, if the server takes the request within `timeout`; None
+    /// if it doesn't (or is gone), and then it never will.
+    pub fn wait(self, timeout: Duration) -> Option<Vec<String>> {
+        match self.answered.recv_timeout(timeout) {
+            Ok(lines) => Some(lines),
+            // The server took it at the last moment: its answer is on the
+            // way (or the sender goes, if the server does).
+            Err(RecvTimeoutError::Timeout) if self.taken.swap(true, Ordering::SeqCst) => {
+                self.answered.recv().ok()
+            }
+            Err(_) => None,
+        }
+    }
+}
+
 /// Answer `request` from the command line, at the server's time `now`:
 /// the lines to send back, the last `ok TEXT` or `error TEXT`.
 pub fn answer(server: &mut Server, request: Request, now: f64) -> Vec<String> {
     let mut lines = Vec::new();
+    // Only the account called what was typed (in any case), as `remove`
+    // without --yes finds it: not one a cleaned-up name happens to match
+    // (NOBLE_6 isn't NOBLE6, nor a 16th letter cut off).
     let find = |gamertag: &str| {
-        server.find(gamertag).ok_or_else(|| {
-            let name = gamertag.trim().to_uppercase();
+        let typed = gamertag.trim();
+        let called = |id: &u64| {
+            let account = server.account(*id);
+            account.is_some_and(|a| a.gamertag.eq_ignore_ascii_case(typed))
+        };
+        server.find(typed).filter(called).ok_or_else(|| {
+            let name = typed.to_uppercase();
             format!("NO ACCOUNT IS CALLED {}", shown(&name))
         })
     };
@@ -298,6 +371,46 @@ mod tests {
             },
             Request::Key,
         ]
+    }
+
+    #[test]
+    fn a_request_is_answered_or_given_up_on_never_both() {
+        let lines = || vec!["ok\tDONE".to_string()];
+        // Taken in time: answered.
+        let (asked, waiting) = ask(Request::List);
+        asked.answer_with(|_| lines());
+        assert_eq!(waiting.wait(Duration::from_secs(5)), Some(lines()));
+        // Given up on (the server busy elsewhere, the router slow to
+        // answer, say): the server, when it comes to it, doesn't carry it
+        // out.
+        let (asked, waiting) = ask(Request::Revoke {
+            gamertag: "KAT".into(),
+        });
+        assert_eq!(waiting.wait(Duration::from_millis(10)), None);
+        let mut carried_out = false;
+        asked.answer_with(|_| {
+            carried_out = true;
+            lines()
+        });
+        assert!(!carried_out);
+        // Taken just as the wait ran out: the asker waits for the answer
+        // rather than say it failed.
+        let (asked, waiting) = ask(Request::List);
+        let (started, starting) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            asked.answer_with(|_| {
+                started.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(200));
+                lines()
+            })
+        });
+        starting.recv().unwrap();
+        assert_eq!(waiting.wait(Duration::from_millis(10)), Some(lines()));
+        server.join().unwrap();
+        // A server that's gone: no answer, at once.
+        let (asked, waiting) = ask(Request::List);
+        drop(asked);
+        assert_eq!(waiting.wait(Duration::from_secs(60)), None);
     }
 
     #[test]

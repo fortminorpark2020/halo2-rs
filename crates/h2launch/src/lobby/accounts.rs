@@ -22,8 +22,9 @@ use h2net::live::{AccountRow, Accounts, ROW_ADMIN, ROW_ONLINE, ROW_PASSWORD};
 /// How long an account request may go unanswered before the lobby says so
 /// (and asks for the list again).
 const ASK_WAIT: Duration = Duration::from_secs(10);
-/// How long KEY CHANGED is up before A trusts the new key: a press meant
-/// for the screen before it (a second Enter, a mashed A) doesn't.
+/// How long KEY CHANGED is up before A trusts the new key, and NEW
+/// PASSWORD before A or B closes it: a press meant for the screen before
+/// it (a second Enter, a mashed A, a B to leave) doesn't.
 pub(super) const TRUST_WAIT: Duration = Duration::from_secs(1);
 /// NEW ACCOUNT's rows: the gamertag typed, the password made up, CREATE.
 const NEW_GAMERTAG: usize = 0;
@@ -75,13 +76,15 @@ impl AccountAction {
             AccountAction::NewPassword => {
                 format!("Give {tag} a new password? Their PCs stay signed in.")
             }
+            // (Their PC is turned away at once: a game they host ends
+            // with HOST_QUIT, as when a host's link dies.)
             AccountAction::SignOut => format!(
-                "Sign {tag} out of all PCs? Any game they are in ends for them, and each PC \
-                 needs the password again."
+                "Sign {tag} out of all PCs? Each PC needs the password again. A game they \
+                 are in ends for them, or for everyone if they host it."
             ),
             AccountAction::Remove => format!(
-                "Remove {tag} for good? Their levels and friends go too, and the gamertag is \
-                 free again."
+                "Remove {tag} for good? Their levels and friends go too. A game they are in \
+                 ends for them, or for everyone if they host it."
             ),
         }
     }
@@ -122,12 +125,13 @@ pub(super) struct Pending {
     pub(super) at: Instant,
 }
 
-/// A password just given out, shown once: whose, and whether it replaced
-/// another (or came with a new account).
+/// A password just given out, shown once: whose, whether it replaced
+/// another (or came with a new account), and when it was shown.
 pub(super) struct Shown {
     pub(super) gamertag: String,
     pub(super) password: Secret,
     pub(super) reset: bool,
+    pub(super) at: Instant,
 }
 
 /// The accounts screen's state and its popups'.
@@ -301,7 +305,10 @@ impl App {
         match p {
             Popup::NewAccount => self.new_account_input(i),
             Popup::NewPassword => {
-                if matches!(i, Input::A | Input::B) {
+                // Not by a press meant for the screen before it (CREATE
+                // pressed twice, a B to leave as the answer comes): it's
+                // the only time the password shows.
+                if matches!(i, Input::A | Input::B) && !self.password_just_shown() {
                     // Forgotten (and wiped).
                     self.acc.shown = None;
                     self.popup = None;
@@ -653,8 +660,16 @@ impl App {
             gamertag,
             password,
             reset,
+            at: self.now,
         });
         self.popup = Some(Popup::NewPassword);
+    }
+
+    /// NEW PASSWORD has been up less than `TRUST_WAIT`: A and B do nothing
+    /// yet.
+    fn password_just_shown(&self) -> bool {
+        let shown = self.acc.shown.as_ref();
+        shown.is_some_and(|s| self.now.saturating_duration_since(s.at) < TRUST_WAIT)
     }
 
     /// Each tick: a request unanswered for too long is given up on (and
@@ -1114,7 +1129,9 @@ mod tests {
     use h2live::password::Cost;
     use h2live::seal;
     use h2live::server::{Actor, Command, Route, Server, SignUp};
-    use h2net::live::{ToPc, Welcome, ACCOUNT_REMOVED, NO_ACCOUNT, SERVER_BUSY};
+    use h2net::live::{
+        Login, LoginClient, ToPc, Welcome, ACCOUNT_REMOVED, NO_ACCOUNT, SERVER_BUSY,
+    };
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::Path;
     use std::sync::Mutex;
@@ -1314,12 +1331,14 @@ mod tests {
     }
 
     /// A server the test plays itself, to see every byte a lobby sends:
-    /// its identity key, the key it seals to, and its challenge.
+    /// its identity key, the key it seals to, its challenge, and the nonce
+    /// in the lobby's LOGIN (once `heard`).
     struct ByHand {
         conn: Connection,
         identity: SigningKey,
         secret: [u8; 32],
         nonce: [u8; 32],
+        login_nonce: Option<[u8; 32]>,
     }
 
     impl ByHand {
@@ -1335,6 +1354,7 @@ mod tests {
                 identity: SigningKey::from_bytes(&[n; 32]),
                 secret: [7; 32],
                 nonce: [9; 32],
+                login_nonce: None,
             }
         }
 
@@ -1342,10 +1362,13 @@ mod tests {
             self.identity.verifying_key().to_bytes()
         }
 
-        /// SEAL_KEY, signed with the identity key, then the challenge.
+        /// SEAL_KEY, signed with the identity key over the LOGIN `heard`,
+        /// then the challenge.
         fn challenge(&mut self) {
             let key = seal::public(&self.secret);
-            let sig = self.identity.sign(&seal::key_proof(&self.nonce, &key));
+            let theirs = self.login_nonce.expect("the LOGIN wasn't heard");
+            let proof = seal::key_proof(&theirs, &self.nonce, &key);
+            let sig = self.identity.sign(&proof);
             let server = self.key();
             let sig = sig.to_bytes();
             ToPc::SealKey { key, server, sig }.send(&mut self.conn);
@@ -1371,10 +1394,21 @@ mod tests {
         /// (pings left out), whether or not it has hung up since.
         fn heard(&mut self) -> Vec<(ToServer, Vec<u8>)> {
             let got = self.conn.receive().unwrap_or_default();
-            got.into_iter()
+            let heard: Vec<_> = got
+                .into_iter()
                 .map(|(k, b)| (ToServer::read(k, &b).unwrap(), b))
                 .filter(|(m, _)| !matches!(m, ToServer::Ping(_) | ToServer::Pong(_)))
-                .collect()
+                .collect();
+            for (message, _) in &heard {
+                if let ToServer::Login(Login {
+                    client: LoginClient::Launcher { nonce, .. },
+                    ..
+                }) = message
+                {
+                    self.login_nonce = Some(*nonce);
+                }
+            }
+            heard
         }
     }
 
@@ -1521,7 +1555,7 @@ mod tests {
         assert_eq!(a.fields[GAMERTAG_FIELD], "ALPHA");
         assert!(toasted(
             &a,
-            "This PC is signed in as ALPHA. To use BRAVO here, type BRAVO's password."
+            "This PC is signed in as ALPHA. To use another gamertag here, type its password too."
         ));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1544,6 +1578,11 @@ mod tests {
             &said,
             "lobby: signing in to ws://127.0.0.1:9/live with a password"
         ));
+        // With the PASSWORD box left empty, on a new PC: the server asks
+        // for the password, and nothing said has what was typed.
+        turned_away(&mut live, &mut a, PASSWORD, "");
+        assert_eq!(a.fields[GAMERTAG_FIELD], swapped);
+        assert!(log_has(&said, "lobby: signing in to ws://127.0.0.1:9/live"));
         // A setting changed now saves lobby.txt with the gamertag from
         // before (none, on a new PC), and the setting.
         a.set_control("vibration", "off").unwrap();
@@ -1556,9 +1595,29 @@ mod tests {
         assert_eq!(a.label(), "live", "{:?}", a.form_error);
         assert_eq!(a.account(), Some(kat));
         assert_eq!(Settings::load(&dir.join("lobby.txt")).gamertag, "KAT");
+        assert!(log_has(&said, "lobby: signed in to 127.0.0.1:9 as KAT"));
+        drop(a);
+        live.until(&mut [], |s, _| s.players_online() == 0);
+        // On the PC KAT is signed in on now, the password typed in the
+        // GAMERTAG box with the PASSWORD box empty: signed in as KAT, and
+        // the notice doesn't say what was typed.
+        let (mut a, said_again) = logged(&dir);
+        a.input(Input::A);
+        a.screen = Screen::SignIn;
+        fill_form(&mut a, PASSWORD, "");
+        live.sign_in(&mut a);
+        assert_eq!(a.label(), "live", "{:?}", a.form_error);
+        assert_eq!(a.account(), Some(kat));
+        assert!(!a.toasts.is_empty());
+        for (toast, _) in &a.toasts {
+            assert!(
+                !toast.contains(&swapped) && !toast.contains(PASSWORD),
+                "{toast}"
+            );
+        }
         // No log line and no file the lobby keeps has the password, in
         // either spelling.
-        let log = said.lock().unwrap().join("\n");
+        let log = said.lock().unwrap().join("\n") + &said_again.lock().unwrap().join("\n");
         for f in [PASSWORD, swapped.as_str()] {
             assert!(!log.contains(f), "{log}");
         }
@@ -2127,7 +2186,15 @@ mod tests {
             assert!(a.drawn().contains(&given));
             assert!(drawn(&a, "it won't be shown again"));
         }
-        // A: it's gone, and the new account is selected.
+        // A press as it opens (CREATE pressed once more, a B to leave)
+        // leaves it up: it's the only time the password shows.
+        a.input(Input::A);
+        a.input(Input::B);
+        assert_eq!(a.popup, Some(Popup::NewPassword));
+        assert!(a.acc.shown.is_some());
+        // A once it has been up a moment: it's gone, and the new account
+        // is selected.
+        a.tick(Instant::now() + TRUST_WAIT);
         a.input(Input::A);
         assert!(a.popup.is_none() && a.acc.shown.is_none());
         live.until(&mut [&mut a], |_, a| a[0].account_rows().len() == 4);
@@ -2192,7 +2259,9 @@ mod tests {
             assert!(a.drawn().iter().any(|d| d == "NEW PASSWORD"));
             assert!(drawn(&a, "BRAVO's new password is"));
         }
+        a.tick(Instant::now() + TRUST_WAIT);
         a.input(Input::A);
+        assert!(a.popup.is_none());
         assert_eq!(b.label(), "live");
         assert_eq!(live.server.devices_of(bravo).len(), 1);
         // Sign out of all PCs: BRAVO's PC is back on the form.
@@ -2325,13 +2394,15 @@ mod tests {
         }
     }
 
-    /// NEW PASSWORD up on `a`, showing BRAVO's.
+    /// NEW PASSWORD up on `a`, showing BRAVO's (long enough for A and B
+    /// to close it).
     fn showing_a_password(a: &mut App) {
         a.screen = Screen::Accounts;
         a.acc.shown = Some(Shown {
             gamertag: "BRAVO".into(),
             password: Secret::new(PASSWORD),
             reset: true,
+            at: a.now.checked_sub(TRUST_WAIT).unwrap(),
         });
         a.popup = Some(Popup::NewPassword);
     }
@@ -2373,6 +2444,31 @@ mod tests {
         a.input(Input::B);
         assert!(a.popup.is_none() && a.acc.shown.is_none());
         assert_eq!(a.label(), "signin");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_password_is_not_closed_by_a_press_meant_for_the_screen_before_it() {
+        let dir = scratch("password-early");
+        let (mut a, _server) = live_app(&dir);
+        a.screen = Screen::Accounts;
+        let start = a.now;
+        a.show_password("BRAVO".into(), Secret::new(PASSWORD), true);
+        // CREATE or Give new password pressed again, or B pressed to leave,
+        // just as the answer comes: the password stays up.
+        for i in [Input::A, Input::B, Input::A] {
+            a.input(i);
+            assert_eq!(a.popup, Some(Popup::NewPassword));
+            let shown = a.acc.shown.as_ref().map(|s| s.password.as_str());
+            assert_eq!(shown, Some(PASSWORD));
+        }
+        a.now = start + TRUST_WAIT / 2;
+        a.input(Input::B);
+        assert_eq!(a.popup, Some(Popup::NewPassword));
+        // Once it has been up a moment, either closes it (and forgets it).
+        a.now = start + TRUST_WAIT;
+        a.input(Input::B);
+        assert!(a.popup.is_none() && a.acc.shown.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2491,9 +2587,20 @@ mod tests {
             assert_eq!(a.osel, k);
             a.input(Input::A);
             assert_eq!(a.popup, Some(Popup::ConfirmAccount(2, action)));
-            assert!(action.question("BRAVO").starts_with(ask));
+            let question = action.question("BRAVO");
+            assert!(question.starts_with(ask));
+            // Signed out or removed, a host's game ends for everyone in it,
+            // and that's said.
+            let everyone = "ends for them, or for everyone if they host it.";
+            assert_eq!(
+                question.ends_with(everyone),
+                action != AccountAction::NewPassword
+            );
             if drew(&mut a) {
                 assert!(a.drawn().iter().any(|d| d == action.title()));
+                // (Its last line, too.)
+                let end = question.rsplit(' ').next().unwrap();
+                assert!(a.drawn().iter().any(|d| d.ends_with(end)), "{end}");
             }
             a.input(Input::B);
             a.input(Input::Down);

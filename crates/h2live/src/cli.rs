@@ -46,7 +46,8 @@ one starting with - goes after --, which ends the flags.
   passwd    a new password for an account (made up, or --password-stdin);
             the PCs it's on stay signed in
   revoke    sign an account out of every PC (it signs in again with its
-            password)
+            password; if the password leaked, run passwd first, then
+            revoke)
   remove    remove an account (without --yes, says what would be lost); for
             good while sign-up is closed
   admin     make an account an admin, or not

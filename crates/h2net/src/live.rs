@@ -34,7 +34,8 @@
 //! password once (PROVE_PASSWORD in place of PROVE). The password never
 //! crosses the link in clear: before its CHALLENGE, the server sends a
 //! launcher a key made for this connection, signed with the server's own
-//! identity key (SEAL_KEY), and the launcher seals each password to it
+//! identity key over a random nonce from the launcher's LOGIN (SEAL_KEY,
+//! good for that sign-in only), and the launcher seals each password to it
 //! (`Sealed`; the sealing itself is `h2live::seal`). Admins make and change
 //! accounts with ACCOUNT, signed with the PC's key, and every launcher is
 //! sent the accounts it may see (ACCOUNTS).
@@ -57,7 +58,7 @@ pub const MAGIC_V2: u32 = u32::from_le_bytes(*b"H2L2");
 /// `PROTOCOL`. (2: LAUNCHER_CUSTOM. 3: kills, assists, betrayals and
 /// suicides in LAUNCHER_RESULT; RECORD and SERVICE_RECORD; the friends
 /// messages. 4: owner-made accounts: SEAL_KEY, PROVE_PASSWORD, ACCOUNT,
-/// ACCOUNTS.)
+/// ACCOUNTS, and a nonce in the launcher's LOGIN.)
 pub const LIVE_PROTOCOL: u32 = 4;
 /// The kinds of program a versioned LOGIN can say it is, as a byte.
 pub const CLIENT_VIEWER: u8 = 0;
@@ -442,8 +443,8 @@ pub enum ToPc {
     Friends(Vec<Friend>),
     /// To a launcher, just before CHALLENGE: an X25519 key made for this
     /// connection, the server's Ed25519 identity key, and that key's
-    /// signature over `h2live::seal::key_proof` of the challenge and the
-    /// X25519 key.
+    /// signature over `h2live::seal::key_proof` of the launcher's LOGIN
+    /// nonce, the challenge and the X25519 key.
     SealKey {
         key: [u8; 32],
         server: [u8; 32],
@@ -485,8 +486,10 @@ pub enum LoginClient {
     Viewer { protocol: u32 },
     /// The launcher (h2launch), with its own version (for the server's
     /// log): it plays on MCC's engine, so the game's `PROTOCOL` is no
-    /// matter to it.
-    Launcher { version: String },
+    /// matter to it. `nonce` is random and new for each sign-in: the
+    /// server's SEAL_KEY signs it, so a SEAL_KEY (and CHALLENGE) recorded
+    /// from another connection doesn't check on this one.
+    Launcher { version: String, nonce: [u8; 32] },
 }
 
 impl LoginClient {
@@ -1200,11 +1203,12 @@ impl Login {
                 w.u32(MAGIC);
                 w.u32(*protocol);
             }
-            LoginClient::Launcher { version } => {
+            LoginClient::Launcher { version, nonce } => {
                 w.u32(MAGIC_V2);
                 w.u32(LIVE_PROTOCOL);
                 w.u8(CLIENT_LAUNCHER);
                 w.str(version);
+                bytes(w, nonce);
             }
         }
         bytes(w, &self.key);
@@ -1230,6 +1234,7 @@ impl Login {
                 CLIENT_VIEWER => LoginClient::Viewer { protocol: r.u32()? },
                 CLIENT_LAUNCHER => LoginClient::Launcher {
                     version: read_str(r, MAX_NAME)?,
+                    nonce: read_bytes(r)?,
                 },
                 _ => return Err(Malformed),
             },
@@ -2429,6 +2434,7 @@ mod tests {
         Login {
             client: LoginClient::Launcher {
                 version: "h2launch 0.1.0".into(),
+                nonce: [0xA5; 32],
             },
             look: Look::default(),
             guests: 0,
@@ -3510,7 +3516,9 @@ mod tests {
             ..l.clone()
         };
         let (_, game) = ToServer::Login(as_game).write();
-        let version = 2 + "h2launch 0.1.0".len();
+        // The launcher's nonce follows its version.
+        let version = 2 + "h2launch 0.1.0".len() + 32;
+        assert_eq!(body[9 + version - 32..9 + version], [0xA5; 32]);
         assert_eq!(body[9 + version..], game[8..]);
         // A versioned LOGIN can say it's the game, at any PROTOCOL (the
         // server judges that).
@@ -3534,11 +3542,15 @@ mod tests {
         let long = Login {
             client: LoginClient::Launcher {
                 version: "v".repeat(MAX_NAME + 1),
+                nonce: [0; 32],
             },
-            ..l
+            ..l.clone()
         };
         let (kind, body) = ToServer::Login(long).write();
         assert!(ToServer::read(kind, &body).is_err());
+        // Nor is one cut off in its nonce.
+        let (kind, body) = ToServer::Login(l).write();
+        assert!(ToServer::read(kind, &body[..9 + version - 1]).is_err());
     }
 
     #[test]

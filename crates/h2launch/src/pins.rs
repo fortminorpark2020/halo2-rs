@@ -34,6 +34,35 @@ pub const FILE: &str = "live-servers.txt";
 /// when the launcher was built), if it was.
 const BUILT_IN: Option<&str> = option_env!("H2LAUNCH_SERVER_KEY");
 
+// A malformed H2LAUNCH_SERVER_KEY (the whole `identity key: ...` line
+// pasted, or the short code) fails the build, rather than making a
+// friends' zip with no built-in key that says so only in each friend's
+// log. (Empty is no key.)
+const _: () = if let Some(key) = BUILT_IN {
+    assert!(
+        built_in_key_reads(key),
+        "H2LAUNCH_SERVER_KEY must be the 64 hex digits after `identity key:` in \
+         `h2live user key` (not the short code), or unset"
+    );
+};
+
+/// `key`, as H2LAUNCH_SERVER_KEY gives it, is 64 hex digits (spaces
+/// around them aside), or nothing. (A const fn, so the build checks it.)
+const fn built_in_key_reads(key: &str) -> bool {
+    let key = key.trim_ascii().as_bytes();
+    if !key.is_empty() && key.len() != 64 {
+        return false;
+    }
+    let mut i = 0;
+    while i < key.len() {
+        if !key[i].is_ascii_hexdigit() {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// The keys pinned: those learned (from the file), and the built-in one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pins {
@@ -263,6 +292,35 @@ mod tests {
         assert_eq!(pins.get(DEFAULT_SERVER), None);
         assert!(pins.notes()[0].contains("H2LAUNCH_SERVER_KEY"));
         assert!(Pins::parse("", Some("")).notes().is_empty());
+    }
+
+    #[test]
+    fn a_built_in_key_that_does_not_read_fails_the_build() {
+        // What the build checks H2LAUNCH_SERVER_KEY with: 64 hex digits
+        // (spaces around them aside) or nothing.
+        let built = hex(&KEY);
+        for good in [
+            built.clone(),
+            built.to_uppercase(),
+            format!(" {built}\n"),
+            String::new(),
+            "  ".into(),
+        ] {
+            assert!(built_in_key_reads(&good), "{good:?}");
+        }
+        // Not what `h2live user key` prints whole, nor its short code.
+        for bad in [
+            format!("identity key: {built}"),
+            "ABAB-ABAB-ABAB-ABAB".to_string(),
+            built[1..].to_string(),
+            format!("{built}0"),
+            format!("{}g", &built[1..]),
+            format!("{} {}", &built[..32], &built[32..]),
+        ] {
+            assert!(!built_in_key_reads(&bad), "{bad:?}");
+        }
+        // So a launcher that was built has none, or one that reads.
+        assert!(BUILT_IN.is_none_or(|k| k.trim().is_empty() || unhex(k.trim()).is_some()));
     }
 
     #[test]

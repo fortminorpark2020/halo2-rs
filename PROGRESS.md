@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-12 06:00 UTC. Any assistant that works on the project
+Last updated 2026-10-12 09:45 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -145,7 +145,7 @@ assists and the team offset aren't. The PC's own log of the day is
 Owner-made accounts (2026-10-11) are built and tested on
 `launcher-accounts` (on `launcher-menu` f0b718b: stage 1 16e80d5, h2live
 and `LIVE_PROTOCOL` 4; stage 2 3323850, the launcher; stage 3, docs and
-the install script; then five rounds of review fixes. The fourth
+the install script; then six rounds of review fixes. The fourth
 (2026-10-12): a wrong password costs the same hash and locks the same way
 whatever gamertag it names, launchers take nothing from a server before it
 proves its key, pins are kept by the address dialled, `--live` stops on a
@@ -157,7 +157,17 @@ its own copies (`zeroize`); the stand-in hash follows the settings most
 kept hashes have, so a cost change doesn't give accounts away; the admin
 socket opens before the router is asked for the port; the install script
 keeps the program from before accounts as `h2live.before-accounts` and
-shows the log when the new server isn't running), pushed, not deployed.
+shows the log when the new server isn't running. The sixth (2026-10-12):
+the launcher's LOGIN carries a random nonce that SEAL_KEY's signature
+covers, so a SEAL_KEY and CHALLENGE recorded from another sign-in don't
+get past the pin; a command-line request the server didn't take in time
+is never carried out later; the command line acts only on the account
+called exactly what was typed; NEW PASSWORD ignores A and B for its first
+second; a malformed `H2LAUNCH_SERVER_KEY` fails the build; the sign-in log
+and notice never repeat the gamertag typed; Sign out and Remove say a
+host's game ends for everyone; the docs give the order for a leaked
+password (a new one first, then sign out) and keep the version 3
+launchers for a rollback), pushed, not deployed.
 `launcher-menu` with the in-game GAME MENU (PR #9, below) is merged into
 it up to 18279ad (the lobby's console echo fix, merged 2026-10-12), so its
 builds carry both; the GAME MENU changes neither protocol, and
@@ -184,8 +194,13 @@ step with the owner's go-ahead:
    "hashing took N ms"; if the cost is lowered for it, set the owner's
    password again after the new build is installed), and `h2live user
    key`.
-2. Rebuild the owner's launcher (`C:\Games\Halo 2 Live`) and the friends'
-   zip with `H2LAUNCH_SERVER_KEY` set to that key, and rewrite the zip's
+2. First keep the version 3 launchers for a rollback: copy
+   `C:\Games\Halo 2 Live` to `C:\Games\Halo 2 Live v3` and
+   `C:\Games\H2-Live-friends.zip` to `C:\Games\H2-Live-friends-v3.zip`
+   (or build them again later from `launcher-menu`, live protocol 3,
+   18279ad). Then rebuild the owner's launcher (`C:\Games\Halo 2 Live`)
+   and the friends' zip with `H2LAUNCH_SERVER_KEY` set to that key (the 64
+   hex digits; anything else fails the build), and rewrite the zip's
    READ ME on his PC ("type the gamertag and password John gave you, once
    on each PC"). The READ ME isn't in the repository. The built-in key
    covers h2.mohnjorrow.com only (written with or without `:47050`, or as
@@ -193,11 +208,14 @@ step with the owner's go-ahead:
    learns the key the first time it signs in (on his own network).
 3. The owner makes his friends' accounts from his launcher's Accounts row.
 Rollback: `install -m755 /opt/h2live/h2live.before-accounts
-/opt/h2live/h2live && systemctl restart h2live`, and the old zip.
-(h2live.prev is only the program before the latest install, so after a
-second install it's an accounts build too. The program from before
-accounts has no command line: `h2live user ...` says so until the newer
-one is back.)
+/opt/h2live/h2live && systemctl restart h2live`, and the owner's PC and
+friends go back to the version 3 launchers kept in step 2 (`Halo 2 Live
+v3`, `H2-Live-friends-v3.zip`). (h2live.prev is only the program before
+the latest install, so after a second install it's an accounts build too.
+The program from before accounts has no command line: `h2live user ...`
+says so until the newer one is back.) To roll forward, run
+`install-h2live.sh` again with the accounts build beside it: a rollback
+leaves none in `/opt/h2live`.
 
 After the MVP: clans, keyboard and mouse, the other layouts, and the
 owner's idea (2026-10-11) of Halo 2 Anniversary weapon and Spartan models

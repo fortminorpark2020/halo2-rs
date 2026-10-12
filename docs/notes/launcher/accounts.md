@@ -30,8 +30,12 @@ script). Not deployed yet: see "Deploy and rollback".
   the launcher zip.
 - **When something goes wrong.** In Accounts, pick the account:
   - "Give a new password" if they forgot it (their PCs stay signed in).
-  - "Sign out of all PCs" if a PC was lost or the password leaked. Every PC
-    then needs the password again; a leaked password also needs a new one.
+  - "Sign out of all PCs" if a PC was lost. Every PC then needs the
+    password again.
+  - If the password leaked: first "Give a new password", then "Sign out of
+    all PCs", in that order. Signed out first, anyone with the old password
+    could sign a PC in again before it changes, and a new password keeps
+    that PC signed in.
   - "Remove account" to delete the account for good.
 
   Each asks first, and the answer shows on the screen.
@@ -149,9 +153,12 @@ is.
 
 - **The server's key for this connection.** When a launcher signs in, the
   server makes a one-time X25519 key for that connection and signs it with
-  its identity key (SEAL_KEY, just before the CHALLENGE). The identity key
-  is an Ed25519 key derived from the same secret that signs stat cards
-  (secret.txt or H2LIVE_SECRET), under its own label.
+  its identity key (SEAL_KEY, just before the CHALLENGE). The signature is
+  over a random nonce the launcher's LOGIN carried (new for each sign-in),
+  the challenge and that key, so a SEAL_KEY recorded from another
+  connection doesn't check. The identity key is an Ed25519 key derived
+  from the same secret that signs stat cards (secret.txt or
+  H2LIVE_SECRET), under its own label.
 - **Sealing.** The launcher seals the password to that key with a key of
   its own made just for that box (X25519, SHA-256 for the box's key, then
   ChaCha20-Poly1305). Each password is padded to the same size (65 bytes),
@@ -180,7 +187,9 @@ launcher wrote with addresses as typed reads the same way.
 - A launcher built with `H2LAUNCH_SERVER_KEY` set to the key (the friends'
   zip) knows the owner's server (`h2.mohnjorrow.com`, the default, however
   it's written) from the start. A key it learns later wins over the
-  built-in one.
+  built-in one. The value must be the 64 hex digits `h2live user key`
+  prints after `identity key:`; anything else (the whole line, or the short
+  code) fails the build, so a zip can't go out without the key by mistake.
 - Otherwise it remembers the key the first time it signs in (after the
   server's WELCOME; the log says `lobby: pinned <server>'s key <code>`).
 - A `live-servers.txt` that is there but can't be read (another program
@@ -189,12 +198,17 @@ launcher wrote with addresses as typed reads the same way.
   read again at the next try. Lines that don't read are skipped, and the
   log says how many.
 - On every sign-in it checks SEAL_KEY before sending anything after its
-  LOGIN: it must come before CHALLENGE and its signature must check, or
-  the launcher hangs up ("THE SERVER DIDN'T PROVE WHO IT IS"). Until then
-  it takes nothing else from the server but a refusal or a ping: a
-  WELCOME, playlists, a match or anything else that comes first hangs up
-  the same way, so a server that never proves its key can't get past the
-  pin. If the key
+  LOGIN: it must come before CHALLENGE and its signature (over this
+  LOGIN's nonce) must check, or the launcher hangs up ("THE SERVER DIDN'T
+  PROVE WHO IT IS"). Until then it takes nothing else from the server but
+  a refusal or a ping: a WELCOME, playlists, a match or anything else that
+  comes first hangs up the same way. So a server that can't sign this
+  sign-in's SEAL_KEY with the pinned key can't get past the pin, and
+  neither can one that plays back a SEAL_KEY and CHALLENGE recorded from
+  another sign-in. Someone in the middle who passes the real server's
+  messages on still can, and can then send a WELCOME, playlists or a match
+  of their own (see "Session takeover" below), but can't open a sealed
+  password or forge an account request. If the key
   differs from the one pinned, it hangs up and shows SERVER KEY CHANGED
   with both short codes, and sends nothing until the player says to trust
   the new one. A (taken once the popup has been up a second) then pins the
@@ -232,15 +246,18 @@ server with no admin.
 - **Sign in.** GAMERTAG, PASSWORD ("Only on a new PC"), SERVER. The
   password is drawn as stars, never saved (lobby.txt keeps only the
   gamertag and server) or logged, sent only sealed, and forgotten when the
-  sign-in ends. With a password, the log says only "signing in to <url>
-  with a password", not the gamertag: a password typed in the GAMERTAG box
-  keeps all but its dashes there, and they don't count. Until the server
+  sign-in ends. Until the server welcomes a gamertag, the log says only
+  "signing in to <url>" (and "with a password" if one was typed), never
+  the gamertag typed: a password typed in the GAMERTAG box keeps all but
+  its dashes there, and they don't count. After WELCOME it says "signed in
+  to <server> as <GAMERTAG>", the name the server gave. Until the server
   welcomes a gamertag, lobby.txt keeps the last one it welcomed (a setting
   changed meanwhile saves that one). ONLINE with a saved
   gamertag still signs in at once by the PC's key. After WELCOME the
   gamertag the server gave is saved; if no password was typed and the
   server signed this PC in as someone else, a notice says "This PC is
-  signed in as JOHN. To use KAT here, type KAT's password."
+  signed in as JOHN. To use another gamertag here, type its password
+  too." (It doesn't repeat what was typed, which may be a password.)
 - **Refusals** go back to the form where typing helps:
 
   | Server says | Launcher shows |
@@ -268,7 +285,11 @@ server with no admin.
   ACCOUNT CREATED with the password ("Give it to them; it won't be shown
   again."); the account options (Give a new password, Sign out of all PCs,
   Remove account), each confirmed first (NEW PASSWORD, SIGN OUT, REMOVE
-  ACCOUNT), a new password shown once the same way; CHANGE PASSWORD
+  ACCOUNT; Sign out and Remove say that a game the player is in ends for
+  them, or for everyone if they host it, since their PC is turned away at
+  once), a new password shown once the same way (A or B closes it only
+  once it has been up a second, so a press meant for the screen before it
+  doesn't lose the password); CHANGE PASSWORD
   (CURRENT PASSWORD, NEW PASSWORD, NEW PASSWORD AGAIN, all stars, checked
   on the PC first: "Type your current password.", "The new passwords don't
   match.", or the password rules; if the server changed it but couldn't
@@ -418,14 +439,15 @@ only its friends and PCs are lost. games.log keeps its history.
 ## LIVE_PROTOCOL 4 messages
 
 The launcher's LOGIN is laid out as in version 3, but for the version
-number. CHALLENGE, PROVE, WELCOME and REFUSED are unchanged. The game is
-never sent the new kinds.
+number and 32 random bytes (the nonce SEAL_KEY signs) after the
+launcher's version. CHALLENGE, PROVE, WELCOME and REFUSED are unchanged.
+The game is never sent the new kinds.
 
 | From | Kind | Name | What it carries |
 |---|---|---|---|
 | PC | 6 | PROVE_PASSWORD | a signature (over "h2live-password-4", the challenge, the PC's key, the LOGIN's gamertag, the PC's name and the sealed password), the PC's name, the sealed password; answers CHALLENGE instead of PROVE |
 | PC | 60 | ACCOUNT | a number, an operation, a signature. Operations: list (0), create {gamertag, sealed password} (1), new password {account, sealed password} (2), sign out of all PCs {account} (3), remove {account} (4), change my password {old and new, sealed} (5) |
-| server | 119 | SEAL_KEY | the connection's X25519 key, the server's identity key, the signature; just before CHALLENGE |
+| server | 119 | SEAL_KEY | the connection's X25519 key, the server's identity key, the signature (over "h2live-seal-key-5", the LOGIN's nonce, the challenge and the X25519 key); just before CHALLENGE |
 | server | 120 | ACCOUNTS | admin or not, has a password or not, which request it answers (0 for none), ok and a message, how many accounts there are, and account rows (gamertag, admin, password, online, PCs, best level): all of them for admins (at most 300), only their own for others |
 
 A sealed box is the sender's one-time key (32 bytes) and the box (17 to
@@ -475,7 +497,14 @@ usage).
 - **Running server:** the commands go to it through admin.sock (one
   tab-separated request line, answered by `row` and `pc` lines and then
   `ok TEXT` or `error TEXT`), so they are safe while people play. Only the
-  server ever writes its files.
+  server ever writes its files. The socket opens before the server asks
+  the router for its port, so a request can wait while the router is slow;
+  one the server hasn't taken within 10 seconds is answered "THE SERVER
+  DIDN'T ANSWER" and is never carried out later.
+- **Gamertags typed** must be an account's gamertag exactly (in any case,
+  spaces around it aside): `NOBLE_6` or a 16th letter is "NO ACCOUNT IS
+  CALLED ...", never the account the name would clean up to, so `remove`
+  with and without `--yes` agree.
 - **Stopped server:** the command line takes the lock and opens the folder
   itself, running the same code. On Linux it first checks that it runs as
   the folder's owner, so root can't leave files the server can't read.
@@ -558,32 +587,48 @@ The server goes first, and only when the owner says so.
    stand-in a gamertag no account has is checked against follows the
    settings most hashes have, so every password made before the change
    should be set again.
-3. **Launchers.** `h2live user key`, then rebuild the owner's launcher and
-   the friends' zip with `H2LAUNCH_SERVER_KEY` set to that key, and rewrite
-   the zip's READ ME ("type the gamertag and password John gave you, once
-   on each PC"; the READ ME isn't in the repository).
+3. **Launchers.** First keep the version 3 launchers, for a rollback:
+   copy `C:\Games\Halo 2 Live` to `C:\Games\Halo 2 Live v3` and
+   `C:\Games\H2-Live-friends.zip` to `C:\Games\H2-Live-friends-v3.zip`.
+   (Lost, they can be built again from the `launcher-menu` branch, live
+   protocol 3: 18279ad when this was written.) Then `h2live user key`,
+   rebuild the owner's launcher and the friends' zip with
+   `H2LAUNCH_SERVER_KEY` set to that key (the 64 hex digits; anything else
+   fails the build), and rewrite the zip's READ ME ("type the gamertag and
+   password John gave you, once on each PC"; the READ ME isn't in the
+   repository).
 4. **Accounts.** The owner's launcher signs in by its PC and shows
    Accounts; the owner creates the friends' accounts there.
 
 To roll back to the version 3 server, `install -m755
 /opt/h2live/h2live.before-accounts /opt/h2live/h2live && systemctl restart
-h2live`, and friends go back to the old zip. (h2live.prev is only the
+h2live`, and the owner's PC and friends go back to the version 3 launchers
+kept in step 3 (`Halo 2 Live v3`, and `H2-Live-friends-v3.zip` sent to
+friends): the version 4 ones can't sign in to it. (h2live.prev is only the
 program before the latest install: after a second install, an accounts
-build too, which turns the old zip away.) The version 3 server reads the
-folder and ignores the new files and the `signup=`
+build too, which turns version 3 launchers away.) The version 3 server
+reads the folder and ignores the new files and the `signup=`
 line, but it is open sign-up again. Accounts the owner made can't sign in
 under it, though they are kept for later. It has no command line either:
 the wrapper says so (`h2live user ...` does nothing) until the newer
-program is back. Rolling forward again adopts any accounts it made
-meanwhile, so check `h2live user list`. For an exact earlier state,
-restore the dated copy.
+program is back. To roll forward, run `install-h2live.sh` again with the
+accounts build of h2live beside it: after a rollback no accounts build is
+left in `/opt/h2live` (after one install, h2live.prev is the version 3
+program too), and the version 4 launchers go back into use. Rolling
+forward adopts any accounts the version 3 server made meanwhile, so check
+`h2live user list`. For an exact earlier state, restore the dated copy.
 
 ## What it doesn't protect
 
 - **Session takeover.** Once signed in, the link is still unencrypted, as
   before. Someone in the middle could take over a session or read parties
   and relay keys, though they can't learn passwords or forge account
-  requests. Encrypting every launcher message is a later step.
+  requests. That includes one who passes the real server's SEAL_KEY and
+  CHALLENGE on as they come and then sends their own WELCOME, playlists or
+  match: the pin can't tell, since the real server signed them. (A SEAL_KEY
+  and CHALLENGE recorded earlier and played back don't check: they were
+  signed over another sign-in's nonce.) Encrypting every launcher message
+  is a later step.
 - **First sign-in without the built-in key.** A launcher without the
   built-in key trusts the server it reaches the first time. The friends'
   zip carries the key.
@@ -620,7 +665,8 @@ restore the dated copy.
   does day-to-day jobs; making admins and touching admins stays on the
   command line, which is always the way back in.
 - **Reset and sign out are separate.** A forgotten password doesn't cost a
-  friend their PCs; for a leaked one the owner does both.
+  friend their PCs; for a leaked one the owner gives a new password first,
+  then signs the account out of all PCs.
 - **Auto sign-up by default.** Local servers and tests stay open with no
   setting; the owner's server is closed explicitly, twice, so losing one
   setting doesn't open it.
@@ -644,28 +690,35 @@ None of the tests need the internet or game files.
   flipped or a zero key.
 - **Passwords and logins.txt:** the rules, the generator, hashes and the
   settings they name, a round trip of the file, its errors, adoption, mode
-  600, and a v3 folder left byte for byte as it was.
+  600, a v3 folder left byte for byte as it was, and a broken or
+  unreadable logins.txt stopping the server with the file left as it was.
 - **Server:** the tests in `crates/h2live/src/server/tests/accounts.rs`
   drive the sign-in rules, locks and limits, PCs, admin actions and their
   guards, removal, cards, renames (reaching friends, the party and the
   ONLINE list), the game never hearing the new kinds, a v3 launcher told
   to update, the auto setting, a one-time seal key for every connection
-  (across a restart too), and a stand-in made like most kept hashes, on
-  simulated time.
+  (across a restart too), a launcher hanging up on a SEAL_KEY and
+  CHALLENGE played back from another sign-in, the command line acting
+  only on the account called what was typed, and a stand-in made like
+  most kept hashes, on simulated time. A request the command line gave up
+  waiting on is never carried out (`admin.rs`).
 - **Command line:** `crates/h2live/tests/program.rs` runs the real program
   against a running and a stopped server, a second server on one folder, a
   folder that isn't the command line's own (with and without a lock left
   in it), a password given as an argument, a missing folder, and `/admin`
   still 404. Its hashes, the command line's and those the program makes
   for a launcher admin, are at the real cost; a gamertag no account has is
-  never logged; and the admin socket is open before the program asks the
-  router for its port.
+  never logged; the admin socket is open before the program asks the
+  router for its port; and a broken logins.txt stops the program and the
+  command line, naming the line, with the file left as it was.
 - **Launcher:** tests sign in against a real server in the same process
   (and one played by the test, to read every byte sent). They check that a
   password is never drawn, logged or sent unsealed, the refusals, that a
   changed server key sends nothing, creating an account and signing in
-  with the password shown, new password, sign out, remove, changing a
-  password, and that every new screen and popup draws and takes clicks.
+  with the password shown, new password (not closed by an early press),
+  sign out, remove, changing a password, a password typed in the GAMERTAG
+  box never logged or shown, a malformed built-in key failing the build,
+  and that every new screen and popup draws and takes clicks.
 - **Stage 3's end-to-end check** (Linux, release builds, 2026-10-11): a
   closed local server, the command line while it ran and while it was
   stopped, and headless lobbies (`lobby.md` has the run):

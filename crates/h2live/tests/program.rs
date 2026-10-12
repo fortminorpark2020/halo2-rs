@@ -911,6 +911,49 @@ fn the_command_line_opens_only_a_folder_it_owns() {
 }
 
 #[test]
+fn a_broken_logins_file_stops_the_program_and_the_command_line_and_is_kept() {
+    let data = TempDir::new("cli-broken-logins");
+    let ran = h2live(
+        &data.0,
+        &["user", "add", "Kat", "--admin", "--password-stdin"],
+        &format!("{PASSWORD}\n"),
+    );
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    // Edited by hand, with a typo on its last line.
+    let logins = data.0.join("logins.txt");
+    let mut text = std::fs::read_to_string(&logins).unwrap();
+    text.push_str("x typo\n");
+    std::fs::write(&logins, &text).unwrap();
+    let line = text.lines().count();
+    let accounts = std::fs::read(data.0.join("accounts.txt")).unwrap();
+    let kept = |data: &Path| {
+        assert_eq!(
+            std::fs::read_to_string(data.join("logins.txt")).unwrap(),
+            text
+        );
+        assert_eq!(std::fs::read(data.join("accounts.txt")).unwrap(), accounts);
+    };
+    // The command line, with the program stopped: it says which line.
+    let ran = h2live(&data.0, &["user", "list"], "");
+    assert_ne!(ran.code, 0);
+    assert!(
+        ran.err.contains(&format!("logins.txt: line {line}")),
+        "{}",
+        ran.err
+    );
+    assert_eq!(ran.out, "");
+    kept(&data.0);
+    // The program doesn't start.
+    let output = program(&data.0, &[]).output().unwrap();
+    assert!(!output.status.success());
+    let said =
+        String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+    assert!(said.contains(&format!("logins.txt: line {line}")), "{said}");
+    assert!(!said.contains("listening on port "), "{said}");
+    kept(&data.0);
+}
+
+#[test]
 fn the_command_line_refuses_a_missing_folder() {
     let data = TempDir::new("cli-missing");
     let missing = data.0.join("not-here");

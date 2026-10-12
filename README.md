@@ -507,7 +507,8 @@ folder inside your own user folder; back it up with the rest). With
 arguments h2live is its own command line: `h2live user list`, `h2live user
 add <gamertag>` (`--admin` makes an admin, whose launcher can make
 accounts; the made-up password is shown once), `h2live user passwd
-<gamertag>` (a new password), `revoke <gamertag>` (sign out of all PCs),
+<gamertag>` (a new password), `revoke <gamertag>` (sign out of all PCs;
+if the password leaked, run `passwd` first, then `revoke`),
 `remove <gamertag> --yes`, `admin <gamertag> on|off`, `rename <gamertag>
 <new>`, and `h2live user key`, the server's key that launchers check (for
 building them with `H2LAUNCH_SERVER_KEY`). A password is never typed as

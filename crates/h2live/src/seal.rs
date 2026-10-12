@@ -5,10 +5,12 @@
 //! The server has an Ed25519 identity key, made from its stat-card key
 //! (`identity`), so it stays the same while `secret.txt` (or
 //! H2LIVE_SECRET) does. For each launcher connection the server makes an
-//! X25519 key and signs it with the identity key over the connection's
-//! challenge (SEAL_KEY, `key_proof`). The launcher checks that signature
-//! (and that the identity key is the one it pinned for the server) before
-//! it sends anything.
+//! X25519 key and signs it with the identity key over the random nonce the
+//! launcher's LOGIN carried and the connection's challenge (SEAL_KEY,
+//! `key_proof`). The launcher checks that signature (and that the identity
+//! key is the one it pinned for the server) before it sends anything. The
+//! launcher's nonce is new for each sign-in, so a SEAL_KEY recorded from
+//! another connection doesn't check.
 //!
 //! A box: the launcher makes an X25519 key of its own for each box, and
 //! both ends work out the same shared point from it and the server's key.
@@ -48,7 +50,8 @@ pub const CHANGE_PASSWORD: u8 = 4;
 /// The labels: for the identity key, its signature over a connection's
 /// key, a box's extra data and a box's key.
 pub const IDENTITY: &[u8] = b"h2live-identity-4";
-pub const KEY_PROOF: &[u8] = b"h2live-seal-key-4";
+/// (`-5`: it signs the launcher's nonce too since then.)
+pub const KEY_PROOF: &[u8] = b"h2live-seal-key-5";
 pub const AAD: &[u8] = b"h2live-seal-4";
 pub const KDF: &[u8] = b"h2live-seal-4 key";
 
@@ -68,9 +71,12 @@ pub fn public(secret: &[u8; 32]) -> [u8; 32] {
     MontgomeryPoint::mul_base_clamped(*secret).to_bytes()
 }
 
-/// What the identity key signs to vouch for a connection's X25519 key.
-pub fn key_proof(nonce: &[u8; 32], public: &[u8; 32]) -> Vec<u8> {
-    [KEY_PROOF, nonce, public].concat()
+/// What the identity key signs to vouch for a connection's X25519 key
+/// `public`: the launcher's nonce from its LOGIN (`launcher`, so the
+/// signature is for this sign-in and no other), then the server's
+/// challenge (`nonce`) and the key.
+pub fn key_proof(launcher: &[u8; 32], nonce: &[u8; 32], public: &[u8; 32]) -> Vec<u8> {
+    [KEY_PROOF, launcher, nonce, public].concat()
 }
 
 /// A box's extra data: what it's for (`SIGN_IN` and the rest), the
@@ -197,6 +203,7 @@ mod tests {
     const S: [u8; 32] = [1; 32];
     const E: [u8; 32] = [2; 32];
     const NONCE: [u8; 32] = [3; 32];
+    const LAUNCHER: [u8; 32] = [6; 32];
     const DEVICE: [u8; 32] = [4; 32];
 
     fn sign_in_aad() -> Vec<u8> {
@@ -329,19 +336,22 @@ mod tests {
             id.to_bytes(),
             identity(&SigningKey::from_bytes(&[8; 32])).to_bytes()
         );
-        // It vouches for a connection's key over its challenge.
+        // It vouches for a connection's key over the launcher's nonce and
+        // the challenge.
         let key = public(&S);
-        let sig = id.sign(&key_proof(&NONCE, &key));
-        let check = |nonce: &[u8; 32], key: &[u8; 32], sig: &Signature| {
+        let sig = id.sign(&key_proof(&LAUNCHER, &NONCE, &key));
+        let check = |launcher: &[u8; 32], nonce: &[u8; 32], key: &[u8; 32], sig: &Signature| {
             id.verifying_key()
-                .verify_strict(&key_proof(nonce, key), sig)
+                .verify_strict(&key_proof(launcher, nonce, key), sig)
                 .is_ok()
         };
-        assert!(check(&NONCE, &key, &sig));
-        assert!(!check(&[5; 32], &key, &sig));
-        assert!(!check(&NONCE, &public(&E), &sig));
-        let card_sig = card.sign(&key_proof(&NONCE, &key));
-        assert!(!check(&NONCE, &key, &card_sig));
+        assert!(check(&LAUNCHER, &NONCE, &key, &sig));
+        assert!(!check(&LAUNCHER, &[5; 32], &key, &sig));
+        assert!(!check(&LAUNCHER, &NONCE, &public(&E), &sig));
+        // Another sign-in's nonce: a SEAL_KEY recorded from it doesn't do.
+        assert!(!check(&[5; 32], &NONCE, &key, &sig));
+        let card_sig = card.sign(&key_proof(&LAUNCHER, &NONCE, &key));
+        assert!(!check(&LAUNCHER, &NONCE, &key, &card_sig));
     }
 
     #[test]
@@ -360,10 +370,11 @@ mod tests {
             hex(&id.verifying_key().to_bytes()),
             "fdffcf9be426d5fd074df7ea54f1a353defc3d8ee55093bf7ae391af81cc85ed"
         );
-        // SEAL_KEY's signature is over its label, the challenge and the key.
+        // SEAL_KEY's signature is over its label, the launcher's nonce,
+        // the challenge and the key.
         let key = public(&S);
-        let expected = [&b"h2live-seal-key-4"[..], &NONCE, &key].concat();
-        assert_eq!(key_proof(&NONCE, &key), expected);
+        let expected = [&b"h2live-seal-key-5"[..], &LAUNCHER, &NONCE, &key].concat();
+        assert_eq!(key_proof(&LAUNCHER, &NONCE, &key), expected);
     }
 
     #[test]

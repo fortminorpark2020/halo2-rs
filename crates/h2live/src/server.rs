@@ -619,12 +619,13 @@ impl Server {
                 let mut nonce = [0; 32];
                 getrandom::fill(&mut nonce).expect("random numbers");
                 // A launcher is sent the key to seal passwords to first (the
-                // game, which can't, never hears of it).
-                if login.client.kind() == ClientKind::Launcher {
+                // game, which can't, never hears of it), signed over its
+                // LOGIN's nonce, so the signature is for this sign-in only.
+                if let LoginClient::Launcher { nonce: theirs, .. } = &login.client {
                     let mut secret = Zeroizing::new([0; 32]);
                     getrandom::fill(&mut *secret).expect("random numbers");
                     let key = seal::public(&secret);
-                    let sig = self.identity.sign(&seal::key_proof(&nonce, &key));
+                    let sig = self.identity.sign(&seal::key_proof(theirs, &nonce, &key));
                     let server = self.identity.verifying_key().to_bytes();
                     let sig = sig.to_bytes();
                     ToPc::SealKey { key, server, sig }.send(&mut pc.conn);
@@ -775,7 +776,9 @@ impl Server {
         pc.pinged = now - live::PING_EVERY;
         let program = match &login.client {
             LoginClient::Viewer { .. } => String::new(),
-            LoginClient::Launcher { version } => format!(" (launcher {})", printable(version)),
+            LoginClient::Launcher { version, .. } => {
+                format!(" (launcher {})", printable(version))
+            }
         };
         log(format_args!(
             "live: {} signed in from {}{program}",
