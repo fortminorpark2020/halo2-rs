@@ -65,7 +65,8 @@ const NOTICES: usize = 10;
 const INVITES: usize = 16;
 /// Pings that can be on their way back at once.
 const PINGS: usize = 16;
-/// Why a launcher gave up on a server that didn't sign its SEAL_KEY.
+/// Why a launcher gave up on a server that didn't sign its SEAL_KEY, or
+/// sent anything but a refusal or a ping before it had.
 pub const SERVER_UNPROVEN: &str = "THE SERVER DIDN'T PROVE WHO IT IS";
 
 /// How a launcher signs in (`LiveClient::set_access`). The default: any
@@ -565,6 +566,23 @@ impl LiveClient {
         if again {
             self.gone = true;
             events.push(LiveEvent::Lost("bad data from the server".into()));
+            return;
+        }
+        // Until the server proved its key (the challenge answered), a
+        // launcher takes nothing else from it but a refusal and pings: a
+        // WELCOME, playlists or a match from a server that never proved
+        // who it is would get past the pin.
+        let early = !matches!(
+            message,
+            ToPc::SealKey { .. }
+                | ToPc::Challenge { .. }
+                | ToPc::Refused(_)
+                | ToPc::Ping(_)
+                | ToPc::Pong(_)
+        );
+        if self.launcher && self.seal.is_none() && early {
+            self.gone = true;
+            events.push(LiveEvent::Lost(SERVER_UNPROVEN.into()));
             return;
         }
         let view = &mut self.view;

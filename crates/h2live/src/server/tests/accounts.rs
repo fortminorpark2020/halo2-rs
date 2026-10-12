@@ -2026,3 +2026,286 @@ fn tries_while_locked_never_make_the_lock_longer() {
     let i = launcher_in(&mut w, 12, "Kat", Some(PASSWORD));
     assert_eq!(w.welcome(i).account, kat);
 }
+
+#[test]
+fn every_box_that_opens_costs_one_hash_and_every_gamertag_locks_alike() {
+    // An account with a password, one without (an older server's), and a
+    // gamertag no account has: a guesser can't tell them apart by the
+    // answer, by how long it takes (one hash each), or by the lock.
+    let mut w = World::with_secret("same-work", Some(SECRET));
+    veteran(&mut w);
+    w.server.set_sign_up(SignUp::Closed);
+    w.server.set_password_cost(Cost::Cheap);
+    make_account(&mut w, "Kat", PASSWORD, false);
+    let mut n = 10;
+    for gamertag in ["KAT", "VETERAN", "NOBODY"] {
+        // A box that doesn't open costs no hash, whatever it names (and
+        // counts as a wrong try)...
+        let hashes = w.server.hashes.len();
+        let (mut conn, nonce, _) = launcher_by_hand(&mut w, n, gamertag);
+        let elsewhere = seal::public(&[4; 32]);
+        let target = gamertag.as_bytes();
+        let boxed = sealed_for(seal::SIGN_IN, n, &nonce, &elsewhere, target, &[PASSWORD]);
+        prove_password(n, &nonce, gamertag, "BY HAND", boxed).send(&mut conn);
+        conn.flush().unwrap();
+        w.step();
+        let wrong = ToPc::Refused(live::WRONG_PASSWORD.into());
+        assert_eq!(heard(&mut conn), [wrong], "{gamertag}");
+        assert_eq!(w.server.hashes.len(), hashes, "{gamertag}");
+        n += 1;
+        // ...and one that opens costs one, whatever it names.
+        for _ in 0..4 {
+            let hashes = w.server.hashes.len();
+            let why = launcher_refused(&mut w, n, gamertag, Some(OTHER_PASSWORD));
+            assert_eq!(why, live::WRONG_PASSWORD, "{gamertag}");
+            assert_eq!(w.server.hashes.len(), hashes + 1, "{gamertag}");
+            n += 1;
+        }
+        // Five wrong tries lock it, from any address, with no hash.
+        let hashes = w.server.hashes.len();
+        let why = launcher_refused(&mut w, n, gamertag, Some(OTHER_PASSWORD));
+        assert_eq!(why, live::TOO_MANY_TRIES, "{gamertag}");
+        assert_eq!(w.server.hashes.len(), hashes, "{gamertag}");
+        n += 1;
+    }
+    // Ten minutes later they're open again, and nothing is kept of them.
+    w.run(600.0);
+    assert!(w.server.wrong_by_name.is_empty());
+    let why = launcher_refused(&mut w, n, "Nobody", Some(OTHER_PASSWORD));
+    assert_eq!(why, live::WRONG_PASSWORD);
+    let i = launcher_in(&mut w, n + 1, "Kat", Some(PASSWORD));
+    assert_eq!(w.welcome(i).gamertag, "KAT");
+}
+
+#[test]
+fn a_rename_reaches_friends_and_requests_while_the_account_is_signed_out() {
+    let mut w = closed("rename-friends");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    make_account(&mut w, "Noble", OTHER_PASSWORD, false);
+    let a = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let b = launcher_in(&mut w, 2, "Jun", Some(OTHER_PASSWORD));
+    let c = launcher_in(&mut w, 3, "Noble", Some(OTHER_PASSWORD));
+    // Jun is Kat's friend, and Noble asked Kat to be one.
+    w.send(a, ToServer::FriendRequest("JUN".into()));
+    w.until(|w| w.pcs[b].view.friends.iter().any(|f| f.account == kat));
+    w.send(b, ToServer::FriendAccept(kat));
+    w.send(c, ToServer::FriendRequest("KAT".into()));
+    w.until(|w| w.pcs[a].view.friends.len() == 2);
+    // Kat isn't signed in (the server started again); Jun and Noble are.
+    restart_closed(&mut w);
+    let b = launcher_in(&mut w, 2, "Jun", None);
+    let c = launcher_in(&mut w, 3, "Noble", None);
+    let shown = |w: &World, i: usize| -> Vec<String> {
+        let list = &w.pcs[i].view.friends;
+        let kats = list.iter().filter(|f| f.account == kat);
+        kats.map(|f| f.gamertag.clone()).collect()
+    };
+    w.until(|w| shown(w, b) == ["KAT"] && shown(w, c) == ["KAT"]);
+    let rename = Command::Rename {
+        account: kat,
+        gamertag: "Kat Two".into(),
+    };
+    let done = w.server.command(Actor::Console, rename, w.now);
+    assert_eq!(done.as_deref(), Ok("KAT IS KAT TWO NOW"));
+    // Both lists show the new name, though no presence changed.
+    w.until(|w| shown(w, b) == ["KAT TWO"] && shown(w, c) == ["KAT TWO"]);
+}
+
+#[test]
+fn a_launcher_takes_nothing_from_a_server_before_it_proves_its_key() {
+    let w = World::new("unproven-welcome");
+    let card = w.card_path(1);
+    let welcome = Welcome {
+        account: 7,
+        gamertag: "KAT".into(),
+        card: String::new(),
+        best: 1,
+        levels: Vec::new(),
+    };
+    let launcher = |pin: Option<[u8; 32]>| {
+        let (server_end, pc_end) = Connection::pair();
+        let mut pc = LiveClient::launcher(pc_end, key(1), &profile("Kat"), "test", &card, 0.0);
+        pc.set_access(Access {
+            pin,
+            password: None,
+            computer: "PC 1".into(),
+        });
+        (server_end, pc)
+    };
+    let kinds = |server_end: &mut Connection| -> Vec<u8> {
+        let sent = server_end.receive().unwrap();
+        sent.into_iter().map(|(kind, _)| kind).collect()
+    };
+    let unproven = LiveEvent::Lost(SERVER_UNPROVEN.into());
+    // A "server" that welcomes the LOGIN at once, with playlists, and
+    // never proves its key: given up on, pinned or not, before anything
+    // is taken from it.
+    for pin in [None, Some(key(8).verifying_key().to_bytes())] {
+        let (mut server_end, mut pc) = launcher(pin);
+        ToPc::Welcome(welcome.clone()).send(&mut server_end);
+        ToPc::Playlists(Vec::new()).send(&mut server_end);
+        server_end.flush().unwrap();
+        assert_eq!(pc.poll(0.1), std::slice::from_ref(&unproven));
+        assert!(pc.view.welcome.is_none() && !pc.signed_in());
+        assert_eq!(kinds(&mut server_end), [kind::LOGIN]);
+    }
+    // Nor with a key it proves and no challenge to prove it over.
+    let (mut server_end, mut pc) = launcher(None);
+    let seal_key = seal::public(&[8; 32]);
+    let sig = key(8).sign(&seal::key_proof(&[5; 32], &seal_key));
+    ToPc::SealKey {
+        key: seal_key,
+        server: key(8).verifying_key().to_bytes(),
+        sig: sig.to_bytes(),
+    }
+    .send(&mut server_end);
+    ToPc::Welcome(welcome.clone()).send(&mut server_end);
+    server_end.flush().unwrap();
+    assert_eq!(pc.poll(0.1), std::slice::from_ref(&unproven));
+    assert!(!pc.signed_in());
+    // Pings are answered and refusals heard, as before.
+    let (mut server_end, mut pc) = launcher(None);
+    ToPc::Ping(3).send(&mut server_end);
+    server_end.flush().unwrap();
+    assert_eq!(pc.poll(0.1), []);
+    assert_eq!(kinds(&mut server_end), [kind::LOGIN, kind::PONG]);
+    ToPc::Refused(live::PASSWORD_NEEDED.into()).send(&mut server_end);
+    server_end.flush().unwrap();
+    let refused = LiveEvent::Refused(live::PASSWORD_NEEDED.into());
+    assert_eq!(pc.poll(0.2), [refused]);
+    // The game, which has no key to check, is welcomed as it always was.
+    let (mut server_end, pc_end) = Connection::pair();
+    let mut game = LiveClient::new(pc_end, key(1), &profile("Kat"), &card, 0.0);
+    ToPc::Welcome(welcome).send(&mut server_end);
+    server_end.flush().unwrap();
+    assert_eq!(game.poll(0.1), [LiveEvent::Welcomed]);
+}
+
+#[test]
+fn an_admin_demoted_or_promoted_while_signed_in_is_told_and_obeyed_at_once() {
+    let mut w = closed("admin-online");
+    let kat = make_account(&mut w, "Kat", PASSWORD, true);
+    make_account(&mut w, "Noble", PASSWORD, true); // so Kat isn't the last admin
+    let jun = make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    let admin = |w: &World, i: usize| w.pcs[i].view.accounts.as_ref().map(|a| a.admin);
+    let k = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    w.until(|w| admin(w, k) == Some(true) && accounts(w, k).rows.len() == 3);
+    let set = |account, admin| Command::SetAdmin { account, admin };
+    w.server
+        .command(Actor::Console, set(kat, false), w.now)
+        .unwrap();
+    // Told at once: not an admin, with its own row alone.
+    w.until(|w| admin(w, k) == Some(false));
+    assert_eq!(accounts(&w, k).rows.len(), 1);
+    assert_eq!(accounts(&w, k).rows[0].account, kat);
+    // Still connected, its next admin request drops the PC and changes
+    // nothing.
+    let j = launcher_in(&mut w, 2, "Jun", Some(OTHER_PASSWORD));
+    let mut k = k;
+    for (round, asked) in [
+        AccountAsk::Remove { account: jun },
+        AccountAsk::SignOut { account: jun },
+        AccountAsk::Create {
+            gamertag: "Carter".into(),
+            password: secret(OTHER_PASSWORD),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if round > 0 {
+            k = launcher_in(&mut w, 1, "Kat", None);
+            w.until(|w| admin(w, k) == Some(false));
+        }
+        w.pcs[k].ask_account(asked).unwrap();
+        signed_out(&mut w, kat);
+        w.run(1.0);
+        assert!(w.server.account(jun).is_some());
+        assert!(w.pcs[j].signed_in() && w.refused(j).is_none());
+        assert_eq!(w.server.devices_of(jun).len(), 1);
+        assert_eq!(w.server.find("Carter"), None);
+    }
+    // Promoted while signed in: told at once, with every row, and obeyed.
+    let k = launcher_in(&mut w, 1, "Kat", None);
+    w.until(|w| admin(w, k) == Some(false));
+    w.server
+        .command(Actor::Console, set(kat, true), w.now)
+        .unwrap();
+    w.until(|w| admin(w, k) == Some(true) && accounts(w, k).rows.len() == 3);
+    let answer = ask(&mut w, k, AccountAsk::SignOut { account: jun });
+    assert!(answer.ok, "{}", answer.text);
+    assert_eq!(refusal(&mut w, j), live::SIGNED_OUT);
+}
+
+#[test]
+fn signing_out_holds_with_sign_up_open_or_auto() {
+    // An account named by its PC's key (an older server's, or one open
+    // sign-up made) signed out of its PCs: they aren't let back in, though
+    // a PC the server doesn't know would get an account.
+    for (name, open) in [("sign-out-auto", false), ("sign-out-open", true)] {
+        let mut w = World::with_secret(name, Some(SECRET));
+        let veteran = veteran(&mut w);
+        if open {
+            w.server.set_sign_up(SignUp::Open);
+        }
+        assert!(!w.server.sign_up_closed());
+        let a = w.sign_in(1, "Veteran");
+        let carter = w.sign_in(2, "Carter");
+        let carter = w.id(carter);
+        for (n, account) in [(1, veteran.id), (2, carter)] {
+            let sign_out = Command::SignOut { account };
+            let done = w.server.command(Actor::Console, sign_out, w.now).unwrap();
+            assert!(done.ends_with("GIVE THEM A PASSWORD SO THEY CAN SIGN IN AGAIN."));
+            // Its PC isn't let back in, as the game or as a launcher.
+            let b = w.connect(n, "Veteran");
+            assert_eq!(refusal(&mut w, b), live::SIGNED_OUT, "{name} {n}");
+            let why = launcher_refused(&mut w, n, "Veteran", None);
+            assert_eq!(why, live::PASSWORD_NEEDED, "{name} {n}");
+            assert_eq!(w.server.pc_of(account), None);
+            assert!(w.server.devices_of(account).is_empty());
+            assert!(w.server.account(account).is_some());
+        }
+        assert_eq!(refusal(&mut w, a), live::SIGNED_OUT);
+        // Nor after a restart (the account isn't adopted again).
+        w.restart();
+        if open {
+            w.server.set_sign_up(SignUp::Open);
+        }
+        for n in [1, 2] {
+            let b = w.connect(n, "Veteran");
+            assert_eq!(refusal(&mut w, b), live::SIGNED_OUT, "{name} {n}");
+        }
+        // A PC it doesn't know still signs up.
+        let d = w.sign_in(3, "Dare");
+        assert_eq!(w.welcome(d).gamertag, "DARE");
+    }
+}
+
+#[test]
+fn a_new_account_whose_sign_ins_cannot_be_saved_is_never_written() {
+    let mut w = closed("add-logins-unsaved");
+    let blocked = unsaveable(&w, "logins.txt");
+    let add = || Command::Add {
+        gamertag: "Kat".into(),
+        phc: password::hash(PASSWORD, Cost::Cheap).unwrap(),
+        admin: true,
+    };
+    let done = w.server.command(Actor::Console, add(), w.now);
+    assert_eq!(done, Err(CANT_SAVE.into()));
+    assert_eq!(w.server.find("Kat"), None);
+    assert_eq!(w.server.logins.admins(), 0);
+    // Sign-ins go first, so accounts.txt is never written (with
+    // accounts.txt first, it would be, even if undone after).
+    assert!(!w.data.0.join("accounts.txt").exists());
+    let logins = std::fs::read_to_string(w.data.0.join("logins.txt")).unwrap_or_default();
+    assert!(!logins.lines().any(|l| l.starts_with("u ")), "{logins}");
+    fixed(blocked);
+    restart_closed(&mut w);
+    assert_eq!(w.server.find("Kat"), None);
+    let done = w.server.command(Actor::Console, add(), w.now);
+    assert_eq!(done.as_deref(), Ok("CREATED KAT"));
+    restart_closed(&mut w);
+    let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    assert!(w.server.logins.is_admin(w.welcome(i).account));
+}

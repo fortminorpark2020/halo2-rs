@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-11 23:50 UTC. Any assistant that works on the project
+Last updated 2026-10-12 04:35 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -145,7 +145,11 @@ assists and the team offset aren't. The PC's own log of the day is
 Owner-made accounts (2026-10-11) are built and tested on
 `launcher-accounts` (on `launcher-menu` f0b718b: stage 1 16e80d5, h2live
 and `LIVE_PROTOCOL` 4; stage 2 3323850, the launcher; stage 3, docs and
-the install script; then three rounds of review fixes), pushed, not
+the install script; then four rounds of review fixes, the fourth on
+2026-10-12: a wrong password costs the same hash and locks the same way
+whatever gamertag it names, launchers take nothing from a server before it
+proves its key, pins are kept by the address dialled, `--live` stops on a
+refusal, and the install script puts the new program in last), pushed, not
 deployed. `launcher-menu` with the in-game GAME MENU (PR #9, below) is
 merged into it (2026-10-11 23:50), so its builds carry both; the GAME
 MENU changes neither protocol, and `LIVE_PROTOCOL` stays 4 there.
@@ -172,7 +176,8 @@ step with the owner's go-ahead:
    zip with `H2LAUNCH_SERVER_KEY` set to that key, and rewrite the zip's
    READ ME on his PC ("type the gamertag and password John gave you, once
    on each PC"). The READ ME isn't in the repository. The built-in key
-   covers h2.mohnjorrow.com only; the desktop build, on 192.168.8.102,
+   covers h2.mohnjorrow.com only (written with or without `:47050`, or as
+   its `ws://` URL); the desktop build, on 192.168.8.102,
    learns the key the first time it signs in (on his own network).
 3. The owner makes his friends' accounts from his launcher's Accounts row.
 Rollback: `install -m755 /opt/h2live/h2live.prev /opt/h2live/h2live &&

@@ -11,9 +11,15 @@
 //! digits, which `h2live user key` prints). A key learned from the server
 //! wins over the built-in one.
 //!
+//! Keys are kept by the address the launcher dials (`live::server_url`,
+//! in lower case), so every way of writing one server ("h2.mohnjorrow.com",
+//! "h2.mohnjorrow.com:47050", "ws://H2.mohnjorrow.com:47050/live") has one
+//! key, the built-in one too. A file written with addresses as typed (by an
+//! earlier launcher) reads the same way.
+//!
 //! ```text
 //! # h2launch: the matchmaking servers' identity keys, as last seen.
-//! h2.mohnjorrow.com 3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29
+//! ws://h2.mohnjorrow.com:47050/live 3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29
 //! ```
 
 use crate::lobby::settings::DEFAULT_SERVER;
@@ -109,8 +115,9 @@ impl Pins {
         notes
     }
 
-    /// The key pinned for `server` (an address as typed): the one learned,
-    /// else for the owner's server the built-in one.
+    /// The key pinned for `server` (an address in any of the ways it may be
+    /// written): the one learned, else for the owner's server the built-in
+    /// one.
     pub fn get(&self, server: &str) -> Option<[u8; 32]> {
         let server = clean(server);
         self.learned
@@ -149,9 +156,14 @@ pub fn path(folder: &Path) -> PathBuf {
     folder.join(FILE)
 }
 
-/// A server's address as pins are kept by: trimmed, in lower case.
+/// A server's address as pins are kept by: the URL the launcher dials for
+/// it, in lower case. (Nothing, for no address.)
 fn clean(server: &str) -> String {
-    server.trim().to_ascii_lowercase()
+    let server = server.trim();
+    if server.is_empty() {
+        return String::new();
+    }
+    crate::live::server_url(server).to_ascii_lowercase()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -194,7 +206,7 @@ mod tests {
         pins.save(&dir).unwrap();
         let text = std::fs::read_to_string(path(&dir)).unwrap();
         assert!(
-            text.contains(&format!("example.org {}\n", hex(&OTHER))),
+            text.contains(&format!("ws://example.org:47050/live {}\n", hex(&OTHER))),
             "{text}"
         );
         let back = Pins::parse(&text, None);
@@ -251,6 +263,50 @@ mod tests {
         assert_eq!(pins.get(DEFAULT_SERVER), None);
         assert!(pins.notes()[0].contains("H2LAUNCH_SERVER_KEY"));
         assert!(Pins::parse("", Some("")).notes().is_empty());
+    }
+
+    #[test]
+    fn every_way_of_writing_a_server_finds_its_one_key() {
+        // The owner's server, however it's written, has the built-in key.
+        let built = hex(&KEY);
+        let pins = Pins::parse("", Some(&built));
+        for server in [
+            "h2.mohnjorrow.com",
+            "h2.mohnjorrow.com:47050",
+            " ws://H2.mohnjorrow.com:47050/live ",
+        ] {
+            assert_eq!(pins.get(server), Some(KEY), "{server}");
+        }
+        // Another port, or another way in, is another server.
+        assert_eq!(pins.get("h2.mohnjorrow.com:47051"), None);
+        assert_eq!(pins.get("wss://h2.mohnjorrow.com/live"), None);
+        // A key learned under one spelling is found under the others.
+        let mut pins = Pins::default();
+        pins.set("Example.org:47050", OTHER);
+        assert_eq!(pins.get("example.org"), Some(OTHER));
+        assert_eq!(pins.get("ws://EXAMPLE.ORG:47050/live"), Some(OTHER));
+        pins.set("ws://example.org:47050/live", KEY);
+        assert_eq!(pins.get("example.org"), Some(KEY));
+        assert_eq!(pins.learned.len(), 1);
+        // So with IPv6 addresses, in brackets.
+        pins.set("[::1]", OTHER);
+        assert_eq!(pins.get("[::1]:47050"), Some(OTHER));
+        // A file an earlier launcher wrote, by the address as typed, reads
+        // the same way, and the key learned for the owner's server still
+        // wins over the built-in one.
+        let old = format!(
+            "h2.mohnjorrow.com {}\nexample.org:47050 {}\n",
+            hex(&OTHER),
+            hex(&KEY)
+        );
+        let pins = Pins::parse(&old, Some(&built));
+        assert_eq!(pins.get("ws://h2.mohnjorrow.com:47050/live"), Some(OTHER));
+        assert_eq!(pins.get("example.org"), Some(KEY));
+        assert!(pins
+            .to_text()
+            .contains("ws://h2.mohnjorrow.com:47050/live "));
+        // No address has no key.
+        assert_eq!(Pins::parse("", Some(&built)).get("  "), None);
     }
 
     #[test]

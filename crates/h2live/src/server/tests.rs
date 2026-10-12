@@ -860,6 +860,29 @@ fn leaders_remove_and_promote_and_members_leave() {
 }
 
 #[test]
+fn a_removed_account_leaves_its_party() {
+    let mut w = World::new("removed-member");
+    let [a, b, c] = w.party_of(&["Alpha", "Bravo", "Charlie"])[..] else {
+        unreachable!();
+    };
+    let (alpha, bravo, charlie) = (w.id(a), w.id(b), w.id(c));
+    // A member, then the leader: each is out of the party at once, and
+    // the one left leads it.
+    let remove = |account| Command::Remove { account };
+    let done = w.server.command(Actor::Console, remove(bravo), w.now);
+    assert_eq!(done.as_deref(), Ok("REMOVED BRAVO"));
+    w.until(|w| w.refused(b).is_some() && w.members(a) == [alpha, charlie]);
+    assert_eq!(w.refused(b), Some(live::ACCOUNT_REMOVED));
+    assert_eq!(w.members(c), [alpha, charlie]);
+    w.server
+        .command(Actor::Console, remove(alpha), w.now)
+        .unwrap();
+    w.until(|w| w.members(c) == [charlie]);
+    assert_eq!(w.party(c).leader, charlie);
+    assert_eq!(w.server.account(bravo), None);
+}
+
+#[test]
 fn the_longest_standing_member_leads_when_the_leader_goes() {
     let mut w = World::new("handover");
     let [a, b, c, d] = w.party_of(&["Alpha", "Bravo", "Charlie", "Delta"])[..] else {

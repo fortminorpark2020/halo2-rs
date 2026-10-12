@@ -62,7 +62,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-pub use accounts::{Actor, Command, SignUp, WRONG_OLD_PASSWORD};
+pub use accounts::{Actor, Command, SignUp, PASSWORD_CHANGED, WRONG_OLD_PASSWORD};
 
 mod accounts;
 mod matches;
@@ -226,8 +226,15 @@ pub struct Server {
     hashes: VecDeque<f64>,
     wrong_by_account: HashMap<u64, Vec<f64>>,
     wrong_by_ip: HashMap<IpAddr, Vec<f64>>,
+    /// Wrong passwords for gamertags no account has, by gamertag (as
+    /// `clean_name` makes it), so they lock as accounts do.
+    wrong_by_name: HashMap<String, Vec<f64>>,
     checks_by_account: HashMap<u64, Vec<f64>>,
     changes_by_account: HashMap<u64, Vec<f64>>,
+    /// A hash of a password no one has, made at `cost` when first needed:
+    /// checked when a box opens but there's no password to check it
+    /// against, so the answer takes as long (`accounts::prove_password`).
+    stand_in: Option<String>,
     /// Sent with every challenge.
     motd: String,
     pcs: Vec<Pc>,
@@ -327,8 +334,10 @@ impl Server {
             hashes: VecDeque::new(),
             wrong_by_account: HashMap::new(),
             wrong_by_ip: HashMap::new(),
+            wrong_by_name: HashMap::new(),
             checks_by_account: HashMap::new(),
             changes_by_account: HashMap::new(),
+            stand_in: None,
             motd: motd.trim().to_string(),
             pcs: Vec::new(),
             legs: Vec::new(),

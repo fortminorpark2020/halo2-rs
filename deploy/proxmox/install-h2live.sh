@@ -16,7 +16,10 @@
 #   /opt/h2live/h2live.prev and a copy of the data folder as
 #   /var/lib/h2live.backup-<date>-<time> (logins.txt and secret.txt there
 #   can't be rebuilt from anything else); if a step fails after the stop (a
-#   full disk, say), it starts the service again before it gives up;
+#   full disk, say), it starts the service again before it gives up. The new
+#   program goes in last, once the settings, the unit and the wrapper are
+#   written, so that start runs the program from before, or the new one
+#   with sign-up closed;
 # - writes /opt/h2live/h2live.txt (the data folder and sign-up closed),
 #   which the server and its command line both read, and sets sign-up
 #   closed in the unit too, so losing one of them doesn't open it;
@@ -66,8 +69,6 @@ if [ -n "$(ls -A /var/lib/h2live)" ]; then
     }
     echo "copied the data folder to $backup"
 fi
-install -m 755 "$here/h2live" /opt/h2live/h2live.new
-mv /opt/h2live/h2live.new /opt/h2live/h2live
 
 # The settings beside the program, read by the server and by "h2live user".
 # Lines other than data= and signup= that someone added are kept.
@@ -138,6 +139,10 @@ chmod 755 /usr/local/bin/h2live.new
 mv /usr/local/bin/h2live.new /usr/local/bin/h2live
 
 systemctl daemon-reload
+# The new program last: from here on, whatever starts it (the trap, should
+# a step fail) finds sign-up closed in h2live.txt and in the unit.
+install -m 755 "$here/h2live" /opt/h2live/h2live.new
+mv /opt/h2live/h2live.new /opt/h2live/h2live
 systemctl enable h2live >/dev/null
 trap - EXIT
 systemctl restart h2live

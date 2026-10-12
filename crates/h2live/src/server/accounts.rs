@@ -19,10 +19,15 @@
 //! A launcher on a PC an account doesn't know proves the account's
 //! password instead (PROVE_PASSWORD, sealed: see `crate::seal`). Right, its
 //! key becomes a device of the account (taken from any other account that
-//! had it). A wrong password and a gamertag no account has get the same
-//! answer. Each password checked costs a hash on the server's own thread,
-//! so there are limits: 30 hashes a minute for the whole server, 5 wrong
-//! passwords for an account or 10 from an address in 10 minutes, and 10
+//! had it). A wrong password, an account without a password and a gamertag
+//! no account has get the same answer after the same work: a box that
+//! opens costs one hash whatever it names (with no password to check, a
+//! stand-in no one knows is checked), and 5 wrong tries lock a gamertag no
+//! account has as they lock an account. So neither the answer, how long it
+//! takes, nor the lock tells a guesser which gamertags are accounts. Each
+//! password checked costs a hash on the server's own thread, so there are
+//! limits: 30 hashes a minute for the whole server, 5 wrong passwords for
+//! an account (or gamertag) or 10 from an address in 10 minutes, and 10
 //! passwords checked for an account in 10 minutes, right or wrong, so
 //! knowing one password can't keep the server busy (then TOO_MANY_TRIES
 //! until they're older). PCs an account knows need no password, and a
@@ -267,6 +272,17 @@ impl Server {
     /// set: tests set `Cost::Cheap`).
     pub fn set_password_cost(&mut self, cost: Cost) {
         self.cost = cost;
+        self.stand_in = None;
+    }
+
+    /// A hash of a password no one has (made at random, and never kept),
+    /// made as this server makes hashes: checked in place of a password
+    /// when there's none to check, so the answer takes as long.
+    fn stand_in(&mut self) -> &str {
+        let cost = self.cost;
+        self.stand_in.get_or_insert_with(|| {
+            password::hash(password::generate().as_str(), cost).unwrap_or_default()
+        })
     }
 
     /// The server's identity key (Ed25519), which launchers pin.
@@ -413,6 +429,13 @@ impl Server {
         times.map_or(0, |t| recent(t, now, WRONG_WINDOW))
     }
 
+    /// Wrong passwords for `gamertag` (as `clean_name` makes it), which no
+    /// account has, in the last 10 minutes.
+    fn wrong_for_name(&self, gamertag: &str, now: f64) -> usize {
+        let times = self.wrong_by_name.get(gamertag);
+        times.map_or(0, |t| recent(t, now, WRONG_WINDOW))
+    }
+
     /// Passwords checked to sign in to account `id` in the last 10 minutes.
     fn checks_for(&self, id: u64, now: f64) -> usize {
         let times = self.checks_by_account.get(&id);
@@ -438,6 +461,9 @@ impl Server {
         for times in self.wrong_by_ip.values_mut() {
             times.retain(|&t| now - t < WRONG_WINDOW);
         }
+        for times in self.wrong_by_name.values_mut() {
+            times.retain(|&t| now - t < WRONG_WINDOW);
+        }
         for times in self.checks_by_account.values_mut() {
             times.retain(|&t| now - t < WRONG_WINDOW);
         }
@@ -446,6 +472,7 @@ impl Server {
         }
         self.wrong_by_account.retain(|_, times| !times.is_empty());
         self.wrong_by_ip.retain(|_, times| !times.is_empty());
+        self.wrong_by_name.retain(|_, times| !times.is_empty());
         self.checks_by_account.retain(|_, times| !times.is_empty());
         self.changes_by_account.retain(|_, times| !times.is_empty());
     }
@@ -493,15 +520,25 @@ impl Server {
             return self.refuse(k, live::TOO_MANY_TRIES);
         }
         // Locked, or checked too often: no hash, and it isn't counted (so
-        // the lock isn't made longer).
-        if found.is_some_and(|a| {
-            self.wrong_for_account(a, now) >= WRONG_PER_ACCOUNT
-                || self.checks_for(a, now) >= CHECKS_PER_ACCOUNT
-        }) {
+        // the lock isn't made longer). A gamertag no account has locks as
+        // an account does, so the lock doesn't tell which are accounts.
+        let locked = match found {
+            Some(a) => {
+                self.wrong_for_account(a, now) >= WRONG_PER_ACCOUNT
+                    || self.checks_for(a, now) >= CHECKS_PER_ACCOUNT
+            }
+            None => self.wrong_for_name(&wanted, now) >= WRONG_PER_ACCOUNT,
+        };
+        if locked {
             return self.refuse(k, live::TOO_MANY_TRIES);
         }
         let typed = self.open_box(k, seal::SIGN_IN, login.gamertag.as_bytes(), sealed, 1);
         let phc = found.and_then(|a| self.logins.get(a)?.password.clone());
+        // A box that opens costs one hash whatever it names: with no
+        // password to check (a gamertag no account has, or an account
+        // without one), the stand-in is checked, and the answer thrown
+        // away, so the answer takes as long. (A box that doesn't open costs
+        // none, whatever it names.)
         let right = match (found, &phc, &typed) {
             (Some(a), Some(phc), Some(typed)) => {
                 // Right or wrong, it counts for the account.
@@ -509,10 +546,21 @@ impl Server {
                 self.checks_by_account.entry(a).or_default().push(now);
                 password::verify(phc, typed[0].as_str())
             }
-            _ => false,
+            (_, _, Some(typed)) => {
+                self.hashes.push_back(now);
+                let _ = password::verify(self.stand_in(), typed[0].as_str());
+                false
+            }
+            (_, _, None) => false,
         };
         let Some(a) = found.filter(|_| right) else {
             self.wrong_password(found, ip, now);
+            if found.is_none() {
+                self.wrong_by_name
+                    .entry(wanted.clone())
+                    .or_default()
+                    .push(now);
+            }
             match found.and_then(|a| self.accounts.get(&a)) {
                 Some(account) => log(format_args!(
                     "live: wrong password for {} from {ip} ({} in 10 minutes)",
@@ -935,6 +983,14 @@ impl Server {
                         self.party_changed(self.pcs[k].party);
                     }
                     self.online_changed = true;
+                    // Every list it's on shows the new name, signed in or
+                    // not (a presence changes only while it is).
+                    let mut theirs = self.friends.friends_of(account);
+                    theirs.extend(self.friends.asked_by(account));
+                    theirs.extend(self.friends.asking(account));
+                    for other in theirs {
+                        self.friends_changed(other);
+                    }
                 }
                 log(format_args!("live: {who} renamed {old} {name}"));
                 format!("{old} IS {name} NOW")

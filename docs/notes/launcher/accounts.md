@@ -163,11 +163,16 @@ is.
 
 The launcher remembers each server's identity key in `live-servers.txt`
 in its folder (a `# ` comment line, then one line per server: the address
-as typed, in lower case, and the key in 64 hex digits).
+it dials, in lower case, as `ws://host:port/live`, and the key in 64 hex
+digits). Keys are kept by the address dialled, not as typed, so every way
+of writing one server (`h2.mohnjorrow.com`, `h2.mohnjorrow.com:47050`,
+`ws://H2.mohnjorrow.com:47050/live`) has the one key; a file an earlier
+launcher wrote with addresses as typed reads the same way.
 
 - A launcher built with `H2LAUNCH_SERVER_KEY` set to the key (the friends'
-  zip) knows the owner's server (`h2.mohnjorrow.com`, the default) from the
-  start. A key it learns later wins over the built-in one.
+  zip) knows the owner's server (`h2.mohnjorrow.com`, the default, however
+  it's written) from the start. A key it learns later wins over the
+  built-in one.
 - Otherwise it remembers the key the first time it signs in (after the
   server's WELCOME; the log says `lobby: pinned <server>'s key <code>`).
 - A `live-servers.txt` that is there but can't be read (another program
@@ -177,7 +182,11 @@ as typed, in lower case, and the key in 64 hex digits).
   log says how many.
 - On every sign-in it checks SEAL_KEY before sending anything after its
   LOGIN: it must come before CHALLENGE and its signature must check, or
-  the launcher hangs up ("THE SERVER DIDN'T PROVE WHO IT IS"). If the key
+  the launcher hangs up ("THE SERVER DIDN'T PROVE WHO IT IS"). Until then
+  it takes nothing else from the server but a refusal or a ping: a
+  WELCOME, playlists, a match or anything else that comes first hangs up
+  the same way, so a server that never proves its key can't get past the
+  pin. If the key
   differs from the one pinned, it hangs up and shows SERVER KEY CHANGED
   with both short codes, and sends nothing until the player says to trust
   the new one. A (taken once the popup has been up a second) then pins the
@@ -250,12 +259,17 @@ server with no admin.
   ACCOUNT), a new password shown once the same way; CHANGE PASSWORD
   (CURRENT PASSWORD, NEW PASSWORD, NEW PASSWORD AGAIN, all stars, checked
   on the PC first: "Type your current password.", "The new passwords don't
-  match.", or the password rules); SERVER KEY CHANGED.
+  match.", or the password rules; if the server changed it but couldn't
+  save it, the popup stays with the server's words, and the new password
+  becomes CURRENT, since it's the one that works now, so A tries again
+  without counting a wrong password); SERVER KEY CHANGED.
 - **`--live`** (the test mode without the lobby) checks the pin, never
   sends a password, and on a PC the account doesn't know stops with "this
   PC isn't signed in to that account: sign in once from the lobby (same
   --instance) with your password". Told UPDATE YOUR LAUNCHER, it says, as
-  the lobby does, that the server runs a different version.
+  the lobby does, that the server runs a different version. A refusal
+  while it searches (signed out or removed by an admin) ends the search at
+  once, with the same words, rather than at the end of `--live-wait`.
 
 ## Files on the server (in the data folder)
 
@@ -325,10 +339,18 @@ theirs; else "BAD SIGNATURE")**, checked in this order:
   and no new count (so the lock isn't made longer). The second limit is so
   whoever knows one account's password can't keep the server's hashes
   busy for everyone by signing in to it again and again. Its remembered
-  PCs still sign in, so guessing can't lock a friend out of play.
-- **Wrong password or unknown gamertag:** the same answer, "WRONG GAMERTAG
-  OR PASSWORD", counted for the account (if there is one) and the address,
-  and logged with the gamertag and address.
+  PCs still sign in, so guessing can't lock a friend out of play. A
+  gamertag no account has locks the same way after 5 wrong tries (counted
+  by the gamertag, in memory only), so the lock doesn't tell a guesser
+  which gamertags are accounts.
+- **Wrong password, an account without a password, or unknown gamertag:**
+  the same answer, "WRONG GAMERTAG OR PASSWORD", after the same work: a
+  sealed password that opens costs one hash whatever it names (with no
+  password to check, a hash of a random password, made once at the
+  server's own cost, is checked instead and its answer thrown away), so how long the answer
+  takes doesn't tell them apart either; one that doesn't open costs none,
+  whatever it names. Counted for the account (or the unknown gamertag)
+  and the address, and logged with the gamertag and address.
 - **A right password:** the account's wrong count is cleared. From a new
   PC, the PC is added (up to 5) and the log says `live: KAT signed in with
   a password from 1.2.3.4 (new PC "DESKTOP-1", 2 of 5)`.
@@ -343,6 +365,10 @@ applies, and every try is a new connection.
   "ASK THE SERVER'S OWNER TO CHANGE YOUR GAMERTAG.", and so is the game
   when it signs in under another name; the launcher's lobby says it
   itself).
+- A rename (the command line's) reaches everyone at once: the account's
+  own launcher if it's on, its party, the ONLINE list, and the friends
+  lists of its friends and of those it has a request with, whether or not
+  the account is signed in (within a second).
 - Gamertags the owner makes are 1 to 15 capital letters, digits and single
   spaces, starting with a letter. That's stricter than what players could
   pick before, so one never looks like a splitscreen guest's "NAME(1)".

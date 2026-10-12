@@ -501,6 +501,16 @@ fn accounts_are_made_from_the_command_line_while_the_program_runs() {
     let mut program = Program::start_with(&data.0, &[("H2LIVE_SIGNUP", "closed")]);
     program.wait_for("sign-up: closed");
     program.wait_for("no admins yet");
+    // The admin socket (open by now) is the folder owner's alone: nothing
+    // else checks who connects to it. (Under any usual umask, a socket
+    // left as bound would be 0755 or wider.)
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(data.0.join("admin.sock"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "admin.sock is {:o}", mode & 0o777);
+    assert!(!data.0.join("admin.sock.tmp").exists());
     let ran = h2live(
         &data.0,
         &["user", "add", "kat", "--password-stdin"],
@@ -774,6 +784,37 @@ fn a_password_argument_is_a_usage_error() {
     }
     assert!(!data.0.join("accounts.txt").exists());
     assert!(!data.0.join("logins.txt").exists());
+}
+
+#[test]
+fn the_command_line_opens_only_a_folder_it_owns() {
+    // Files it made in someone else's folder (root's, run without the
+    // h2live wrapper on the server) would be theirs, and the program
+    // couldn't open them.
+    let data = TempDir::new("cli-not-owned");
+    let folder = if rustix::process::geteuid().is_root() {
+        // As root: a folder that is nobody's.
+        std::os::unix::fs::chown(&data.0, Some(65534), Some(65534)).unwrap();
+        data.0.clone()
+    } else {
+        // Otherwise: root's (and never written to, even by a broken build).
+        PathBuf::from("/")
+    };
+    for (args, stdin) in [
+        (&["user", "list"][..], ""),
+        (
+            &["user", "add", "Kat", "--password-stdin"][..],
+            "K7MP-4QR9-XW2T\n",
+        ),
+    ] {
+        let ran = h2live(&folder, args, stdin);
+        assert_eq!(ran.code, 1, "{args:?}: {}", ran.err);
+        let why = "run this as the folder's owner";
+        assert!(ran.err.contains(why), "{args:?}: {}", ran.err);
+        for file in ["h2live.lock", "logins.txt", "accounts.txt"] {
+            assert!(!folder.join(file).exists(), "{file}");
+        }
+    }
 }
 
 #[test]

@@ -131,7 +131,10 @@ it from your PC.
   the program and keeps every account. Each time, it stops the service,
   keeps the program it replaces as `/opt/h2live/h2live.prev` and copies the
   data folder to `/var/lib/h2live.backup-<date>-<time>` (old copies pile up;
-  delete them by hand), then starts the new one.
+  delete them by hand), then starts the new one. The new program goes in
+  last, after the settings, the unit and the wrapper, so if a step fails
+  and the script starts the service again, it runs the old program or the
+  new one with sign-up closed, never the new one with sign-up open.
 - It sets sign-up closed twice (`signup=closed` in `/opt/h2live/h2live.txt`
   and `H2LIVE_SIGNUP=closed` in the unit), so only the server's owner makes
   accounts there, and `UMask=0077`, so the files the server writes

@@ -16,7 +16,7 @@ use super::*;
 use h2live::client::AccountAsk;
 use h2live::logins::MAX_PCS;
 use h2live::password;
-use h2live::server::WRONG_OLD_PASSWORD;
+use h2live::server::{PASSWORD_CHANGED, WRONG_OLD_PASSWORD};
 use h2net::live::{AccountRow, Accounts, ROW_ADMIN, ROW_ONLINE, ROW_PASSWORD};
 
 /// How long an account request may go unanswered before the lobby says so
@@ -592,6 +592,15 @@ impl App {
                 {
                     self.acc.change[0].clear();
                     self.acc.row = 0;
+                }
+                // Changed, but the server couldn't save it: the new password
+                // works now, so it's the current one if A is pressed again
+                // (the old one would be refused, and counted as wrong).
+                Asked::ChangePassword
+                    if self.popup == Some(Popup::ChangePassword)
+                        && text.starts_with(PASSWORD_CHANGED) =>
+                {
+                    self.acc.change[0] = self.acc.change[1].clone();
                 }
                 Asked::Create { .. }
                     if self.popup == Some(Popup::NewAccount)
@@ -2543,6 +2552,56 @@ mod tests {
         turned_away(&mut live, &mut c, "alpha", PASSWORD);
         assert_eq!(c.form_error.as_deref(), Some("Wrong gamertag or password."));
         for d in [dir, dir_b, dir_c] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn a_password_change_the_server_cannot_save_is_tried_again_from_the_new_one() {
+        let mut live = Live::new("change-unsaved");
+        let alpha = live.add("ALPHA", PASSWORD, false);
+        let (mut a, said, dir) = new_pc(&mut live, "change-unsaved-alpha", "alpha", PASSWORD);
+        open_accounts_row(&mut a);
+        a.input(Input::A);
+        assert_eq!(a.label(), "changepassword");
+        // The server can't replace logins.txt (a folder is where its
+        // temporary file would go).
+        let blocked = live.dir.join("logins.txt.tmp");
+        std::fs::create_dir(&blocked).unwrap();
+        let new = "NEW-PASS-4471";
+        type_in(&mut a, PASSWORD);
+        a.input(Input::Tab);
+        type_in(&mut a, new);
+        a.input(Input::Tab);
+        type_in(&mut a, new);
+        a.input(Input::A);
+        live.until(&mut [&mut a], |_, a| a[0].acc.pending.is_none());
+        // Said in full, in the popup; the new password is the current one
+        // now, as it is on the server.
+        assert_eq!(a.label(), "changepassword");
+        let error = a.acc.error.clone().unwrap();
+        assert!(error.starts_with(PASSWORD_CHANGED), "{error}");
+        assert!(error.ends_with("TRY AGAIN."), "{error}");
+        assert_eq!(a.acc.change[0].as_str(), new);
+        assert!(a.acc.change[1..].iter().all(|s| s.as_str() == new));
+        // A again once it can be saved: changed (not WRONG PASSWORD), and
+        // the popup closes.
+        std::fs::remove_dir(&blocked).unwrap();
+        a.input(Input::A);
+        live.until(&mut [&mut a], |_, a| a[0].acc.pending.is_none());
+        assert!(a.popup.is_none(), "{:?}", a.acc.error);
+        assert!(toasted(&a, "Password changed."));
+        assert!(a.acc.change.iter().all(Secret::is_empty));
+        for typed in [new, "NEWPASS4471", PASSWORD] {
+            assert!(!log_has(&said, typed), "{typed}");
+        }
+        // Saved: after a restart, a new PC signs in with the new password.
+        live.server = Server::open(&live.dir, Some("test")).unwrap();
+        live.server.set_sign_up(SignUp::Closed);
+        live.server.set_password_cost(Cost::Cheap);
+        let (b, _, dir_b) = new_pc(&mut live, "change-unsaved-b", "alpha", new);
+        assert_eq!(b.account(), Some(alpha));
+        for d in [dir, dir_b] {
             let _ = std::fs::remove_dir_all(d);
         }
     }
