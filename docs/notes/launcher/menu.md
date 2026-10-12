@@ -1380,6 +1380,105 @@ Halo 2's intro movie before the start screen, from Cartographer's
    the launcher still starts, and the log says `intro: Media Foundation
    isn't installed (...); skipped`.
 
+#### What Phase 2.4 built (2026-10-12)
+
+The 3D scene behind the start screen and main menu, read into plain data
+by a new crate, `crates/h2scene`, on any thread and with no GPU. Nothing
+visible changes; 2.5 draws it.
+
+- **`blam-cache`** gained what `menu-preview` had added for it:
+  `model::sky_atmosphere` (a sky's `Atmosphere`: its atmospheric `Fog`,
+  the fog over the sky's model, and the clear colour when its flags ask
+  for one) and `shader::read_menu_shader`, which reads the cloud
+  templates the menu's way (two maps multiplied, doubled and added for
+  the added clouds, as bright as the colour's alpha) and shows plain
+  glows (`ShaderInfo::multiply`). `read_shader`, which h2viewer and
+  h2tool use, is unchanged.
+- **`h2scene`**, copied from `menu-preview`'s h2viewer (ours):
+  - `flythrough.rs`, as it was: the `mainmenu_flythrough` script's
+    `camera_set`s and `sleep`s at 30 ticks a second, each move a curve
+    that starts at the camera's speed and turn and is cut off by the
+    next. Its 70-degree field of view and the sign of the camera
+    points' roll are still unverified (marked so). New: `seconds`,
+    `ticks`, `points`, `points_used` and `moves`, for the example.
+  - `camera.rs`: `look_to` (a view that banks with the camera's up),
+    `Lens` with the reversed-Z projection and `fov_magnification`, and
+    `menu_view_proj` (the camera at a time and its view-projection for
+    an aspect, as h2viewer drew it: 70 degrees across at any width from
+    4:3 up, near 0.05, far 2,000).
+  - `data.rs`: `Vertex` (position, normal, uv, lightmap uv, light; 56
+    bytes, `vertex_bytes` and `index_bytes` give the buffers' bytes, so
+    the renderer needs no casting crate), `Material` (colour map, the
+    second map's `AuxKind` (glow, mask, change colour, emblem, multiply,
+    multiply twice), `Blend`, `pass()`: Opaque, Alpha or Additive),
+    `MeshData::from_sections` (batched by material and lightmap page; a
+    damaged section drops its bad triangles instead of panicking),
+    `TextureData { w, h, mips }` with `mip_chain` (2x2 boxes down to
+    1x1) and the grey fallback, and `SceneData { level, bsps, meshes,
+    objects, sky, atmosphere, textures, materials, flythrough,
+    failed_textures }`.
+  - `light.rs`: `LevelLight`, the baked light on the floor under a
+    point, which lights each piece of scenery.
+  - `load.rs`: `load(mainmenu, log) -> Result<SceneData, String>`, a port
+    of `Backdrop::load` and the `Loader` parts it used (level, lightmap
+    pages, bitmaps, menu shaders, sky, atmosphere, scenery, placements);
+    the game's HUD, weapons, sounds, rigs and h2sim are left out.
+    Warnings go to `log`. An error, never a panic (a damaged map's panic
+    is caught): a missing file, a file that isn't a Halo 2 map, MCC's
+    format 13 ("MCC maps have no geometry reader yet"), no level
+    geometry, or no flythrough.
+  - `examples/scene_info.rs`: BSPs, triangles, textures, materials by
+    pass, scenery by tag name, fog, camera points, the loop and the load
+    time.
+- **Workspace**: `crates/h2scene` is a member; `Dockerfile.live` stubs
+  its `src/lib.rs` as it does h2ui's (checked by resolving the workspace
+  from only what `.dockerignore` lets through, with and without the
+  stub).
+- **Tests (no game files).** The flythrough's (copied: reading the
+  script, the loop back to rest, no jumps in speed or turn at the cuts,
+  the bank); the lens (70 degrees across 4:3, depth reversed, a banked
+  view tilts, the menu view centred on where the flythrough faces); `from_sections` on made-up sections (batches, shared
+  batches, lighting, damaged sections), the mip chain's sizes and
+  averages, the vertex bytes; `LevelLight` over two made-up floors and
+  a lightmap page; the sky's fog and clear colour and a postprocess
+  colour's alpha (copied); `load` on a missing path, on junk (empty,
+  text, zeros, a Vista header with nothing behind it) and on a format-13
+  header; `SceneData` is `Send`. Ignored, with `H2_MAPS`:
+  `reads_the_real_main_menu`.
+- **Measured in the container** on Cartographer's `mainmenu.map`
+  (`H2_MAPS=... cargo test --release -p h2scene -- --ignored` and the
+  example):
+  - 1 BSP, 38,738 level triangles (the plan's count exactly), 6,997 in
+    the scenery as placed and 184 in the sky: 45,919 in all;
+  - 39 textures with the fallback (19.4 MB with their mips), none that
+    failed to decode. The plan's 48 was h2viewer's loader for a whole
+    level, which adds the players' bodies and weapons;
+  - 40 materials: 27 opaque, 7 alpha-blended, 6 additive;
+  - 10 pieces of scenery: the carrier (5,510 triangles), two plasma
+    screens, the progress symbol (1,348), a cinematic anchor (6) and
+    five one-triangle stand-ins for the firing effects; 9 of them over
+    a floor that lights them. Whether Halo 2 draws the anchor and the
+    stand-ins is for 2.5's look check;
+  - the sky's fog: a brown haze, density up to 0.5, from 0 to 150
+    units; clear colour a dark grey;
+  - 18 camera points, 12 of them flown through in 13 moves; a loop of
+    2,990 ticks (99.7 s), starting on the first path point;
+  - the load: about 1.9 s the first time (the file read from disk),
+    about 110 ms once the file is in the disk cache.
+
+**On the owner's PC (with P4)**, from the clone (`C:\Halo 2 Rust
+Project` or the work folder):
+
+```
+cargo run --release -p h2scene --example scene_info -- "C:\Games\Halo 2 Project Cartographer\maps\mainmenu.map"
+```
+
+It should print the counts above (1 BSP, 45,919 triangles, 39 textures
+and 0 not decoded, 40 materials as 27/7/6, 10 objects, 18 camera points
+with 12 flown through, 2,990 ticks and 99.7 s) and a load time; and on
+MCC's `halo2\h2_maps_win64_dx11\mainmenu.map`, `error: MCC maps have no
+geometry reader yet`.
+
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 
 **1. MATCHMAKING (0xD2).**

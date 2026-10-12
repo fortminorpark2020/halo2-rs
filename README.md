@@ -185,6 +185,10 @@ install. No game files are included in this repository.
   Vista (Project Cartographer) folder if the launcher finds one, otherwise
   from MCC's own Halo 2 files (`H2LOBBY_VISTA=off` tries it without); the
   menu music and sounds from Cartographer's only.
+- `h2scene`: the 3D scene behind Halo 2's main menu (the Covenant carrier
+  over New Mombasa, flown through by the map's own camera path), read
+  from your Halo 2 Vista (Project Cartographer) `mainmenu.map` for the
+  launcher's menus. The launcher doesn't draw it yet.
 - `wma`: Windows Media Audio 2 decoder for the announcer's lines (and the
   launcher's menu music), ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).

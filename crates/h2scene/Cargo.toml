@@ -1,0 +1,12 @@
+[package]
+name = "h2scene"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Halo 2's main menu scene (mainmenu.map's level, sky, scenery and flythrough) as plain data for a renderer; no GPU and no game files"
+
+[dependencies]
+# mainmenu.map's geometry, bitmaps, shaders and script, read from the
+# player's own install at run time.
+blam-cache = { path = "../blam-cache" }
+glam = "0.33"

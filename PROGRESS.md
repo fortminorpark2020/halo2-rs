@@ -1,7 +1,7 @@
 # Progress and handoff
 
-Last updated 2026-10-12 (menu 2.3 review fixes; the in-game game menu
-merged in from `launcher-menu`). Any assistant that works on the project
+Last updated 2026-10-12 (menu 2.4: the menu scene as data, in the new
+`crates/h2scene`). Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -193,7 +193,21 @@ Next, in order:
    direction or typing (`App::key_repeated`), so Enter held to skip the
    intro no longer goes on to the main menu and signs in; the README
    says the launcher opens on the intro; menu.md now has the full P3
-   list ("On the owner's PC (P3)"). Next: 2.4, the menu scene as data.
+   list ("On the owner's PC (P3)"). 2.4 is done (2026-10-12; menu.md
+   "What Phase 2.4 built"): a new crate, `crates/h2scene`, reads
+   Cartographer's `mainmenu.map` scene (the level, sky, fog, scenery and
+   the flythrough's camera path, ported from `menu-preview`'s h2viewer)
+   into plain data on any thread with no GPU; `blam-cache` gained the
+   sky's fog (`model::sky_atmosphere`) and the menu's shader reading
+   (`shader::read_menu_shader`). Nothing visible changes. In the
+   container: 38,738 level triangles (45,919 with the scenery and sky),
+   39 textures, 40 materials, 12 of 18 camera points flown through in a
+   2,990-tick loop, read in about 110 ms (1.9 s from a cold disk). MCC's
+   format-13 maps are refused ("no geometry reader yet"). On the owner's
+   PC (with P4): `cargo run --release -p h2scene --example scene_info --
+   "C:\Games\Halo 2 Project Cartographer\maps\mainmenu.map"` should
+   print the same counts. Next: 2.5, the scene drawn behind the start
+   screen and main menu (wgpu offscreen).
 2. Friends: the owner sends their public IPs; add each to the allowlist
    (below) and play a two-PC match with a friend through
    h2.mohnjorrow.com, the first test of the relay from outside.

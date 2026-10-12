@@ -1136,6 +1136,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2scene"
+version = "0.1.0"
+dependencies = [
+ "blam-cache",
+ "glam",
+]
+
+[[package]]
 name = "h2sim"
 version = "0.1.0"
 dependencies = [

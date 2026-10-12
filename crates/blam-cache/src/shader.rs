@@ -49,6 +49,10 @@ pub struct ShaderInfo {
     /// Change-colour map: where a player's primary (red channel) and
     /// secondary (green) armour colours tint the surface.
     pub change_color: Option<DatumIndex>,
+    /// A second colour map multiplied into the first (colour and alpha),
+    /// and how much the product is scaled by (the cloud templates double
+    /// it).
+    pub multiply: Option<(DatumIndex, f32)>,
     /// Colour multiplied into the base colour.
     pub tint: [f32; 3],
     /// Multiplies alpha-blended surfaces' opacity.
@@ -64,7 +68,25 @@ fn color(c: &[u8]) -> [f32; 3] {
     ]
 }
 
+/// A postprocess colour's alpha byte.
+fn color_alpha(c: &[u8]) -> f32 {
+    c[3] as f32 / 255.0
+}
+
+/// A shader as the levels draw it.
 pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
+    read(set, shader, false)
+}
+
+/// A shader as the main menu's scene draws it: its sky's cloud templates
+/// multiply in their second map, and plain glows (`opaque\illum`) show.
+/// The levels keep their own look (`read_shader`) until they're checked
+/// against Halo 2 the same way.
+pub fn read_menu_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
+    read(set, shader, true)
+}
+
+fn read(set: &mut MapSet, shader: DatumIndex, menu: bool) -> Result<ShaderInfo> {
     let (src, _, data) = set.tag_data(shader)?;
     let file = set.get(src);
     let region = file.meta_region();
@@ -92,11 +114,11 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
         .iter()
         .map(|b| DatumIndex(u32_at(b, 0)))
         .collect();
-    let colors: Vec<[f32; 3]> = colors
+    let colors: Vec<([f32; 3], f32)> = colors
         .as_chunks::<POSTPROCESS_COLOR_SIZE>()
         .0
         .iter()
-        .map(|c| color(c))
+        .map(|c| (color(c), color_alpha(c)))
         .collect();
     let template = set
         .locate(DatumIndex(u32_at(&data, 4)))
@@ -110,7 +132,8 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
         })
     };
     let first_own = (0..bitmaps.len()).find_map(own);
-    let slot_color = |i: usize| colors.get(i).copied().unwrap_or([1.0; 3]);
+    let slot_color = |i: usize| colors.get(i).map_or([1.0; 3], |c| c.0);
+    let slot_alpha = |i: usize| colors.get(i).map_or(1.0, |c| c.1);
 
     let mut info = ShaderInfo {
         diffuse: runtime_diffuse.or(first_own),
@@ -134,6 +157,11 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
         }
         "opaque\\illum_3_channel" => {
             info.illum = own(0).map(|b| (b, [1.0; 3]));
+            info.tint = [0.0; 3];
+        }
+        // Only a glow: its pass shows map 0 times the colour.
+        "opaque\\illum" if menu => {
+            info.illum = own(0).map(|b| (b, slot_color(0)));
             info.tint = [0.0; 3];
         }
         "opaque\\overlay" => info.blend = Blend::Alpha,
@@ -171,10 +199,25 @@ pub fn read_shader(set: &mut MapSet, shader: DatumIndex) -> Result<ShaderInfo> {
             info.diffuse = own(2).or(first_own);
             info.blend = Blend::Alpha;
         }
+        // Their passes multiply the two maps, colour and alpha.
+        "transparent\\two_alpha_clouds" | "transparent\\sky_two_alpha_clouds" if menu => {
+            info.diffuse = own(0);
+            info.multiply = own(1).map(|b| (b, 1.0));
+            info.blend = Blend::Alpha;
+        }
+        // The levels' clouds: the second map as a mask.
         "transparent\\two_alpha_clouds" | "transparent\\sky_two_alpha_clouds" => {
             info.diffuse = own(0);
             info.mask = own(1);
             info.blend = Blend::Alpha;
+        }
+        // Twice the two maps' product, added, as bright as the colour's
+        // alpha says (none for lightning that only flashes when animated).
+        "transparent\\two_add_clouds" | "transparent\\sky_two_add_clouds" if menu => {
+            info.diffuse = own(0);
+            info.multiply = own(1).map(|b| (b, 2.0));
+            info.opacity = slot_alpha(0);
+            info.blend = Blend::Additive;
         }
         "transparent\\plasma_alpha" => {
             info.diffuse = own(2).or(first_own);
@@ -227,5 +270,12 @@ mod tests {
         // Lockout's blue grav lift.
         let [r, g, b] = color(&[0xb0, 0x38, 0x0b, 0x00]);
         assert!(b > 0.6 && r < 0.05 && g > 0.2, "{r} {g} {b}");
+    }
+
+    #[test]
+    fn postprocess_alpha_is_the_last_byte() {
+        // The main menu's cloud dome shows in full; its lightning not at rest.
+        assert_eq!(color_alpha(&[0x00, 0x00, 0x00, 0xff]), 1.0);
+        assert_eq!(color_alpha(&[0x00, 0x00, 0x00, 0x00]), 0.0);
     }
 }
