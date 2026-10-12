@@ -129,9 +129,13 @@ it from your PC.
   to a Linux build of `h2live`, installs it as the `h2live` service (program
   in `/opt/h2live`, accounts in `/var/lib/h2live`). Running it again updates
   the program and keeps every account. Each time, it stops the service,
-  keeps the program it replaces as `/opt/h2live/h2live.prev` and copies the
-  data folder to `/var/lib/h2live.backup-<date>-<time>` (old copies pile up;
-  delete them by hand), then starts the new one. The new program goes in
+  keeps the program it replaces as `/opt/h2live/h2live.prev` (only the one
+  before the latest install) and copies the data folder to
+  `/var/lib/h2live.backup-<date>-<time>` (old copies pile up; delete them
+  by hand), then starts the new one. The last program from before accounts
+  (live protocol 3) is also kept, for good, as
+  `/opt/h2live/h2live.before-accounts`. If the new server isn't running
+  after the start, the script shows its log and ends with an error. The new program goes in
   last, after the settings, the unit and the wrapper, so if a step fails
   and the script starts the service again, it runs the old program or the
   new one with sign-up closed, never the new one with sign-up open.
@@ -144,11 +148,13 @@ it from your PC.
   the rest (below), in a root shell in the container (over ssh), or from
   the Proxmox host with `pct exec 102 -- h2live user list`. On its own,
   `h2live` only says how to use it: the server is the service.
-- To go back to the program before an update: `install -m755
+- To go back to the program before the latest update: `install -m755
   /opt/h2live/h2live.prev /opt/h2live/h2live && systemctl restart h2live`.
-  For the data as it was too, stop the service and copy that update's
-  backup folder back over `/var/lib/h2live` first. A server from before
-  accounts (live protocol 3) ignores `logins.txt` and `signup=`, so it is
+  To go back to the server from before accounts, whatever was installed
+  since, use `/opt/h2live/h2live.before-accounts` in place of
+  `h2live.prev`. For the data as it was too, stop the service and copy that
+  update's backup folder back over `/var/lib/h2live` first. A server from
+  before accounts (live protocol 3) ignores `logins.txt` and `signup=`, so it is
   open sign-up again, and accounts made by hand can't sign in to it until
   the newer one is back. It has no command line either: until then,
   `h2live user ...` says so and does nothing.

@@ -127,12 +127,20 @@ owner may read it.
 - **Why the main thread is fine.** The hash runs on the server's main
   thread, at most 30 a minute. The launcher's game traffic runs on the
   relay's own thread, so matches aren't touched.
-- **Never kept.** A password in clear lives only in memory that is wiped
-  when it's dropped. No password, hash or sealed box is ever logged, and no
-  password is written anywhere (a made-up one is shown once, on the screen
-  or the command line's output, and then forgotten). A hash read from logins.txt or the admin socket
-  is refused if its settings are out of bounds (over 256 MiB, 16 passes or
-  4 lanes), so a bad line can't make the server work for minutes.
+- **Never kept.** Our code keeps a password in clear only in memory that
+  is wiped when it's dropped, and argon2 is built with its `zeroize`
+  feature, so it wipes its own working copies too (the first hash of the
+  password and salt, and the last block's hash). That wiping is best
+  effort: while it hashes, the password also sits in the hashing library's
+  Blake2b buffer and in leftover stack copies, which can't be wiped from
+  outside. Someone who can read the server's memory is out of scope, as
+  with secret.txt. No password, hash or sealed box is ever logged, and
+  neither is a gamertag no account has (it may be a password typed in the
+  wrong box), and no password is written anywhere (a made-up one is shown
+  once, on the screen or the command line's output, and then forgotten).
+  A hash read from logins.txt or the admin socket is refused if its
+  settings are out of bounds (over 256 MiB, 16 passes or 4 lanes), so a
+  bad line can't make the server work for minutes.
 
 ### Passwords on the wire
 
@@ -223,8 +231,12 @@ server with no admin.
 
 - **Sign in.** GAMERTAG, PASSWORD ("Only on a new PC"), SERVER. The
   password is drawn as stars, never saved (lobby.txt keeps only the
-  gamertag and server) or logged (the log says "(with a password)"), sent
-  only sealed, and forgotten when the sign-in ends. ONLINE with a saved
+  gamertag and server) or logged, sent only sealed, and forgotten when the
+  sign-in ends. With a password, the log says only "signing in to <url>
+  with a password", not the gamertag: a password typed in the GAMERTAG box
+  keeps all but its dashes there, and they don't count. Until the server
+  welcomes a gamertag, lobby.txt keeps the last one it welcomed (a setting
+  changed meanwhile saves that one). ONLINE with a saved
   gamertag still signs in at once by the PC's key. After WELCOME the
   gamertag the server gave is saved; if no password was typed and the
   server signed this PC in as someone else, a notice says "This PC is
@@ -345,12 +357,18 @@ theirs; else "BAD SIGNATURE")**, checked in this order:
   which gamertags are accounts.
 - **Wrong password, an account without a password, or unknown gamertag:**
   the same answer, "WRONG GAMERTAG OR PASSWORD", after the same work: a
-  sealed password that opens costs one hash whatever it names (with no
-  password to check, a hash of a random password, made once at the
-  server's own cost, is checked instead and its answer thrown away), so how long the answer
-  takes doesn't tell them apart either; one that doesn't open costs none,
-  whatever it names. Counted for the account (or the unknown gamertag)
-  and the address, and logged with the gamertag and address.
+  sealed password that opens costs one hash whatever it names, so how long
+  the answer takes doesn't tell them apart either; one that doesn't open
+  costs none, whatever it names. With no password to check, a stand-in is
+  checked instead and its answer thrown away: a hash of a random password,
+  made with the settings most hashes in logins.txt have (the server's own
+  when there are none). It's made when the server starts, and again when
+  those settings change, so after a cost change it still takes as long as
+  a usual account's hash. Counted for the account (or the unknown
+  gamertag) and the address. Logged with the account's gamertag and the
+  address, or for a gamertag no account has, with the address only
+  (`live: wrong password for a gamertag no account has, from 1.2.3.4 (1 in
+  10 minutes)`): that gamertag may be a password typed in the wrong box.
 - **A right password:** the account's wrong count is cleared. From a new
   PC, the PC is added (up to 5) and the log says `live: KAT signed in with
   a password from 1.2.3.4 (new PC "DESKTOP-1", 2 of 5)`.
@@ -523,7 +541,9 @@ server has none. Open set by hand while there are admins logs a warning.
 The server goes first, and only when the owner says so.
 
 1. **Install.** `deploy/proxmox/install-h2live.sh` keeps the old program as
-   h2live.prev and a dated copy of the data folder
+   h2live.prev (only the program before the latest install), the last
+   program from before accounts as h2live.before-accounts (kept for good:
+   later installs don't replace it), and a dated copy of the data folder
    (`/var/lib/h2live.backup-<date>-<time>`). It writes
    `/opt/h2live/h2live.txt` (`data=/var/lib/h2live`, `signup=closed`), adds
    `H2LIVE_SIGNUP=closed` and `UMask=0077` to the unit, installs the
@@ -532,7 +552,12 @@ The server goes first, and only when the owner says so.
 2. **Owner's account.** `h2live user list` to find it, `h2live user admin
    <OWNER> on`, then `h2live user passwd <OWNER>`, and give him the
    password. Note the "hashing took N ms" line (over about 150 ms: lower
-   the memory, or plan a worker thread).
+   the memory, or plan a worker thread). After lowering it (`Cost::Real`
+   in password.rs), rebuild, install again and run `h2live user passwd
+   <OWNER>` again: hashes keep the settings they were made with, and the
+   stand-in a gamertag no account has is checked against follows the
+   settings most hashes have, so every password made before the change
+   should be set again.
 3. **Launchers.** `h2live user key`, then rebuild the owner's launcher and
    the friends' zip with `H2LAUNCH_SERVER_KEY` set to that key, and rewrite
    the zip's READ ME ("type the gamertag and password John gave you, once
@@ -540,9 +565,12 @@ The server goes first, and only when the owner says so.
 4. **Accounts.** The owner's launcher signs in by its PC and shows
    Accounts; the owner creates the friends' accounts there.
 
-To roll back, `install -m755 /opt/h2live/h2live.prev /opt/h2live/h2live &&
-systemctl restart h2live`, and friends go back to the old zip. The version
-3 server reads the folder and ignores the new files and the `signup=`
+To roll back to the version 3 server, `install -m755
+/opt/h2live/h2live.before-accounts /opt/h2live/h2live && systemctl restart
+h2live`, and friends go back to the old zip. (h2live.prev is only the
+program before the latest install: after a second install, an accounts
+build too, which turns the old zip away.) The version 3 server reads the
+folder and ignores the new files and the `signup=`
 line, but it is open sign-up again. Accounts the owner made can't sign in
 under it, though they are kept for later. It has no command line either:
 the wrapper says so (`h2live user ...` does nothing) until the newer
@@ -614,16 +642,24 @@ None of the tests need the internet or game files.
 - **Sealing:** a fixed known answer (worked out separately when it was
   written), so launcher and server can't drift apart; boxes don't open with any part of the extra data changed, a bit
   flipped or a zero key.
-- **Passwords and logins.txt:** the rules, the generator, hashes, a
-  round trip of the file, its errors, adoption, mode 600, and a v3 folder
-  left byte for byte as it was.
-- **Server:** 30 tests in `crates/h2live/src/server/tests/accounts.rs`
+- **Passwords and logins.txt:** the rules, the generator, hashes and the
+  settings they name, a round trip of the file, its errors, adoption, mode
+  600, and a v3 folder left byte for byte as it was.
+- **Server:** the tests in `crates/h2live/src/server/tests/accounts.rs`
   drive the sign-in rules, locks and limits, PCs, admin actions and their
-  guards, removal, cards, renames, the game never hearing the new kinds, a
-  v3 launcher told to update, and the auto setting, on simulated time.
+  guards, removal, cards, renames (reaching friends, the party and the
+  ONLINE list), the game never hearing the new kinds, a v3 launcher told
+  to update, the auto setting, a one-time seal key for every connection
+  (across a restart too), and a stand-in made like most kept hashes, on
+  simulated time.
 - **Command line:** `crates/h2live/tests/program.rs` runs the real program
   against a running and a stopped server, a second server on one folder, a
-  password given as an argument, a missing folder, and `/admin` still 404.
+  folder that isn't the command line's own (with and without a lock left
+  in it), a password given as an argument, a missing folder, and `/admin`
+  still 404. Its hashes, the command line's and those the program makes
+  for a launcher admin, are at the real cost; a gamertag no account has is
+  never logged; and the admin socket is open before the program asks the
+  router for its port.
 - **Launcher:** tests sign in against a real server in the same process
   (and one played by the test, to read every byte sent). They check that a
   password is never drawn, logged or sent unsealed, the refusals, that a

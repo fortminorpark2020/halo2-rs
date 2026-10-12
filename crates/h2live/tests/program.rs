@@ -6,7 +6,7 @@
 #![cfg(unix)]
 
 use ed25519_dalek::SigningKey;
-use h2live::client::{Access, LiveClient, LiveEvent, Profile};
+use h2live::client::{Access, AccountAsk, LiveClient, LiveEvent, Profile};
 use h2live::password::Secret;
 use h2net::live::{self, ToServer};
 use h2relay::{ClientConfig, Failure, Refusal, RelayClient, State};
@@ -72,21 +72,24 @@ impl Program {
         Program::launch_with(data, &[])
     }
 
+    /// (What it said up to then is kept in `said`.)
     fn launch_with(data: &Path, env: &[(&str, &str)]) -> (Program, BufReader<ChildStdout>) {
         let mut child = program(data, env).stdout(Stdio::piped()).spawn().unwrap();
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut said = Vec::new();
         let mut line = String::new();
         while !line.contains("listening on port ") {
             line.clear();
             let read = stdout.read_line(&mut line).unwrap();
-            assert!(read > 0, "it never said which port it's on");
+            assert!(read > 0, "it never said which port it's on: {said:#?}");
+            said.push(line.trim_end().to_string());
         }
         let after = line.split("listening on port ").nth(1).unwrap();
         let port = after.split(' ').next().unwrap().parse().unwrap();
         let program = Program {
             child,
             lines: mpsc::channel().1,
-            said: Vec::new(),
+            said,
             port,
         };
         (program, stdout)
@@ -204,6 +207,23 @@ fn h2live(data: &Path, args: &[&str], stdin: &str) -> Ran {
 /// A password, as tests type it, and a wrong one.
 const PASSWORD: &str = "K7MP-4QR9-XW2T";
 const WRONG: &str = "Q9W8-E7R6-T5Y4";
+
+/// How every hash the program and its command line make starts: argon2id
+/// at the real cost (`Cost::Real`), never the tests' cheap one.
+const REAL_PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$";
+
+/// logins.txt in `data` holds `n` hashes, each made at the real cost.
+fn hashes_are_real(data: &Path, n: usize) {
+    let kept = std::fs::read_to_string(data.join("logins.txt")).unwrap();
+    let hashes: Vec<&str> = kept
+        .match_indices("$argon2id$")
+        .map(|(at, _)| &kept[at..])
+        .collect();
+    assert_eq!(hashes.len(), n, "{kept}");
+    for hash in hashes {
+        assert!(hash.starts_with(REAL_PHC), "{kept}");
+    }
+}
 
 /// The program never said a hash, nor any of `passwords`, as typed or as
 /// sealed (`password::normalize`).
@@ -541,6 +561,14 @@ fn accounts_are_made_from_the_command_line_while_the_program_runs() {
     assert_eq!(pcs.answer(d), Err(live::WRONG_PASSWORD.into()));
     let e = pcs.connect_launcher(program.port, 4, "Nobody", Some(PASSWORD));
     assert_eq!(pcs.answer(e), Err(live::WRONG_PASSWORD.into()));
+    // The password typed in the GAMERTAG box (which drops its dashes, and
+    // they don't count) and the gamertag in the PASSWORD box: refused, and
+    // a gamertag no account has is never logged, as it may be a password.
+    let swapped = h2live::password::normalize(PASSWORD);
+    let f = pcs.connect_launcher(program.port, 5, &swapped, Some("KAT KAT KAT"));
+    assert_eq!(pcs.answer(f), Err(live::WRONG_PASSWORD.into()));
+    let unknown = "live: wrong password for a gamertag no account has, from 127.0.0.1";
+    program.wait_for(unknown);
     let ran = h2live(&data.0, &["user", "list"], "");
     assert_eq!(ran.code, 0, "{}", ran.err);
     let row = ran.out.lines().find(|l| l.starts_with("KAT ")).unwrap();
@@ -562,8 +590,16 @@ fn accounts_are_made_from_the_command_line_while_the_program_runs() {
         ran.err
     );
     program.stop();
-    // Nothing secret was said.
+    // Nothing secret was said, nor the gamertags no account has.
     said_nothing_secret(&program, &[PASSWORD, WRONG]);
+    for line in &program.said {
+        assert!(
+            !line.contains("NOBODY") && !line.contains(&swapped),
+            "{line}"
+        );
+    }
+    let unknowns = program.said.iter().filter(|l| l.contains(unknown));
+    assert_eq!(unknowns.count(), 2, "{:#?}", program.said);
     // The same key with the program stopped (the folder opened here).
     let ran = h2live(&data.0, &["user", "key"], "");
     assert_eq!(
@@ -574,6 +610,25 @@ fn accounts_are_made_from_the_command_line_while_the_program_runs() {
     );
     // The socket goes with the program.
     assert!(!data.0.join("admin.sock").exists());
+}
+
+#[test]
+fn the_command_line_can_reach_the_program_before_it_asks_the_router() {
+    // Asking the router for the port can take UPNP_TIMEOUT (3 s, and every
+    // time on the owner's server, whose router doesn't answer), all the
+    // while holding h2live.lock: the admin socket is open before then, so
+    // the command line isn't told it can't reach it. (Here the router is
+    // left alone; the order is the same.)
+    let data = TempDir::new("cli-early");
+    let (mut program, _stdout) = Program::launch(&data.0);
+    // Said once the socket is open, and before the port.
+    let at = |what: &str| program.said.iter().position(|l| l.contains(what));
+    let sign_up = at("sign-up: ").expect("no sign-up line before the port");
+    assert!(sign_up < at("listening on port ").unwrap());
+    assert!(data.0.join("admin.sock").exists());
+    let ran = h2live(&data.0, &["user", "list"], "");
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    program.stop();
 }
 
 #[test]
@@ -612,7 +667,8 @@ fn the_command_line_works_on_its_own_while_the_program_is_stopped() {
     // Only its hash is kept, where only the folder's owner can read it.
     let logins = data.0.join("logins.txt");
     let kept = std::fs::read_to_string(&logins).unwrap();
-    assert!(kept.contains("$argon2id$") && !kept.contains(password));
+    assert!(kept.contains(REAL_PHC) && !kept.contains(password));
+    hashes_are_real(&data.0, 1);
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(&logins).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
@@ -624,6 +680,17 @@ fn the_command_line_works_on_its_own_while_the_program_is_stopped() {
     assert_eq!(pcs.answer(a), Ok(()));
     pcs.until(|p| p.pcs[a].view.accounts.is_some());
     assert!(pcs.pcs[a].view.accounts.as_ref().unwrap().admin);
+    // An account the admin makes from the launcher: the program hashes at
+    // the real cost too.
+    let create = AccountAsk::Create {
+        gamertag: "Jun".into(),
+        password: Secret::new(PASSWORD),
+    };
+    let seq = pcs.pcs[a].ask_account(create).unwrap();
+    pcs.until(|p| p.pcs[a].view.accounts.as_ref().unwrap().answers == seq);
+    let rows = &pcs.pcs[a].view.accounts.as_ref().unwrap().rows;
+    assert!(rows.iter().any(|r| r.gamertag == "JUN"), "{rows:?}");
+    hashes_are_real(&data.0, 2);
     let b = pcs.connect(program.port, 2, "Gamer");
     assert_eq!(pcs.answer(b), Err(live::NO_ACCOUNT.into()));
     program.stop();
@@ -696,6 +763,8 @@ fn the_command_line_removes_makes_admins_and_gives_new_passwords() {
     assert_eq!(password.len(), 14);
     let kept = std::fs::read_to_string(data.0.join("logins.txt")).unwrap();
     assert!(!kept.contains(&password));
+    // Jun's new hash (Kat's is gone) is made at the real cost.
+    hashes_are_real(&data.0, 1);
 
     // It signs in from a new PC; the old one doesn't.
     let mut program = Program::start(&data.0);
@@ -813,6 +882,30 @@ fn the_command_line_opens_only_a_folder_it_owns() {
         assert!(ran.err.contains(why), "{args:?}: {}", ran.err);
         for file in ["h2live.lock", "logins.txt", "accounts.txt"] {
             assert!(!folder.join(file).exists(), "{file}");
+        }
+    }
+    // A folder a stopped server left its lock in (as on the server, where
+    // the lock stays once the program has run): refused the same way,
+    // though the lock is free. (Only as root: no one else can make a
+    // folder that is someone else's.)
+    if rustix::process::geteuid().is_root() {
+        let lock = folder.join("h2live.lock");
+        std::fs::write(&lock, "").unwrap();
+        std::os::unix::fs::chown(&lock, Some(65534), Some(65534)).unwrap();
+        for (args, stdin) in [
+            (&["user", "list"][..], ""),
+            (
+                &["user", "add", "Kat", "--password-stdin"][..],
+                "K7MP-4QR9-XW2T\n",
+            ),
+        ] {
+            let ran = h2live(&folder, args, stdin);
+            assert_eq!(ran.code, 1, "{args:?}: {}", ran.err);
+            let why = "run this as the folder's owner";
+            assert!(ran.err.contains(why), "{args:?}: {}", ran.err);
+            for file in ["logins.txt", "accounts.txt"] {
+                assert!(!folder.join(file).exists(), "{file}");
+            }
         }
     }
 }

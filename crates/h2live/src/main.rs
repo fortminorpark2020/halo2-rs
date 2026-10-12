@@ -251,6 +251,22 @@ fn run() -> Result<(), String> {
     server.set_sign_up(settings.signup);
     let data = std::path::absolute(&settings.data).unwrap_or(settings.data);
     log(format_args!("accounts are kept in {}", data.display()));
+    // The command line's way in, open before the relay starts and the
+    // router is asked for the port (which waits out UPNP_TIMEOUT when the
+    // router doesn't answer): it holds h2live.lock, so the command line
+    // takes it this way from now on. What it asks waits until `serve`
+    // takes it, well within its timeouts.
+    #[cfg(unix)]
+    let admin = admin_socket::open(&data);
+    #[cfg(unix)]
+    let asks = admin.as_ref().map(|a| &a.asks);
+    #[cfg(not(unix))]
+    let asks = None;
+    // (Said once the admin socket is open.)
+    for line in server.sign_up_line().lines() {
+        log(line);
+    }
+    server.prepare_stand_in();
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = stop.clone();
     ctrlc::set_handler(move || stopping.store(true, Ordering::SeqCst))
@@ -266,15 +282,6 @@ fn run() -> Result<(), String> {
     } else {
         Vec::new()
     };
-    #[cfg(unix)]
-    let admin = admin_socket::open(&data);
-    #[cfg(unix)]
-    let asks = admin.as_ref().map(|a| &a.asks);
-    #[cfg(not(unix))]
-    let asks = None;
-    for line in server.sign_up_line().lines() {
-        log(line);
-    }
 
     serve(&listener, &mut server, &stop, settings.hosted, asks);
 

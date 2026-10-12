@@ -209,7 +209,8 @@ the launcher doesn't do.
    type the gamertag and the password the server's owner gave you; the
    password ("Only on a new PC") is drawn as stars, never saved or logged,
    sent only sealed to the server's key, and forgotten when the sign-in
-   ends. The gamertag the server signs you in as is kept in `lobby.txt`
+   ends. The gamertag the server signs you in as (only once it has, and
+   with a password it isn't logged before then) is kept in `lobby.txt`
    in the launcher's folder with the server's address, and from then on
    ONLINE signs in with this PC's key alone. A refusal comes back to the
    form, on the field to fix, with what to do: "This PC isn't signed in to

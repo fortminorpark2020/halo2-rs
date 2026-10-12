@@ -13,13 +13,15 @@
 # a gamertag and a password: see docs/notes/launcher/accounts.md. So this
 # script also:
 # - stops the service, then keeps the program it replaces as
-#   /opt/h2live/h2live.prev and a copy of the data folder as
-#   /var/lib/h2live.backup-<date>-<time> (logins.txt and secret.txt there
-#   can't be rebuilt from anything else); if a step fails after the stop (a
-#   full disk, say), it starts the service again before it gives up. The new
-#   program goes in last, once the settings, the unit and the wrapper are
-#   written, so that start runs the program from before, or the new one
-#   with sign-up closed;
+#   /opt/h2live/h2live.prev (only the one before the latest install) and a
+#   copy of the data folder as /var/lib/h2live.backup-<date>-<time>
+#   (logins.txt and secret.txt there can't be rebuilt from anything else);
+#   the last program from before accounts (live protocol 3, no command
+#   line) is also kept, for good, as /opt/h2live/h2live.before-accounts. If
+#   a step fails after the stop (a full disk, say), it starts the service
+#   again before it gives up. The new program goes in last, once the
+#   settings, the unit and the wrapper are written, so that start runs the
+#   program from before, or the new one with sign-up closed;
 # - writes /opt/h2live/h2live.txt (the data folder and sign-up closed),
 #   which the server and its command line both read, and sets sign-up
 #   closed in the unit too, so losing one of them doesn't open it;
@@ -28,8 +30,12 @@
 #   (`h2live user list`, `h2live user add <gamertag>` and the rest) as the
 #   h2live user.
 #
-# To go back to the program before: as root,
+# To go back to the program before the latest install (which may be one
+# with accounts too): as root,
 #   install -m755 /opt/h2live/h2live.prev /opt/h2live/h2live && systemctl restart h2live
+# To go back to the server from before accounts (live protocol 3, for the
+# old launcher zip), whatever was installed since:
+#   install -m755 /opt/h2live/h2live.before-accounts /opt/h2live/h2live && systemctl restart h2live
 # For the exact data from before an update too, stop h2live and copy that
 # update's backup folder back over /var/lib/h2live first. A program from
 # before accounts has no command line: until the newer one is back,
@@ -57,6 +63,13 @@ fi
 if [ -f /opt/h2live/h2live ] && ! cmp -s "$here/h2live" /opt/h2live/h2live; then
     cp -p /opt/h2live/h2live /opt/h2live/h2live.prev
     echo "kept the program before as /opt/h2live/h2live.prev"
+    # The program from before accounts (it has no command line: the same
+    # test as the wrapper's below) is also kept by its own name, so later
+    # updates, which replace h2live.prev, keep the way back to it.
+    if ! grep -qaF 'usage: h2live user list' /opt/h2live/h2live; then
+        cp -p /opt/h2live/h2live /opt/h2live/h2live.before-accounts
+        echo "kept the program from before accounts as /opt/h2live/h2live.before-accounts"
+    fi
 fi
 # A copy of the data folder each time this runs. Old copies pile up: delete
 # them by hand (rm -r /var/lib/h2live.backup-...) once they're not needed.
@@ -147,7 +160,11 @@ systemctl enable h2live >/dev/null
 trap - EXIT
 systemctl restart h2live
 sleep 6
-systemctl --no-pager --lines=0 status h2live | head -3
+# (status exits non-zero while the service isn't running, auto-restarting
+# included: that mustn't end the script before the log below says why.)
+{ systemctl --no-pager --lines=0 status h2live || true; } | head -3
+running=yes
+systemctl is-active --quiet h2live || running=no
 # This start's lines: the sign-up setting, and how many accounts from an
 # older server now sign in from their PCs as before.
 journalctl -u h2live --no-pager -n 25 -o cat
@@ -169,3 +186,8 @@ Accounts (as root here, or "pct exec <container> -- h2live ..." on the host):
   h2live user add <gamertag>         make an account (its password is shown once)
   h2live user key                    the server's key, for H2LAUNCH_SERVER_KEY
 HINT
+if [ "$running" = no ]; then
+    echo
+    echo "h2live isn't running: its log above says why" >&2
+    exit 1
+fi

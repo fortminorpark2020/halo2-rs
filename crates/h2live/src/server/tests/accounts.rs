@@ -6,7 +6,7 @@
 use super::*;
 use crate::admin::{self, Request};
 use crate::client::{Access, AccountAsk, SERVER_UNPROVEN};
-use crate::password::{self, Cost, Secret};
+use crate::password::{self, Cost, Secret, Settings};
 use crate::server::accounts::{
     AN_ADMINS, CANT_SAVE, CHECKS_PER_ACCOUNT, HASHES_PER_MINUTE, LAST_ADMIN, NOT_A_HASH, NOT_SAVED,
     NO_PASSWORD_YET, NO_SUCH_ACCOUNT, ONLY_THE_COMMAND_LINE, PASSWORD_CHANGED, RENAMES,
@@ -2308,4 +2308,110 @@ fn a_new_account_whose_sign_ins_cannot_be_saved_is_never_written() {
     restart_closed(&mut w);
     let i = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
     assert!(w.server.logins.is_admin(w.welcome(i).account));
+}
+
+#[test]
+fn the_stand_in_is_made_like_most_kept_hashes() {
+    // After a cost change, the hashes made before it keep their settings.
+    // A gamertag no account has is checked against a stand-in made like
+    // most of them, so it takes as long as a usual account's.
+    let mut w = closed("stand-in");
+    let own = Cost::Cheap.settings();
+    let older = Settings { m: 16, t: 2, p: 1 };
+    let ids: Vec<u64> = ["Kat", "Jun", "Noble"]
+        .into_iter()
+        .map(|gamertag| make_account(&mut w, gamertag, PASSWORD, false))
+        .collect();
+    let made = |w: &World| {
+        let (settings, phc) = w.server.stand_in.as_ref().unwrap();
+        assert_eq!(password::settings_of(phc), Some(*settings));
+        *settings
+    };
+    let nobody = |w: &mut World, n: u8| {
+        let why = launcher_refused(w, n, "Nobody", Some(OTHER_PASSWORD));
+        assert_eq!(why, live::WRONG_PASSWORD);
+    };
+    nobody(&mut w, 1);
+    assert_eq!(made(&w), own);
+    // Two of the three were made before the change.
+    for &id in &ids[1..] {
+        let phc = password::hash_with(PASSWORD, older).unwrap();
+        w.server.logins.set_password(id, phc);
+    }
+    nobody(&mut w, 2);
+    assert_eq!(made(&w), older);
+    // They still sign in.
+    let i = launcher_in(&mut w, 3, "Jun", Some(PASSWORD));
+    assert_eq!(w.welcome(i).account, ids[1]);
+    // Once most are made at the server's own cost again, so is it.
+    for &id in &ids[1..] {
+        let phc = password::hash(PASSWORD, Cost::Cheap).unwrap();
+        w.server.logins.set_password(id, phc);
+    }
+    nobody(&mut w, 4);
+    assert_eq!(made(&w), own);
+    // A server that keeps no hashes makes it its own way, at start.
+    let mut empty = closed("stand-in-empty");
+    assert!(empty.server.stand_in.is_none());
+    empty.server.prepare_stand_in();
+    assert_eq!(made(&empty), own);
+}
+
+#[test]
+fn each_launcher_connection_gets_a_seal_key_of_its_own() {
+    // A seal key kept for more than one connection (or made from
+    // secret.txt) would let whoever reads secret.txt later open every box
+    // recorded before. (`launcher_by_hand` checks each is signed by the
+    // server's identity key.)
+    let mut w = closed("seal-keys");
+    let identity = w.server.identity_key();
+    let (_first, _, one) = launcher_by_hand(&mut w, 1, "KAT");
+    let (_second, _, two) = launcher_by_hand(&mut w, 1, "KAT");
+    // Started again from the same folder: the same identity, but not the
+    // same seal key.
+    restart_closed(&mut w);
+    assert_eq!(w.server.identity_key(), identity);
+    let (_third, _, three) = launcher_by_hand(&mut w, 1, "KAT");
+    assert_ne!(one, two);
+    assert_ne!(one, three);
+    assert_ne!(two, three);
+}
+
+#[test]
+fn a_rename_reaches_the_party_and_everyone_online() {
+    let mut w = closed("rename-party");
+    let kat = make_account(&mut w, "Kat", PASSWORD, false);
+    make_account(&mut w, "Jun", OTHER_PASSWORD, false);
+    make_account(&mut w, "Noble", OTHER_PASSWORD, false);
+    let a = launcher_in(&mut w, 1, "Kat", Some(PASSWORD));
+    let b = launcher_in(&mut w, 2, "Jun", Some(OTHER_PASSWORD));
+    let c = launcher_in(&mut w, 3, "Noble", Some(OTHER_PASSWORD));
+    // Jun is in Kat's party; Noble is only online.
+    let party = w.party(a).id;
+    w.send(a, ToServer::Invite(w.id(b)));
+    w.until(|w| w.pcs[b].view.invites.iter().any(|i| i.0 == party));
+    w.send(b, ToServer::Accept(party));
+    let in_party = |w: &World, name: &str| {
+        let members = &w.party(b).members;
+        members
+            .iter()
+            .any(|m| m.account == kat && m.gamertag == name)
+    };
+    let online = |w: &World, i: usize, name: &str| {
+        let list = &w.pcs[i].view.online;
+        list.iter().any(|p| p.account == kat && p.gamertag == name)
+    };
+    w.until(|w| in_party(w, "KAT") && online(w, b, "KAT") && online(w, c, "KAT"));
+    let rename = Command::Rename {
+        account: kat,
+        gamertag: "Kat Two".into(),
+    };
+    let done = w.server.command(Actor::Console, rename, w.now);
+    assert_eq!(done.as_deref(), Ok("KAT IS KAT TWO NOW"));
+    w.until(|w| {
+        in_party(w, "KAT TWO")
+            && online(w, b, "KAT TWO")
+            && online(w, c, "KAT TWO")
+            && w.welcome(a).gamertag == "KAT TWO"
+    });
 }

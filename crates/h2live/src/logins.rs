@@ -272,6 +272,11 @@ impl Logins {
         self.logins.get(&id).is_some_and(|l| l.admin)
     }
 
+    /// Every password hash kept.
+    pub fn hashes(&self) -> impl Iterator<Item = &str> {
+        self.logins.values().filter_map(|l| l.password.as_deref())
+    }
+
     /// How many accounts are admins.
     pub fn admins(&self) -> usize {
         self.logins.values().filter(|l| l.admin).count()

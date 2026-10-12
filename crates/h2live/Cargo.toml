@@ -16,7 +16,8 @@ getrandom = "0.3"
 # Owner-made accounts: argon2id password hashes at rest, and passwords
 # sealed to the server on the wire (X25519, ChaCha20-Poly1305). All pure
 # Rust.
-argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "password-hash"] }
+# (zeroize: argon2 wipes its own working copies of the password's hash.)
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "password-hash", "zeroize"] }
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
 curve25519-dalek = "4.1"
 zeroize = "1"

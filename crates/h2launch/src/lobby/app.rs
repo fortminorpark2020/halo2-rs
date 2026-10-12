@@ -730,16 +730,16 @@ impl App {
         self.settings.gamertag = gamertag;
         self.with_password = !self.password.is_empty();
         let url = live::server_url(&self.settings.server);
-        // Never the password itself.
-        self.log(&format!(
-            "lobby: signing in to {url} as {:?}{}",
-            self.settings.gamertag,
-            if self.with_password {
-                " (with a password)"
-            } else {
-                ""
-            }
-        ));
+        // Never the password itself. With one, not the gamertag either
+        // until the server has welcomed it (`keep_gamertag` logs it then):
+        // a password typed in the GAMERTAG box loses only its dashes there,
+        // and they don't count.
+        if self.with_password {
+            self.log(&format!("lobby: signing in to {url} with a password"));
+        } else {
+            let gamertag = &self.settings.gamertag;
+            self.log(&format!("lobby: signing in to {url} as {gamertag:?}"));
+        }
         self.client = None;
         self.acc = AccountScreen::default();
         // Another server, maybe, with the same account numbers: nothing
@@ -2437,9 +2437,21 @@ impl App {
         !(self.screen == Screen::InGame && playing)
     }
 
+    /// Save lobby.txt. Until the server has welcomed the gamertag typed
+    /// last, the one it welcomed before is saved in its place: what was
+    /// typed may be a password in the wrong box (`keep_gamertag` saves the
+    /// new one once it's welcomed).
     fn save_settings(&mut self) {
+        let welcomed = self
+            .client
+            .as_ref()
+            .is_some_and(|c| c.view.welcome.is_some());
+        let mut settings = self.settings.clone();
+        if !welcomed {
+            settings.gamertag = self.saved[GAMERTAG_FIELD].clone();
+        }
         let path = self.cfg.folder.join("lobby.txt");
-        if let Err(e) = self.settings.save(&path) {
+        if let Err(e) = settings.save(&path) {
             self.log(&format!("lobby: {e}"));
         }
     }

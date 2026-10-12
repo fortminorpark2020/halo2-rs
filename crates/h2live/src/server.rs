@@ -40,7 +40,7 @@ use crate::card;
 use crate::friends::Friends;
 use crate::logins::Logins;
 use crate::matchmaker::Matchmaker;
-use crate::password::Cost;
+use crate::password::{Cost, Settings};
 use crate::playlists::{self, Playlist};
 use crate::seal;
 use crate::store::{self, Account};
@@ -231,10 +231,12 @@ pub struct Server {
     wrong_by_name: HashMap<String, Vec<f64>>,
     checks_by_account: HashMap<u64, Vec<f64>>,
     changes_by_account: HashMap<u64, Vec<f64>>,
-    /// A hash of a password no one has, made at `cost` when first needed:
-    /// checked when a box opens but there's no password to check it
-    /// against, so the answer takes as long (`accounts::prove_password`).
-    stand_in: Option<String>,
+    /// A hash of a password no one has, and the settings it was made with
+    /// (those most kept hashes have, else `cost`'s): checked when a box
+    /// opens but there's no password to check it against, so the answer
+    /// takes as long (`accounts::prove_password`). Made at start, and again
+    /// when needed with other settings.
+    stand_in: Option<(Settings, String)>,
     /// Sent with every challenge.
     motd: String,
     pcs: Vec<Pc>,

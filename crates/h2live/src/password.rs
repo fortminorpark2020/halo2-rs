@@ -9,9 +9,14 @@
 //! taken for one another), shown as `XXXX-XXXX-XXXX`: about 56 bits.
 //!
 //! Only argon2id hashes are kept (as PHC strings, which hold their own
-//! parameters, so a later cost still checks an old hash). A password in
-//! clear lives only in a `Secret`, wiped when dropped, and is never logged
-//! or written anywhere.
+//! parameters, so a later cost still checks an old hash). Our code keeps a
+//! password in clear only in a `Secret` (or a `Zeroizing` copy), wiped
+//! when dropped, and never logs or writes it anywhere. That wiping is best
+//! effort: argon2 (built with `zeroize`) wipes its own first and last
+//! hashes, but while it hashes the password also sits in the Blake2b
+//! buffer under it and in leftover stack copies, which can't be wiped from
+//! here. Someone who can read the server's memory is out of scope, as with
+//! `secret.txt`.
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -96,20 +101,56 @@ impl std::fmt::Debug for Secret {
 pub enum Cost {
     /// OWASP's argon2id baseline: 19 MiB, 2 passes, one lane. How long it
     /// takes on the owner's server is an estimate (25 to 80 ms) until the
-    /// command line measures it ("hashing took N ms").
+    /// command line measures it ("hashing took N ms"). After a change to
+    /// it, set the passwords made before again (accounts.md, deploy step
+    /// 2), so every hash costs what the stand-in does.
     Real,
     /// As little as argon2id allows, for tests.
     Cheap,
 }
 
 impl Cost {
-    fn params(self) -> Params {
+    /// The settings its hashes are made with. (After a change to
+    /// `Cost::Real`'s, hashes made before it are still checked with their
+    /// own; the server's stand-in follows the settings most of them have,
+    /// see `Server::stand_in`.)
+    pub fn settings(self) -> Settings {
         let (m, t, p) = match self {
             Cost::Real => (19_456, 2, 1),
             Cost::Cheap => (8, 1, 1),
         };
-        Params::new(m, t, p, Some(32)).expect("argon2 parameters in range")
+        Settings { m, t, p }
     }
+}
+
+/// The settings an argon2id hash is made with: memory (KiB), passes and
+/// lanes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Settings {
+    pub m: u32,
+    pub t: u32,
+    pub p: u32,
+}
+
+impl Settings {
+    fn params(self) -> Result<Params, &'static str> {
+        Params::new(self.m, self.t, self.p, Some(32)).map_err(|_| "BAD HASH SETTINGS")
+    }
+}
+
+/// The settings the argon2id hash `phc` was made with, if it's one
+/// (`is_phc`).
+pub fn settings_of(phc: &str) -> Option<Settings> {
+    let hash = PasswordHash::new(phc).ok()?;
+    if !is_argon2id(&hash) {
+        return None;
+    }
+    let params = Params::try_from(&hash).ok()?;
+    Some(Settings {
+        m: params.m_cost(),
+        t: params.t_cost(),
+        p: params.p_cost(),
+    })
 }
 
 /// A password as it's checked: without spaces or dashes, ASCII in capitals.
@@ -137,12 +178,19 @@ pub fn check(typed: &str) -> Result<(), &'static str> {
 
 /// `typed`'s hash, as a PHC string, if it keeps the rules.
 pub fn hash(typed: &str, cost: Cost) -> Result<String, &'static str> {
+    hash_with(typed, cost.settings())
+}
+
+/// `typed`'s hash made with `settings`, as a PHC string, if it keeps the
+/// rules.
+pub fn hash_with(typed: &str, settings: Settings) -> Result<String, &'static str> {
     check(typed)?;
+    let params = settings.params()?;
     let text = Zeroizing::new(normalize(typed));
     let mut salt = [0; 16];
     getrandom::fill(&mut salt).map_err(|_| "NO RANDOM NUMBERS")?;
     let salt = SaltString::encode_b64(&salt).map_err(|_| "A BAD SALT")?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, cost.params());
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let hash = argon2
         .hash_password(text.as_bytes(), &salt)
         .map_err(|_| "THE PASSWORD COULDN'T BE HASHED")?;
@@ -259,6 +307,23 @@ mod tests {
             "{real}"
         );
         assert!(verify(&real, "CORRECTHORSE"));
+    }
+
+    #[test]
+    fn hashes_say_their_settings() {
+        let cheap = hash("K7MP-4QR9-XW2T", Cost::Cheap).unwrap();
+        assert_eq!(settings_of(&cheap), Some(Cost::Cheap.settings()));
+        // Made with other settings, a hash names them, and still checks.
+        let other = Settings { m: 16, t: 3, p: 2 };
+        let made = hash_with("K7MP-4QR9-XW2T", other).unwrap();
+        assert!(made.starts_with("$argon2id$v=19$m=16,t=3,p=2$"), "{made}");
+        assert_eq!(settings_of(&made), Some(other));
+        assert!(verify(&made, "k7mp4qr9xw2t"));
+        assert_eq!(settings_of("not a hash"), None);
+        assert_eq!(settings_of(&cheap.replace("argon2id", "argon2i")), None);
+        // Settings argon2 can't use are refused, not a panic.
+        let none = Settings { m: 8, t: 0, p: 1 };
+        assert!(hash_with("K7MP-4QR9-XW2T", none).is_err());
     }
 
     #[test]

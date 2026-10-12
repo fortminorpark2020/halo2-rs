@@ -1,6 +1,6 @@
 # Progress and handoff
 
-Last updated 2026-10-12 04:35 UTC. Any assistant that works on the project
+Last updated 2026-10-12 06:00 UTC. Any assistant that works on the project
 should update this file before it stops, so the next one can pick up. Read
 AGENTS.md first for the rules.
 
@@ -145,14 +145,23 @@ assists and the team offset aren't. The PC's own log of the day is
 Owner-made accounts (2026-10-11) are built and tested on
 `launcher-accounts` (on `launcher-menu` f0b718b: stage 1 16e80d5, h2live
 and `LIVE_PROTOCOL` 4; stage 2 3323850, the launcher; stage 3, docs and
-the install script; then four rounds of review fixes, the fourth on
-2026-10-12: a wrong password costs the same hash and locks the same way
+the install script; then five rounds of review fixes. The fourth
+(2026-10-12): a wrong password costs the same hash and locks the same way
 whatever gamertag it names, launchers take nothing from a server before it
 proves its key, pins are kept by the address dialled, `--live` stops on a
-refusal, and the install script puts the new program in last), pushed, not
-deployed. `launcher-menu` with the in-game GAME MENU (PR #9, below) is
-merged into it (2026-10-11 23:50), so its builds carry both; the GAME
-MENU changes neither protocol, and `LIVE_PROTOCOL` stays 4 there.
+refusal, and the install script puts the new program in last. The fifth
+(2026-10-12): a gamertag no account has is never logged (it may be a
+password in the wrong box), and the launcher neither logs nor saves a
+gamertag typed with a password before the server welcomes it; argon2 wipes
+its own copies (`zeroize`); the stand-in hash follows the settings most
+kept hashes have, so a cost change doesn't give accounts away; the admin
+socket opens before the router is asked for the port; the install script
+keeps the program from before accounts as `h2live.before-accounts` and
+shows the log when the new server isn't running), pushed, not deployed.
+`launcher-menu` with the in-game GAME MENU (PR #9, below) is merged into
+it up to 18279ad (the lobby's console echo fix, merged 2026-10-12), so its
+builds carry both; the GAME MENU changes neither protocol, and
+`LIVE_PROTOCOL` stays 4 there.
 `PROTOCOL` stays 26, so the
 hold on the Proxmox server's `PROTOCOL` 27 update is unchanged. Design and
 details: `docs/notes/launcher/accounts.md`. Each account is a gamertag and
@@ -166,12 +175,15 @@ server, nor the other way round, so the deploy goes in this order, each
 step with the owner's go-ahead:
 1. The server: build h2live (static musl) from the merged branch and run
    the updated `deploy/proxmox/install-h2live.sh` in container 102. It
-   keeps `/opt/h2live/h2live.prev` and a dated copy of `/var/lib/h2live`,
+   keeps `/opt/h2live/h2live.prev`, the version 3 program for good as
+   `/opt/h2live/h2live.before-accounts`, and a dated copy of `/var/lib/h2live`,
    sets sign-up closed, and installs the `/usr/local/bin/h2live` wrapper.
    Existing accounts (the owner's, FRIENDTEST, MENUTEST and any friends')
    are kept and sign in from their PCs as before. Then `h2live user list`,
    `h2live user admin <OWNER> on`, `h2live user passwd <OWNER>` (note
-   "hashing took N ms"), and `h2live user key`.
+   "hashing took N ms"; if the cost is lowered for it, set the owner's
+   password again after the new build is installed), and `h2live user
+   key`.
 2. Rebuild the owner's launcher (`C:\Games\Halo 2 Live`) and the friends'
    zip with `H2LAUNCH_SERVER_KEY` set to that key, and rewrite the zip's
    READ ME on his PC ("type the gamertag and password John gave you, once
@@ -180,8 +192,10 @@ step with the owner's go-ahead:
    its `ws://` URL); the desktop build, on 192.168.8.102,
    learns the key the first time it signs in (on his own network).
 3. The owner makes his friends' accounts from his launcher's Accounts row.
-Rollback: `install -m755 /opt/h2live/h2live.prev /opt/h2live/h2live &&
-systemctl restart h2live`, and the old zip. (The program from before
+Rollback: `install -m755 /opt/h2live/h2live.before-accounts
+/opt/h2live/h2live && systemctl restart h2live`, and the old zip.
+(h2live.prev is only the program before the latest install, so after a
+second install it's an accounts build too. The program from before
 accounts has no command line: `h2live user ...` says so until the newer
 one is back.)
 

@@ -59,7 +59,7 @@
 
 use super::{log, printable, signed_over, Server};
 use crate::logins::{Device, Logins, MAX_PCS};
-use crate::password::{self, Cost, Secret};
+use crate::password::{self, Cost, Secret, Settings};
 use crate::seal;
 use crate::store::{self, Account};
 use h2net::live::{
@@ -67,7 +67,7 @@ use h2net::live::{
     ROW_ADMIN, ROW_ONLINE, ROW_PASSWORD,
 };
 use h2sim::game::clean_name;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::path::Path;
 
@@ -276,13 +276,39 @@ impl Server {
     }
 
     /// A hash of a password no one has (made at random, and never kept),
-    /// made as this server makes hashes: checked in place of a password
-    /// when there's none to check, so the answer takes as long.
+    /// made with the settings most kept hashes have (this server's own when
+    /// it keeps none): checked in place of a password when there's none to
+    /// check, so the answer takes as long as checking a usual account's.
+    /// (After a change to `Cost::Real`, the hashes made before it keep
+    /// their settings, and so does the stand-in while they're most.)
     fn stand_in(&mut self) -> &str {
-        let cost = self.cost;
-        self.stand_in.get_or_insert_with(|| {
-            password::hash(password::generate().as_str(), cost).unwrap_or_default()
-        })
+        let settings = self.usual_settings();
+        if self.stand_in.as_ref().map(|(s, _)| *s) != Some(settings) {
+            let made = password::hash_with(password::generate().as_str(), settings);
+            self.stand_in = Some((settings, made.unwrap_or_default()));
+        }
+        self.stand_in.as_ref().map_or("", |(_, phc)| phc)
+    }
+
+    /// Make the stand-in now (as the program starts), so the first try for
+    /// a gamertag no account has doesn't also wait for it to be made.
+    pub fn prepare_stand_in(&mut self) {
+        self.stand_in();
+    }
+
+    /// The settings most kept hashes were made with (ties go to this
+    /// server's own, then to the costlier), or this server's own if it
+    /// keeps none.
+    fn usual_settings(&self) -> Settings {
+        let own = self.cost.settings();
+        let mut counts: HashMap<Settings, usize> = HashMap::new();
+        for s in self.logins.hashes().filter_map(password::settings_of) {
+            *counts.entry(s).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .max_by_key(|&(s, n)| (n, s == own, s))
+            .map_or(own, |(s, _)| s)
     }
 
     /// The server's identity key (Ed25519), which launchers pin.
@@ -567,9 +593,12 @@ impl Server {
                     account.gamertag,
                     self.wrong_for_account(account.id, now)
                 )),
+                // Not the name: it may be a password typed in the wrong
+                // box (a password's dashes don't fit in a gamertag, and
+                // don't count).
                 None => log(format_args!(
-                    "live: wrong password for unknown gamertag {} from {ip} ({} in 10 minutes)",
-                    printable(&wanted),
+                    "live: wrong password for a gamertag no account has, from {ip} \
+                     ({} in 10 minutes)",
                     self.wrong_from(ip, now)
                 )),
             }

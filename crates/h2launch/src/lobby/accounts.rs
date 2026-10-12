@@ -1454,7 +1454,7 @@ mod tests {
         assert!(a.password.is_empty());
         assert_eq!(Pins::load(&dir).unwrap().get(SERVER), Some(server.key()));
         // No log line and no file the lobby keeps has it.
-        assert!(log_has(&said, "(with a password)"));
+        assert!(log_has(&said, "with a password"));
         let log = said.lock().unwrap().join("\n");
         for f in &forms {
             assert!(!log.contains(f.as_str()), "{log}");
@@ -1505,7 +1505,7 @@ mod tests {
         live.sign_in(&mut a);
         assert_eq!(a.label(), "live");
         assert_eq!(a.account(), Some(alpha));
-        assert!(!log_has(&said, "(with a password)"));
+        assert!(!log_has(&said, "with a password"));
         assert_eq!(live.server.devices_of(alpha).len(), 1);
         drop(a);
         live.until(&mut [], |s, _| s.players_online() == 0);
@@ -1523,6 +1523,50 @@ mod tests {
             &a,
             "This PC is signed in as ALPHA. To use BRAVO here, type BRAVO's password."
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_password_typed_in_the_gamertag_box_is_never_logged_or_saved() {
+        // The GAMERTAG box keeps all of a made-up password but its dashes,
+        // which don't count: until the server welcomes a gamertag, it's
+        // neither logged (with a password) nor saved in lobby.txt.
+        let mut live = Live::new("swapped");
+        let kat = live.add("KAT", PASSWORD, false);
+        let dir = scratch("swapped");
+        let (mut a, said) = lobby(&dir, "");
+        to_online(&mut a);
+        turned_away(&mut live, &mut a, PASSWORD, "KAT KAT KAT");
+        let swapped = password::normalize(PASSWORD);
+        assert_eq!(a.fields[GAMERTAG_FIELD], swapped);
+        assert_eq!(a.form_error.as_deref(), Some("Wrong gamertag or password."));
+        assert!(log_has(
+            &said,
+            "lobby: signing in to ws://127.0.0.1:9/live with a password"
+        ));
+        // A setting changed now saves lobby.txt with the gamertag from
+        // before (none, on a new PC), and the setting.
+        a.set_control("vibration", "off").unwrap();
+        let saved = Settings::load(&dir.join("lobby.txt"));
+        assert_eq!(saved.gamertag, "");
+        assert!(!saved.controls.vibration);
+        // The right way round, the gamertag is saved once it's welcomed.
+        fill_form(&mut a, "kat", PASSWORD);
+        live.sign_in(&mut a);
+        assert_eq!(a.label(), "live", "{:?}", a.form_error);
+        assert_eq!(a.account(), Some(kat));
+        assert_eq!(Settings::load(&dir.join("lobby.txt")).gamertag, "KAT");
+        // No log line and no file the lobby keeps has the password, in
+        // either spelling.
+        let log = said.lock().unwrap().join("\n");
+        for f in [PASSWORD, swapped.as_str()] {
+            assert!(!log.contains(f), "{log}");
+        }
+        for file in std::fs::read_dir(&dir).unwrap() {
+            let path = file.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(!holds(&bytes, &swapped), "{}", path.display());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1588,7 +1632,7 @@ mod tests {
         a.input(Input::A);
         live.sign_in(&mut a);
         assert_eq!(a.label(), "live");
-        assert!(log_has(&said, "(with a password)"));
+        assert!(log_has(&said, "with a password"));
         assert_eq!(live.server.devices_of(alpha).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
