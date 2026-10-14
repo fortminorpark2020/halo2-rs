@@ -1,31 +1,64 @@
 # Progress and handoff
 
-Last updated 2026-10-12 (menu 2.7's review fixes, round 2: the Xbox
-dialogs' header in their frame's top band, Halo 2's drop shadow under
-menu text, the focused button's words in the header's colour, no
-bitmap found by another folder's last name, the lobby screenshot
-comparison redone at 1920x1200 (pane 0 matches to the pixel), more
-tests; round 1: hidden
-buttons, list skins' pictures read whole, Xbox panes' text 1.25 times
-bigger, "the online service" after into/to/of/from/with/by, intro ends
-counting skin pictures, Vista's pictures pinned exactly; before it menu
-2.7: `h2ui` lays out and draws any
-screen of mainmenu.map from its tags, a catalog of the 27 the lobby
-will use, checked on Cartographer's map; before it menu 2.6's review
-fixes, round 2: Halo 2's
-flat grey-navy above and below the shell's bands, tests for the popup
-double-click, the shell's tags and ADD FRIEND's legend, step 7's CPU
-check standing alone; round 1: double-clicks,
-legends naming only keys that work, the friend-request count, slow
-drawing behind a match, the legend's colours; P4, the owner's check of
-2.5, passed, and its follow-ups: the flythrough's veil darker, bluer and
-soft; before them
-menu 2.6: Halo 2's shell, header and button legend on every lobby
-screen after the main menu, legends by the device used last, the stick
-at 90% and held directions repeating; 2.5, the flythrough behind the
-start screen and main menu, and its review fixes; P3 passed). Any assistant that works on the
+Last updated 2026-10-14 22:30 UTC (the project is on hold; read "On hold"
+first). Any assistant that works on the
 project should update this file before it stops, so the next one can pick
 up. Read AGENTS.md first for the rules.
+
+## On hold (since 2026-10-14 22:19 UTC)
+
+The owner put the project on hold: "I want to put this project on hold for
+now". Start nothing until the owner says to carry on. Nothing runs: no workflows,
+no scheduled restarts, no PR watching, nothing on the owner's PC.
+
+Where everything stands (all pushed; draft PRs, none merged into `main`):
+
+- `launcher-menu` (#7) 18279ad: what the owner's desktop launcher
+  ("Halo 2 Live", `C:\Games\Halo 2 Live`) and the friends' zip
+  (`C:\Games\H2-Live-friends.zip`) run. The in-game menu
+  (`launcher-gamemenu`, #9) is merged into it.
+- `launcher-accounts` (#8) 7319aca: owner-made accounts (gamertag and
+  password, the admin's ACCOUNTS screen, `LIVE_PROTOCOL` 4). Passed P0 to
+  P11 on the owner's PC against a local server
+  (`docs/notes/launcher/accounts-pc-test.md`). **Not deployed**: the
+  Proxmox server (container 102) still runs `LIVE_PROTOCOL` 3, unchanged.
+  The install steps and rollback are in that branch's PROGRESS.md; the
+  build for it (h2live from 7319aca) is on the orphan branch
+  `deploy-h2live` (82b347a) and, checked, in `C:\h2work\deploy-v4` on the
+  owner's PC. The install needs the owner's go-ahead typed in the thread,
+  naming the action (copy h2live version 4 to the server and install it,
+  make MOHNJORROW an admin with a password saved in `C:\Users\mohnj`,
+  replace the desktop launcher and the friends' zip).
+- `launcher-menu2` (#10) 6310c4e: menu phase 2, sub-phases 2.1 to 2.7 and
+  their review fixes, CI green. P1 to P4 passed on the owner's PC (P4's
+  flythrough re-check at afd799e matched the Xbox video's colour).
+- `launcher-menu2-wip` 4245e98: 2.8 (Halo 2's dialogs), unfinished and not
+  run through the gate. Finish it from there, then merge into
+  `launcher-menu2`. The sub-phase briefs for 2.8 to 2.16 are in
+  `docs/notes/launcher/menu.md`, "Phase 2 (widened, 2026-10-11)".
+
+On the owner's PC: `C:\h2work` keeps the worktrees (`menu2` at afd799e,
+`accounts` at 7319aca, `gamemenu` at 18279ad, `launch`, `hunt` parked),
+`deploy-v4` and the previous friends' zip (`H2-Live-friends.prev.zip`).
+The PC's own report of the last session is
+`reports\2026-10-12_pc-work-log-cont.md` in the Cartographer folder.
+
+To resume, in order:
+1. The accounts install above (with his typed go-ahead), then the new
+   desktop launcher and friends' zip, then the owner makes testers' accounts.
+2. Finish 2.8 from `launcher-menu2-wip`, then 2.9 to 2.16 (menu phase 3
+   after: matchmaking, pregame lobby and carnage report screens).
+3. Friends' public IPs into the allowlist, then a two-PC match.
+4. A real game with kills to set `COUNTS_SEEN`.
+5. Merging the PR stack into `main`, each merge with the owner's typed OK.
+
+Small follow-ups, left until after the accounts install so the installed
+build stays the tested 7319aca: in `accounts-pc-test.md`, move `1 see My
+account 10` and `1 see Accounts 10` after the twelve `0.1 down` lines in
+`myacct.txt` (P2.7), `admin.txt` (P6) and `change.txt` (P8.5) (with 8
+playlists the row is index 10 and isn't drawn until the list scrolls); and
+h2live should log, and its command line name, an admin socket it can't
+open because its path is over the 108-byte Unix socket limit, with a test.
 
 ## Goal (changed 2026-10-09 23:12)
 
