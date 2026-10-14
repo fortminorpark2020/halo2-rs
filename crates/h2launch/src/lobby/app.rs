@@ -44,6 +44,8 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod dialogs;
+use dialogs::DialogKey;
 mod shell;
 
 /// How long the pregame lobby shows the match before the engine starts.
@@ -302,6 +304,9 @@ enum Hit {
     /// (`true`) or back.
     Step(usize, bool),
     Press(Input),
+    /// Picks a row of the dialog up (`dialogs`), after giving it the
+    /// focus.
+    Choice(usize),
 }
 
 /// Part of the screen that takes clicks, in layout units.
@@ -457,8 +462,8 @@ pub struct App {
     size: (usize, usize),
     menu_times: MenuTimes,
     /// The last click: when (on the menus' clock), the screen it was on,
-    /// and whether a popup took it (`DOUBLE_CLICK`).
-    last_click: Option<(f64, Screen, bool)>,
+    /// and the popup or invitation that took it (`DOUBLE_CLICK`).
+    last_click: Option<(f64, Screen, Option<DialogKey>)>,
     /// The sounds asked for since the sound last took them (`take_sound`),
     /// and the intro's soundtrack starting or stopping.
     cues: Vec<Cue>,
@@ -479,6 +484,12 @@ pub struct App {
     refused: bool,
     /// The invitation shown last (its party), so a new one sounds once.
     invite_seen: Option<u64>,
+    /// The dialog up (a popup, the invitation or the offline screen,
+    /// `dialogs`): which one was seen last, when it opened (on the menus'
+    /// clock; its pieces come in from then) and its focused row.
+    dialog_shown: Option<DialogKey>,
+    dialog_opened: f64,
+    dialog_focus: Focus,
 }
 
 /// What the cue of a press is worked out from (`App::cue_state`), taken
@@ -720,6 +731,9 @@ impl App {
             pressed: None,
             refused: false,
             invite_seen: None,
+            dialog_shown: None,
+            dialog_opened: 0.0,
+            dialog_focus: Focus::on(0, 0.0),
         }
     }
 
@@ -840,6 +854,8 @@ impl App {
     fn cue_state(&self) -> CueState {
         let focus = match (self.popup, self.screen) {
             (Some(Popup::FriendOptions(_)), _) => self.osel,
+            // A dialog's row (`dialogs`).
+            _ if self.dialog_key().is_some() => self.dialog_focus.item,
             (Some(_), _) => 0,
             (None, Screen::Main) => self.main_focus.item,
             (None, Screen::Live) => self.sel,
@@ -874,11 +890,13 @@ impl App {
     /// Run a press (`act`), then ask for its sounds: cues it asked for
     /// itself stand, else `cue_for`'s from before and after.
     fn sounding(&mut self, act: impl FnOnce(&mut App)) {
+        self.follow_dialog();
         let before = self.cue_state();
         let asked = self.cues.len();
         self.pressed = None;
         self.refused = false;
         act(self);
+        self.follow_dialog();
         let after = self.cue_state();
         self.refused = false;
         if !after.refused && self.cues.len() > asked {
@@ -2005,6 +2023,7 @@ impl App {
         if shown.is_some() {
             self.invite_seen = shown;
         }
+        self.follow_dialog();
     }
 
     /// Keep the selections on the friends and players screens on the
@@ -2042,6 +2061,8 @@ impl App {
         let options = self.friend_options(who);
         self.osel = i.min(options.len().saturating_sub(1));
         self.opick = options.get(self.osel).copied();
+        // The dialog's focus with it (`dialogs`).
+        self.focus_dialog(self.osel);
     }
 
     /// The lobby is closing: close the engine of a match being played
@@ -2170,21 +2191,7 @@ impl App {
             return self.popup_input(p, i);
         }
         if let Some((party, from)) = self.invite() {
-            match i {
-                Input::A => {
-                    self.log(&format!("lobby: joining {from}'s party"));
-                    self.send(ToServer::Accept(party));
-                    // From the main menu, to the playlists, where the new
-                    // party shows (as if ONLINE had been picked).
-                    if self.screen == Screen::Main {
-                        self.main_focus = Focus::on(LIVE_ROW, self.menu_clock());
-                        self.screen = Screen::Live;
-                    }
-                }
-                Input::B => self.send(ToServer::Decline(party)),
-                _ => {}
-            }
-            return;
+            return self.invite_input(party, &from, i);
         }
         match self.screen {
             Screen::Start => match i {
@@ -2227,16 +2234,43 @@ impl App {
             Screen::Record => self.record_input(i),
             Screen::Friends => self.friends_input(i),
             Screen::Settings => self.settings_input(i),
-            Screen::Failed => match i {
-                Input::A => self.connect(),
-                Input::X => self.open_settings(),
-                Input::Y => {
-                    self.form_error = None;
-                    self.screen = Screen::SignIn;
+            Screen::Failed => self.failed_input(i),
+        }
+    }
+
+    /// The invitation from `party` (`from`'s) as its presses were before
+    /// it had rows (`dialogs::invite_input`): A accepts (from the main
+    /// menu going on to the playlists), B declines.
+    fn invite_press(&mut self, party: u64, from: &str, i: Input) {
+        match i {
+            Input::A => {
+                self.log(&format!("lobby: joining {from}'s party"));
+                self.send(ToServer::Accept(party));
+                // From the main menu, to the playlists, where the new
+                // party shows (as if ONLINE had been picked).
+                if self.screen == Screen::Main {
+                    self.main_focus = Focus::on(LIVE_ROW, self.menu_clock());
+                    self.screen = Screen::Live;
                 }
-                Input::B => self.screen = Screen::Main,
-                _ => {}
-            },
+            }
+            Input::B => self.send(ToServer::Decline(party)),
+            _ => {}
+        }
+    }
+
+    /// The offline screen's presses as they were before it had rows
+    /// (`dialogs::failed_input`): A tries again, X the controller
+    /// settings, Y the sign-in form, B the main menu.
+    fn failed_press(&mut self, i: Input) {
+        match i {
+            Input::A => self.connect(),
+            Input::X => self.open_settings(),
+            Input::Y => {
+                self.form_error = None;
+                self.screen = Screen::SignIn;
+            }
+            Input::B => self.screen = Screen::Main,
+            _ => {}
         }
     }
 
@@ -2303,7 +2337,9 @@ impl App {
         self.clock.elapsed().as_secs_f64()
     }
 
-    fn popup_input(&mut self, p: Popup, i: Input) {
+    /// A popup's presses as they were before its dialog had rows
+    /// (`dialogs::popup_input`).
+    fn popup_press(&mut self, p: Popup, i: Input) {
         match (p, i) {
             (Popup::Quit, Input::A) => self.quit = true,
             (Popup::Quit, Input::Y) if self.client.is_some() => {
@@ -2901,12 +2937,13 @@ impl App {
 
     fn click_inner(&mut self, x: f32, y: f32) {
         let clock = self.menu_clock();
-        let over = self.popup.is_some() || self.invite().is_some();
+        self.follow_dialog();
+        let over = self.over_key();
         let before = self.last_click.replace((clock, self.screen, over));
         // The second half of a double-click whose first half changed the
         // screen or shut a popup: it mustn't go on again.
-        let second = before.is_some_and(|(t, screen, over)| {
-            clock - t < DOUBLE_CLICK && (over || screen != self.screen)
+        let second = before.is_some_and(|(t, screen, was)| {
+            clock - t < DOUBLE_CLICK && (was.is_some() || screen != self.screen)
         });
         // A click anywhere skips the intro (and its double-click's second
         // half doesn't go on from the start screen: above).
@@ -2916,7 +2953,7 @@ impl App {
         // The start screen goes on with a click anywhere, and a main menu
         // row is focused, or picked if it had the focus. A popup over
         // them takes the click as on any screen.
-        if !over {
+        if over.is_none() {
             match self.screen {
                 Screen::Start if second => return,
                 Screen::Start => return self.input_inner(Input::A),
@@ -2936,12 +2973,13 @@ impl App {
             }
         }
         // Elsewhere, the second half of a double-click whose first half
-        // changed the screen or shut a popup lands on what is shown now
-        // (the legend's BACK is in the same place on most screens): a
-        // button or an arrow there isn't pressed, and a row is only
-        // selected. Two clicks in a popup that is still up both count.
-        let went_on = before.is_some_and(|(t, screen, was_over)| {
-            clock - t < DOUBLE_CLICK && (screen != self.screen || (was_over && !over))
+        // changed the screen, or shut a popup or put another in its place,
+        // lands on what is shown now (the legend's BACK is in the same
+        // place on most screens): a button or an arrow there isn't
+        // pressed, and a row (a dialog's too) is only selected. Two clicks
+        // in a popup that is still up both count.
+        let went_on = before.is_some_and(|(t, screen, was)| {
+            clock - t < DOUBLE_CLICK && (screen != self.screen || (was.is_some() && was != over))
         });
         let (s, ox, oy) = self.view;
         let (x, y) = ((x - ox) / s, (y - oy) / s);
@@ -2965,13 +3003,7 @@ impl App {
                 }
                 self.input_inner(if on { Input::Right } else { Input::Left });
             }
-            Some(Hit::Row(r)) if matches!(self.popup, Some(Popup::FriendOptions(_))) => {
-                if self.osel == r && !went_on {
-                    self.input_inner(Input::A);
-                } else if let Some(Popup::FriendOptions(who)) = self.popup {
-                    self.pick_option(who, r);
-                }
-            }
+            Some(Hit::Choice(k)) => self.choose(k, went_on),
             Some(Hit::Row(r)) if self.screen == Screen::Friends => {
                 if self.fsel == r && !went_on {
                     self.input_inner(Input::A);
@@ -3086,7 +3118,9 @@ impl App {
 
     /// Draw the screen into `c`: the intro, the start screen or main menu
     /// (`draw_menu`), or another screen in Halo 2's shell (`draw_shell`);
-    /// then over it the popups and notices (`draw_over`). The first frames
+    /// then over it Halo 2's dialog for a popup, the invitation or the
+    /// offline screen (`draw_dialog`), then ADD FRIEND's box and the
+    /// notices (`draw_over`). The first frames
     /// on each screen at each window size are timed for the log
     /// (`time_frame`): the whole draw here, the start screen's and main
     /// menu's in `draw_menu`.
@@ -3127,6 +3161,8 @@ impl App {
         } else {
             timed = self.draw_shell(c, t, (s, ox, oy), &mut areas, &mut drawn);
         }
+        // Halo 2's dialog over it (and the overlay under ADD FRIEND's box).
+        self.draw_dialog(c, (s, ox, oy), &mut areas, &mut drawn);
         let ranks = self.cfg.ranks.clone();
         let mut p = Pen {
             c,
@@ -3264,9 +3300,14 @@ impl App {
 
     /// The start screen or main menu has come in and is worth a picture
     /// (always true on the other screens): its intro is over, and on the
-    /// start screen PRESS START is back at the top of its pulse. The
-    /// headless run waits for it before its automatic screenshot.
+    /// start screen PRESS START is back at the top of its pulse; and a
+    /// dialog up (`dialogs`) has come in too. The headless run waits for
+    /// it before its automatic screenshot.
     pub fn menu_settled(&self) -> bool {
+        // A dialog up waits for its pieces to come in (`dialogs`).
+        if !self.dialog_settled() {
+            return false;
+        }
         if !self.on_menus() {
             return true;
         }
@@ -3393,64 +3434,21 @@ impl App {
             Screen::Pregame => self.draw_pregame(p),
             Screen::InGame => self.draw_in_game(p),
             Screen::Carnage => self.draw_carnage(p),
-            Screen::Failed => self.draw_failed(p),
+            // Halo 2's large error dialog (`draw_dialog`).
+            Screen::Failed => {}
             Screen::Record => self.draw_record(p),
             Screen::Friends => self.draw_friends(p),
             Screen::Settings => self.draw_settings(p),
         }
     }
 
-    /// What goes over any screen: a popup or the party invitation, then
-    /// the notices.
+    /// What goes over any screen after Halo 2's dialog (`draw_dialog`):
+    /// ADD FRIEND's box (until 2.14's keyboard), then the notices.
     fn draw_over(&self, p: &mut Pen) {
-        if let Some(popup) = self.popup {
-            match popup {
-                Popup::Quit => {
-                    let mut hints = vec![(Input::A, "Quit"), (Input::B, "Stay")];
-                    if self.client.is_some() {
-                        hints.insert(1, (Input::Y, "Sign out"));
-                    }
-                    p.popup("QUIT", "Close the launcher?", &hints);
-                }
-                Popup::LeaveGame => p.popup(
-                    "LEAVE GAME",
-                    "Leave the game in progress? In a ranked playlist it counts as a loss.",
-                    &[(Input::A, "Leave"), (Input::B, "Stay")],
-                ),
-                Popup::Kick(who) => {
-                    let name = self
-                        .party()
-                        .and_then(|pt| pt.members.iter().find(|m| m.account == who))
-                        .map_or("this player".into(), |m| m.gamertag.clone());
-                    p.popup(
-                        "REMOVE PLAYER",
-                        &format!(
-                            "Remove {name} from your party? They can come back only if invited."
-                        ),
-                        &[(Input::A, "Remove"), (Input::B, "Cancel")],
-                    );
-                }
-                Popup::AddFriend => self.draw_add_friend(p),
-                Popup::FriendOptions(who) => self.draw_friend_options(p, who),
-                Popup::Unfriend(who) => {
-                    let name = self
-                        .friend(who)
-                        .map_or("this player".into(), |f| f.gamertag.clone());
-                    p.popup(
-                        "REMOVE FRIEND",
-                        &format!("Remove {name} from your friends? They won't be told."),
-                        &[(Input::A, "Remove"), (Input::B, "Cancel")],
-                    );
-                }
-            }
-        } else if let Some((_, from)) = self.invite() {
-            p.popup(
-                "PARTY INVITATION",
-                &format!("{from} invited you to their party."),
-                &[(Input::A, "Accept"), (Input::B, "Decline")],
-            );
+        if self.popup == Some(Popup::AddFriend) {
+            self.draw_add_friend(p);
         }
-        // Last, so a popup's shade doesn't dim them.
+        // Last, so a dialog's overlay doesn't dim them.
         self.draw_toasts(p);
     }
 
@@ -3552,24 +3550,6 @@ impl App {
         p.text(640.0, 320.0, 26.0, TEXT, Align::Center, &line);
         p.spinner(640.0, 420.0, self.clock.elapsed().as_secs_f32());
         p.hints(&[(Input::B, "Cancel")]);
-    }
-
-    fn draw_failed(&self, p: &mut Pen) {
-        let lines = p.wrap(26.0, 1000.0, &self.failed);
-        for (k, l) in lines.iter().enumerate() {
-            p.text(640.0, 280.0 + k as f32 * 36.0, 26.0, TEXT, Align::Center, l);
-        }
-        let who = format!(
-            "Server {}  ·  Gamertag {}",
-            self.settings.server, self.settings.gamertag
-        );
-        p.text(640.0, 460.0, 18.0, DIM, Align::Center, &who);
-        p.hints(&[
-            (Input::A, "Try again"),
-            (Input::Y, "Change gamertag or server"),
-            (Input::X, "Controller settings"),
-            (Input::B, "Back"),
-        ]);
     }
 
     fn draw_live(&self, p: &mut Pen) {
@@ -4643,22 +4623,6 @@ impl App {
         p.hint_row(&hints, 640.0 - width / 2.0, 462.0);
     }
 
-    fn draw_friend_options(&self, p: &mut Pen, who: u64) {
-        p.popup_box(320.0, 200.0, 640.0, 320.0);
-        let name = self.friend(who).map_or("", |f| f.gamertag.as_str());
-        p.text(640.0, 250.0, 30.0, WHITE, Align::Center, name);
-        for (k, o) in self.friend_options(who).iter().enumerate() {
-            let y = 280.0 + k as f32 * 44.0;
-            let on = k == self.osel;
-            p.row(360.0, y, 560.0, 40.0, on, Hit::Row(k));
-            let col = if on { WHITE } else { TEXT };
-            p.text(640.0, y + 28.0, 22.0, col, Align::Center, o.label());
-        }
-        let hints = [(Input::A, "Select"), (Input::B, "Back")];
-        let width = p.hints_width(&hints);
-        p.hint_row(&hints, 640.0 - width / 2.0, 492.0);
-    }
-
     /// The notices, newest at the bottom, stacked up from just above the
     /// shell's button legend and clear of every popup's box (the lowest
     /// ends at y 520), so none is hidden behind one.
@@ -5032,25 +4996,12 @@ impl Pen<'_> {
         w - 30.0
     }
 
-    /// A popup's box, which alone takes clicks while it is up.
+    /// A popup's box, which alone takes clicks while it is up (over the
+    /// globals' overlay, `App::draw_dialog`).
     fn popup_box(&mut self, x: f32, y: f32, w: f32, h: f32) {
         self.top = true;
-        let (cw, ch) = (self.c.w as f32, self.c.h as f32);
-        self.c.fill(0.0, 0.0, cw, ch, Color::rgb(0).alpha(150));
         self.fill(x, y, w, h, Color::rgb(0x08_1A3C));
         self.outline(x, y, w, h, 2.0, EDGE);
-    }
-
-    /// A box over the screen, which alone takes clicks while it is up.
-    fn popup(&mut self, title: &str, body: &str, hints: &[(Input, &str)]) {
-        self.popup_box(320.0, 230.0, 640.0, 260.0);
-        self.text(640.0, 290.0, 30.0, WHITE, Align::Center, title);
-        let lines = self.wrap(22.0, 560.0, body);
-        for (k, l) in lines.iter().enumerate() {
-            self.text(640.0, 340.0 + k as f32 * 30.0, 22.0, TEXT, Align::Center, l);
-        }
-        let width = self.hints_width(hints);
-        self.hint_row(hints, 640.0 - width / 2.0, 462.0);
     }
 }
 

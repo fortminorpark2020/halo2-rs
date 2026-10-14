@@ -12,6 +12,7 @@ use crate::catalog::{self, Override, ScreenId};
 use crate::layout::{ChromeLayout, MainMenuLayout, ScreenLayout, StartLayout};
 use crate::tags;
 use blam_cache::ui::{Menus, Pictures, Ui};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -178,6 +179,16 @@ impl Shell {
     /// A catalog screen, when the tags have it.
     pub fn screen(&self, id: ScreenId) -> Option<&ScreenLayout> {
         self.screens.get(&id)
+    }
+
+    /// A catalog screen as the tags have it, else the built-in one when
+    /// there is one (`tags::built_in_screen`: the dialogs and the
+    /// invitation's notice, for the flat look).
+    pub fn screen_or_built_in(&self, id: ScreenId) -> Option<Cow<'_, ScreenLayout>> {
+        match self.screens.get(&id) {
+            Some(s) => Some(Cow::Borrowed(s)),
+            None => tags::built_in_screen(id).map(Cow::Owned),
+        }
     }
 
     /// The pictures, as an art source.

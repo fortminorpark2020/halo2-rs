@@ -24,7 +24,7 @@ fn face_of(i: Input) -> Option<Face> {
 }
 
 /// The press a click on a legend's button makes.
-fn input_of(face: Face) -> Option<Input> {
+pub(super) fn input_of(face: Face) -> Option<Input> {
     match face {
         Face::A => Some(Input::A),
         Face::B => Some(Input::B),
@@ -36,7 +36,8 @@ fn input_of(face: Face) -> Option<Input> {
 
 impl App {
     /// The header of the screen on show; none on Halo 2's own screens
-    /// before the shell (the intro, the start screen, the main menu).
+    /// before the shell (the intro, the start screen, the main menu), nor
+    /// on the offline screen, whose dialog has its own.
     pub(super) fn screen_title(&self) -> &'static str {
         match self.screen {
             Screen::Intro | Screen::Start | Screen::Main => "",
@@ -50,7 +51,8 @@ impl App {
             Screen::Pregame => "PREGAME LOBBY",
             Screen::InGame => "IN GAME",
             Screen::Carnage => "CARNAGE REPORT",
-            Screen::Failed => "OFFLINE",
+            // Halo 2's large error dialog says it (`dialogs`).
+            Screen::Failed => "",
             Screen::Record => "SERVICE RECORD",
             Screen::Friends => "FRIENDS",
             Screen::Settings => "CONTROLLER",
@@ -63,7 +65,7 @@ impl App {
     /// While the engine plays, the in-game screen's keys and the
     /// controller are the game's (`keys_are_the_games`, `wants_pad`); where
     /// a name is typed, the X and Y keys are letters.
-    fn unpressable(&self, i: Input) -> bool {
+    pub(super) fn unpressable(&self, i: Input) -> bool {
         if !self.keyboard {
             return !self.wants_pad();
         }

@@ -914,6 +914,188 @@ pub fn screen_wanted(screen: &ScreenLayout) -> Wants {
 /// (lit, with arrow tips), and a softer third one not used.
 pub const BUTTON_FRAMES: [usize; 2] = [0, 1];
 
+/// The dialog's body text colour (the error dialogs' and the multiple
+/// choice dialog's text in Vista's tags).
+const DIALOG_TEXT: [f32; 3] = [0.39, 0.58, 0.76];
+
+/// A catalog screen without any UI tags (the flat look: CI, the tests, a
+/// PC without Halo 2's files), for the dialogs the lobby draws over every
+/// screen: the quarter dialogs (ok_cancel, multiple_choice), the half one
+/// (large_error) and the invitation's notice (beeper). Our own copies of
+/// the places and sizes Vista's tags give them (menu.md 9.2), each frame
+/// piece as `flat_for`'s panel, the default skin's row as a flat backing,
+/// end cap and label, and no animations. None for the other screens,
+/// which the lobby doesn't draw without their tags.
+pub fn built_in_screen(id: ScreenId) -> Option<ScreenLayout> {
+    use layout::DialogSize;
+    // The frame's pieces' top left corners: ul_07, br_07, dialog1 and
+    // dialog2; the body's box; the list's corner and rows shown.
+    type Dialog = ([[f32; 2]; 4], [f32; 4], [f32; 2], usize);
+    let (size, (corners, body, list, visible), key): (DialogSize, Dialog, &str) = match id {
+        ScreenId::OkCancel => (
+            DialogSize::Quarter,
+            (
+                [[-298.0, 210.0], [150.0, -125.0], [-290.0, 198.0], [-235.0, 248.0]],
+                [-250.0, 140.0, 240.0, -80.0],
+                [-255.0, -140.0],
+                2,
+            ),
+            "#0",
+        ),
+        ScreenId::MultipleChoice => (
+            DialogSize::Quarter,
+            (
+                [[-292.0, 210.0], [150.0, -130.0], [-282.0, 198.0], [-230.0, 242.0]],
+                [-122.0, 72.0, 122.0, -19.0],
+                [-106.0, -20.0],
+                4,
+            ),
+            "#0",
+        ),
+        ScreenId::LargeError => (
+            DialogSize::Half,
+            (
+                [[-550.0, 186.0], [425.0, -130.0], [-541.0, 174.0], [42.0, 242.0]],
+                [0.0, 100.0, 520.0, -80.0],
+                [-500.0, 40.0],
+                2,
+            ),
+            "help",
+        ),
+        ScreenId::Beeper => return Some(built_in_beeper()),
+        _ => return None,
+    };
+    let pieces = ["ul_07", "br_07", "dialog1", "dialog2"];
+    let bitmaps = pieces
+        .iter()
+        .zip(corners)
+        .map(|(name, corner)| {
+            let name = format!("ui\\global_bitmaps\\{name}");
+            BitmapWidget {
+                flat: flat_for(&name),
+                ..BitmapWidget::new(&name, corner)
+            }
+        })
+        .collect();
+    let text = SlotText {
+        key: key.to_string(),
+        words: None,
+        widget: TextWidget::new(crate::Font::Body, DIALOG_TEXT, body, Justify::Left),
+        glyphs: 1.0,
+    };
+    let list = ListLayout {
+        skin: default_skin(),
+        corner: list,
+        step: layout::DIALOG_PLACE.step,
+        visible,
+        wraps: true,
+        intro: None,
+        delay_ms: 0.0,
+    };
+    Some(ScreenLayout {
+        id: Some(id),
+        path: id.path(),
+        size,
+        has_header: true,
+        header_id: "header".to_string(),
+        header_words: None,
+        // A SELECT, B CANCEL, as the three dialogs' tags have it.
+        button_key: 2,
+        overlay: true,
+        pane_per_item: false,
+        panes: vec![PaneLayout {
+            scale: Scale::Vista,
+            bitmaps,
+            texts: vec![text],
+            lists: vec![list],
+            buttons: Vec::new(),
+            players: Vec::new(),
+        }],
+        strings: Vec::new(),
+    })
+}
+
+/// The default list skin's row without its tags: its backing (depth 10)
+/// and end cap (11, not counted in the row's size) as flat panels, and
+/// its left-justified label (12), at the places the default skin gives
+/// them.
+fn default_skin() -> SkinLayout {
+    let piece = |name: &str, corner: [f32; 2], depth: i16| {
+        let name = format!("ui\\list_skins\\default\\{name}");
+        BitmapWidget {
+            depth,
+            flat: flat_for(&name),
+            ignore_for_list_size: depth == 11,
+            ..BitmapWidget::new(&name, corner)
+        }
+    };
+    let mut label = TextWidget::new(
+        crate::Font::Body,
+        colour::LIST_TEXT,
+        [50.0, 38.0, 440.0, -8.0],
+        Justify::Left,
+    );
+    label.depth = 12;
+    SkinLayout {
+        bitmaps: vec![
+            piece("item_background", [40.0, -4.0], 10),
+            piece("end_cap", [21.0, -17.0], 11),
+        ],
+        texts: vec![label],
+        items: ItemLook::default(),
+        arrows: None,
+    }
+}
+
+/// The invitation's notice at the lower left without its tags (the
+/// beeper, a full screen with no header or legend, at the Xbox's scale):
+/// the status icon and two white lines of text (the upper the notice's
+/// words, the lower the gamertag), at the places its tags give them. The
+/// icon has no flat shape: in the flat look only the words show.
+fn built_in_beeper() -> ScreenLayout {
+    let scale = Scale::Xbox;
+    let line = |bounds: [f32; 4]| {
+        let mut widget =
+            TextWidget::new(crate::Font::Body, [1.0, 1.0, 1.0], scale.rect(bounds), Justify::Left);
+        widget.depth = 3;
+        SlotText {
+            key: "invite_recieved".to_string(),
+            words: None,
+            widget,
+            glyphs: scale.bitmap(),
+        }
+    };
+    let icon = BitmapWidget {
+        frame: 6,
+        depth: 3,
+        scale: [scale.bitmap(); 2],
+        ..BitmapWidget::new("ui\\global_bitmaps\\live_icons", scale.point([-268.0, -143.0]))
+    };
+    ScreenLayout {
+        id: Some(ScreenId::Beeper),
+        path: ScreenId::Beeper.path(),
+        size: layout::DialogSize::Full,
+        has_header: false,
+        header_id: String::new(),
+        header_words: None,
+        button_key: 0,
+        overlay: true,
+        pane_per_item: false,
+        panes: vec![PaneLayout {
+            scale,
+            bitmaps: vec![icon],
+            texts: vec![
+                line([-238.0, -155.0, -98.0, -175.0]),
+                line([-238.0, -139.0, -98.0, -159.0]),
+            ],
+            lists: Vec::new(),
+            buttons: Vec::new(),
+            players: Vec::new(),
+        }],
+        strings: Vec::new(),
+    }
+}
+
 /// Every bitmap (name and frame) the layouts draw.
 pub fn wanted(
     start: &StartLayout,
