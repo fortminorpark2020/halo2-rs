@@ -49,11 +49,79 @@ install. No game files are included in this repository.
   widen, even teams, map choice and host choice).
 - `h2launch`: the launcher (Windows only, work in progress) that starts MCC's
   own classic Halo 2 engine from your Master Chief Collection install,
-  without running MCC. Double-click it and it opens on Halo 2's start
-  screen, as on the Xbox: press A or Start (Enter or Space on a keyboard,
-  or click) for the main menu, which has ONLINE and SETTINGS (up and
-  down to pick, A to choose, B to go back). Its pictures and fonts are
-  read from your MCC install; without them it is plain shapes. ONLINE
+  without running MCC. Double-click it and, as on the Xbox, it plays Halo
+  2's intro movie (when it finds Cartographer's `movie` folder; see
+  below), then opens on Halo 2's start screen: press A or Start (Enter
+  or Space on a keyboard, or click) for the main menu, which has ONLINE
+  and SETTINGS (up and down to pick, A to choose, B to go back). Its
+  pictures and fonts are read from your Halo 2 Vista (Project
+  Cartographer) folder if the launcher finds one, otherwise from MCC's
+  own Halo 2 files; without either the menus are plain shapes. It looks
+  for Cartographer in
+  `C:\Games\Halo 2 Project Cartographer` and in Halo 2 Vista's usual
+  folders under Program Files; if yours is somewhere else, add the line
+  `vista = <folder>` (the Cartographer folder or its `maps` folder) to
+  `%LOCALAPPDATA%\h2launch\lobby.txt`, or set `H2LOBBY_VISTA` to it. With
+  Cartographer's files, Halo 2's main menu flythrough (the Covenant
+  carrier over New Mombasa, dark, soft and navy as on the Xbox) plays behind the
+  start screen and the main menu: your graphics card draws its first
+  picture while the intro plays, so it is there as the start screen
+  opens (without the intro it fades in over a moment), carries on where
+  it left off when you come back to the main menu, and stops while you
+  are on any other screen or in a match, so the game has the graphics
+  card to itself.
+  Without Cartographer, without a graphics card that can draw it, or with
+  `background = still` in `lobby.txt` (or `H2LOBBY_SCENE=off`), the menus
+  have a still navy background instead. With Cartographer's files the
+  menus also have Halo 2's sound: its main menu
+  music on the start screen and the main menu, as loud as Halo 2's own
+  sound settings in the map make it (its first seconds are quiet: the
+  music itself starts softly), (as on the Xbox it fades
+  out over about 5 seconds on the playlists, and starts again from the
+  beginning back on the main menu; it never starts or stops more often
+  than once every 6 seconds), and its menu sounds when you leave the
+  start screen, move, choose (with a second sound as a new screen or
+  popup opens, as on the Xbox, also when one opens by itself, such as
+  the playlists after signing in), go back, are told you can't do
+  something, start a search, or get an invitation or a friend request.
+  Nothing plays during a match, and nothing from before it plays on
+  after it. Without Cartographer the menus are silent for now (MCC's own
+  sounds can't be read yet); `menu_sound = off` in `lobby.txt` (or
+  `H2LOBBY_SOUND=off`) silences them. With Cartographer's `movie` folder
+  the launcher first plays Halo 2's intro movie, with its sound at full
+  volume as on the Xbox (silent with `menu_sound = off` or
+  `H2LOBBY_SOUND=off`), before the start screen, as the Xbox did each
+  time it started: any button (A, B, X, Y, the bumpers, the triggers,
+  Start, Back, Enter, Esc, Space or a letter) or a click skips it, but
+  not the stick, the d-pad or the arrow keys (a key held down skips only
+  the movie: in the menus only the arrows and typing repeat while held,
+  as only directions did in Halo 2). At its end, or when skipped, the
+  start screen comes in and its music starts. It plays at every start;
+  `intro = off` in `lobby.txt` (or `H2LOBBY_INTRO=off`) goes straight to
+  the start screen. On Windows N without the Media Feature
+  Pack it can't be played, and the start screen comes at once (the
+  launcher itself still starts). Every screen after the main menu sits in
+  Halo 2's own frame: the navy background with its bands at the top and
+  bottom (a lighter grey-navy above and below them) and thin lines
+  scrolling slowly across it, the screen's name at
+  the top left, and the buttons it takes at the bottom right (such as
+  A SELECT and B BACK), both with Halo 2's small dark shadow under the
+  letters. Those show the controller's buttons after you
+  used a controller (how it starts) and the keys, such as ENTER and ESC,
+  after you used the keyboard or the mouse; click one to press it. LB
+  and RB still open the service record and the friends list but aren't
+  listed there. Who you are signed in as, your level, how many are
+  online and the server's ping are on a small line at the top right, and
+  friend requests waiting for your answer are counted under it. A button
+  that can't be pressed with its key or the controller just then (LEAVE
+  GAME while the game plays, or CONTROLLER SETTINGS while you type a
+  gamertag) shows only its words; click it instead. While a match is
+  played and the launcher's window isn't in front, it is drawn only
+  twice a second, leaving the computer to the game. On
+  a controller the stick now counts only when pushed nearly all the way
+  (as in Halo 2's menus), and holding the d-pad or the stick moves again
+  every quarter second. The screens' insides still have the launcher's
+  own look for now. ONLINE
   takes you to its lobby: pick a gamertag the first time (after that it
   signs you in by itself), form a party (the sign-in screen offers the
   project's server, h2.mohnjorrow.com, by default), search a playlist,
@@ -75,10 +143,12 @@ install. No game files are included in this repository.
   party panel and the party screen show each member's level in the playlist
   you have selected. On
   a keyboard, Q and E (or Page Up and Page Down) are LB and RB. Levels show
-  as Halo 2's own level icons, read from your MCC install (or from a Halo 2
-  Vista install if MCC's can't be read); without either they are numbers. Friends and service records need the matching
+  as Halo 2's own level icons, read from the same place (your Halo 2 Vista
+  folder first, otherwise MCC's files); without either they are numbers.
+  Friends and service records need the matching
   server: an older launcher signing in to it is told UPDATE YOUR LAUNCHER.
-  Its text is in Halo 2's own fonts, read from your MCC install.
+  Its text is in Halo 2's own fonts, from the same place (Halo 2 Vista's
+  first, otherwise MCC's); without either it uses a system font.
   Settings (SETTINGS on the main menu, the row after Custom Game, or X on
   a controller at the sign-in screen) holds Halo 2's controller settings,
   in the order of its CONTROLLER screen: Thumbstick Layout (Default, Southpaw, Legacy, Legacy
@@ -141,10 +211,19 @@ install. No game files are included in this repository.
   above. See `docs/notes/launcher/README.md`.
 - `h2ui`: the original Xbox Halo 2 menus for the launcher (work in
   progress): the start screen and main menu the launcher opens on, laid
-  out from your `mainmenu.map`'s menu tags and pictures (MCC's or Halo 2
-  Vista's), drawn without a graphics card; plain shapes in Halo 2's colours when the files
-  aren't there.
-- `wma`: Windows Media Audio 2 decoder for the announcer's lines, ported from
+  out from your `mainmenu.map`'s menu tags and pictures, drawn without a
+  graphics card; plain shapes in Halo 2's colours when the files aren't
+  there. The menu art, the fonts and the rank icons come from your Halo 2
+  Vista (Project Cartographer) folder if the launcher finds one, otherwise
+  from MCC's own Halo 2 files (`H2LOBBY_VISTA=off` tries it without); the
+  menu music and sounds from Cartographer's only.
+- `h2scene`: the 3D scene behind Halo 2's main menu (the Covenant carrier
+  over New Mombasa, flown through by the map's own camera path), read
+  from your Halo 2 Vista (Project Cartographer) `mainmenu.map` and drawn
+  on your graphics card, off screen, behind the launcher's start screen
+  and main menu.
+- `wma`: Windows Media Audio 2 decoder for the announcer's lines (and the
+  launcher's menu music), ported from
   FFmpeg (and so LGPL 2.1 or later, unlike the rest of the repository).
 - `h2viewer`: the game: Halo 2 style menus and lobby, Halo 2's maps with their
   lighting, Spartans, weapons, HUD and sounds, bots, splitscreen for up to four

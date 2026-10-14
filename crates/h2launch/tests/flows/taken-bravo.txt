@@ -1,0 +1,26 @@
+# (f) A taken gamertag, then: ALPHA is turned away, BRAVO is taken; then B
+# back to the start screen and its quit popup, which quits.
+0 wait start 20
+0.2 a                       # the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form
+0 wait signin 10
+0 type ALPHA
+0.2 a
+0 see Someone else has that gamertag 30
+0 wait signin 5
+0.1 back
+0.1 back
+0.1 back
+0.1 back
+0.1 back
+0 type BRAVO
+0.2 a
+0 wait live 30
+0.2 b                       # the main menu, still signed in
+0 wait main 5
+0.2 b                       # the start screen
+0 wait start 5
+0.2 b                       # the quit popup
+0 wait quit 5
+0.2 a                       # quits: the run ends here

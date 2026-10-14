@@ -1,0 +1,10 @@
+# (e) A setting is kept, the first run: set the button layout and quit.
+0 wait start 20
+0.2 a                       # the main menu
+0 wait main 10
+0.2 down
+0.2 a                       # SETTINGS
+0 wait settings 5
+0 set button_layout bumper_jumper
+0 see Bumper Jumper 5
+0.5 quit

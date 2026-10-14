@@ -1,16 +1,23 @@
-//! The lobby's screens and what happens on them: Halo 2's start screen
-//! and main menu (drawn by `h2ui`), signing in, the party and the
-//! playlists, searching, custom games, the pregame lobby, the match (its
-//! engine runs in a second copy of the launcher, see `child`), the carnage
-//! report, the friends list and players' service records.
+//! The lobby's screens and what happens on them: Halo 2's intro movie
+//! (`intro`), its start screen and main menu (drawn by `h2ui`), signing
+//! in, the party and the playlists, searching, custom games, the pregame
+//! lobby, the match (its engine runs in a second copy of the launcher, see
+//! `child`), the carnage report, the friends list and players' service
+//! records. Behind the start screen and main menu goes the main menu's
+//! flythrough when it can be drawn (`h2scene`, `Config::scene`), else a
+//! still background; every screen after them sits in Halo 2's shell
+//! (`shell`): its background, header and button legend.
 //! Nothing here opens a window: `window`, or the headless loop in
 //! `mod.rs`, gives it input and time and shows what it draws.
 
 use super::canvas::{Align, Canvas, Color, Style, Text};
 use super::child::{self, Kind, Match, Running, Said};
+use super::intro::{self, End, Intro, Plan};
 use super::names;
 use super::ranks::{RankIcons, Size};
 use super::settings::{self, Settings, GAMERTAG_LEN};
+use super::sound::{Cue, SoundOut};
+use super::sources::Vista;
 use crate::controls::{self, button, Controls};
 use crate::gamemenu::Leave;
 use crate::live::{self, Engine, Log, Told};
@@ -22,10 +29,12 @@ use h2net::live::{
     CUSTOM_GAME, GAMERTAG_TAKEN, MAX_FRIENDS, QUICKMATCH,
 };
 use h2net::Connection;
+use h2scene::{Frame, SceneSource, SceneState};
 use h2ui::anim::{Animation, Focus};
+use h2ui::art::ImageRef;
 use h2ui::cpu::Kept;
 use h2ui::layout::{BitmapWidget, Space};
-use h2ui::paint::Resources;
+use h2ui::paint::{Blend, DrawList, Quad, Resources, Texture, Textures};
 use h2ui::screens::{self, Backdrop, MainMenu, Start};
 use h2ui::shell::Shell;
 use h2ui::text::Fonts;
@@ -34,6 +43,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+mod shell;
 
 /// How long the pregame lobby shows the match before the engine starts.
 const PREGAME: Duration = Duration::from_secs(5);
@@ -90,14 +101,35 @@ const LIVE_ROW: usize = 0;
 const MAIN_SETTINGS_ROW: usize = 1;
 /// The in-game screen's line while the engine plays.
 const IN_GAME_MENU_HINT: &str = "Start or Esc in the game's window opens the game menu.";
-/// Frames of a menu screen timed at each window size before the log says
-/// how long one takes.
+/// Frames of a screen timed at each window size before the log says how
+/// long one takes.
 const MENU_FRAMES: u32 = 30;
 /// A click this soon (seconds) after one that changed the screen or shut a
 /// popup is the second half of a double-click: on the start screen it
-/// doesn't go on, and on the main menu it only focuses a row. Windows'
-/// default double-click time is 0.5 s; 0.4 s is our own choice.
+/// doesn't go on, on the main menu it only focuses a row, and elsewhere it
+/// presses no button or arrow and only selects a row. Windows' default
+/// double-click time is 0.5 s; 0.4 s is our own choice.
 const DOUBLE_CLICK: f64 = 0.4;
+/// Cues kept for the sound to take (`App::take_sound`); older ones are
+/// dropped when nothing takes them (no sound, and the tests).
+const CUES_KEPT: usize = 16;
+/// How often the window draws a frame: about 60 a second while the intro
+/// movie plays (its pictures come 60 a second, going by its name), else
+/// about 30 (the menus' animations and the lobby's screens).
+const FRAME_MOVIE: Duration = Duration::from_millis(16);
+const FRAME: Duration = Duration::from_millis(33);
+/// How often the window is drawn while the engine plays and the lobby's
+/// window hasn't the focus (`draw_interval`): our own choice, often
+/// enough for a lobby left in sight on another screen to keep up.
+const FRAME_BEHIND_GAME: Duration = Duration::from_millis(500);
+/// The flythrough's first frame fades in over the still background in
+/// this long (seconds), when it wasn't ready as the start screen opened
+/// (the intro wakes it ahead): our estimate, so the scene doesn't pop in
+/// once the GPU has it (Halo 2 had it from the start).
+const SCENE_FADE: f64 = 0.25;
+/// The flythrough's clock goes on at most this much (seconds) between two
+/// frames, so a stall (the window dragged, a slow PC) doesn't jump it.
+const SCENE_STEP: f64 = 0.25;
 
 /// The start screen's and main menu's layouts, pictures and fonts
 /// (`h2ui`), read once when the lobby opens.
@@ -137,10 +169,24 @@ pub struct Config {
     pub ranks: Option<Arc<RankIcons>>,
     /// The start screen and main menu (`Menus::flat` without the files).
     pub menus: Arc<Menus>,
+    /// The Halo 2 Vista (Project Cartographer) files, if `sources::find`
+    /// found them: the menus, fonts and rank icons above came from there
+    /// first.
+    pub vista: Option<Vista>,
+    /// The intro movie to play before the start screen (`mod.rs`'s
+    /// `intro_plan`: a window, Windows, Vista's movie, not switched off).
+    pub intro: Option<Plan>,
     /// For tests: more words for each match's engine
     /// (`H2LOBBY_ENGINE_ARGS`: `--set-option`, `--pad`, a control flag),
     /// read once when the lobby starts.
     pub engine_args: String,
+    /// The main menu's flythrough behind the start screen and main menu
+    /// (`h2scene::Backdrop`, which `mod.rs` starts when it can be drawn);
+    /// None, or a scene that fails, leaves the still background.
+    pub scene: Option<Arc<dyn SceneSource>>,
+    /// `H2LOBBY_SCENE_FPS=60`: the window draws about 60 frames a second
+    /// while the flythrough shows, not 30.
+    pub scene_fast: bool,
 }
 
 /// A key, button or typed character.
@@ -160,6 +206,11 @@ pub enum Input {
     /// buttons): LB is always a service record, RB the friends list.
     Lb,
     Rb,
+    /// The pad's triggers: only the intro takes them (they skip it, as
+    /// every button but the d-pad and the stick clicks does in Halo 2,
+    /// 0x156ab0); every other screen leaves them alone.
+    Lt,
+    Rt,
     Tab,
     Backspace,
     Char(char),
@@ -167,7 +218,11 @@ pub enum Input {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
-    /// Halo 2's start screen ("PRESS START"), where the lobby opens.
+    /// Halo 2's intro movie, where the lobby opens when there is one to
+    /// play (`Config::intro`); any button but a direction skips it.
+    Intro,
+    /// Halo 2's start screen ("PRESS START"), where the lobby opens
+    /// without the intro, and after it.
     Start,
     /// Halo 2's main menu: ONLINE and SETTINGS.
     Main,
@@ -374,6 +429,29 @@ pub struct App {
     menu_opened: f64,
     /// The menus' still background, drawn once for a window size.
     backdrop: Kept<u32>,
+    /// The shell's still background behind the other screens
+    /// (`shell::draw_shell`), kept apart from the menus' so going between
+    /// the main menu and them never draws either again.
+    shell_backdrop: Kept<u32>,
+    /// The keyboard or the mouse was used last, not the controller: the
+    /// button legends name keys rather than show the pad's buttons. The
+    /// controller comes first, so it starts false.
+    keyboard: bool,
+    /// The flythrough (`Config::scene`): how far into it the menus are
+    /// (seconds; its clock runs only while the start screen or main menu
+    /// is up), the menus' clock at its last step, when its first frame
+    /// showed (it fades in from then; None until a frame of the window's
+    /// size comes), whether it was told to sleep, whether it failed (the
+    /// still background for the rest of the run), whether its frame is
+    /// on screen (`frame_interval`), and the window's size the intro
+    /// asked for its first frame at (`scene_warm_up`).
+    scene_seconds: f64,
+    scene_step: Option<f64>,
+    scene_since: Option<f64>,
+    scene_asleep: bool,
+    scene_failed: bool,
+    scene_shown: bool,
+    scene_warm: Option<(usize, usize)>,
     /// The window's size in pixels at the last draw of the start screen
     /// or main menu: the main menu's rows are found under the mouse at it.
     size: (usize, usize),
@@ -381,38 +459,204 @@ pub struct App {
     /// The last click: when (on the menus' clock), the screen it was on,
     /// and whether a popup took it (`DOUBLE_CLICK`).
     last_click: Option<(f64, Screen, bool)>,
+    /// The sounds asked for since the sound last took them (`take_sound`),
+    /// and the intro's soundtrack starting or stopping.
+    cues: Vec<Cue>,
+    movie_sound: Vec<SoundOut>,
+    /// The intro movie playing (from the first draw on its screen), the
+    /// picture drawn last (its serial number), and that picture drawn into
+    /// the window's size once.
+    intro: Option<Intro>,
+    intro_serial: u64,
+    intro_kept: Kept<u32>,
+    /// The menu music is wanted (`music_rule`).
+    music_on: bool,
+    /// The press `input_inner` acted on last, after letters and Backspace
+    /// were turned into buttons: B's changes sound as Back, and only A's
+    /// opening a screen as Select too (`cue_for`).
+    pressed: Option<Input>,
+    /// Something asked for couldn't be done (`refuse`).
+    refused: bool,
+    /// The invitation shown last (its party), so a new one sounds once.
+    invite_seen: Option<u64>,
 }
 
-/// How long the menus take to draw on the CPU, for the log (menu.md phase
-/// 1, "Done when"): the kept background once for each window size, and
-/// each screen's frames, averaged over the first `MENU_FRAMES` at a size.
+/// What the cue of a press is worked out from (`App::cue_state`), taken
+/// before and after it.
+#[derive(Clone, Debug, PartialEq)]
+struct CueState {
+    screen: Screen,
+    popup: Option<Popup>,
+    /// The invitation shown (its party).
+    invite: Option<u64>,
+    /// The focused row (or field) of the list on show.
+    focus: usize,
+    /// The values a press can change in place: the custom game's game and
+    /// map, and the controller settings.
+    values: (usize, usize, Controls),
+    refused: bool,
+}
+
+/// The sounds of a press, from the state before and after it (`pressed`:
+/// the button it was), as Halo 2 plays them: Error if it was refused; if
+/// the screen, popup or invitation changed, Back on B (a screen brought
+/// back from the history plays no `advance`, 0x23553f); else, when a
+/// screen or a popup opens, its `advance` (every screen and dialog loaded
+/// forward plays it, 0x147f6d), after Select for A (the list item's or
+/// button's `forward1`, 0x24ac05 and 0x2540e8, which only A and Start
+/// play; a shortcut such as X or RB opening a screen, like Halo 2's Y
+/// opening its Y menu, is the `advance` alone); Select alone between the
+/// Y menu's tabs (the players and friends lists: the tab's `forward1`)
+/// and when a popup only closes; Cursor if only the focus or a value
+/// changed.
+fn cue_for(before: &CueState, after: &CueState, pressed: Option<Input>) -> &'static [Cue] {
+    // Leaving the intro sounds nothing: the press isn't a list item's or a
+    // button's, and the start screen's load plays no `advance`
+    // (0x147f6d).
+    if before.screen == Screen::Intro {
+        return &[];
+    }
+    if after.refused {
+        return &[Cue::Error];
+    }
+    let screen = before.screen != after.screen;
+    let popup = before.popup != after.popup;
+    if screen || popup || before.invite != after.invite {
+        let y_menu = |s: Screen| matches!(s, Screen::Players | Screen::Friends);
+        let tab = y_menu(before.screen) && y_menu(after.screen);
+        let opens = (screen && !tab) || (popup && after.popup.is_some());
+        return match (pressed, opens) {
+            (Some(Input::B), _) => &[Cue::Back],
+            (Some(Input::A), true) => &[Cue::Select, Cue::Advance],
+            (_, true) => &[Cue::Advance],
+            (_, false) => &[Cue::Select],
+        };
+    }
+    if before.focus != after.focus || before.values != after.values {
+        return &[Cue::Cursor];
+    }
+    &[]
+}
+
+/// `text` is the server's notice that someone sent us a friend request
+/// (`h2net::live::ASKED_YOU`, with whatever gamertag in it).
+fn is_asked_you(text: &str) -> bool {
+    match h2net::live::ASKED_YOU.split_once("{X}") {
+        Some((before, after)) => {
+            text.len() > before.len() + after.len()
+                && text.starts_with(before)
+                && text.ends_with(after)
+        }
+        None => text == h2net::live::ASKED_YOU,
+    }
+}
+
+/// Whether the menu music is wanted on `screen`, it being `current` (Halo
+/// 2's rule, menu.md section 5): on at the start screen and the main
+/// menu; off during the intro movie (it has its own sound; the music
+/// starts with the start screen), on the ONLINE screens (searching too),
+/// the party, the custom game and the match's screens; elsewhere as it
+/// was, so the settings keep it and the carnage report stays silent after
+/// a game.
+fn music_rule(screen: Screen, current: bool) -> bool {
+    match screen {
+        Screen::Start | Screen::Main => true,
+        Screen::Intro
+        | Screen::Live
+        | Screen::Party
+        | Screen::Custom
+        | Screen::Pregame
+        | Screen::InGame => false,
+        Screen::SignIn
+        | Screen::Connecting
+        | Screen::Players
+        | Screen::Carnage
+        | Screen::Failed
+        | Screen::Record
+        | Screen::Friends
+        | Screen::Settings => current,
+    }
+}
+
+/// How far (0 to 1) the flythrough has faded in over the still
+/// background `elapsed` seconds after its first frame showed.
+fn scene_alpha(elapsed: f64) -> f32 {
+    (elapsed / SCENE_FADE).clamp(0.0, 1.0) as f32
+}
+
+/// `top` over `under` (0x00RRGGBB pixels, the same count), `alpha` of the
+/// way (0 keeps `under`, 1 is `top`).
+fn blend_px(under: &mut [u32], top: &[u32], alpha: f32) {
+    let a = (alpha.clamp(0.0, 1.0) * 256.0).round() as u32;
+    if a == 0 {
+        return;
+    }
+    if a == 256 {
+        under.copy_from_slice(top);
+        return;
+    }
+    let b = 256 - a;
+    for (u, t) in under.iter_mut().zip(top) {
+        // Red and blue together, then green: each lane's sum stays below
+        // its 8 bits times 256 (plus a half for the rounding).
+        // Rounded to nearest.
+        let rb = (((*u & 0xFF_00FF) * b + (*t & 0xFF_00FF) * a + 0x80_0080) >> 8) & 0xFF_00FF;
+        let g = (((*u & 0x00_FF00) * b + (*t & 0x00_FF00) * a + 0x00_8000) >> 8) & 0x00_FF00;
+        *u = rb | g;
+    }
+}
+
+/// How long each screen takes to draw on the CPU, for the log (menu.md,
+/// phase 1's "Done when" and phase 2's CPU budget): the menus' kept
+/// background once for each window size, and each screen's frames (by
+/// `App::timer_name`), averaged over the first `MENU_FRAMES` at a size.
 #[derive(Default)]
 struct MenuTimes {
     size: (usize, usize),
-    /// The start screen's frames timed at this size, then the main
-    /// menu's, with their total time (ms).
-    frames: [(u32, f64); 2],
+    /// Each screen's frames timed at this size.
+    frames: Vec<ScreenTimes>,
+    /// The size the menus' still background was last drawn at: a frame
+    /// that draws it again isn't timed.
+    kept: (usize, usize),
     /// Each size's background time (ms), the first time it was drawn.
     backgrounds: Vec<((usize, usize), f64)>,
     /// The sizes and screens already logged.
-    logged: Vec<((usize, usize), usize)>,
+    logged: Vec<((usize, usize), &'static str)>,
+}
+
+/// One screen's frames timed at the window's size (`MenuTimes`).
+struct ScreenTimes {
+    /// Its timer name (`App::timer_name`).
+    name: &'static str,
+    /// How many frames, and their total time (ms).
+    frames: u32,
+    total: f64,
+    /// The flythrough's frames copied in (`draw_menu`) among them: how
+    /// many, and their total time (ms).
+    copies: u32,
+    copy_total: f64,
 }
 
 impl App {
-    /// The lobby, on the start screen. It signs in when the player picks
-    /// ONLINE on the main menu.
+    /// The lobby, on the intro movie if there is one to play
+    /// (`Config::intro`), else on the start screen. It signs in when the
+    /// player picks ONLINE on the main menu.
     pub fn new(cfg: Config) -> App {
         let mut settings = Settings::load(&cfg.folder.join("lobby.txt"));
         if let Some(s) = &cfg.server {
             settings.server = s.clone();
         }
         let now = Instant::now();
+        let screen = match cfg.intro {
+            Some(_) => Screen::Intro,
+            None => Screen::Start,
+        };
         App {
             fields: [settings.gamertag.clone(), settings.server.clone()],
             saved: [settings.gamertag.clone(), settings.server.clone()],
             settings,
             cfg,
-            screen: Screen::Start,
+            screen,
             field: 0,
             form_error: None,
             dialing: None,
@@ -454,9 +698,28 @@ impl App {
             drawn_screen: None,
             menu_opened: 0.0,
             backdrop: Kept::default(),
+            shell_backdrop: Kept::default(),
+            keyboard: false,
+            scene_seconds: 0.0,
+            scene_step: None,
+            scene_since: None,
+            // Nothing to put to sleep until the menus first ask for it.
+            scene_asleep: true,
+            scene_failed: false,
+            scene_shown: false,
+            scene_warm: None,
             size: (0, 0),
             menu_times: MenuTimes::default(),
             last_click: None,
+            cues: Vec::new(),
+            movie_sound: Vec::new(),
+            intro: None,
+            intro_serial: 0,
+            intro_kept: Kept::default(),
+            music_on: screen != Screen::Intro,
+            pressed: None,
+            refused: false,
+            invite_seen: None,
         }
     }
 
@@ -493,6 +756,7 @@ impl App {
         }
         let waiting = self.game.as_ref().is_some_and(|g| g.over.is_none());
         match self.screen {
+            Screen::Intro => "intro",
             Screen::Start => "start",
             Screen::Main => "main",
             Screen::SignIn => "signin",
@@ -517,6 +781,119 @@ impl App {
     /// The text drawn in the last frame, each string as it was drawn.
     pub fn drawn(&self) -> &[String] {
         &self.drawn
+    }
+
+    /// What the sound should play since the last call: the intro's
+    /// soundtrack starting or stopping, then the cues, oldest first.
+    pub fn take_sound(&mut self) -> Vec<SoundOut> {
+        let mut out = std::mem::take(&mut self.movie_sound);
+        out.extend(self.cues.drain(..).map(SoundOut::Cue));
+        out
+    }
+
+    /// The cues alone (`take_sound`'s), for the tests.
+    #[cfg(test)]
+    pub fn take_cues(&mut self) -> Vec<Cue> {
+        std::mem::take(&mut self.cues)
+    }
+
+    /// How long the window waits between frames: shorter while the intro
+    /// movie plays, and while the flythrough shows if `Config::scene_fast`
+    /// asks for 60 frames a second. It wakes at least this often even
+    /// when it draws less often (`draw_interval`), as `tick` polls the
+    /// server and the engine.
+    pub fn frame_interval(&self) -> Duration {
+        match self.screen {
+            Screen::Intro => FRAME_MOVIE,
+            Screen::Start | Screen::Main if self.cfg.scene_fast && self.scene_shown => FRAME_MOVIE,
+            _ => FRAME,
+        }
+    }
+
+    /// How long the window waits between the frames it draws: each
+    /// `frame_interval`, except while the engine plays and the lobby's
+    /// window hasn't the focus (`focused`), when the shell's scrolling
+    /// strips needn't be drawn 30 times a second under the engine's window
+    /// (Windows still sends a covered window its paints): only every
+    /// `FRAME_BEHIND_GAME`. A key, a click or the focus draws at once.
+    pub fn draw_interval(&self, focused: bool) -> Duration {
+        if self.engine_running() && !focused {
+            FRAME_BEHIND_GAME
+        } else {
+            self.frame_interval()
+        }
+    }
+
+    /// The menu music is wanted (`music_rule`, kept by `tick`).
+    pub fn music_on(&self) -> bool {
+        self.music_on
+    }
+
+    fn cue(&mut self, c: Cue) {
+        if self.cues.len() == CUES_KEPT {
+            self.cues.remove(0);
+        }
+        self.cues.push(c);
+    }
+
+    /// What a press's cue is worked out from (`cue_for`).
+    fn cue_state(&self) -> CueState {
+        let focus = match (self.popup, self.screen) {
+            (Some(Popup::FriendOptions(_)), _) => self.osel,
+            (Some(_), _) => 0,
+            (None, Screen::Main) => self.main_focus.item,
+            (None, Screen::Live) => self.sel,
+            (None, Screen::Players) => self.psel,
+            (None, Screen::Party) => self.msel,
+            (None, Screen::Custom) => self.crow,
+            (None, Screen::Settings) => self.srow,
+            (None, Screen::Friends) => self.fsel,
+            (None, Screen::Carnage) => self.csel,
+            (None, Screen::Record) => self.record_first,
+            (None, Screen::SignIn) => self.field,
+            (
+                None,
+                Screen::Intro
+                | Screen::Start
+                | Screen::Connecting
+                | Screen::Pregame
+                | Screen::InGame
+                | Screen::Failed,
+            ) => 0,
+        };
+        CueState {
+            screen: self.screen,
+            popup: self.popup,
+            invite: self.invite().map(|(party, _)| party),
+            focus,
+            values: (self.cgame, self.cmap, self.settings.controls),
+            refused: self.refused,
+        }
+    }
+
+    /// Run a press (`act`), then ask for its sounds: cues it asked for
+    /// itself stand, else `cue_for`'s from before and after.
+    fn sounding(&mut self, act: impl FnOnce(&mut App)) {
+        let before = self.cue_state();
+        let asked = self.cues.len();
+        self.pressed = None;
+        self.refused = false;
+        act(self);
+        let after = self.cue_state();
+        self.refused = false;
+        if !after.refused && self.cues.len() > asked {
+            return;
+        }
+        for &c in cue_for(&before, &after, self.pressed) {
+            self.cue(c);
+        }
+    }
+
+    /// Say why something asked for can't be done, with Halo 2's error
+    /// sound.
+    fn refuse(&mut self, text: String) {
+        self.refused = true;
+        self.toast(text);
     }
 
     // ------------------------------------------------------------ server
@@ -649,6 +1026,11 @@ impl App {
                 if !h2net::live::is_friend_notice(&text) {
                     self.asked = None;
                 }
+                // A friend request to us is a message: Halo 2 sounds every
+                // one (the notification screen, 0x2b740a).
+                if is_asked_you(&text) {
+                    self.cue(Cue::Notify);
+                }
                 self.toast(text);
             }
             LiveEvent::LauncherMatch(m) => self.on_match(m),
@@ -671,6 +1053,10 @@ impl App {
         self.saved = [self.settings.gamertag.clone(), self.settings.server.clone()];
         let server = self.settings.server.clone();
         self.log(&format!("lobby: signed in to {server}"));
+        // Halo 2's main menu loads the online screen by itself once signed
+        // in (0x230ba6 calls the item's handler again), so it advances
+        // (0x147f6d) with no press.
+        self.cue(Cue::Advance);
     }
 
     /// Show `why` on the failure screen, once any match being played ends.
@@ -690,6 +1076,11 @@ impl App {
         if self.away_from_live() {
             self.toast(why);
         } else {
+            // Halo 2's error dialog loading by itself (0x1486b8 through
+            // `dialog_ok`, then 0x147f6d), once.
+            if self.screen != Screen::Failed {
+                self.cue(Cue::Advance);
+            }
             self.popup = None;
             self.screen = Screen::Failed;
         }
@@ -698,6 +1089,92 @@ impl App {
     /// The start screen or the main menu is up.
     fn on_menus(&self) -> bool {
         matches!(self.screen, Screen::Start | Screen::Main)
+    }
+
+    /// The flythrough may be drawn: the start screen or main menu is up,
+    /// or the intro before them (which wakes it ahead), and no match is
+    /// on (its engine has the GPU to itself).
+    fn scene_wanted(&self) -> bool {
+        matches!(self.screen, Screen::Intro | Screen::Start | Screen::Main) && self.game.is_none()
+    }
+
+    /// While the intro plays, ask the flythrough for its first frame at
+    /// the window's size (again only if the size changes): its GPU device
+    /// opens and the frame is drawn behind the movie, so the start screen
+    /// has the scene from its first frame, as Halo 2's did, and the fade
+    /// is only for a scene that comes later.
+    fn scene_warm_up(&mut self, w: usize, h: usize) {
+        if self.scene_failed || self.scene_warm == Some((w, h)) || !self.scene_wanted() {
+            return;
+        }
+        let Some(scene) = self.cfg.scene.clone() else {
+            return;
+        };
+        // A failure is logged by the menus' first draw.
+        if matches!(scene.state(), SceneState::Failed(_)) {
+            return;
+        }
+        scene.ask(w, h, self.scene_seconds);
+        self.scene_asleep = false;
+        self.scene_warm = Some((w, h));
+    }
+
+    /// Tell the flythrough to let go of the GPU (once), and stop its
+    /// clock until the menus are back.
+    fn scene_sleep(&mut self) {
+        self.scene_step = None;
+        self.scene_shown = false;
+        if self.scene_asleep {
+            return;
+        }
+        self.scene_asleep = true;
+        if let Some(s) = &self.cfg.scene {
+            s.sleep();
+        }
+    }
+
+    /// The flythrough's newest frame of the window's size `w` by `h`, and
+    /// how far it has faded in (0 to 1), after moving its clock on to the
+    /// menus' `clock` and asking for the next; None for the still
+    /// background (no scene, not drawn yet, a frame of another size, or
+    /// it failed, which is logged once).
+    fn scene_frame(&mut self, w: usize, h: usize, clock: f64) -> Option<(Arc<Frame>, f32)> {
+        if self.scene_failed || !self.scene_wanted() {
+            return None;
+        }
+        let scene = self.cfg.scene.clone()?;
+        // The intro's frame counts for the menus' first draw only.
+        let warm = self.scene_warm.take();
+        if let SceneState::Failed(why) = scene.state() {
+            self.scene_failed = true;
+            self.scene_since = None;
+            self.scene_shown = false;
+            self.log(&format!(
+                "menus: the scene can't be drawn ({why}); the still background from now on"
+            ));
+            return None;
+        }
+        if let Some(last) = self.scene_step {
+            self.scene_seconds += (clock - last).clamp(0.0, SCENE_STEP);
+        }
+        self.scene_step = Some(clock);
+        scene.ask(w, h, self.scene_seconds);
+        self.scene_asleep = false;
+        // The newest frame is the last good one: until one of this size
+        // comes (after the window's size changes), the still background.
+        let Some(frame) = scene.latest(w, h).filter(|f| f.px.len() == w * h) else {
+            self.scene_since = None;
+            return None;
+        };
+        // Drawn during the intro, it is there as the screen opens: shown
+        // whole at once, with no fade from the still background.
+        let first = if warm == Some((w, h)) {
+            clock - SCENE_FADE
+        } else {
+            clock
+        };
+        let since = *self.scene_since.get_or_insert(first);
+        Some((frame, scene_alpha(clock - since)))
     }
 
     /// The player is on the start screen or the main menu, or in the
@@ -824,6 +1301,26 @@ impl App {
         }
     }
 
+    /// Y on a player: a friend request when one makes sense (`can_ask`),
+    /// else why not, in the server's words (no words for ourselves).
+    fn ask_friend_or_refuse(&mut self, account: u64, gamertag: &str) {
+        if self.can_ask(account) {
+            return self.ask_friend(gamertag);
+        }
+        let why = match self.friend(account).map(|f| f.relation) {
+            Some(Relation::Friend) => h2net::live::ALREADY_FRIENDS,
+            Some(Relation::WeAsked) => h2net::live::ALREADY_ASKED,
+            Some(Relation::AskedUs) => h2net::live::ASKED_YOU,
+            // Ourselves: only the error sound.
+            None => {
+                self.refused = true;
+                return;
+            }
+        };
+        let tag = gamertag.to_uppercase();
+        self.refuse(h2net::live::friend_notice(why, &tag));
+    }
+
     /// Send a friend request to `gamertag` (it's cleaned first; nothing
     /// goes for an empty one).
     fn ask_friend(&mut self, gamertag: &str) {
@@ -833,6 +1330,7 @@ impl App {
         }
         self.log(&format!("lobby: sending {tag} a friend request"));
         self.send(ToServer::FriendRequest(tag));
+        self.cue(Cue::Select);
     }
 
     fn playlist_name(&self, id: u8) -> String {
@@ -972,6 +1470,8 @@ impl App {
     // ------------------------------------------------------------- match
 
     fn on_match(&mut self, m: LauncherMatch) {
+        // The engine is about to start: the GPU is all its own.
+        self.scene_sleep();
         let ip = self.client.as_ref().and_then(|c| c.server_ip());
         let made = ip
             .ok_or_else(|| "the server's address is unknown".to_string())
@@ -1027,6 +1527,8 @@ impl App {
         self.popup = None;
         self.asked = None;
         self.screen = Screen::Pregame;
+        // The pregame lobby loading (0x147f6d).
+        self.cue(Cue::Advance);
     }
 
     fn on_match_over(&mut self, over: MatchOver) {
@@ -1143,8 +1645,9 @@ impl App {
             self.log(n);
         }
         self.send_all(out);
+        let mut carnage = false;
         if exited {
-            self.on_engine_exit();
+            carnage = self.on_engine_exit();
         } else if let Some(t) = toast {
             // The engine didn't start.
             self.screen = self.after_game_screen();
@@ -1156,9 +1659,119 @@ impl App {
             self.game = None;
             let stay = [Screen::SignIn, Screen::Connecting];
             if !stay.contains(&self.screen) && !self.away_from_live() {
+                // The failure screen loading (as in `fail`), unless the
+                // carnage report's advance has just sounded for it.
+                if self.screen != Screen::Failed && !carnage {
+                    self.cue(Cue::Advance);
+                }
                 self.screen = Screen::Failed;
             }
         }
+    }
+
+    // ------------------------------------------------------------- intro
+
+    /// Play the intro on to `now` (it starts at its first draw,
+    /// `draw_intro`): its soundtrack goes to the sound when it comes, and
+    /// at its end, or when it stalls or fails, the start screen comes in.
+    fn play_intro(&mut self, now: Instant) {
+        let Some(intro) = &mut self.intro else {
+            return;
+        };
+        let u = intro.update(now);
+        if let Some(clip) = u.sound {
+            self.movie_sound.push(SoundOut::Movie(clip));
+        }
+        if let Some(end) = u.end {
+            self.leave_intro(Some(end));
+        }
+    }
+
+    /// Leave the intro for the start screen, whose intro animations start
+    /// at its first draw: skipped (`None`), played out, or given up. Its
+    /// soundtrack stops (a skip cuts it off, as in Halo 2).
+    fn leave_intro(&mut self, end: Option<End>) {
+        if self.screen != Screen::Intro {
+            return;
+        }
+        let at = self.intro.as_ref().map_or(0.0, |i| i.clock(self.now));
+        let (pictures, late) = self.intro.as_ref().map_or((0, 0), Intro::counts);
+        let line = match end {
+            None => format!("intro: skipped at {at:.1} s"),
+            Some(End::Played) => format!(
+                "intro: played to the end ({at:.1} s, {pictures} pictures, {late} late ones passed over)"
+            ),
+            Some(End::Stalled) => format!(
+                "intro: the decoder sent nothing for {} s; skipped",
+                intro::STALL.as_secs()
+            ),
+            Some(End::Failed(e)) => format!("intro: {e}; skipped"),
+        };
+        self.log(&line);
+        self.intro = None;
+        self.intro_kept = Kept::default();
+        self.movie_sound.push(SoundOut::StopMovie);
+        self.screen = Screen::Start;
+    }
+
+    /// Draw the intro: black, then the picture showing, as large as fits
+    /// (`intro::letterbox`). Its first draw starts it, with the file for
+    /// the window's height (`Plan::file`). Whether this draw drew a new
+    /// picture (only those are timed: black while none has come, and a
+    /// picture drawn again, cost next to nothing), or `None` when it
+    /// couldn't start (the start screen is drawn instead).
+    fn draw_intro(&mut self, c: &mut Canvas) -> Option<bool> {
+        if self.intro.is_none() {
+            let Some(plan) = self.cfg.intro.clone() else {
+                self.leave_intro(Some(End::Failed("no movie".into())));
+                return None;
+            };
+            let Some(path) = plan.file(c.h) else {
+                self.leave_intro(Some(End::Failed("no movie file".into())));
+                return None;
+            };
+            let name = path.file_name().unwrap_or(path.as_os_str());
+            self.log(&format!(
+                "intro: playing {} ({}x{} window)",
+                name.to_string_lossy(),
+                c.w,
+                c.h
+            ));
+            let source = (plan.open)(path);
+            match Intro::start(source, self.now) {
+                Ok(i) => self.intro = Some(i),
+                Err(e) => {
+                    self.leave_intro(Some(End::Failed(e)));
+                    return None;
+                }
+            }
+        }
+        let (w, h) = (c.w, c.h);
+        self.scene_warm_up(w, h);
+        let shown = self.intro.as_ref().and_then(Intro::showing);
+        let Some((p, serial)) = shown else {
+            c.px.fill(0);
+            return Some(false);
+        };
+        let new = serial != self.intro_serial;
+        if new {
+            self.intro_serial = serial;
+            self.intro_kept.forget();
+        }
+        let list = DrawList {
+            size: [w as u32, h as u32],
+            quads: vec![Quad {
+                texture: Texture::Art(0),
+                rect: intro::letterbox(p.w, p.h, w as f32, h as f32),
+                uv: [0.0, 0.0, 1.0, 1.0],
+                color: [[1.0; 4]; 2],
+                blend: Blend::Plain,
+                wrap: [false; 2],
+            }],
+            texts: Vec::new(),
+        };
+        self.intro_kept.draw(&list, &mut c.px, w, h, &MovieFrame(p));
+        Some(new)
     }
 
     /// What the engine's launcher said about the engine: kept on the
@@ -1277,7 +1890,9 @@ impl App {
     /// gives when the game ended without them, as when the host's engine
     /// ended a Team Slayer game whose team emptied, PC check 13). Either
     /// way the lobby's window comes to the front.
-    fn on_engine_exit(&mut self) {
+    ///
+    /// True when the carnage report comes in (its loading sound plays).
+    fn on_engine_exit(&mut self) -> bool {
         // The lobby's own "leave the game?" has nothing left to ask once
         // the engine is gone (the player left from the GAME MENU, or the
         // game ended), and it would cover the screen landed on.
@@ -1285,7 +1900,7 @@ impl App {
             self.popup = None;
         }
         let Some(g) = self.game.as_mut() else {
-            return;
+            return false;
         };
         g.child = None;
         let (id, host) = (g.m.id, g.host());
@@ -1316,11 +1931,15 @@ impl App {
         };
         self.log("lobby: the engine closed");
         self.send_all(out);
-        if let Some(t) = toast {
-            self.screen = self.after_game_screen();
-            self.game = None;
-            self.toast(t);
-        }
+        let Some(t) = toast else {
+            // The carnage report loading (0x147f6d).
+            self.cue(Cue::Advance);
+            return true;
+        };
+        self.screen = self.after_game_screen();
+        self.game = None;
+        self.toast(t);
+        false
     }
 
     // -------------------------------------------------------------- time
@@ -1328,6 +1947,7 @@ impl App {
     /// Take on what the server and the engine said, and start what is due.
     pub fn tick(&mut self, now: Instant) {
         self.now = now;
+        self.play_intro(now);
         self.poll_dial();
         self.poll_server();
         self.poll_game();
@@ -1362,6 +1982,29 @@ impl App {
         self.record_asks
             .retain(|(_, at)| now.saturating_duration_since(*at) < RECORD_WAIT);
         self.ask_member_records();
+        self.music_on = !self.engine_running() && music_rule(self.screen, self.music_on);
+        if !self.scene_wanted() {
+            self.scene_sleep();
+        }
+        // A new invitation on show sounds once. One that has gone from the
+        // list (declined, accepted, taken back) is forgotten, so the same
+        // party inviting again sounds again; one only hidden (a popup, a
+        // screen without invitations) is kept, and doesn't.
+        let seen_gone = self.invite_seen.is_some_and(|seen| {
+            !self
+                .view()
+                .is_some_and(|v| v.invites.iter().any(|(party, _)| *party == seen))
+        });
+        if seen_gone {
+            self.invite_seen = None;
+        }
+        let shown = self.invite().map(|(party, _)| party);
+        if shown.is_some() && shown != self.invite_seen {
+            self.cue(Cue::Notify);
+        }
+        if shown.is_some() {
+            self.invite_seen = shown;
+        }
     }
 
     /// Keep the selections on the friends and players screens on the
@@ -1429,13 +2072,46 @@ impl App {
     // ------------------------------------------------------------- input
 
     /// A key pressed in the lobby's window (the window's keyboard events
-    /// come here; clicks, the controller and the headless script's
-    /// presses go straight to `input`).
+    /// come here; the controller's go to `pad`, the wheel's to `wheel`,
+    /// clicks to `click`, and the headless script's presses straight to
+    /// `input`). The legends name keys from now on.
     pub fn key(&mut self, i: Input) {
+        self.keyboard = true;
         if self.keys_are_the_games(i, self.engine_running()) {
             return;
         }
         self.input(i)
+    }
+
+    /// A press from the controller: the legends show its buttons from now
+    /// on.
+    pub fn pad(&mut self, i: Input) {
+        self.keyboard = false;
+        self.input(i)
+    }
+
+    /// The mouse wheel turned a notch, up or down: a press of Up or Down,
+    /// and the legends name keys from now on.
+    pub fn wheel(&mut self, up: bool) {
+        self.keyboard = true;
+        self.input(if up { Input::Up } else { Input::Down })
+    }
+
+    /// A key the window repeats while it's held down: the arrows and
+    /// typing repeat, but not a press that is a button (Enter, Esc,
+    /// PageUp and PageDown, or a letter or Backspace outside a field), as
+    /// Halo 2 repeats only directions. So a key held to skip the intro
+    /// skips only the movie, and a key held past a popup opening never
+    /// answers it.
+    pub fn key_repeated(&mut self, i: Input) {
+        let button = match i {
+            Input::A | Input::B | Input::Lb | Input::Rb => true,
+            Input::Backspace | Input::Char(_) => !self.typing(),
+            _ => false,
+        };
+        if !button {
+            self.key(i);
+        }
     }
 
     /// A key that belongs to the game rather than the lobby: on the
@@ -1453,11 +2129,29 @@ impl App {
         }
     }
 
+    /// A press from the controller, a key (`key`), a click on a button or
+    /// the headless script, with its sound (`sounding`).
     pub fn input(&mut self, i: Input) {
+        self.sounding(|a| a.input_inner(i));
+    }
+
+    fn input_inner(&mut self, i: Input) {
+        // The intro: any button skips it (the pad's, a key, a letter), but
+        // not a direction (the d-pad, the stick, the arrows), as in Halo 2.
+        if self.screen == Screen::Intro {
+            let direction = matches!(i, Input::Up | Input::Down | Input::Left | Input::Right);
+            if !direction && i != Input::Tab {
+                self.leave_intro(None);
+            }
+            return;
+        }
+        // The triggers do nothing anywhere else: no press, no sound.
+        if matches!(i, Input::Lt | Input::Rt) {
+            return;
+        }
         // Letters are buttons, except where a name is typed; Backspace is
         // B where it doesn't rub a letter out.
-        let typing = (self.screen == Screen::SignIn && self.popup.is_none())
-            || self.popup == Some(Popup::AddFriend);
+        let typing = self.typing();
         let i = match i {
             Input::Char(c) if !typing => match c.to_ascii_lowercase() {
                 'a' | ' ' => Input::A,
@@ -1471,6 +2165,7 @@ impl App {
             Input::Backspace if !typing => Input::B,
             other => other,
         };
+        self.pressed = Some(i);
         if let Some(p) = self.popup {
             return self.popup_input(p, i);
         }
@@ -1493,7 +2188,15 @@ impl App {
         }
         match self.screen {
             Screen::Start => match i {
-                Input::A => self.screen = Screen::Main,
+                Input::A => {
+                    self.screen = Screen::Main;
+                    // The press, the main menu loading (0x147f6d), then
+                    // Halo 2's start screen going on to it (sound 5,
+                    // 0x22f28c).
+                    self.cue(Cue::Select);
+                    self.cue(Cue::Advance);
+                    self.cue(Cue::Transport);
+                }
                 Input::B => self.popup = Some(Popup::Quit),
                 _ => {}
             },
@@ -1512,7 +2215,8 @@ impl App {
             Screen::Players => self.players_input(i),
             Screen::Party => self.party_input(i),
             Screen::Custom => self.custom_input(i),
-            Screen::Pregame => {}
+            // Taken above.
+            Screen::Intro | Screen::Pregame => {}
             Screen::InGame => {
                 let ended = self.game.as_ref().is_some_and(|g| g.results.is_some());
                 if i == Input::B && !ended {
@@ -1533,6 +2237,16 @@ impl App {
                 Input::B => self.screen = Screen::Main,
                 _ => {}
             },
+        }
+    }
+
+    /// Text is typed where the screen or popup has a field with the
+    /// cursor: there letters aren't buttons, and Backspace rubs out.
+    fn typing(&self) -> bool {
+        match self.popup {
+            None => self.screen == Screen::SignIn,
+            Some(Popup::AddFriend) => true,
+            Some(_) => false,
         }
     }
 
@@ -1712,8 +2426,8 @@ impl App {
                 }
             }
             Input::Y => {
-                if let Some(p) = picked.filter(|p| self.can_ask(p.account)) {
-                    self.ask_friend(&p.gamertag);
+                if let Some(p) = picked {
+                    self.ask_friend_or_refuse(p.account, &p.gamertag);
                 }
             }
             Input::A | Input::B => {
@@ -1785,10 +2499,12 @@ impl App {
             (Input::A, Some(f)) if f.relation == Relation::AskedUs => {
                 self.log(&format!("lobby: accepting {}'s friend request", f.gamertag));
                 self.send(ToServer::FriendAccept(f.account));
+                self.cue(Cue::Select);
             }
             (Input::X, Some(f)) if f.relation == Relation::AskedUs => {
                 self.log(&format!("lobby: declining {}'s friend request", f.gamertag));
                 self.send(ToServer::FriendDecline(f.account));
+                self.cue(Cue::Select);
             }
             (Input::A, Some(f)) if f.relation == Relation::Friend => {
                 let who = f.account;
@@ -1802,7 +2518,7 @@ impl App {
             }
             (Input::X, Some(f)) if f.relation == Relation::Friend => {
                 let why = self.cannot_join(&f);
-                self.toast(why);
+                self.refuse(why);
             }
             (Input::X, Some(f)) if f.relation == Relation::WeAsked => {
                 self.log(&format!(
@@ -1810,6 +2526,7 @@ impl App {
                     f.gamertag
                 ));
                 self.send(ToServer::FriendRemove(f.account));
+                self.cue(Cue::Select);
             }
             _ => {}
         }
@@ -1860,8 +2577,9 @@ impl App {
             if i == Input::B {
                 if self.leader() {
                     self.send(ToServer::Cancel);
+                    self.cue(Cue::Back);
                 } else {
-                    self.toast("Only the party leader can stop the search.".into());
+                    self.refuse("Only the party leader can stop the search.".into());
                 }
             }
             return;
@@ -1874,7 +2592,7 @@ impl App {
             Input::A if self.sel == n + 1 => self.open_settings(),
             Input::A if self.sel == n => {
                 if !self.leader() {
-                    self.toast("Only the party leader can start a custom game.".into());
+                    self.refuse("Only the party leader can start a custom game.".into());
                     return;
                 }
                 self.open_custom();
@@ -1885,7 +2603,7 @@ impl App {
                 };
                 let (id, name) = (pl.id, pl.name.clone());
                 if !self.leader() {
-                    self.toast("Only the party leader can pick a playlist.".into());
+                    self.refuse("Only the party leader can pick a playlist.".into());
                     return;
                 }
                 self.log(&format!("lobby: searching {name:?} (playlist {id})"));
@@ -1893,6 +2611,10 @@ impl App {
                     c.view.status = None;
                 }
                 self.send(ToServer::Search(id));
+                // The press, then Halo 2's matchmaking screen loading
+                // (here the search shows on this screen).
+                self.cue(Cue::Select);
+                self.cue(Cue::Advance);
             }
             Input::X => {
                 self.select_player(0);
@@ -1938,6 +2660,7 @@ impl App {
             (Input::A, Some((who, false))) if leader => {
                 self.log(&format!("lobby: making {who:#x} party leader"));
                 self.send(ToServer::Promote(who));
+                self.cue(Cue::Select);
             }
             (Input::X, Some((who, false))) if leader => self.popup = Some(Popup::Kick(who)),
             (Input::Lb, Some((who, _))) => self.open_record(who),
@@ -1947,6 +2670,7 @@ impl App {
                     _ => Privacy::Open,
                 };
                 self.send(ToServer::Privacy(privacy));
+                self.cue(Cue::Select);
             }
             (Input::B, _) => self.screen = Screen::Live,
             _ => {}
@@ -1995,7 +2719,7 @@ impl App {
             return;
         }
         let Some((map, _)) = self.cfg.maps.get(self.cmap).cloned() else {
-            self.toast("No Halo 2 maps were found in MCC's folder.".into());
+            self.refuse("No Halo 2 maps were found in MCC's folder.".into());
             return;
         };
         let (variant, _) = names::CUSTOM_GAMES[self.cgame % names::CUSTOM_GAMES.len()];
@@ -2007,6 +2731,9 @@ impl App {
             map,
             variant: variant.into(),
         });
+        // Halo 2's START GAME is a button: its press only (no screen
+        // loads until the match comes, `on_match`).
+        self.cue(Cue::Select);
     }
 
     // ---------------------------------------------------------- settings
@@ -2021,7 +2748,7 @@ impl App {
     }
 
     /// An engine is running for the match.
-    fn engine_running(&self) -> bool {
+    pub fn engine_running(&self) -> bool {
         self.game.as_ref().is_some_and(|g| g.child.is_some())
     }
 
@@ -2131,8 +2858,8 @@ impl App {
             Input::Up => self.select_player(self.psel.saturating_sub(1)),
             Input::Down => self.select_player((self.psel + 1).min(others.len().saturating_sub(1))),
             Input::Y => {
-                if let Some(p) = picked.filter(|p| self.can_ask(p.account)) {
-                    self.ask_friend(&p.gamertag);
+                if let Some(p) = picked {
+                    self.ask_friend_or_refuse(p.account, &p.gamertag);
                 }
             }
             Input::Lb => {
@@ -2145,6 +2872,7 @@ impl App {
                 if let Some(p) = picked {
                     self.send(ToServer::Invite(p.account));
                     self.toast(format!("Invited {} to your party.", p.gamertag));
+                    self.cue(Cue::Select);
                 }
             }
             Input::X => {
@@ -2164,8 +2892,14 @@ impl App {
         p.open && p.openings > 0 && ours != Some(p.party)
     }
 
-    /// A click at window pixel (`x`, `y`).
+    /// A click at window pixel (`x`, `y`), with its sound (`sounding`).
+    /// The legends name keys from now on.
     pub fn click(&mut self, x: f32, y: f32) {
+        self.keyboard = true;
+        self.sounding(|a| a.click_inner(x, y));
+    }
+
+    fn click_inner(&mut self, x: f32, y: f32) {
         let clock = self.menu_clock();
         let over = self.popup.is_some() || self.invite().is_some();
         let before = self.last_click.replace((clock, self.screen, over));
@@ -2174,17 +2908,24 @@ impl App {
         let second = before.is_some_and(|(t, screen, over)| {
             clock - t < DOUBLE_CLICK && (over || screen != self.screen)
         });
+        // A click anywhere skips the intro (and its double-click's second
+        // half doesn't go on from the start screen: above).
+        if self.screen == Screen::Intro {
+            return self.leave_intro(None);
+        }
         // The start screen goes on with a click anywhere, and a main menu
         // row is focused, or picked if it had the focus. A popup over
         // them takes the click as on any screen.
         if !over {
             match self.screen {
                 Screen::Start if second => return,
-                Screen::Start => return self.input(Input::A),
+                Screen::Start => return self.input_inner(Input::A),
                 Screen::Main => {
                     if let Some(row) = self.main_row_at(x, y) {
                         if row == self.main_focus.item && !second {
-                            self.pick_main(row);
+                            // Picked as A picks the focused row, and
+                            // sounding as A.
+                            self.input_inner(Input::A);
                         } else {
                             self.focus_main(row);
                         }
@@ -2194,6 +2935,14 @@ impl App {
                 _ => {}
             }
         }
+        // Elsewhere, the second half of a double-click whose first half
+        // changed the screen or shut a popup lands on what is shown now
+        // (the legend's BACK is in the same place on most screens): a
+        // button or an arrow there isn't pressed, and a row is only
+        // selected. Two clicks in a popup that is still up both count.
+        let went_on = before.is_some_and(|(t, screen, was_over)| {
+            clock - t < DOUBLE_CLICK && (screen != self.screen || (was_over && !over))
+        });
         let (s, ox, oy) = self.view;
         let (x, y) = ((x - ox) / s, (y - oy) / s);
         let top = self.areas.iter().any(|a| a.top);
@@ -2205,7 +2954,8 @@ impl App {
             .find(|a| x >= a.x && x < a.x + a.w && y >= a.y && y < a.y + a.h)
             .map(|a| a.hit);
         match hit {
-            Some(Hit::Press(i)) => self.input(i),
+            Some(Hit::Press(_) | Hit::Step(..)) if went_on => {}
+            Some(Hit::Press(i)) => self.input_inner(i),
             Some(Hit::Field(f)) => self.field = f,
             Some(Hit::Step(r, on)) => {
                 if self.screen == Screen::Settings {
@@ -2213,32 +2963,32 @@ impl App {
                 } else {
                     self.crow = r;
                 }
-                self.input(if on { Input::Right } else { Input::Left });
+                self.input_inner(if on { Input::Right } else { Input::Left });
             }
             Some(Hit::Row(r)) if matches!(self.popup, Some(Popup::FriendOptions(_))) => {
-                if self.osel == r {
-                    self.input(Input::A);
+                if self.osel == r && !went_on {
+                    self.input_inner(Input::A);
                 } else if let Some(Popup::FriendOptions(who)) = self.popup {
                     self.pick_option(who, r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Friends => {
-                if self.fsel == r {
-                    self.input(Input::A);
+                if self.fsel == r && !went_on {
+                    self.input_inner(Input::A);
                 } else {
                     self.select_friend(r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Players => {
-                if self.psel == r {
-                    self.input(Input::A);
+                if self.psel == r && !went_on {
+                    self.input_inner(Input::A);
                 } else {
                     self.select_player(r);
                 }
             }
             Some(Hit::Row(r)) if self.screen == Screen::Settings => {
-                if self.srow == r {
-                    self.input(Input::A);
+                if self.srow == r && !went_on {
+                    self.input_inner(Input::A);
                 } else {
                     self.srow = r;
                 }
@@ -2246,8 +2996,8 @@ impl App {
             // A row of the carnage report is only selected: A continues.
             Some(Hit::Row(r)) if self.screen == Screen::Carnage => self.csel = r,
             Some(Hit::Row(r)) if self.screen == Screen::Custom => {
-                if self.crow == r && r == CUSTOM_ROWS - 1 {
-                    self.input(Input::A);
+                if self.crow == r && r == CUSTOM_ROWS - 1 && !went_on {
+                    self.input_inner(Input::A);
                 } else {
                     self.crow = r;
                 }
@@ -2257,8 +3007,8 @@ impl App {
                     Screen::Party => &mut self.msel,
                     _ => &mut self.sel,
                 };
-                if *sel == r {
-                    self.input(Input::A);
+                if *sel == r && !went_on {
+                    self.input_inner(Input::A);
                 } else {
                     *sel = r;
                 }
@@ -2334,8 +3084,27 @@ impl App {
         }
     }
 
-    /// Draw the screen into `c`.
+    /// Draw the screen into `c`: the intro, the start screen or main menu
+    /// (`draw_menu`), or another screen in Halo 2's shell (`draw_shell`);
+    /// then over it the popups and notices (`draw_over`). The first frames
+    /// on each screen at each window size are timed for the log
+    /// (`time_frame`): the whole draw here, the start screen's and main
+    /// menu's in `draw_menu`.
     pub fn draw(&mut self, c: &mut Canvas, t: &mut Text) {
+        let started = Instant::now();
+        let intro = match self.screen {
+            Screen::Intro => self.draw_intro(c),
+            _ => None,
+        };
+        if let Some(new_picture) = intro {
+            self.areas.clear();
+            self.drawn.clear();
+            self.drawn_screen = Some(Screen::Intro);
+            let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
+            // Only a new picture's draw is timed (`draw_intro`).
+            self.time_frame((c.w, c.h), frame_ms, new_picture, None);
+            return;
+        }
         let (w, h) = (c.w as f32, c.h as f32);
         let s = (w / 1280.0).min(h / 720.0).max(0.01);
         let (ox, oy) = ((w - 1280.0 * s) / 2.0, (h - 720.0 * s) / 2.0);
@@ -2348,15 +3117,16 @@ impl App {
                 self.main_focus = Focus::on(self.main_focus.item, self.menu_opened);
             }
         }
-        if self.on_menus() {
-            // Halo 2's own screen in place of the lobby's chrome.
+        let menus = self.on_menus();
+        let mut areas = Vec::new();
+        // A frame whose still background was drawn afresh isn't timed.
+        let mut timed = true;
+        if menus {
+            // Halo 2's own screen.
             self.draw_menu(c, &mut drawn);
         } else {
-            c.gradient(0.0, 0.0, w, h, BG_TOP, BG_BOTTOM);
-            c.fill(0.0, 0.0, w, oy + 88.0 * s, Color::rgb(0).alpha(90));
-            c.fill(0.0, oy + 88.0 * s, w, (2.0 * s).max(1.0), EDGE.alpha(120));
+            timed = self.draw_shell(c, t, (s, ox, oy), &mut areas, &mut drawn);
         }
-        let mut areas = Vec::new();
         let ranks = self.cfg.ranks.clone();
         let mut p = Pen {
             c,
@@ -2368,17 +3138,23 @@ impl App {
             top: false,
             ranks: ranks.as_deref(),
             drawn: &mut drawn,
+            legend: Vec::new(),
         };
-        self.draw_screen(&mut p);
+        self.draw_over(&mut p);
         self.areas = areas;
         self.drawn = drawn;
         self.view = (s, ox, oy);
+        if !menus {
+            let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
+            self.time_frame((c.w, c.h), frame_ms, timed, None);
+        }
     }
 
-    /// The start screen or the main menu, drawn by `h2ui` over the still
-    /// background (drawn once for a window size), with the strings shown
-    /// put in `drawn`. The first frames at each size are timed for the
-    /// log.
+    /// The start screen or the main menu, drawn by `h2ui` over the
+    /// flythrough's newest frame (`scene_frame`) or, without one, the
+    /// still background (drawn once for a window size), which the
+    /// flythrough's first frame fades in over. The strings shown are put
+    /// in `drawn`. The first frames at each size are timed for the log.
     fn draw_menu(&mut self, c: &mut Canvas, drawn: &mut Vec<String>) {
         let started = Instant::now();
         let clock = self.menu_clock();
@@ -2390,13 +3166,44 @@ impl App {
         self.size = (w, h);
         let space = Space::new(w as u32, h as u32);
         let framing = &shell.main.framing;
-        let behind = screens::background(clock, Backdrop::Still, framing, art, fonts, space);
-        self.backdrop.draw(&behind, &mut c.px, w, h, &res);
-        let background_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let scene = self.scene_frame(w, h, clock);
+        self.scene_shown = scene.is_some();
+        let mut fresh = false;
+        let mut copy_ms = None;
+        match &scene {
+            Some((frame, alpha)) if *alpha >= 1.0 => {
+                // The flythrough in place of the still background (with
+                // `Backdrop::Scene` the background's list is empty).
+                let copied = Instant::now();
+                c.px.copy_from_slice(&frame.px);
+                copy_ms = Some(copied.elapsed().as_secs_f64() * 1000.0);
+            }
+            _ => {
+                let behind =
+                    screens::background(clock, Backdrop::Still, framing, art, fonts, space);
+                // Drawn again only at a new size (`Kept`): that frame isn't
+                // timed, and its time is the background's.
+                fresh = self.menu_times.kept != (w, h);
+                self.backdrop.draw(&behind, &mut c.px, w, h, &res);
+                let background_ms = started.elapsed().as_secs_f64() * 1000.0;
+                if fresh {
+                    let t = &mut self.menu_times;
+                    t.kept = (w, h);
+                    if !t.backgrounds.iter().any(|b| b.0 == (w, h)) {
+                        t.backgrounds.push(((w, h), background_ms));
+                    }
+                }
+                if let Some((frame, alpha)) = &scene {
+                    // The flythrough fading in over it.
+                    blend_px(&mut c.px, &frame.px, *alpha);
+                }
+            }
+        }
+        drop(scene);
         let small_print = self.small_print();
         // Its text counts as drawn (for `see`) once it has faded in.
         let shown = clock - self.menu_opened >= self.menu_intro();
-        let (list, k) = match self.screen {
+        let list = match self.screen {
             Screen::Start => {
                 let start = Start {
                     layout: &shell.start,
@@ -2407,7 +3214,7 @@ impl App {
                 if shown {
                     drawn.push(screens::PRESS_START.to_string());
                 }
-                (screens::start(clock, &start, art, fonts, space), 0)
+                screens::start(clock, &start, art, fonts, space)
             }
             _ => {
                 let m = self.main_menu(shell, &small_print);
@@ -2417,12 +3224,12 @@ impl App {
                         drawn.push(small_print.clone());
                     }
                 }
-                (screens::main_menu(clock, &m, art, fonts, space), 1)
+                screens::main_menu(clock, &m, art, fonts, space)
             }
         };
         h2ui::cpu::draw_u32(&list, &mut c.px, w, h, &res);
         let frame_ms = started.elapsed().as_secs_f64() * 1000.0;
-        self.time_menu((w, h), k, background_ms, frame_ms);
+        self.time_frame((w, h), frame_ms, !fresh, copy_ms);
     }
 
     /// How long (seconds) the start screen or main menu on show takes to
@@ -2474,68 +3281,109 @@ impl App {
         self.menu_clock() - self.menu_opened >= at
     }
 
-    /// Count a menu frame's time (screen `k`: 0 the start screen, 1 the
-    /// main menu) at window size `size`, and log the average once its
-    /// first `MENU_FRAMES` there are timed. The first frame at a size,
-    /// which draws the background, is timed apart.
-    fn time_menu(&mut self, size: (usize, usize), k: usize, background_ms: f64, frame_ms: f64) {
+    /// The screen's name in the per-screen timer and the log.
+    fn timer_name(&self) -> &'static str {
+        match self.screen {
+            Screen::Intro => "intro",
+            Screen::Start => "start screen",
+            Screen::Main => "main menu",
+            Screen::SignIn => "sign-in",
+            Screen::Connecting => "signing in",
+            Screen::Live if self.searching() => "searching",
+            Screen::Live => "playlists",
+            Screen::Players => "players",
+            Screen::Party => "party",
+            Screen::Custom => "custom game",
+            Screen::Pregame => "pregame lobby",
+            Screen::InGame => "in game",
+            Screen::Carnage => "carnage report",
+            Screen::Failed => "offline",
+            Screen::Record => "service record",
+            Screen::Friends => "friends",
+            Screen::Settings => "settings",
+        }
+    }
+
+    /// Count a frame's time on the screen shown (`timer_name`) at window
+    /// size `size`, unless it isn't `timed`, and log the average once its
+    /// first `MENU_FRAMES` there are timed: once per screen and size. The
+    /// first frame after the size changes isn't timed either. `copy_ms` is
+    /// the part of it spent copying the flythrough's frame in, if it was;
+    /// a screen's line gives the average of its own copies only.
+    fn time_frame(
+        &mut self,
+        size: (usize, usize),
+        frame_ms: f64,
+        timed: bool,
+        copy_ms: Option<f64>,
+    ) {
+        let name = self.timer_name();
+        let menus = self.on_menus();
         let t = &mut self.menu_times;
         if t.size != size {
             t.size = size;
-            t.frames = [(0, 0.0); 2];
-            if !t.backgrounds.iter().any(|b| b.0 == size) {
-                t.backgrounds.push((size, background_ms));
+            t.frames.clear();
+            return;
+        }
+        if !timed || t.logged.contains(&(size, name)) {
+            return;
+        }
+        let k = match t.frames.iter().position(|f| f.name == name) {
+            Some(k) => k,
+            None => {
+                t.frames.push(ScreenTimes {
+                    name,
+                    frames: 0,
+                    total: 0.0,
+                    copies: 0,
+                    copy_total: 0.0,
+                });
+                t.frames.len() - 1
             }
+        };
+        let f = &mut t.frames[k];
+        f.frames += 1;
+        f.total += frame_ms;
+        if let Some(ms) = copy_ms {
+            f.copies += 1;
+            f.copy_total += ms;
+        }
+        if f.frames != MENU_FRAMES {
             return;
         }
-        let (n, total) = &mut t.frames[k];
-        *n += 1;
-        *total += frame_ms;
-        if *n != MENU_FRAMES || t.logged.contains(&(size, k)) {
-            return;
-        }
-        t.logged.push((size, k));
-        let average = *total / f64::from(MENU_FRAMES);
-        let background = t
-            .backgrounds
-            .iter()
-            .find(|b| b.0 == size)
-            .map_or(0.0, |b| b.1);
-        let screen = ["start screen", "main menu"][k];
-        let line = format!(
-            "menus: {}x{}, {screen} {average:.1} ms a frame on the CPU (background {background:.0} ms once)",
-            size.0, size.1
-        );
+        let average = f.total / f64::from(MENU_FRAMES);
+        let copies = (f.copies, f.copy_total);
+        t.logged.push((size, name));
+        let (w, h) = size;
+        let line = if menus {
+            let background = t.backgrounds.iter().find(|b| b.0 == size).map(|b| b.1);
+            let mut parts = Vec::new();
+            if copies.0 > 0 {
+                let copy = copies.1 / f64::from(copies.0);
+                parts.push(format!("the scene's frame copied in {copy:.1} ms"));
+            }
+            if background.is_some() || parts.is_empty() {
+                let background = background.unwrap_or(0.0);
+                parts.push(format!("background {background:.0} ms once"));
+            }
+            format!(
+                "menus: {w}x{h}, {name} {average:.1} ms a frame on the CPU ({})",
+                parts.join("; ")
+            )
+        } else {
+            format!("lobby: {w}x{h}, {name} {average:.1} ms a frame on the CPU")
+        };
         self.log(&line);
     }
 
-    fn draw_screen(&self, p: &mut Pen) {
-        let title = match self.screen {
-            // Halo 2's own screens have no title or header.
-            Screen::Start | Screen::Main => "",
-            Screen::SignIn => "SIGN IN",
-            Screen::Connecting => "SIGNING IN",
-            Screen::Live if self.searching() => "MATCHMAKING",
-            Screen::Live => "PLAYLISTS",
-            Screen::Players => "PLAYERS ONLINE",
-            Screen::Party => "PARTY",
-            Screen::Custom => "CUSTOM GAME",
-            Screen::Pregame => "PREGAME LOBBY",
-            Screen::InGame => "IN GAME",
-            Screen::Carnage => "CARNAGE REPORT",
-            Screen::Failed => "OFFLINE",
-            Screen::Record => "SERVICE RECORD",
-            Screen::Friends => "FRIENDS",
-            Screen::Settings => "CONTROLLER",
-        };
-        let menus = self.on_menus();
-        if !menus {
-            p.text(60.0, 58.0, 36.0, WHITE, Align::Left, title);
-            self.draw_header(p);
-        }
+    /// A screen's own part in the shell (between its header and legend):
+    /// who is signed in at the top right, then the screen's body. Its
+    /// button hints are gathered for the legend (`Pen::hints`).
+    fn draw_body(&self, p: &mut Pen) {
+        self.draw_status(p);
         match self.screen {
-            // Drawn already (`draw_menu`).
-            Screen::Start | Screen::Main => {}
+            // Drawn already (`draw_intro`, `draw_menu`).
+            Screen::Intro | Screen::Start | Screen::Main => {}
             Screen::SignIn => self.draw_sign_in(p),
             Screen::Connecting => self.draw_connecting(p),
             Screen::Live => self.draw_live(p),
@@ -2550,16 +3398,11 @@ impl App {
             Screen::Friends => self.draw_friends(p),
             Screen::Settings => self.draw_settings(p),
         }
-        if !menus {
-            p.text(
-                1220.0,
-                712.0,
-                14.5,
-                DIM,
-                Align::Right,
-                "Keyboard: Enter or Space = A, Esc or Backspace = B, X, Y, Q = LB, E = RB, arrows",
-            );
-        }
+    }
+
+    /// What goes over any screen: a popup or the party invitation, then
+    /// the notices.
+    fn draw_over(&self, p: &mut Pen) {
         if let Some(popup) = self.popup {
             match popup {
                 Popup::Quit => {
@@ -2611,33 +3454,39 @@ impl App {
         self.draw_toasts(p);
     }
 
-    fn draw_header(&self, p: &mut Pen) {
+    /// Who is signed in, on one small line at the top right, level with
+    /// the header: the highest level's icon, the gamertag, then the level,
+    /// how many are online and the server's round trip.
+    fn draw_status(&self, p: &mut Pen) {
         let Some(c) = &self.client else {
             return;
         };
         let Some(w) = &c.view.welcome else {
             return;
         };
-        let wd = p.text(1220.0, 44.0, 24.0, WHITE, Align::Right, &w.gamertag);
-        // The highest level's icon left of the gamertag (the line below
-        // has the number).
-        if p.has_icons() {
-            let x = 1220.0 - wd - 10.0;
-            p.level(
-                x,
-                44.0,
-                24.0,
-                WHITE,
-                Align::Right,
-                w.best.max(1),
-                Size::Small,
-            );
-        }
         let mut line = format!("Level {}  ·  {} online", w.best.max(1), c.view.online.len());
         if let Some(ms) = c.view.round_trip {
             line += &format!("  ·  {ms} ms");
         }
-        p.text(1220.0, 70.0, 16.0, DIM, Align::Right, &line);
+        let rest = p.text(1220.0, 44.0, 16.0, DIM, Align::Right, &line);
+        let x = 1220.0 - rest - 14.0;
+        let wd = p.text(x, 44.0, 18.0, WHITE, Align::Right, &w.gamertag);
+        if p.has_icons() {
+            let x = x - wd - 8.0;
+            let level = w.best.max(1);
+            p.level(x, 44.0, 18.0, WHITE, Align::Right, level, Size::Small);
+        }
+        // Friend requests waiting for an answer, under it on every screen:
+        // one made while this player was offline gives no notice when
+        // they sign in, and one made during a game only a short one. RB
+        // (E) opens the friends list, where they come first.
+        let asking = c.view.friends.iter();
+        let asking = asking.filter(|f| f.relation == Relation::AskedUs).count();
+        if asking > 0 {
+            let s = if asking == 1 { "" } else { "s" };
+            let line = format!("{asking} friend request{s}");
+            p.text(1220.0, 68.0, 15.0, GOLD, Align::Right, &line);
+        }
     }
 
     fn draw_sign_in(&self, p: &mut Pen) {
@@ -2727,24 +3576,14 @@ impl App {
         let Some(v) = self.view() else {
             return;
         };
-        // The RB hint counts the friend requests waiting for an answer.
-        let asking = v
-            .friends
-            .iter()
-            .filter(|f| f.relation == Relation::AskedUs)
-            .count();
-        let friends = if asking > 0 {
-            format!("Friends ({asking})")
-        } else {
-            "Friends".into()
-        };
+        // (The friend requests waiting are counted by `draw_status`.)
         if self.searching() {
             self.draw_search(p, v);
             let mut hints = Vec::new();
             if self.leader() {
                 hints.push((Input::B, "Stop searching"));
             }
-            hints.push((Input::Rb, friends.as_str()));
+            hints.push((Input::Rb, "Friends"));
             hints.push((Input::Lb, "Service record"));
             p.hints(&hints);
         } else {
@@ -2760,7 +3599,7 @@ impl App {
             if v.party.is_some() {
                 hints.push((Input::Y, "Party"));
             }
-            hints.push((Input::Rb, friends.as_str()));
+            hints.push((Input::Rb, "Friends"));
             hints.push((Input::Lb, "Service record"));
             hints.push((Input::B, "Back"));
             p.hints(&hints);
@@ -3821,8 +4660,8 @@ impl App {
     }
 
     /// The notices, newest at the bottom, stacked up from just above the
-    /// button hints and clear of every popup's box (the lowest ends at
-    /// y 520), so none is hidden behind one.
+    /// shell's button legend and clear of every popup's box (the lowest
+    /// ends at y 520), so none is hidden behind one.
     fn draw_toasts(&self, p: &mut Pen) {
         for (k, (text, _)) in self.toasts.iter().rev().enumerate() {
             let top = toast_top(k);
@@ -3843,10 +4682,26 @@ impl App {
 /// A notice's height, in layout units.
 const TOAST_H: f32 = 40.0;
 
+/// The intro's picture showing, as the only texture of its draw list
+/// (`App::draw_intro`).
+struct MovieFrame<'a>(&'a intro::Picture);
+
+impl Textures for MovieFrame<'_> {
+    fn image(&self, texture: Texture) -> Option<ImageRef<'_>> {
+        let p = self.0;
+        let image = ImageRef {
+            width: p.w as usize,
+            height: p.h as usize,
+            rgba: &p.rgba,
+        };
+        (texture == Texture::Art(0) && image.is_whole()).then_some(image)
+    }
+}
+
 /// The top of the `k`th notice up from the newest (layout units): the
-/// newest ends at y 652, above the button hints (from about 656), and the
-/// third starts at y 524, below the lowest popup's box (the friend options
-/// popup ends at 520).
+/// newest ends at y 652, above the shell's button legend (from 660), and
+/// the third starts at y 524, below the lowest popup's box (the friend
+/// options popup ends at 520).
 fn toast_top(k: usize) -> f32 {
     612.0 - k as f32 * 44.0
 }
@@ -3912,8 +4767,6 @@ fn first_row(sel: usize, len: usize, rows: usize) -> usize {
     }
 }
 
-const BG_TOP: Color = Color::rgb(0x0B_2246);
-const BG_BOTTOM: Color = Color::rgb(0x02_0814);
 const PANEL: Color = Color::rgb(0x10_2A52).alpha(200);
 const EDGE: Color = Color::rgb(0x4F_86C6);
 const SEL: Color = Color::rgb(0x2F_6DB5);
@@ -3950,6 +4803,8 @@ struct Pen<'a> {
     ranks: Option<&'a RankIcons>,
     /// Every string drawn, for `App::drawn`.
     drawn: &'a mut Vec<String>,
+    /// The screen's button hints, for the shell's legend (`hints`).
+    legend: Vec<(Input, String)>,
 }
 
 impl Pen<'_> {
@@ -4146,9 +5001,17 @@ impl Pen<'_> {
         self.text(x, y + 6.5, 18.0, WHITE, Align::Center, letter);
     }
 
-    /// Button hints along the bottom, from the left.
+    /// The screen's button hints, for the shell's legend at the bottom
+    /// right (`App::draw_shell`), which draws them: A, B, X and Y, their
+    /// words in capitals as Halo 2's legends are. LB and RB still work
+    /// (the service record and the friends list) but are PC extras and
+    /// stay off it (menu.md 1.2).
     fn hints(&mut self, hints: &[(Input, &str)]) {
-        self.hint_row(hints, 60.0, 680.0);
+        for &(i, label) in hints {
+            if matches!(i, Input::A | Input::B | Input::X | Input::Y) {
+                self.legend.push((i, label.to_uppercase()));
+            }
+        }
     }
 
     fn hint_row(&mut self, hints: &[(Input, &str)], mut x: f32, y: f32) {
@@ -4194,6 +5057,7 @@ impl Pen<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use h2ui::layout::DialogSize;
     use std::sync::Mutex;
 
     fn app(folder: &std::path::Path) -> App {
@@ -4207,7 +5071,11 @@ mod tests {
             log: Arc::new(|_: &str| {}),
             ranks: None,
             menus: Arc::new(Menus::flat()),
+            vista: None,
+            intro: None,
             engine_args: String::new(),
+            scene: None,
+            scene_fast: false,
         })
     }
 
@@ -4670,7 +5538,8 @@ mod tests {
         a.click(ox + (arrow.x + 5.0) * s, oy + (arrow.y + 5.0) * s);
         assert_eq!(a.srow, BUTTONS_ROW);
         assert_eq!(a.settings.controls.buttons, before.next(true));
-        // Every row and its arrows are on the panel, above the help line.
+        // Every row and its arrows are on the panel, above the help line
+        // and the shell's legend.
         let last = a
             .areas
             .iter()
@@ -4678,6 +5547,8 @@ mod tests {
             .copied()
             .unwrap();
         assert!(last.y + last.h <= 600.0, "{}", last.y + last.h);
+        let back = a.areas.iter().find(|ar| ar.hit == Hit::Press(Input::B));
+        assert!(back.is_some_and(|b| b.y >= legend_top() - 0.5 && b.y >= last.y + last.h));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4724,19 +5595,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `rgb` (0 to 1) as the canvas's pixel.
+    fn pixel([r, g, b]: [f32; 3]) -> u32 {
+        let c = |v: f32| (v * 255.0).round() as u32;
+        (c(r) << 16) | (c(g) << 8) | c(b)
+    }
+
+    /// The pixels of `c` within 3 of `want` in each of red, green and blue.
+    fn pixels_like(c: &Canvas, want: u32) -> Vec<(f32, f32)> {
+        let near = |p: u32| {
+            (0..3).all(|k| ((p >> (8 * k)) & 0xFF).abs_diff((want >> (8 * k)) & 0xFF) <= 3)
+        };
+        let mut found = Vec::new();
+        for (k, &p) in c.px.iter().enumerate() {
+            if near(p) {
+                found.push(((k % c.w) as f32 + 0.5, (k / c.w) as f32 + 0.5));
+            }
+        }
+        found
+    }
+
+    /// The shell legend's top edge, in layout units (at 16:9 they are the
+    /// window's pixels at 1280 by 720).
+    fn legend_top() -> f32 {
+        let space = Space::new(1280, 720);
+        space.rect(h2ui::layout::legend_box(DialogSize::Full))[1]
+    }
+
     #[test]
     fn screens_draw_and_clicks_land_on_buttons() {
-        let Ok(mut text) = Text::system() else {
-            // No font on this system: nothing to draw with.
-            return;
-        };
+        // Without a font on this system the lobby's own words aren't
+        // drawn; the shell's header and legend are (h2ui's built-in font).
+        let mut text = Text::system().unwrap_or_else(|_| Text::none());
         let dir = scratch("draw");
         let mut a = app(&dir);
         to_online(&mut a);
+        assert_eq!(a.label(), "signin");
         let mut c = Canvas::new(640, 480);
         a.draw(&mut c, &mut text);
-        assert!(c.px.contains(&0xFF_FFFF), "the title is drawn");
-        // The B hint ("Back") sits last in the row along the bottom.
+        // Halo 2's header, in its colour, at the top left in its box.
+        let space = Space::new(640, 480);
+        let [x0, y0, x1, y1] = space.rect(h2ui::layout::header_box(DialogSize::Full));
+        let header = pixels_like(&c, pixel(h2ui::layout::colour::HEADER));
+        let inside = |&(x, y): &(f32, f32)| x >= x0 && x <= x1 && y >= y0 && y <= y1;
+        assert!(
+            header.iter().filter(|p| inside(p)).count() > 20,
+            "{header:?}"
+        );
+        assert!(a.drawn().iter().any(|d| d == "SIGN IN"));
+        // No lobby title or keyboard line any more.
+        assert!(a.drawn().iter().all(|d| !d.starts_with("Keyboard:")));
+        // The legend's B ("BACK") is last, at the bottom right in the
+        // legend's box, and a click on it goes back.
         let b = a
             .areas
             .iter()
@@ -4744,7 +5654,21 @@ mod tests {
             .copied()
             .unwrap();
         let (s, ox, oy) = a.view;
-        a.click(ox + (b.x + 5.0) * s, oy + (b.y + 5.0) * s);
+        let [l0, t0, r0, b0] = space.rect(h2ui::layout::legend_box(DialogSize::Full));
+        let (bx, by) = (ox + b.x * s, oy + b.y * s);
+        assert!(
+            (by - t0).abs() < 0.5 && (by + b.h * s - b0).abs() < 0.5,
+            "{b:?}"
+        );
+        assert!((bx + b.w * s - r0).abs() <= 1.0 && bx > l0, "{b:?}");
+        assert!(!b.top);
+        let legend: Vec<&String> = a.drawn().iter().skip_while(|d| *d != "SIGN IN").collect();
+        assert_eq!(
+            legend.last().map(|d| d.as_str()),
+            Some("BACK"),
+            "{legend:?}"
+        );
+        a.click(bx + 5.0, by + 5.0);
         assert_eq!(a.label(), "main");
         a.input(Input::B);
         a.input(Input::B);
@@ -4796,6 +5720,8 @@ mod tests {
             hit.copied().unwrap()
         };
         let next_map = arrow(&a, 1, true);
+        // (Not the second half of a double-click with the start screen's.)
+        a.last_click = None;
         a.click(ox + (next_map.x + 5.0) * s, oy + (next_map.y + 5.0) * s);
         assert_eq!((a.crow, a.cmap), (1, 0));
         let back = arrow(&a, 0, false);
@@ -4804,11 +5730,434 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_legend_names_the_device_used_last() {
+        let mut text = Text::none();
+        let dir = scratch("legend-device");
+        let mut a = app(&dir);
+        // The main menu's SETTINGS.
+        a.input(Input::A);
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        let mut c = Canvas::new(1280, 720);
+        let shows = |a: &App, s: &str| a.drawn().iter().any(|d| d == s);
+        // The controller comes first: its buttons' glyphs before any
+        // press.
+        a.draw(&mut c, &mut text);
+        assert!(!a.keyboard);
+        for s in ["\u{e100}", "CHANGE", "\u{e101}", "BACK"] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        assert!(!shows(&a, "ENTER"));
+        // A key: the keys' names.
+        a.key(Input::A);
+        a.draw(&mut c, &mut text);
+        for s in ["ENTER", "CHANGE", "ESC", "BACK"] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        assert!(!shows(&a, "\u{e100}"));
+        // The pad again: its buttons.
+        a.pad(Input::Down);
+        assert_eq!(a.srow, 1);
+        a.draw(&mut c, &mut text);
+        assert!(!shows(&a, "ENTER") && shows(&a, "\u{e100}"));
+        // The headless script's presses leave it as it was.
+        a.input(Input::Up);
+        assert!(!a.keyboard);
+        // A click or the wheel is the keyboard's side.
+        a.wheel(false);
+        assert!(a.keyboard);
+        assert_eq!(a.srow, 1);
+        a.pad(Input::Up);
+        a.click(1.0, 1.0);
+        assert!(a.keyboard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_legend_names_no_key_or_button_that_does_nothing() {
+        let mut text = Text::none();
+        let dir = scratch("legend-keyless");
+        let mut c = Canvas::new(1280, 720);
+        let shows = |a: &App, s: &str| a.drawn().iter().any(|d| d == s);
+        let legend_b = |a: &App| {
+            let hit = a.areas.iter().find(|ar| ar.hit == Hit::Press(Input::B));
+            hit.copied().unwrap()
+        };
+        // While the engine plays, the in-game screen's Esc and the pad
+        // are the game's: LEAVE GAME alone, after either device.
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        let g = a.game.as_mut().unwrap();
+        g.results = None;
+        g.ended_at = None;
+        g.child = Some(Running::waiting());
+        a.screen = Screen::InGame;
+        for keyboard in [false, true] {
+            a.keyboard = keyboard;
+            a.draw(&mut c, &mut text);
+            assert!(shows(&a, "LEAVE GAME"), "{:?}", a.drawn());
+            for key in ["ESC", "\u{e101}"] {
+                assert!(!shows(&a, key), "{key:?} in {:?}", a.drawn());
+            }
+        }
+        // A click on it still asks.
+        let (s, ox, oy) = a.view;
+        let b = legend_b(&a);
+        a.click(ox + (b.x + 3.0) * s, oy + (b.y + 3.0) * s);
+        assert_eq!(a.label(), "leave");
+        a.popup = None;
+        // Once the engine has closed, Esc and the pad's B work there.
+        a.game.as_mut().unwrap().child.as_mut().unwrap().kill();
+        a.game.as_mut().unwrap().child = None;
+        a.keyboard = true;
+        a.draw(&mut c, &mut text);
+        assert!(shows(&a, "ESC") && shows(&a, "LEAVE GAME"));
+        a.keyboard = false;
+        a.draw(&mut c, &mut text);
+        assert!(shows(&a, "\u{e101}"));
+        // On SIGN IN the X key types a letter: after the keyboard its X
+        // is CONTROLLER SETTINGS alone (Enter and Esc still named); after
+        // the pad, whose X opens them, its glyph shows.
+        let mut a = app(&dir);
+        to_online(&mut a);
+        assert_eq!(a.label(), "signin");
+        a.key(Input::Char('a'));
+        a.draw(&mut c, &mut text);
+        for s in ["ENTER", "CONTROLLER SETTINGS", "ESC", "BACK"] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        assert!(!shows(&a, "X"), "{:?}", a.drawn());
+        // A click on it still opens them.
+        let (s, ox, oy) = a.view;
+        let x = a.areas.iter().find(|ar| ar.hit == Hit::Press(Input::X));
+        let x = x.copied().unwrap();
+        a.click(ox + (x.x + 3.0) * s, oy + (x.y + 3.0) * s);
+        assert_eq!(a.label(), "settings");
+        a.input(Input::B);
+        assert_eq!(a.label(), "signin");
+        a.pad(Input::Down);
+        a.draw(&mut c, &mut text);
+        assert!(shows(&a, "\u{e102}") && shows(&a, "CONTROLLER SETTINGS"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_playlists_legend_holds_its_buttons_and_presses_them() {
+        let mut text = Text::none();
+        let dir = scratch("legend-live");
+        let (mut a, _server) = live_app(&dir);
+        let mut c = Canvas::new(1280, 720);
+        a.draw(&mut c, &mut text);
+        let drawn = a.drawn().to_vec();
+        for s in ["PLAYLISTS", "PLAYERS", "BACK"] {
+            assert!(drawn.iter().any(|d| d == s), "{s:?} in {drawn:?}");
+        }
+        // The bumpers' shortcuts stay off it (they still work).
+        assert!(drawn.iter().all(
+            |d| !d.eq_ignore_ascii_case("service record") && !d.eq_ignore_ascii_case("friends")
+        ));
+        // Who is signed in, at the top right.
+        assert!(drawn.iter().any(|d| d == "ALPHA"));
+        assert!(drawn.iter().any(|d| d.starts_with("Level 3  ·  0 online")));
+        // Under it, the friend requests waiting, if any (not those we
+        // made, nor friends).
+        assert!(drawn.iter().all(|d| !d.contains("friend request")));
+        let asked = |id, name: &str, r| friend(id, name, r, Online::Offline);
+        view(&mut a).friends = vec![
+            asked(12, "YAN", Relation::AskedUs),
+            asked(13, "ZED", Relation::WeAsked),
+            asked(14, "UMA", Relation::Friend),
+        ];
+        a.draw(&mut c, &mut text);
+        let requests: Vec<&String> = a.drawn().iter().filter(|d| d.contains("request")).collect();
+        assert_eq!(requests, ["1 friend request"]);
+        view(&mut a)
+            .friends
+            .push(asked(15, "AMY", Relation::AskedUs));
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().any(|d| d == "2 friend requests"));
+        // On the other screens too.
+        a.screen = Screen::Players;
+        a.draw(&mut c, &mut text);
+        assert!(a.drawn().iter().any(|d| d == "2 friend requests"));
+        a.screen = Screen::Live;
+        view(&mut a).friends.clear();
+        // With the invitation up, it alone takes clicks: the legend's
+        // B doesn't go back.
+        let area = |a: &App, i: Input| {
+            let hit = a.areas.iter().find(|ar| !ar.top && ar.hit == Hit::Press(i));
+            hit.copied().unwrap()
+        };
+        let (s, ox, oy) = a.view;
+        let click = |a: &mut App, ar: Area| a.click(ox + (ar.x + 3.0) * s, oy + (ar.y + 3.0) * s);
+        view(&mut a).invites.push((9, "BRAVO".into()));
+        a.draw(&mut c, &mut text);
+        let back = area(&a, Input::B);
+        click(&mut a, back);
+        assert_eq!(a.label(), "invite");
+        view(&mut a).invites.clear();
+        a.last_click = None;
+        // Without it, the legend's X opens the players online.
+        a.draw(&mut c, &mut text);
+        let players = area(&a, Input::X);
+        click(&mut a, players);
+        assert_eq!(a.label(), "players");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_double_click_on_the_legends_back_goes_back_once() {
+        let mut text = Text::none();
+        let dir = scratch("double-back");
+        let (mut a, _server) = live_app(&dir);
+        let mut c = Canvas::new(1280, 720);
+        a.input(Input::X);
+        assert_eq!(a.label(), "players");
+        a.draw(&mut c, &mut text);
+        let (s, ox, oy) = a.view;
+        let back = |a: &App| {
+            let hit = a.areas.iter().find(|ar| ar.hit == Hit::Press(Input::B));
+            hit.copied().unwrap()
+        };
+        // Near the legend's right end, where its BACK is on every screen.
+        let b = back(&a);
+        let (x, y) = (ox + (b.x + b.w - 3.0) * s, oy + (b.y + 3.0) * s);
+        a.click(x, y);
+        assert_eq!(a.label(), "live");
+        a.draw(&mut c, &mut text);
+        let under = back(&a);
+        let (ux, uy) = ((x - ox) / s, (y - oy) / s);
+        assert!(
+            ux >= under.x && ux < under.x + under.w && uy >= under.y && uy < under.y + under.h,
+            "the playlists' BACK is under the click: {under:?}"
+        );
+        // The double-click's second half doesn't go on to the main menu.
+        a.click(x, y);
+        assert_eq!(a.label(), "live");
+        // A click there a moment later does.
+        a.last_click = None;
+        a.click(x, y);
+        assert_eq!(a.label(), "main");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_double_click_that_shuts_a_popup_presses_nothing_under_it() {
+        let mut text = Text::none();
+        let dir = scratch("double-popup");
+        let (mut a, mut server) = live_app(&dir);
+        let mut c = Canvas::new(1280, 720);
+        // Seven playlists: rows 5 and 6 lie under the invitation's
+        // buttons. The sixth is selected, and we lead (no party).
+        view(&mut a).playlists = (0..7)
+            .map(|k| PlaylistInfo {
+                id: 20 + k,
+                key: format!("p{k}"),
+                name: format!("Playlist {k}"),
+                ranked: false,
+                teams: false,
+                guests: false,
+                min: 2,
+                max: 8,
+                party_max: 4,
+                searching: 0,
+                playing: 0,
+                level: 1,
+                maps: Vec::new(),
+            })
+            .collect();
+        a.sel = 5;
+        view(&mut a).invites.push((9, "BRAVO".into()));
+        a.draw(&mut c, &mut text);
+        assert_eq!(a.label(), "invite");
+        let (s, ox, oy) = a.view;
+        let find = |a: &App, top: bool, hit: Hit| {
+            let ar = a.areas.iter().find(|ar| ar.top == top && ar.hit == hit);
+            ar.copied().unwrap()
+        };
+        // The invitation's B DECLINE: a click shuts it.
+        let decline = find(&a, true, Hit::Press(Input::B));
+        let (ux, uy) = (decline.x + 3.0, decline.y + 3.0);
+        let (x, y) = (ox + ux * s, oy + uy * s);
+        a.click(x, y);
+        assert_eq!(a.label(), "live");
+        assert_eq!(sent(&mut server), [ToServer::Decline(9)]);
+        a.draw(&mut c, &mut text);
+        let row = find(&a, false, Hit::Row(5));
+        assert!(
+            ux >= row.x && ux < row.x + row.w && uy >= row.y && uy < row.y + row.h,
+            "the selected row is under the click: {row:?}"
+        );
+        // The double-click's second half only selects that row: no
+        // search.
+        a.click(x, y);
+        assert_eq!((a.label().as_str(), a.sel), ("live", 5));
+        assert!(sent(&mut server).is_empty());
+        // A click there a moment later searches it.
+        a.last_click = None;
+        a.click(x, y);
+        assert_eq!(sent(&mut server), [ToServer::Search(25)]);
+
+        // Two clicks in a popup that stays up both count: the first
+        // selects an option, the second picks it.
+        view(&mut a).friends = vec![friend(11, "BOB", Relation::Friend, Online::Offline)];
+        a.screen = Screen::Friends;
+        a.tick(a.now);
+        a.input(Input::A);
+        assert_eq!(a.label(), "friend");
+        // Remove friend selected; Service record above it.
+        a.input(Input::Down);
+        assert_eq!(a.osel, 1);
+        a.draw(&mut c, &mut text);
+        let record = find(&a, true, Hit::Row(0));
+        let (x, y) = (ox + (record.x + 3.0) * s, oy + (record.y + 3.0) * s);
+        a.last_click = None;
+        a.click(x, y);
+        assert_eq!((a.label().as_str(), a.osel), ("friend", 0));
+        a.click(x, y);
+        assert_eq!(a.label(), "record");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typing_a_friends_gamertag_leaves_x_and_y_keyless() {
+        let mut text = Text::none();
+        let dir = scratch("addfriend-keyless");
+        let (mut a, _server) = live_app(&dir);
+        let mut c = Canvas::new(1280, 720);
+        let shows = |a: &App, s: &str| a.drawn().iter().any(|d| d == s);
+        view(&mut a).friends = vec![friend(12, "YAN", Relation::AskedUs, Online::Offline)];
+        a.input(Input::Rb);
+        assert_eq!(a.label(), "friends");
+        // After the keyboard, the friends list names its keys: X and Y
+        // are buttons here.
+        a.key(Input::Down);
+        a.draw(&mut c, &mut text);
+        for s in [
+            "ENTER",
+            "ACCEPT",
+            "X",
+            "DECLINE",
+            "Y",
+            "ADD FRIEND",
+            "ESC",
+            "BACK",
+        ] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        // Under ADD FRIEND the X and Y keys type letters: the legend
+        // under it gives their words alone.
+        a.key(Input::Char('y'));
+        assert_eq!(a.label(), "addfriend");
+        a.draw(&mut c, &mut text);
+        for s in ["ENTER", "DECLINE", "ADD FRIEND", "ESC"] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        for s in ["X", "Y"] {
+            assert!(!shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        a.key(Input::Char('y'));
+        assert_eq!(a.friend_tag, "Y");
+        // After the pad, whose X and Y aren't letters, the glyphs show.
+        a.pad(Input::B);
+        a.pad(Input::Down);
+        a.input(Input::Y);
+        assert_eq!(a.label(), "addfriend");
+        a.draw(&mut c, &mut text);
+        for s in ["\u{e102}", "\u{e103}"] {
+            assert!(shows(&a, s), "{s:?} in {:?}", a.drawn());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_shells_still_background_is_kept_while_its_strips_scroll() {
+        let mut text = Text::none();
+        let dir = scratch("shell-kept");
+        let mut menus = Menus::flat();
+        // A framing and one strip that scrolls, with stand-in pictures:
+        // the strip's columns differ so its scrolling shows.
+        let flat = |w: usize, h: usize| h2ui::art::ArtImage {
+            width: w,
+            height: h,
+            rgba: [40, 60, 120, 200].repeat(w * h),
+        };
+        let strip = h2ui::art::ArtImage {
+            width: 32,
+            height: 40,
+            rgba: (0..32 * 40)
+                .flat_map(|k| [(k % 32 * 8) as u8, 255, 0, 255])
+                .collect(),
+        };
+        let shell = &mut menus.shell;
+        shell.art.add_image(h2ui::layout::FRAMING, flat(64, 40));
+        shell.art.add_image("strip", strip);
+        shell.chrome.still = vec![BitmapWidget {
+            scale: [32.0, 32.0],
+            depth: 10,
+            ..BitmapWidget::new(h2ui::layout::FRAMING, h2ui::layout::FRAMING_CORNER)
+        }];
+        shell.chrome.moving = vec![BitmapWidget {
+            scale: [1.1, 1.1],
+            wraps_per_second: [0.08, 0.0],
+            depth: 11,
+            ..BitmapWidget::new("strip", [-200.0, 300.0])
+        }];
+        let mut a = app(&dir);
+        a.cfg.menus = Arc::new(menus);
+        let mut c = Canvas::new(1280, 720);
+        a.input(Input::A);
+        // The main menu drawn first at the same size, as when SETTINGS is
+        // picked from it: the timer's size is set, so only the shell's
+        // own fresh background keeps its first frame out.
+        assert_eq!(a.label(), "main");
+        a.draw(&mut c, &mut text);
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        let timed = |a: &App| {
+            let f = a.menu_times.frames.iter().find(|f| f.name == "settings");
+            f.map_or(0, |f| f.frames)
+        };
+        // The first frame at a size draws the still background (and isn't
+        // timed); the next ones copy it in, so they are.
+        a.draw(&mut c, &mut text);
+        assert_eq!(timed(&a), 0, "the fresh background's frame was timed");
+        let first = c.px.clone();
+        a.clock -= Duration::from_secs(2);
+        a.draw(&mut c, &mut text);
+        assert_eq!(timed(&a), 1, "the kept background wasn't drawn again");
+        a.clock -= Duration::from_secs(2);
+        a.draw(&mut c, &mut text);
+        assert_eq!(timed(&a), 2);
+        // The strip moved, and nothing else: from 256 to 300 units up and
+        // 200 to 165 left of the middle (y 180 to 206 and x 520 to 541
+        // here).
+        let changed: Vec<usize> = (0..c.px.len()).filter(|&k| c.px[k] != first[k]).collect();
+        assert!(!changed.is_empty(), "the strip scrolls");
+        for k in changed {
+            let (x, y) = (k % 1280, k / 1280);
+            assert!((178..=208).contains(&y), "pixel {x}, {y} changed");
+            assert!((518..=543).contains(&x), "pixel {x}, {y} changed");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A lobby signed in as ALPHA (account 1) over one end of a pair, on
     /// the playlists, and the server's end, to read what the lobby sends.
     fn live_app(dir: &std::path::Path) -> (App, Connection) {
-        let mut a = app(dir);
         let (ours, mut theirs) = Connection::pair();
+        let a = live_app_over(dir, ours);
+        // The LOGIN.
+        sent(&mut theirs);
+        (a, theirs)
+    }
+
+    /// `live_app` signed in over `ours`.
+    fn live_app_over(dir: &std::path::Path, ours: Connection) -> App {
+        let mut a = app(dir);
         let key = h2live::client::identity(&dir.join("key.bin")).unwrap();
         let profile = Profile {
             gamertag: "ALPHA".into(),
@@ -4827,9 +6176,7 @@ mod tests {
         });
         a.client = Some(c);
         a.screen = Screen::Live;
-        // The LOGIN.
-        sent(&mut theirs);
-        (a, theirs)
+        a
     }
 
     /// What the lobby sent since the last look (pings left out).
@@ -5162,31 +6509,7 @@ mod tests {
     /// A game of ALPHA (this PC) against BRAVO, over, on the carnage
     /// report.
     fn carnage(a: &mut App) {
-        let player = |relay_id: u64, account: u64, tag: &str| h2net::live::LauncherPlayer {
-            relay_id,
-            account,
-            gamertag: tag.into(),
-            team: 0,
-            level: 4,
-            party: account,
-        };
-        let m = LauncherMatch {
-            id: 0x77,
-            playlist: 11,
-            ranked: true,
-            teams: false,
-            map: "lockout".into(),
-            variant: "H2_FFA_HeadtoHead_b".into(),
-            relay: h2net::live::RelaySeat {
-                port: 47050,
-                room: 0x77,
-                id: 0x11,
-                key: [0; 16],
-            },
-            host: 0x11,
-            countdown: 20,
-            players: vec![player(0x11, 1, "ALPHA"), player(0x22, 2, "BRAVO")],
-        };
+        let m = a_match();
         let ip = "127.0.0.1".parse().unwrap();
         let (session, me) = live::session_from(&m, ip).unwrap();
         let result = |relay_id, place, score| LauncherPlayerResult {
@@ -5221,6 +6544,597 @@ mod tests {
         });
         a.screen = Screen::Carnage;
         a.csel = 1;
+    }
+
+    /// A Head to Head match on Lockout for ALPHA (us) and BRAVO, ALPHA
+    /// hosting.
+    fn a_match() -> LauncherMatch {
+        let player = |relay_id: u64, account: u64, tag: &str| h2net::live::LauncherPlayer {
+            relay_id,
+            account,
+            gamertag: tag.into(),
+            team: 0,
+            level: 4,
+            party: account,
+        };
+        LauncherMatch {
+            id: 0x77,
+            playlist: 11,
+            ranked: true,
+            teams: false,
+            map: "lockout".into(),
+            variant: "H2_FFA_HeadtoHead_b".into(),
+            relay: h2net::live::RelaySeat {
+                port: 47050,
+                room: 0x77,
+                id: 0x11,
+                key: [0; 16],
+            },
+            host: 0x11,
+            countdown: 20,
+            players: vec![player(0x11, 1, "ALPHA"), player(0x22, 2, "BRAVO")],
+        }
+    }
+
+    #[test]
+    fn presses_ask_for_halo_2s_sounds() {
+        let dir = scratch("cues");
+        let mut a = app(&dir);
+        // B on the start screen opens the quit popup, and B shuts it.
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        a.input(Input::Char('b'));
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        // A on the start screen: the press, the main menu loading, and
+        // the start screen going on to it.
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance, Cue::Transport]);
+        assert_eq!(a.label(), "main");
+        // Down moves the focus; at the end it doesn't, and is silent.
+        a.input(Input::Down);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::Down);
+        assert!(a.take_cues().is_empty());
+        a.input(Input::Up);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        // A on ONLINE (no gamertag yet: the sign-in form): the press,
+        // then the screen loading.
+        a.input(Input::A);
+        assert_eq!(a.label(), "signin");
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
+        // Typing is silent; Tab moves to the other field.
+        a.input(Input::Char('j'));
+        assert!(a.take_cues().is_empty());
+        a.input(Input::Tab);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        // SETTINGS, a value changed in place, and B back from it.
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        assert_eq!(a.take_cues(), [Cue::Cursor, Cue::Select, Cue::Advance]);
+        a.input(Input::Right);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::Backspace);
+        assert_eq!(a.label(), "main");
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        // A click on a main menu row focuses it, then picks it.
+        a.size = (1280, 720);
+        let row = (0..720)
+            .step_by(4)
+            .flat_map(|y| (0..1280).step_by(8).map(move |x| (x as f32, y as f32)))
+            .find(|&(x, y)| a.main_row_at(x, y) == Some(LIVE_ROW))
+            .unwrap();
+        a.click(row.0, row.1);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.last_click = None;
+        a.click(row.0, row.1);
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
+        assert_eq!(a.label(), "signin");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refusal_sounds_as_an_error_and_a_search_advances() {
+        let dir = scratch("cue-refused");
+        let (mut a, mut server) = live_app(&dir);
+        view(&mut a).playlists = vec![PlaylistInfo {
+            id: 11,
+            key: "h2h".into(),
+            name: "Head to Head".into(),
+            ranked: true,
+            teams: false,
+            guests: false,
+            min: 2,
+            max: 2,
+            party_max: 1,
+            searching: 0,
+            playing: 0,
+            level: 1,
+            maps: Vec::new(),
+        }];
+        // A party BRAVO leads: we may not pick a playlist.
+        let mut pt = party(7, Activity::Lobby);
+        pt.leader = 2;
+        pt.members.push(PartyMember {
+            account: 2,
+            gamertag: "BRAVO".into(),
+            look: Default::default(),
+            best: 1,
+            level: 1,
+            guests: 0,
+        });
+        view(&mut a).party = Some(pt);
+        a.sel = 0;
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Error]);
+        let said = "Only the party leader can pick a playlist.";
+        assert!(a.toasts.iter().any(|(t, _)| t == said));
+        assert!(sent(&mut server).is_empty());
+        // Nor a custom game (the row after the playlists).
+        a.input(Input::Down);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Error]);
+        // Leading it, A searches: the press, then Halo 2's matchmaking
+        // screen loading.
+        view(&mut a).party.as_mut().unwrap().leader = 1;
+        a.input(Input::Up);
+        a.take_cues();
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Select, Cue::Advance]);
+        assert_eq!(sent(&mut server), [ToServer::Search(11)]);
+        // Searching: the leader's B stops it, as Back; a member's is
+        // refused.
+        view(&mut a).party.as_mut().unwrap().activity = Activity::Searching;
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        assert_eq!(sent(&mut server), [ToServer::Cancel]);
+        view(&mut a).party.as_mut().unwrap().leader = 2;
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Error]);
+        assert!(sent(&mut server).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_custom_game_asked_for_sounds_its_press_and_no_maps_is_an_error() {
+        let dir = scratch("cue-custom");
+        let mut a = app(&dir);
+        a.cfg.maps = vec![("midship".into(), 1), ("lockout".into(), 2)];
+        a.open_custom();
+        // The game and the map change in place.
+        a.input(Input::Left);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::Down);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        a.input(Input::Right);
+        assert_eq!(a.take_cues(), [Cue::Cursor]);
+        // A asks for it: Halo 2's START GAME is a button, so its press
+        // only (the pregame lobby's advance comes with the match).
+        a.input(Input::A);
+        assert!(a.asked.is_some());
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        // Asked already: nothing happens, silently.
+        a.input(Input::A);
+        assert!(a.take_cues().is_empty());
+        // No maps: refused, with the error sound.
+        a.cfg.maps = Vec::new();
+        a.open_custom();
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Error]);
+        assert!(a.asked.is_none());
+        let said = "No Halo 2 maps were found in MCC's folder.";
+        assert!(a.toasts.iter().any(|(t, _)| t == said));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_popup_opening_advances_but_one_closing_or_a_tab_doesnt() {
+        let dir = scratch("cue-popups");
+        let (mut a, mut server) = live_app(&dir);
+        let mut pt = party(7, Activity::Lobby);
+        pt.members.push(PartyMember {
+            account: 2,
+            gamertag: "BRAVO".into(),
+            look: Default::default(),
+            best: 1,
+            level: 1,
+            guests: 0,
+        });
+        view(&mut a).party = Some(pt);
+        a.screen = Screen::Party;
+        assert!(a.pick("bravo"));
+        // X opens the kick confirmation: the dialog loading alone (only
+        // A and Start play a list item's or button's `forward1`).
+        a.input(Input::X);
+        assert!(matches!(a.popup, Some(Popup::Kick(2))));
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        // A on it only closes it: the press alone.
+        a.input(Input::A);
+        assert!(a.popup.is_none());
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(sent(&mut server), [ToServer::Kick(2)]);
+        // B on a popup, as on a screen: back alone.
+        a.input(Input::X);
+        a.take_cues();
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        // X on the playlists opens the players list: Halo 2's Y menu
+        // loading, which Y opens with no sound of its own (0x1494af), so
+        // the advance alone. RB there goes to its friends tab: the tab's
+        // press alone.
+        a.screen = Screen::Live;
+        a.input(Input::X);
+        assert_eq!(a.label(), "players");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        a.input(Input::Rb);
+        assert_eq!(a.label(), "friends");
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_pregame_lobby_and_the_carnage_report_advance_as_they_open() {
+        let dir = scratch("cue-match");
+        // A match needs the server's address: a real connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ours = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _theirs = listener.accept().unwrap();
+        let mut a = live_app_over(&dir, Connection::tcp(ours).unwrap());
+        a.on_event(LiveEvent::LauncherMatch(a_match()));
+        assert_eq!(a.label(), "pregame");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        // The same match again with another host: nothing opens.
+        a.on_event(LiveEvent::LauncherMatch(a_match()));
+        assert!(a.take_cues().is_empty());
+        // The engine closes after the game: the carnage report.
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        a.screen = Screen::InGame;
+        let mut engine = Running::waiting();
+        engine.kill();
+        a.game.as_mut().unwrap().child = Some(engine);
+        a.tick(a.now);
+        assert_eq!(a.screen, Screen::Carnage);
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn screens_the_lobby_opens_by_itself_advance() {
+        let dir = scratch("cue-itself");
+        // Signed in: the playlists load with no press.
+        let (mut a, _server) = live_app(&dir);
+        a.screen = Screen::Connecting;
+        a.signing_in = Some(Instant::now());
+        a.on_event(LiveEvent::Welcomed);
+        assert_eq!(a.label(), "live");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        // The server lost on the playlists: the failure screen loads,
+        // once.
+        a.on_event(LiveEvent::Lost("gone".into()));
+        assert_eq!(a.label(), "failed");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        a.tick(a.now);
+        a.fail("again".into());
+        assert!(a.take_cues().is_empty());
+        // Lost on the main menu: a notice, and no screen loads.
+        let (mut a, _server) = live_app(&dir);
+        a.screen = Screen::Main;
+        a.on_event(LiveEvent::Lost("gone".into()));
+        assert_eq!(a.label(), "main");
+        assert!(a.take_cues().is_empty());
+        // Lost during a match: nothing until the engine closes, then the
+        // failure screen loads.
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        let g = a.game.as_mut().unwrap();
+        g.results = None;
+        g.ended_at = None;
+        g.child = Some(Running::waiting());
+        a.screen = Screen::InGame;
+        a.on_event(LiveEvent::Lost("gone".into()));
+        a.tick(a.now);
+        assert_eq!(a.label(), "ingame");
+        assert!(a.take_cues().is_empty());
+        a.game.as_mut().unwrap().child.as_mut().unwrap().kill();
+        a.tick(a.now);
+        assert_eq!(a.label(), "failed");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        // The same after a game with results: the carnage report's
+        // advance stands for the failure screen it gives way to, once.
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        a.screen = Screen::InGame;
+        let mut engine = Running::waiting();
+        engine.kill();
+        a.game.as_mut().unwrap().child = Some(engine);
+        a.client = None;
+        a.tick(a.now);
+        assert_eq!(a.label(), "failed");
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        a.tick(a.now);
+        assert!(a.take_cues().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn behind_the_engine_the_window_is_drawn_seldom_but_polled_as_often() {
+        let dir = scratch("draw-pace");
+        let (mut a, _server) = live_app(&dir);
+        carnage(&mut a);
+        a.screen = Screen::InGame;
+        a.game.as_mut().unwrap().child = None;
+        assert_eq!(
+            (a.draw_interval(true), a.draw_interval(false)),
+            (FRAME, FRAME)
+        );
+        // While the engine plays, twice a second without the focus, and
+        // each frame with it; the window wakes each frame either way.
+        a.game.as_mut().unwrap().child = Some(Running::waiting());
+        assert_eq!(a.draw_interval(false), FRAME_BEHIND_GAME);
+        assert_eq!(a.draw_interval(true), FRAME);
+        assert_eq!(a.frame_interval(), FRAME);
+        a.game.as_mut().unwrap().child.as_mut().unwrap().kill();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_invitation_sounds_once() {
+        let dir = scratch("cue-invite");
+        let (mut a, _server) = live_app(&dir);
+        a.screen = Screen::Main;
+        a.tick(Instant::now());
+        assert!(a.take_cues().is_empty());
+        view(&mut a).invites = vec![(55, "BRAVO".into())];
+        a.tick(Instant::now());
+        assert_eq!(a.take_cues(), [Cue::Notify]);
+        a.tick(Instant::now());
+        assert!(a.take_cues().is_empty());
+        assert_eq!(a.label(), "invite");
+        // Another: once more. Declining it with B sounds as Back.
+        view(&mut a).invites.push((56, "CHARLIE".into()));
+        a.tick(Instant::now());
+        assert_eq!(a.take_cues(), [Cue::Notify]);
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        // The one under it was seen, but is shown again: it sounds again.
+        a.tick(Instant::now());
+        assert_eq!(a.take_cues(), [Cue::Notify]);
+        // Hidden by a popup, it is still the one seen: no sound when it
+        // shows again.
+        a.popup = Some(Popup::Quit);
+        a.tick(Instant::now());
+        a.popup = None;
+        a.tick(Instant::now());
+        assert!(a.take_cues().is_empty());
+        // Declined, then the same party invites again: it sounds.
+        a.input(Input::B);
+        assert_eq!(a.take_cues(), [Cue::Back]);
+        a.tick(Instant::now());
+        assert!(a.take_cues().is_empty());
+        view(&mut a).invites.push((55, "BRAVO".into()));
+        a.tick(Instant::now());
+        assert_eq!(a.take_cues(), [Cue::Notify]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_friend_request_to_us_sounds_as_a_message() {
+        let dir = scratch("cue-asked");
+        let (mut a, _server) = live_app(&dir);
+        use h2net::live::{friend_notice, ACCEPTED, ALREADY_ASKED, ASKED_YOU, SLOW_DOWN};
+        a.on_event(LiveEvent::Notice(friend_notice(ASKED_YOU, "BRAVO")));
+        assert_eq!(a.take_cues(), [Cue::Notify]);
+        // Other notices are only shown.
+        for text in [
+            friend_notice(ACCEPTED, "BRAVO"),
+            friend_notice(ALREADY_ASKED, "BRAVO"),
+            SLOW_DOWN.to_string(),
+            "THAT PARTY IS INVITE ONLY".to_string(),
+            // The notice's words with no gamertag in them.
+            friend_notice(ASKED_YOU, ""),
+        ] {
+            a.on_event(LiveEvent::Notice(text.clone()));
+            assert!(a.take_cues().is_empty(), "{text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn presses_that_only_ask_the_server_still_sound() {
+        let dir = scratch("cue-asks");
+        let (mut a, mut server) = live_app(&dir);
+        // The party's leader makes BRAVO leader, and changes its privacy.
+        let mut pt = party(7, Activity::Lobby);
+        pt.members.push(PartyMember {
+            account: 2,
+            gamertag: "BRAVO".into(),
+            look: Default::default(),
+            best: 1,
+            level: 1,
+            guests: 0,
+        });
+        view(&mut a).party = Some(pt);
+        a.screen = Screen::Party;
+        assert!(a.pick("bravo"));
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(sent(&mut server), [ToServer::Promote(2)]);
+        a.input(Input::Y);
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(sent(&mut server), [ToServer::Privacy(Privacy::InviteOnly)]);
+        // Friend requests answered or taken back.
+        view(&mut a).friends = vec![
+            friend(12, "YAN", Relation::AskedUs, Online::Offline),
+            friend(10, "ZED", Relation::WeAsked, Online::Offline),
+        ];
+        a.screen = Screen::Friends;
+        a.tick(Instant::now());
+        a.take_cues();
+        for (tag, press, asked) in [
+            ("yan", Input::A, ToServer::FriendAccept(12)),
+            ("yan", Input::X, ToServer::FriendDecline(12)),
+            ("zed", Input::X, ToServer::FriendRemove(10)),
+        ] {
+            assert!(a.pick(tag));
+            a.input(press);
+            assert_eq!(a.take_cues(), [Cue::Select], "{tag} {press:?}");
+            assert_eq!(sent(&mut server), [asked]);
+        }
+        // An invitation sent, and a friend request.
+        view(&mut a).online = vec![OnlinePlayer {
+            account: 21,
+            gamertag: "CHARLIE".into(),
+            look: Default::default(),
+            best: 1,
+            activity: Activity::Lobby,
+            party: 21,
+            open: true,
+            size: 1,
+            openings: 3,
+        }];
+        a.screen = Screen::Players;
+        a.tick(Instant::now());
+        a.take_cues();
+        assert!(a.pick("charlie"));
+        a.input(Input::A);
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(sent(&mut server), [ToServer::Invite(21)]);
+        a.input(Input::Y);
+        assert_eq!(a.take_cues(), [Cue::Select]);
+        assert_eq!(
+            sent(&mut server),
+            [ToServer::FriendRequest("CHARLIE".into())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn y_on_someone_who_cant_be_asked_says_why_with_the_error_sound() {
+        let dir = scratch("cue-cant-ask");
+        let (mut a, mut server) = live_app(&dir);
+        use h2net::live::{friend_notice, ALREADY_ASKED, ALREADY_FRIENDS, ASKED_YOU};
+        let player = |account: u64, tag: &str| OnlinePlayer {
+            account,
+            gamertag: tag.into(),
+            look: Default::default(),
+            best: 1,
+            activity: Activity::Lobby,
+            party: account,
+            open: true,
+            size: 1,
+            openings: 3,
+        };
+        view(&mut a).online = vec![
+            player(1, "ALPHA"),
+            player(2, "BRAVO"),
+            player(3, "CHARLIE"),
+            player(4, "DAN"),
+        ];
+        view(&mut a).friends = vec![
+            friend(2, "BRAVO", Relation::Friend, Online::Launcher),
+            friend(3, "CHARLIE", Relation::WeAsked, Online::Launcher),
+            friend(4, "DAN", Relation::AskedUs, Online::Launcher),
+        ];
+        a.screen = Screen::Players;
+        a.tick(Instant::now());
+        a.take_cues();
+        sent(&mut server);
+        for (tag, why) in [
+            ("BRAVO", ALREADY_FRIENDS),
+            ("CHARLIE", ALREADY_ASKED),
+            ("DAN", ASKED_YOU),
+        ] {
+            assert!(a.pick(tag));
+            a.input(Input::Y);
+            assert_eq!(a.take_cues(), [Cue::Error], "{tag}");
+            let said = a.toasts.back().map(|(t, _)| t.clone());
+            assert_eq!(said, Some(friend_notice(why, tag)));
+            assert!(sent(&mut server).is_empty(), "{tag}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_music_follows_halo_2s_rule_and_stops_for_the_engine() {
+        let all = [
+            Screen::Intro,
+            Screen::Start,
+            Screen::Main,
+            Screen::SignIn,
+            Screen::Connecting,
+            Screen::Live,
+            Screen::Players,
+            Screen::Party,
+            Screen::Custom,
+            Screen::Pregame,
+            Screen::InGame,
+            Screen::Carnage,
+            Screen::Failed,
+            Screen::Record,
+            Screen::Friends,
+            Screen::Settings,
+        ];
+        let on = [Screen::Start, Screen::Main];
+        let off = [
+            Screen::Intro,
+            Screen::Live,
+            Screen::Party,
+            Screen::Custom,
+            Screen::Pregame,
+            Screen::InGame,
+        ];
+        for s in all {
+            for current in [false, true] {
+                let want = if on.contains(&s) {
+                    true
+                } else if off.contains(&s) {
+                    false
+                } else {
+                    current
+                };
+                assert_eq!(music_rule(s, current), want, "{s:?} {current}");
+            }
+        }
+        // Main to the playlists turns it off, back to Main on, and the
+        // settings keep it.
+        let dir = scratch("music");
+        let mut a = app(&dir);
+        assert!(a.music_on());
+        a.input(Input::A);
+        a.screen = Screen::Live;
+        a.tick(Instant::now());
+        assert!(!a.music_on());
+        a.screen = Screen::Settings;
+        a.tick(Instant::now());
+        assert!(!a.music_on());
+        a.screen = Screen::Main;
+        a.tick(Instant::now());
+        assert!(a.music_on());
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        a.tick(Instant::now());
+        assert!(a.music_on());
+        // An engine running: off, on any screen; after it, the carnage
+        // report stays silent until the main menu.
+        carnage(&mut a);
+        a.screen = Screen::Main;
+        a.game.as_mut().unwrap().child = Some(Running::waiting());
+        assert!(a.engine_running());
+        a.tick(Instant::now());
+        assert!(!a.music_on());
+        a.game.as_mut().unwrap().child = None;
+        a.screen = Screen::Carnage;
+        a.tick(Instant::now());
+        assert!(!a.music_on());
+        a.screen = Screen::Main;
+        a.tick(Instant::now());
+        assert!(a.music_on());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -5264,12 +7178,16 @@ mod tests {
             .map(|r| r.relay_id)
             .collect();
         assert_eq!(rows, [0x22, 0x11]);
-        // Y on ourselves does nothing; on BRAVO it's a friend request.
+        // Y on ourselves only sounds the error (no notice, nothing sent);
+        // on BRAVO it's a friend request.
         a.input(Input::Y);
+        assert_eq!(a.take_cues(), [Cue::Error]);
+        assert!(a.toasts.is_empty());
         assert!(sent(&mut server).is_empty());
         assert!(a.pick("bravo"));
         assert_eq!(a.csel, 0);
         a.input(Input::Y);
+        assert_eq!(a.take_cues(), [Cue::Select]);
         assert_eq!(sent(&mut server), [ToServer::FriendRequest("BRAVO".into())]);
         a.input(Input::Lb);
         assert_eq!(a.label(), "record");
@@ -5433,33 +7351,44 @@ mod tests {
             size: 1,
             openings: 0,
         }];
+        // RB from the playlists opens the friends list (Halo 2's Y menu
+        // loading: the advance alone, as for Y).
         a.input(Input::Rb);
+        assert_eq!(a.take_cues(), [Cue::Advance]);
         a.tick(a.now);
+        assert!(a.take_cues().is_empty());
         let last = |a: &App| a.toasts.back().map(|(t, _)| t.clone());
         assert!(a.pick("DAN"));
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS INVITE ONLY"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         view(&mut a).online[0].open = true;
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS FULL"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         view(&mut a).online[0].openings = 3;
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY CAN'T BE JOINED"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         view(&mut a).friends[0].activity = Activity::Playing;
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("DAN'S PARTY IS IN A MATCH"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         view(&mut a).friends[0].party = 500;
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("DAN IS ALREADY IN YOUR PARTY"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         assert!(a.pick("BOB"));
         a.input(Input::X);
         assert_eq!(last(&a).as_deref(), Some("BOB IS OFFLINE"));
+        assert_eq!(a.take_cues(), [Cue::Error]);
         assert!(a.pick("CAT"));
         a.input(Input::X);
         assert_eq!(
             last(&a).as_deref(),
             Some("CAT IS ON ANOTHER VERSION OF THE GAME")
         );
+        assert_eq!(a.take_cues(), [Cue::Error]);
         assert_eq!(a.label(), "friends");
         assert!(sent(&mut server).is_empty());
         // A join the server turns down (the flag was a second old) is told
@@ -5468,6 +7397,10 @@ mod tests {
         assert!(a.pick("DAN"));
         a.input(Input::X);
         assert_eq!(sent(&mut server), [ToServer::JoinParty(500)]);
+        // A friend who can be joined: the playlists again with the party
+        // joined, loading (X plays no `forward1`).
+        assert_eq!(a.take_cues(), [Cue::Advance]);
+        assert_eq!(a.label(), "live");
         a.on_event(LiveEvent::Notice("THAT PARTY IS INVITE ONLY".into()));
         assert_eq!(last(&a).as_deref(), Some("THAT PARTY IS INVITE ONLY"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -5629,9 +7562,10 @@ mod tests {
     #[test]
     fn notices_are_drawn_above_popups() {
         // Clear of every popup's box (the lowest ends at 520) and of the
-        // button hints along the bottom (from about 656).
+        // shell's legend at the bottom (from 660).
         assert!(toast_top(2) >= 520.0);
-        assert!(toast_top(0) + TOAST_H <= 656.0);
+        assert_eq!(legend_top(), 660.0);
+        assert!(toast_top(0) + TOAST_H <= legend_top());
         let Ok(mut text) = Text::system() else {
             return;
         };
@@ -5807,7 +7741,7 @@ mod tests {
         for _ in 0..=MENU_FRAMES {
             a.draw_menu(&mut c, &mut Vec::new());
         }
-        assert_eq!(a.menu_times.logged, [((320, 180), 0)]);
+        assert_eq!(a.menu_times.logged, [((320, 180), "start screen")]);
         let timed = |lines: &[String]| {
             lines
                 .iter()
@@ -5831,6 +7765,927 @@ mod tests {
         a.draw(&mut c, &mut text);
         assert!(a.drawn().iter().any(|d| d == "ONLINE"));
         assert!(a.drawn().iter().any(|d| d == "CHIEF"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A flythrough (`SceneSource`) whose frames are all one colour and
+    /// come as soon as they are asked for, once it is `ready`; it keeps
+    /// what it was asked.
+    struct FakeScene {
+        colour: u32,
+        ready: Mutex<bool>,
+        state: Mutex<SceneState>,
+        asks: Mutex<Vec<(usize, usize, f64)>>,
+        sleeps: Mutex<u32>,
+        frame: Mutex<Option<Arc<Frame>>>,
+    }
+
+    impl FakeScene {
+        fn new(colour: u32) -> Arc<FakeScene> {
+            Arc::new(FakeScene {
+                colour,
+                ready: Mutex::new(true),
+                state: Mutex::new(SceneState::Ready),
+                asks: Mutex::new(Vec::new()),
+                sleeps: Mutex::new(0),
+                frame: Mutex::new(None),
+            })
+        }
+
+        fn asks(&self) -> Vec<(usize, usize, f64)> {
+            self.asks.lock().unwrap().clone()
+        }
+
+        fn sleeps(&self) -> u32 {
+            *self.sleeps.lock().unwrap()
+        }
+    }
+
+    impl SceneSource for FakeScene {
+        fn ask(&self, w: usize, h: usize, seconds: f64) {
+            self.asks.lock().unwrap().push((w, h, seconds));
+            if *self.ready.lock().unwrap() {
+                *self.frame.lock().unwrap() = Some(Arc::new(Frame {
+                    w,
+                    h,
+                    seconds,
+                    px: vec![self.colour; w * h],
+                }));
+            }
+        }
+
+        fn latest(&self, w: usize, h: usize) -> Option<Arc<Frame>> {
+            let frame = self.frame.lock().unwrap().clone();
+            frame.filter(|f| f.w == w && f.h == h)
+        }
+
+        fn sleep(&self) {
+            *self.sleeps.lock().unwrap() += 1;
+        }
+
+        fn state(&self) -> SceneState {
+            self.state.lock().unwrap().clone()
+        }
+    }
+
+    /// The lobby with `scene` behind its menus, and the lines it logs.
+    fn scene_app(dir: &std::path::Path, scene: &Arc<FakeScene>) -> (App, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let source: Arc<dyn SceneSource> = scene.clone();
+        let a = App::new(Config {
+            log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
+            scene: Some(source),
+            ..app(dir).cfg
+        });
+        (a, lines)
+    }
+
+    /// How many of `px` are `colour`.
+    fn count_of(px: &[u32], colour: u32) -> usize {
+        px.iter().filter(|&&p| p == colour).count()
+    }
+
+    /// The flythrough's colour in the fakes: no still background or menu
+    /// art has it.
+    const SCENE_COLOUR: u32 = 0x0012_3456;
+
+    #[test]
+    fn the_flythrough_fades_in_behind_the_start_screen_and_main_menu() {
+        let dir = scratch("scene-menus");
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let (mut a, _) = scene_app(&dir, &scene);
+        let (w, h) = (320, 180);
+        let mut c = Canvas::new(w, h);
+        for label in ["start", "main"] {
+            assert_eq!(a.label(), label);
+            a.drawn_screen = Some(a.screen);
+            a.menu_opened = a.menu_clock() - 5.0;
+            a.main_focus = Focus::on(a.main_focus.item, a.menu_opened);
+            // With no intro to wake it ahead, the first frame fades in
+            // as it comes: this draw is still the still background.
+            a.scene_since = None;
+            a.draw_menu(&mut c, &mut Vec::new());
+            assert_eq!(scene.asks().last().map(|k| (k.0, k.1)), Some((w, h)));
+            assert_eq!(count_of(&c.px, SCENE_COLOUR), 0, "{label}");
+            let still = c.px.clone();
+            // Half way: neither the still background nor the scene.
+            a.scene_since = Some(a.menu_clock() - SCENE_FADE / 2.0);
+            a.draw_menu(&mut c, &mut Vec::new());
+            assert_eq!(count_of(&c.px, SCENE_COLOUR), 0, "{label}");
+            assert_ne!(c.px, still, "{label}");
+            // Faded in: the scene is behind the screen, which is still
+            // drawn over it.
+            a.scene_since = Some(a.menu_clock() - 1.0);
+            let mut drawn = Vec::new();
+            a.draw_menu(&mut c, &mut drawn);
+            let n = count_of(&c.px, SCENE_COLOUR);
+            assert!(n > w * h / 2 && n < w * h, "{label}: {n}");
+            assert!(a.scene_shown, "{label}");
+            match label {
+                "start" => assert_eq!(drawn, [screens::PRESS_START]),
+                _ => assert_eq!(drawn, MAIN_ROWS),
+            }
+            a.input(Input::A);
+        }
+        // The flythrough's clock: on with the menus' clock, at most
+        // `SCENE_STEP` a frame.
+        a.screen = Screen::Main;
+        let before = scene.asks().last().unwrap().2;
+        a.scene_step = Some(a.menu_clock() - 10.0);
+        a.draw_menu(&mut c, &mut Vec::new());
+        let after = scene.asks().last().unwrap().2;
+        assert!(after > before && after - before <= SCENE_STEP + 1e-9);
+        // Another size: the still background until a frame of it comes.
+        *scene.ready.lock().unwrap() = false;
+        let mut big = Canvas::new(400, 200);
+        a.draw_menu(&mut big, &mut Vec::new());
+        assert_eq!(count_of(&big.px, SCENE_COLOUR), 0);
+        assert!(!a.scene_shown);
+        assert_eq!(a.scene_since, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_intro_wakes_the_flythrough_so_the_start_screen_has_it_at_once() {
+        let dir = scratch("scene-intro");
+        let (mut a, _) = intro_app(&dir, intro::FakeSource::second());
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let source: Arc<dyn SceneSource> = scene.clone();
+        a.cfg.scene = Some(source);
+        let mut text = Text::none();
+        let (w, h) = (320, 180);
+        let mut c = Canvas::new(w, h);
+        let t0 = Instant::now();
+        // Nothing is asked before the intro's first draw.
+        a.tick(t0);
+        assert!(scene.asks().is_empty());
+        // Its first draw asks for the scene's first frame at the window's
+        // size, once; it isn't put to sleep while the movie plays, and
+        // isn't drawn under it.
+        for _ in 0..5 {
+            a.draw(&mut c, &mut text);
+            a.tick(t0);
+        }
+        assert_eq!(a.label(), "intro");
+        assert_eq!(scene.asks(), [(w, h, 0.0)]);
+        assert_eq!(scene.sleeps(), 0);
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        // A new size asks again, once.
+        let mut big = Canvas::new(400, 200);
+        a.draw(&mut big, &mut text);
+        a.draw(&mut big, &mut text);
+        assert_eq!(scene.asks().len(), 2);
+        assert_eq!(scene.asks()[1], (400, 200, 0.0));
+        a.draw(&mut c, &mut text);
+        assert_eq!(scene.asks().len(), 3);
+        // Skipped: the start screen's first draw has the scene whole
+        // behind it (no fade from the still background, so no framing
+        // showing through), from the loop's start.
+        a.input(Input::A);
+        assert_eq!(a.label(), "start");
+        a.tick(t0);
+        assert_eq!(scene.sleeps(), 0);
+        a.draw(&mut c, &mut text);
+        let n = count_of(&c.px, SCENE_COLOUR);
+        assert!(n > w * h / 2, "{n}");
+        assert!(a.scene_shown);
+        assert_eq!(scene.asks().last(), Some(&(w, h, 0.0)));
+        // A frame that only comes later (the window resized) fades in:
+        // its first draw is still the still background.
+        *scene.ready.lock().unwrap() = false;
+        a.draw(&mut big, &mut text);
+        *scene.ready.lock().unwrap() = true;
+        a.draw(&mut big, &mut text);
+        assert_eq!(count_of(&big.px, SCENE_COLOUR), 0);
+        assert!(a.scene_since.is_some());
+        // A scene that can't be drawn isn't asked for during the intro.
+        let (mut b, _) = intro_app(&dir, intro::FakeSource::second());
+        let failed = FakeScene::new(SCENE_COLOUR);
+        *failed.state.lock().unwrap() = SceneState::Failed("no GPU".into());
+        let source: Arc<dyn SceneSource> = failed.clone();
+        b.cfg.scene = Some(source);
+        b.draw(&mut c, &mut text);
+        assert_eq!(b.label(), "intro");
+        assert!(failed.asks().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_flythrough_sleeps_away_from_the_menus() {
+        let dir = scratch("scene-sleep");
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let (mut a, _) = scene_app(&dir, &scene);
+        let (w, h) = (320, 180);
+        let mut c = Canvas::new(w, h);
+        let mut text = Text::none();
+        // Not asked for before the menus show, nor put to sleep.
+        a.tick(Instant::now());
+        assert!(scene.asks().is_empty());
+        assert_eq!(scene.sleeps(), 0);
+        a.input(Input::A);
+        assert_eq!(a.label(), "main");
+        a.draw(&mut c, &mut text);
+        a.scene_since = Some(a.menu_clock() - 1.0);
+        a.draw(&mut c, &mut text);
+        assert!(count_of(&c.px, SCENE_COLOUR) > w * h / 2);
+        assert_eq!(a.frame_interval(), FRAME);
+        // The settings: no scene behind them, and it sleeps (once).
+        a.input(Input::Down);
+        a.input(Input::A);
+        assert_eq!(a.label(), "settings");
+        let asked = scene.asks().len();
+        a.tick(Instant::now());
+        a.draw(&mut c, &mut text);
+        a.tick(Instant::now());
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        assert_eq!(scene.asks().len(), asked);
+        assert_eq!(scene.sleeps(), 1);
+        assert!(!a.scene_shown);
+        // Back on the main menu it wakes: its last frame is there at once,
+        // and its clock went on from where it stopped.
+        let stopped = scene.asks().last().unwrap().2;
+        a.input(Input::B);
+        assert_eq!(a.label(), "main");
+        a.draw(&mut c, &mut text);
+        assert!(count_of(&c.px, SCENE_COLOUR) > w * h / 2);
+        assert!((scene.asks().last().unwrap().2 - stopped).abs() < 1e-9);
+        a.tick(Instant::now());
+        assert_eq!(scene.sleeps(), 1);
+        // ONLINE's screens have none either.
+        let (mut a, _server) = live_app(&dir);
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let source: Arc<dyn SceneSource> = scene.clone();
+        a.cfg.scene = Some(source);
+        a.draw(&mut c, &mut text);
+        assert_eq!(a.label(), "live");
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        assert!(scene.asks().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_match_puts_the_flythrough_to_sleep_before_its_engine_starts() {
+        let dir = scratch("scene-match");
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let source: Arc<dyn SceneSource> = scene.clone();
+        // A match needs the server's address: a real connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ours = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _theirs = listener.accept().unwrap();
+        let mut a = live_app_over(&dir, Connection::tcp(ours).unwrap());
+        a.cfg.scene = Some(source);
+        // On the main menu (signed in), drawing the scene.
+        a.screen = Screen::Main;
+        let mut c = Canvas::new(64, 36);
+        a.draw_menu(&mut c, &mut Vec::new());
+        assert_eq!(scene.asks().len(), 1);
+        a.on_event(LiveEvent::LauncherMatch(a_match()));
+        assert_eq!(a.label(), "pregame");
+        assert_eq!(scene.sleeps(), 1);
+        // While the match is on, nothing is asked for, even on the menus.
+        a.screen = Screen::Main;
+        a.draw_menu(&mut c, &mut Vec::new());
+        assert_eq!(scene.asks().len(), 1);
+        assert_eq!(scene.sleeps(), 1);
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_flythrough_that_fails_leaves_the_still_background_and_says_why_once() {
+        let dir = scratch("scene-failed");
+        let scene = FakeScene::new(SCENE_COLOUR);
+        *scene.state.lock().unwrap() = SceneState::Failed("no GPU".into());
+        let (mut a, lines) = scene_app(&dir, &scene);
+        let mut c = Canvas::new(64, 36);
+        for _ in 0..3 {
+            a.draw_menu(&mut c, &mut Vec::new());
+            a.tick(Instant::now());
+        }
+        assert!(scene.asks().is_empty());
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        let said: Vec<String> = lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("scene"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            said,
+            ["menus: the scene can't be drawn (no GPU); the still background from now on"]
+        );
+        // Not read yet: the still background, while it is asked for.
+        let scene = FakeScene::new(SCENE_COLOUR);
+        *scene.state.lock().unwrap() = SceneState::Loading;
+        *scene.ready.lock().unwrap() = false;
+        let (mut a, _) = scene_app(&dir, &scene);
+        a.draw_menu(&mut c, &mut Vec::new());
+        assert_eq!(scene.asks().len(), 1);
+        assert_eq!(count_of(&c.px, SCENE_COLOUR), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_window_draws_faster_behind_the_flythrough_only_when_asked() {
+        let dir = scratch("scene-fps");
+        let scene = FakeScene::new(SCENE_COLOUR);
+        let (mut a, _) = scene_app(&dir, &scene);
+        let mut c = Canvas::new(64, 36);
+        a.draw_menu(&mut c, &mut Vec::new());
+        assert!(a.scene_shown);
+        assert_eq!(a.frame_interval(), FRAME);
+        a.cfg.scene_fast = true;
+        assert_eq!(a.frame_interval(), FRAME_MOVIE);
+        // Not on the other screens, nor before the scene shows.
+        a.screen = Screen::Settings;
+        assert_eq!(a.frame_interval(), FRAME);
+        a.screen = Screen::Start;
+        a.scene_shown = false;
+        assert_eq!(a.frame_interval(), FRAME);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_flythrough_cross_fades_in_over_a_quarter_second() {
+        assert_eq!(scene_alpha(-1.0), 0.0);
+        assert_eq!(scene_alpha(0.0), 0.0);
+        assert!((scene_alpha(SCENE_FADE / 2.0) - 0.5).abs() < 1e-6);
+        assert_eq!(scene_alpha(SCENE_FADE), 1.0);
+        assert_eq!(scene_alpha(60.0), 1.0);
+        let under = [0x0000_0000, 0x00FF_FFFF, 0x0010_2030];
+        let top = [0x00FF_8040, 0x0000_0000, 0x0010_2030];
+        let blend = |alpha: f32| {
+            let mut px = under;
+            blend_px(&mut px, &top, alpha);
+            px
+        };
+        assert_eq!(blend(0.0), under);
+        assert_eq!(blend(1.0), top);
+        assert_eq!(blend(0.5), [0x0080_4020, 0x0080_8080, 0x0010_2030]);
+        assert_eq!(blend(0.25)[0], 0x0040_2010);
+    }
+
+    #[test]
+    fn the_menus_log_line_says_how_long_the_scenes_copy_took() {
+        let dir = scratch("scene-timer");
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let mut a = App::new(Config {
+            log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
+            ..app(&dir).cfg
+        });
+        a.screen = Screen::Main;
+        a.menu_times.backgrounds.push(((640, 360), 20.0));
+        for _ in 0..=MENU_FRAMES {
+            a.time_frame((640, 360), 3.0, true, Some(1.5));
+        }
+        a.screen = Screen::Start;
+        for _ in 0..MENU_FRAMES {
+            a.time_frame((1280, 720), 3.0, true, Some(1.5));
+        }
+        a.time_frame((1280, 720), 3.0, true, Some(1.5));
+        // At the same size, a screen that copied none in (the scene
+        // failed after the start screen's) says nothing of copies.
+        a.screen = Screen::Main;
+        a.menu_times.backgrounds.push(((1280, 720), 20.0));
+        for _ in 0..MENU_FRAMES {
+            a.time_frame((1280, 720), 3.0, true, None);
+        }
+        // Each screen's copy time is its own.
+        a.screen = Screen::Start;
+        for _ in 0..=MENU_FRAMES {
+            a.time_frame((320, 180), 3.0, true, Some(1.0));
+        }
+        a.screen = Screen::Main;
+        for i in 0..MENU_FRAMES {
+            a.time_frame((320, 180), 3.0, true, (i % 2 == 0).then_some(4.0));
+        }
+        assert_eq!(
+            *lines.lock().unwrap(),
+            [
+                "menus: 640x360, main menu 3.0 ms a frame on the CPU (the scene's frame copied in 1.5 ms; background 20 ms once)",
+                "menus: 1280x720, start screen 3.0 ms a frame on the CPU (the scene's frame copied in 1.5 ms)",
+                "menus: 1280x720, main menu 3.0 ms a frame on the CPU (background 20 ms once)",
+                "menus: 320x180, start screen 3.0 ms a frame on the CPU (the scene's frame copied in 1.0 ms)",
+                "menus: 320x180, main menu 3.0 ms a frame on the CPU (the scene's frame copied in 4.0 ms)",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn each_screen_is_timed_once_per_window_size() {
+        let dir = scratch("timer");
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let mut a = App::new(Config {
+            log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
+            ..app(&dir).cfg
+        });
+        let frames = |a: &mut App, screen: Screen, size: (usize, usize), n: u32| {
+            a.screen = screen;
+            for _ in 0..n {
+                a.time_frame(size, 1.0, true, None);
+            }
+        };
+        let logged = || lines.lock().unwrap().clone();
+        // The first frame at a size isn't timed.
+        frames(&mut a, Screen::Players, (640, 360), MENU_FRAMES);
+        assert!(logged().is_empty(), "{:?}", logged());
+        frames(&mut a, Screen::Players, (640, 360), 1);
+        assert_eq!(
+            logged(),
+            ["lobby: 640x360, players 1.0 ms a frame on the CPU"]
+        );
+        // Once per screen and size.
+        frames(&mut a, Screen::Players, (640, 360), MENU_FRAMES * 2);
+        assert_eq!(logged().len(), 1);
+        // Frames that aren't timed don't count.
+        a.screen = Screen::Party;
+        for _ in 0..MENU_FRAMES {
+            a.time_frame((640, 360), 9.0, false, None);
+        }
+        frames(&mut a, Screen::Party, (640, 360), MENU_FRAMES - 1);
+        assert_eq!(logged().len(), 1);
+        frames(&mut a, Screen::Party, (640, 360), 1);
+        assert_eq!(
+            logged()[1],
+            "lobby: 640x360, party 1.0 ms a frame on the CPU"
+        );
+        // Another size: once more there; back at the first, nothing new.
+        frames(&mut a, Screen::Players, (1920, 1080), MENU_FRAMES + 1);
+        assert_eq!(
+            logged()[2],
+            "lobby: 1920x1080, players 1.0 ms a frame on the CPU"
+        );
+        frames(&mut a, Screen::Players, (640, 360), MENU_FRAMES * 2);
+        assert_eq!(logged().len(), 3);
+        // The menus keep their line, with the background's time.
+        a.menu_times.backgrounds.push(((640, 360), 20.0));
+        frames(&mut a, Screen::Main, (640, 360), MENU_FRAMES);
+        assert_eq!(
+            logged()[3],
+            "menus: 640x360, main menu 1.0 ms a frame on the CPU (background 20 ms once)"
+        );
+        // Every screen has a name of its own.
+        let screens = [
+            Screen::Intro,
+            Screen::Start,
+            Screen::Main,
+            Screen::SignIn,
+            Screen::Connecting,
+            Screen::Live,
+            Screen::Players,
+            Screen::Party,
+            Screen::Custom,
+            Screen::Pregame,
+            Screen::InGame,
+            Screen::Carnage,
+            Screen::Failed,
+            Screen::Record,
+            Screen::Friends,
+            Screen::Settings,
+        ];
+        let mut names: Vec<&str> = screens
+            .iter()
+            .map(|&s| {
+                a.screen = s;
+                a.timer_name()
+            })
+            .collect();
+        // The playlists while the party searches have their own.
+        let (mut b, _server) = live_app(&dir);
+        view(&mut b).party = Some(party(500, Activity::Searching));
+        assert_eq!(b.timer_name(), "searching");
+        names.push(b.timer_name());
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), screens.len() + 1);
+        // Through `draw` on a lobby screen, when there is a font.
+        let Ok(mut text) = Text::system() else {
+            return;
+        };
+        a.screen = Screen::Settings;
+        let mut c = Canvas::new(320, 180);
+        for _ in 0..=MENU_FRAMES {
+            a.draw(&mut c, &mut text);
+        }
+        let line = logged().pop().unwrap();
+        assert!(
+            line.starts_with("lobby: 320x180, settings ")
+                && line.ends_with(" ms a frame on the CPU"),
+            "{line}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lobby opening on the intro, played from the made-up `source`,
+    /// with its log.
+    fn intro_app(
+        dir: &std::path::Path,
+        source: intro::FakeSource,
+    ) -> (App, Arc<Mutex<Vec<String>>>) {
+        intro_app_with(dir, source, None)
+    }
+
+    /// `intro_app`, with the small movie too when `low` names it.
+    fn intro_app_with(
+        dir: &std::path::Path,
+        source: intro::FakeSource,
+        low: Option<&str>,
+    ) -> (App, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = lines.clone();
+        let slot = Mutex::new(Some(source));
+        let open: intro::Opener = Arc::new(move |_: &std::path::Path| {
+            let source = slot.lock().unwrap().take().expect("opened once");
+            Box::new(source) as Box<dyn intro::MovieSource>
+        });
+        let a = App::new(Config {
+            log: Arc::new(move |l: &str| kept.lock().unwrap().push(l.to_string())),
+            intro: Some(Plan {
+                full: Some(PathBuf::from("intro_60.wmv")),
+                low: low.map(PathBuf::from),
+                open,
+            }),
+            ..app(dir).cfg
+        });
+        (a, lines)
+    }
+
+    /// Tick `a` at `t` until `done`, giving the decoder's thread time to
+    /// send (the lobby's clock stays at `t`).
+    fn tick_until(a: &mut App, t: Instant, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            a.tick(t);
+            if done(a) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "still waiting on {}", a.label());
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// The red of the intro's picture showing, if one is.
+    fn intro_red(a: &App) -> Option<u8> {
+        let shown = a.intro.as_ref().and_then(Intro::showing);
+        shown.map(|(p, _)| p.rgba[0])
+    }
+
+    #[test]
+    fn the_intro_plays_before_the_start_screen_and_goes_on_at_its_end() {
+        let dir = scratch("intro-end");
+        let (mut a, lines) = intro_app(&dir, intro::FakeSource::second());
+        let mut text = Text::none();
+        assert_eq!(a.label(), "intro");
+        assert_eq!(a.frame_interval(), FRAME_MOVIE);
+        let t0 = Instant::now();
+        a.tick(t0);
+        assert!(!a.music_on());
+        // Nothing is decoded before the first draw, which starts it, on
+        // black.
+        assert!(a.intro.is_none());
+        let mut c = Canvas::new(64, 36);
+        c.px.fill(0xFF_FFFF);
+        a.draw(&mut c, &mut text);
+        assert!(c.px.iter().all(|&p| p == 0));
+        assert!(a.intro.is_some());
+        assert_eq!(
+            lines.lock().unwrap()[0],
+            "intro: playing intro_60.wmv (64x36 window)"
+        );
+        // Its soundtrack comes first, for the sound to play, and the
+        // movie's clock starts.
+        tick_until(&mut a, t0, |a| intro_red(a).is_some());
+        let sound = a.take_sound();
+        assert!(
+            matches!(sound.as_slice(), [SoundOut::Movie(_)]),
+            "{sound:?}"
+        );
+        // Pictures by their time (red is the picture's number), as large
+        // as fits: a 4:3 picture in a 16:9 window has bars at its sides.
+        let red = |c: &Canvas, x: usize| (c.px[18 * c.w + x] >> 16) & 0xFF;
+        for (ms, k) in [(510, 15), (680, 20)] {
+            let t = t0 + Duration::from_millis(ms);
+            tick_until(&mut a, t, |a| intro_red(a) == Some(k));
+            a.draw(&mut c, &mut text);
+            assert!(red(&c, 32).abs_diff(u32::from(k)) <= 1, "{}", red(&c, 32));
+            assert_eq!(c.px[18 * 64 + 2], 0);
+            assert_eq!(c.px[18 * 64 + 61], 0);
+        }
+        assert_eq!(a.label(), "intro");
+        assert!(!a.music_on());
+        // The decoder finished, and the movie played out: the start
+        // screen, its music, and no cue.
+        tick_until(&mut a, t0 + Duration::from_secs(2), |a| {
+            a.screen == Screen::Start
+        });
+        assert_eq!(a.take_sound(), [SoundOut::StopMovie]);
+        let played = lines.lock().unwrap().last().cloned().unwrap();
+        assert!(
+            played.starts_with("intro: played to the end (") && played.contains(" 30 pictures, "),
+            "{played}"
+        );
+        assert!(a.music_on());
+        assert_eq!(a.frame_interval(), FRAME);
+        // The start screen opens at its first draw (its intro animations
+        // start then).
+        a.draw(&mut c, &mut text);
+        assert_eq!(a.drawn_screen, Some(Screen::Start));
+        assert!(a.intro.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn any_button_or_a_click_skips_the_intro_but_a_direction_doesnt() {
+        let dir = scratch("intro-skip");
+        let skips = [
+            Input::A,
+            Input::B,
+            Input::X,
+            Input::Y,
+            Input::Lb,
+            Input::Rb,
+            Input::Lt,
+            Input::Rt,
+            Input::Backspace,
+            Input::Char(' '),
+            Input::Char('z'),
+        ];
+        for i in skips {
+            let (mut a, lines) = intro_app(&dir, intro::FakeSource::second());
+            let t0 = Instant::now();
+            a.tick(t0);
+            a.draw(&mut Canvas::new(64, 36), &mut Text::none());
+            tick_until(&mut a, t0, |a| intro_red(a).is_some());
+            for d in [
+                Input::Up,
+                Input::Down,
+                Input::Left,
+                Input::Right,
+                Input::Tab,
+            ] {
+                a.input(d);
+                assert_eq!(a.label(), "intro", "{d:?}");
+            }
+            a.input(i);
+            assert_eq!(a.label(), "start", "{i:?}");
+            // The soundtrack stops, and leaving sounds nothing.
+            let sound = a.take_sound();
+            assert_eq!(sound.last(), Some(&SoundOut::StopMovie), "{i:?}");
+            assert!(
+                !sound.iter().any(|s| matches!(s, SoundOut::Cue(_))),
+                "{i:?}"
+            );
+            let skipped = lines.lock().unwrap().last().cloned().unwrap();
+            assert!(skipped.starts_with("intro: skipped at "), "{skipped}");
+            assert!(a.intro.is_none());
+            a.tick(t0);
+            assert!(a.music_on());
+            // The start screen takes the next press as ever.
+            if i == Input::A {
+                a.input(Input::A);
+                assert_eq!(a.label(), "main");
+            }
+        }
+        // A click anywhere, and the second half of a double-click doesn't
+        // go on from the start screen.
+        let (mut a, _) = intro_app(&dir, intro::FakeSource::second());
+        a.tick(Instant::now());
+        a.draw(&mut Canvas::new(64, 36), &mut Text::none());
+        a.click(10.0, 10.0);
+        assert_eq!(a.label(), "start");
+        assert_eq!(a.take_sound(), [SoundOut::StopMovie]);
+        a.click(10.0, 10.0);
+        assert_eq!(a.label(), "start");
+        // Without an intro (no movie, headless, switched off) the lobby
+        // opens on the start screen, with its music.
+        let a = app(&dir);
+        assert_eq!(a.label(), "start");
+        assert!(a.music_on());
+        assert_eq!(a.frame_interval(), FRAME);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_key_held_to_skip_the_intro_skips_only_the_movie() {
+        // Windows repeats a held key; Halo 2 repeats only directions, so
+        // the repeats of a key that is a button do nothing: Enter held
+        // through the intro leaves the start screen showing rather than
+        // going on to the main menu and signing in, and Esc held doesn't
+        // open and shut the Quit popup.
+        let dir = scratch("intro-held");
+        let buttons = [
+            Input::A,
+            Input::B,
+            Input::Lb,
+            Input::Rb,
+            Input::Backspace,
+            Input::Char(' '),
+            Input::Char('a'),
+            Input::Char('b'),
+            Input::Char('q'),
+            Input::Char('e'),
+        ];
+        for held in buttons {
+            let (mut a, _) = intro_app(&dir, intro::FakeSource::second());
+            let t0 = Instant::now();
+            a.tick(t0);
+            a.draw(&mut Canvas::new(64, 36), &mut Text::none());
+            tick_until(&mut a, t0, |a| intro_red(a).is_some());
+            a.key(held);
+            assert_eq!(a.label(), "start", "{held:?}");
+            a.take_sound();
+            for _ in 0..5 {
+                a.key_repeated(held);
+            }
+            assert_eq!(a.label(), "start", "{held:?}");
+            assert_eq!(a.popup, None, "{held:?}");
+            assert!(a.take_cues().is_empty(), "{held:?}");
+        }
+        // On the main menu the arrows still repeat, and the buttons don't.
+        let mut a = app(&dir);
+        a.key(Input::A);
+        assert_eq!(a.label(), "main");
+        let row = a.main_focus.item;
+        a.key_repeated(Input::Down);
+        assert_eq!(a.main_focus.item, row + 1);
+        a.key_repeated(Input::Up);
+        assert_eq!(a.main_focus.item, row);
+        a.take_cues();
+        for held in buttons {
+            a.key_repeated(held);
+            assert_eq!(a.label(), "main", "{held:?}");
+            assert_eq!(a.main_focus.item, row, "{held:?}");
+        }
+        assert!(a.take_cues().is_empty());
+        // Where a name is typed, the letters and Backspace repeat.
+        a.key(Input::A);
+        assert_eq!(a.label(), "signin");
+        a.field = 0;
+        for c in "kab".chars() {
+            a.key_repeated(Input::Char(c));
+        }
+        assert_eq!(a.fields[0], "KAB");
+        a.key_repeated(Input::Backspace);
+        assert_eq!(a.fields[0], "KA");
+        a.key_repeated(Input::A);
+        assert_eq!(a.label(), "signin");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_triggers_do_nothing_but_skip_the_intro() {
+        // Halo 2 skips its movies on any button but the d-pad and the
+        // stick clicks, the triggers too (0x156ab0, above); elsewhere the
+        // lobby gives them nothing to do, so they change nothing and
+        // sound nothing.
+        let dir = scratch("triggers");
+        let mut a = app(&dir);
+        let mut text = Text::none();
+        let mut c = Canvas::new(320, 180);
+        a.draw(&mut c, &mut text);
+        for t in [Input::Lt, Input::Rt] {
+            a.input(t);
+            assert_eq!(a.label(), "start", "{t:?}");
+        }
+        a.input(Input::A);
+        assert_eq!(a.label(), "main");
+        a.take_sound();
+        a.draw(&mut c, &mut text);
+        let row = a.main_focus.item;
+        for t in [Input::Lt, Input::Rt] {
+            a.input(t);
+            assert_eq!(a.label(), "main", "{t:?}");
+            assert_eq!(a.main_focus.item, row);
+            assert_eq!(a.popup, None);
+        }
+        assert!(a.take_sound().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_windows_height_at_the_first_draw_picks_the_movie() {
+        // Width and height on opposite sides of 720: only the height
+        // counts (`Plan::file`).
+        let dir = scratch("intro-low");
+        for ((w, h), file) in [
+            ((1280, 700), "intro_low_60.wmv"),
+            ((640, 720), "intro_60.wmv"),
+        ] {
+            let source = intro::FakeSource::second();
+            let (mut a, lines) = intro_app_with(&dir, source, Some("intro_low_60.wmv"));
+            a.tick(Instant::now());
+            a.draw(&mut Canvas::new(w, h), &mut Text::none());
+            assert_eq!(
+                lines.lock().unwrap()[0],
+                format!("intro: playing {file} ({w}x{h} window)")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_intros_new_pictures_are_timed() {
+        // The decoder says nothing for a while (Media Foundation reads
+        // the whole soundtrack first): those black frames cost next to
+        // nothing and aren't timed, nor is a picture drawn again, so the
+        // log's `intro` time is a new picture's.
+        let dir = scratch("intro-timer");
+        let (go, wait) = std::sync::mpsc::channel();
+        let source = intro::FakeSource {
+            wait: Some(wait),
+            ..intro::FakeSource::second()
+        };
+        let (mut a, lines) = intro_app(&dir, source);
+        let mut text = Text::none();
+        let mut c = Canvas::new(64, 36);
+        let t0 = Instant::now();
+        a.tick(t0);
+        let timed = |a: &App| {
+            let f = a.menu_times.frames.iter().find(|f| f.name == "intro");
+            f.map_or(0, |f| f.frames)
+        };
+        let logged = |lines: &Mutex<Vec<String>>| {
+            let lines = lines.lock().unwrap();
+            lines
+                .iter()
+                .filter(|l| l.starts_with("lobby: 64x36, intro "))
+                .count()
+        };
+        for _ in 0..2 * MENU_FRAMES {
+            a.draw(&mut c, &mut text);
+            a.tick(t0);
+        }
+        assert!(intro_red(&a).is_none());
+        assert_eq!(timed(&a), 0);
+        go.send(()).unwrap();
+        // Each picture in turn (red is its number, at k/30 s on the
+        // movie's clock, which starts at t0 with the decoder's first
+        // word), drawn twice: only the first draw counts.
+        for k in 0..MENU_FRAMES {
+            let after = if k == 0 { 0.0 } else { 0.001 };
+            let t = t0 + Duration::from_secs_f64(f64::from(k) / 30.0 + after);
+            tick_until(&mut a, t, |a| intro_red(a).map(u32::from) == Some(k));
+            a.draw(&mut c, &mut text);
+            a.draw(&mut c, &mut text);
+            if k + 1 < MENU_FRAMES {
+                assert_eq!(timed(&a), k + 1);
+                assert_eq!(logged(&lines), 0);
+            }
+        }
+        assert_eq!(logged(&lines), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stalled_or_failing_intro_goes_on_to_the_start_screen() {
+        let dir = scratch("intro-stall");
+        // Two pictures, then the decoder says nothing (it holds on).
+        let (keep, hold) = std::sync::mpsc::channel();
+        let source = intro::FakeSource {
+            pictures: 2,
+            hold: Some(hold),
+            ..intro::FakeSource::second()
+        };
+        let (mut a, lines) = intro_app(&dir, source);
+        let t0 = Instant::now();
+        a.tick(t0);
+        a.draw(&mut Canvas::new(64, 36), &mut Text::none());
+        // Its clock starts at its first word (t0).
+        tick_until(&mut a, t0, |a| intro_red(a) == Some(0));
+        let t1 = t0 + Duration::from_millis(50);
+        tick_until(&mut a, t1, |a| intro_red(a) == Some(1));
+        a.tick(t1 + intro::STALL - Duration::from_millis(100));
+        assert_eq!(a.label(), "intro");
+        a.tick(t1 + intro::STALL + Duration::from_millis(100));
+        assert_eq!(a.label(), "start");
+        assert_eq!(
+            lines.lock().unwrap().last().unwrap(),
+            "intro: the decoder sent nothing for 5 s; skipped"
+        );
+        assert_eq!(a.take_sound().last(), Some(&SoundOut::StopMovie));
+        drop(keep);
+        // One that can't be played says why.
+        let source = intro::FakeSource {
+            pictures: 0,
+            sound_seconds: 0.0,
+            fail: Some("Media Foundation: no decoder".into()),
+            ..intro::FakeSource::second()
+        };
+        let (mut a, lines) = intro_app(&dir, source);
+        let t0 = Instant::now();
+        a.tick(t0);
+        a.draw(&mut Canvas::new(64, 36), &mut Text::none());
+        tick_until(&mut a, t0, |a| a.screen == Screen::Start);
+        assert_eq!(
+            lines.lock().unwrap().last().unwrap(),
+            "intro: Media Foundation: no decoder; skipped"
+        );
+        assert!(a.music_on());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

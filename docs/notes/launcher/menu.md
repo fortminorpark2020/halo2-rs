@@ -1,9 +1,10 @@
 # The launcher's Halo 2 menus
 
-The plan for re-creating the original Xbox Halo 2 menus in the launcher, on
-`launcher-menu` (based on `launcher-friends`). Phase 0's reader and drawing
-pieces are built, and the start screen and main menu draw from the tags;
-the lobby doesn't show them yet ("What Phase 0 built", section 7).
+The plan for re-creating the original Xbox Halo 2 menus in the launcher.
+Phases 0 and 1 were built on `launcher-menu` (based on
+`launcher-friends`): the lobby opens on Halo 2's start screen and main
+menu, drawn from the tags. Phase 2 (widened, section 7) goes on on
+`launcher-menu2`, one sub-phase at a time.
 
 The owner asked (2026-10-10): "I also want to re-create the original halo 2
 menu from the halo 2 xbox version", and "make the main menu a priority". At
@@ -99,7 +100,7 @@ that each one replaces.
 | Select Player (0xC1) and Profile Name keyboard (0xA7) | the gamertags used on this PC, plus a new one typed in | SignIn | 2 |
 | "Please Wait" (0xB6), "SIGNING INTO XBOX LIVE" | while connecting to h2live | Connecting | 2 |
 | XBOX LIVE (0xBA): Quickmatch, Optimatch, Create Party, Content Download | the first three; picture and help line per row, "Latest news" from the server's message of the day (sent with CHALLENGE) | Live (its list half) | 2 |
-| Choose matchmaking playlist (0xDB; 0xED from the lobby) | our launcher playlists: name, your level icon, "N players in this playlist" | Live (playlists) | 2 |
+| Choose matchmaking playlist (0xDB; 0xED from the lobby) | our launcher playlists: name, your level icon, "N players in this playlist" (the icon and the count are our additions) | Live (playlists) | 2 |
 | PREGAME LOBBY (0xE): START GAME, GAME SETUP, mode block, party status, 16-row player list | the party hub | Live (party panel), Party, Custom | 2 |
 | Game Setup (0x17), Party Privacy (0x19), Select New Leader (0xB1), Boot Player (0xB8), Select Map (0xCE), Select Game (0xCF) | as Halo 2, over our party and custom-game messages | Party, Custom | 2 |
 | Y menu players list (0x1A): FRIENDS, CLAN, PLAYERS tabs | FRIENDS and PLAYERS (everyone signed in); level icon and status columns | Friends, Players | 2 |
@@ -131,7 +132,7 @@ The lobby's current keys move to Halo 2's:
 
 - A or Start selects; B or Back goes back.
 - The d-pad or the left stick moves. The stick counts only past about 90%
-  (H; the lobby uses 60% today). Holding repeats every 250 ms (H).
+  (H; the lobby used 60% until 2.6). Holding repeats every 250 ms (H).
 - X opens options (Y menu) or changes teams (lobby).
 - In the Y menu, LB and RB change tabs, and so do Left and Right. Halo 2's
   own choice isn't known (L).
@@ -158,7 +159,8 @@ stay as PC extras but leave the button legends.
   - After a keyboard key, the legend uses key names instead. Those legends
     are built in code, because Vista's keyboard variants are mangled in the
     tags.
-  - The lobby already tracks whether a pad or the keyboard was used last.
+  - The lobby tracks whether a pad or the keyboard was used last since
+    2.6 ("What Phase 2.6 built").
 - **Transitions.** Fades of 250 ms. Pieces slide in from the right one after
   another over 180 to 320 ms, and slide out to the left when a screen
   closes.
@@ -249,7 +251,7 @@ stay as PC extras but leave the button legends.
     reader, none of which exists: several weeks plus research. Until then,
     players with only MCC get no scene.
 - **Fidelity:** medium-high. There are no particles or bloom, and the
-  camera roll sign and the 70 degree field of view are unverified.
+  70 degree field of view is unverified.
 - It also revives the renderer the pivot meant to stop maintaining.
 
 ### (C) Halo 2's 2D UI over a still background
@@ -340,31 +342,37 @@ Two more things to measure before choosing A:
   - New `Screen` values: `Start`, `Main`, `Settings` and the settings
     sub-screens.
 
-## 3. What comes from MCC and what from Halo 2 Vista
+## 3. What comes from Halo 2 Vista and what from MCC
 
-Other players have MCC only, so MCC comes first everywhere. The owner also
-has Vista (Project Cartographer, `maps\mainmenu.map`), which serves as the
-second source and as a check on the first. The log says which source each
-piece came from, as it does for the rank icons.
+Since Phase 2 (widened, section 7), Halo 2 Vista as Project Cartographer
+installs it comes first, and MCC second: Vista has everything the menus
+use (music, sounds, the scene and the intro too), and MCC's own files
+have the same art, layouts, fonts and rank icons, which is what friends
+without Cartographer get. One finder (`lobby/sources.rs`) picks the
+Vista folder: `H2LOBBY_VISTA` (the folder or its `maps`, or `off`), else
+`vista =` in `lobby.txt`, else the usual folders (`ranks::MAP_DIRS`).
+The log says which source each piece came from.
 
 | What | First | Second | Last |
 |---|---|---|---|
-| Fonts | MCC `halo2\h2_fonts` (done) | Vista `maps\fonts` | a system font (done) |
-| Screen layouts (UI tags) | MCC `mainmenu.map`, format 13 | Vista `mainmenu.map` | numbers in `h2ui::layout` |
-| UI pictures | MCC `textures.dat` | Vista `mainmenu.map` | flat shapes in Halo 2's colours |
-| Rank icons | MCC (done) | Vista (done) | numbers (done) |
-| Map pictures and names | MCC `mainmenu.map` (`matg` UI level data) | Vista | names from `names.rs` |
-| Help and status texts | MCC's string tables | Vista's | our own short words |
+| Fonts | Vista `maps\fonts` (2.1) | MCC `halo2\h2_fonts` (done) | a system font (done) |
+| Screen layouts (UI tags) | Vista `mainmenu.map` | MCC `mainmenu.map`, format 13 | numbers in `h2ui::layout` |
+| UI pictures | Vista `mainmenu.map` | MCC `textures.dat` | flat shapes in Halo 2's colours |
+| Rank icons | Vista (done) | MCC (done) | numbers (done) |
+| Map pictures and names | Vista | MCC `mainmenu.map` (`matg` UI level data) | names from `names.rs` |
+| Help and status texts | Vista's string tables | MCC's | our own short words |
 | Button glyphs | Halo 2's fonts (U+E100 to U+E105) | | a letter in a circle |
-| UI sounds and music | MCC's sound tags (once researched; section 5) | Vista's (menu-preview's decoders) | silent |
-| The flythrough | the engine in UI shell (A) | our renderer on Vista files (B, only if built) | the navy framing (C) |
-| Intro and attract movies | a movie in MCC, if one exists | Vista `movie\intro_60.wmv` (Media Foundation) | skipped |
+| UI sounds and music | Vista's sound tags (menu-preview's decoders; 2.2) | MCC's, once researched (section 5; later) | silent |
+| The flythrough | our renderer on Vista files (2.4, 2.5) | | the still background (C) |
+| Intro movie | Vista `movie\intro_60.wmv` (Media Foundation; 2.3) | | skipped |
 
-Two settings, in the same style as `H2LOBBY_RANKS`:
+Settings in the same style as `H2LOBBY_RANKS`:
 
+- `H2LOBBY_VISTA=<folder>` names the Cartographer folder (or its
+  `maps`), and `off` uses none: menus, fonts and rank icons from MCC.
 - `H2LOBBY_MENU=<map or folder>` points at another `mainmenu.map`, and
   `off` gives the flat look. Tests use the flat look.
-- `H2LOBBY_SOUND=off` silences the menus.
+- `H2LOBBY_SOUND=off` silences the menus (from 2.2).
 
 ### What the format-13 reader still needs
 
@@ -442,9 +450,18 @@ What Halo 2 does (H):
 | message or invite arrives | `receive_message` |
 | lobby countdown, each of 3, 2, 1, 0 | `countdown_for_respawn` |
 | a key on the on-screen keyboard | `virtual_keyboard_click` |
+| the start screen goes on to the main menu | `transport` (0x22f28c) |
 
 **The music** is `sound\ui\main_menu_music\main_menu_music`: an `in` track,
-then a `loop`, with a 5.5 s fade.
+then a `loop`, at its track's gain (-6 dB in Vista's).
+
+- It starts or stops at most once every 6 s (0x235b9c); a change asked
+  for sooner waits. Each start is a new looping sound, from `in` again.
+- Stopped, it fades out over its track's own fade-out (5.0 s in Vista's,
+  the track's fade-at-stop flag set; no fade-in).
+- The globals' 5500 ms at 0x1C0 is not a fade: it is how long before the
+  idle attract movie the music is stopped (the decompilation's "silence
+  time", 0x223976).
 
 - It is switched on at the start screen and the main menu.
 - It is switched off on the XBOX LIVE screen, the System Link browser and
@@ -700,7 +717,8 @@ XBOX LIVE, not between the start screen and the main menu.
   and notices are drawn over them with the lobby's own pen.
 - Loading (`lobby/mod.rs`, `menus`): `H2LOBBY_MENU` (a map or its folder,
   or `off`), else the rank icons' candidates (`ranks::candidates`: MCC's
-  mainmenu.map, then Vista's folders, then `maps` beside the launcher);
+  mainmenu.map, then Vista's folders, then `maps` beside the launcher;
+  2.1 puts Vista's first);
   the first that gives pictures is used, else the first that opened,
   drawn flat with its layouts, else the flat look. `Shell::open` logs its
   `menus:` lines to `lobby.log`. The fonts are `Fonts::read` on
@@ -715,88 +733,1887 @@ XBOX LIVE, not between the start screen and the main menu.
   PRESS START is back at the top of its pulse), holding the script. On the container, flat, at 1280x720: about
   1 ms a frame and 6 ms for the background.
 
-### Phase 2: the Xbox Live screens over our features, and settings
+### Phase 2 (widened, 2026-10-11)
 
-**1. The shell.** `game_shell_background`, headers, legends, transitions,
-list skins, dialogs and the overlay dimming.
+This replaces the first Phase 2 plan. What was still true of it is kept
+below, under the sub-phase it now belongs to.
 
-**2. Sign in and the Live menu.**
+**The owner's direction.** The menus should look and feel as close to
+the original Xbox Halo 2 as possible; that comes before anything else.
+On the main menu he asked for Cartographer's music, intro movie and look.
+Every screen works with a pad alone. The word is ONLINE, never XBOX LIVE,
+and the Xbox Live logo is never drawn. No campaign, and nothing touches
+halo2.dll.
 
-- Select Player and the gamertag keyboard. An on-screen keyboard is needed
-  for controller-only players; `controller-wip` has one to borrow from.
-- "Please Wait" while connecting, then the XBOX LIVE screen:
-  - **Quickmatch** searches at once. The Xbox code doesn't say which
-    playlist; we take the party's last one, or the one with the most
-    players.
-  - **Optimatch** opens the playlists.
-  - **Create Party** opens the pregame lobby. On h2live you are always in a
-    party, so this only changes the screen.
+**Where Halo 2's files come from** (`lobby/sources.rs`, section 3):
 
-**3. The playlist screen**, with your level icon per playlist and "N players
-in this playlist" from the server's searching and playing counts.
+1. **Cartographer first**: Halo 2 Vista as Project Cartographer installs
+   it gives the art, the layouts, the fonts, the rank icons, the UI
+   sounds, the music, the 3D menu scene and the intro movie.
+2. **MCC second**: its own Halo 2 files give the art, the layouts, the
+   fonts and the rank icons (the same as Vista's: 133 of 133 screens).
+   They give no music, scene or intro yet (format 13's sounds and
+   geometry aren't read, and its movies are Bink 2).
+3. **Then the built-ins**: the flat look, the built-in font, level
+   numbers, silence, the still background and no movie.
 
-**4. The pregame lobby as the party's home.**
+The finder decides once, when the lobby opens: `H2LOBBY_VISTA` (the
+Cartographer folder or its `maps` folder), else `vista =` in
+`lobby.txt`, else the first of `ranks::MAP_DIRS` that holds a
+mainmenu.map. `off` in either place shows what friends without
+Cartographer get: then nothing comes from a Vista folder at all, not even
+through `MAP_DIRS`. Nothing from either install goes into the repository
+or the friends' zip.
 
-- START GAME (leader) searches the playlist, or starts the custom game.
-- GAME SETUP opens:
-  - Change Match Settings, Switch To: Custom Game;
-  - or Change Map, Change Rules, Switch To: Matchmaking.
-- Party Privacy offers Open and Invite Only. Closed needs the server and
-  comes later.
-- Y opens the players list; X changes teams in a custom game.
-- The lines on the left:
-  - "Matchmaking / In <playlist>", or the custom game's type and map with
-    the map picture;
-  - "Party is OPEN / INVITE ONLY";
-  - one status line.
-- On the right:
-  - up to 16 players with their level icon and gamertag;
-  - "N players in party";
-  - "<gamertag> is the party leader".
-- Select New Leader and Boot Player do today's PROMOTE and KICK.
-- B asks, then leaves the party.
+**Decisions.**
 
-**5. The Y menu.**
+- **Drawing.** The lobby keeps its CPU canvas (softbuffer). Only the 3D
+  menu scene uses the GPU: wgpu renders it offscreen on its own thread,
+  and the frame is read back into the canvas, on the start screen and
+  main menu only. Every other screen keeps the still
+  `game_shell_background`, and the scene sleeps there. A GPU presenter
+  for the whole UI waits until some screen takes more than 12 ms at
+  1080p on the owner's PC.
+- **Audio.** A mixer inside h2launch, copied from our
+  `h2viewer/src/audio.rs`, on cpal. `App` only emits cues and says
+  whether music is wanted; the window owns the device, so App's tests
+  need none.
+- **Screens from tags.** `h2ui::tags::screen_layout` reads any wgit by
+  its full path. Each lobby screen binds its slots to
+  `Words::{Tag, TagOr, Ours, Hide}`, and a slot the binding doesn't name
+  is hidden. Format tokens (U+E400 to U+E4FF) take our values; a token we
+  don't know hides its text.
+- **Wording.** `wording()` turns Xbox Live into ONLINE (never XBOX LIVE)
+  and hides Bungie, clan, voice and the other Xbox wording.
+- **Scale**, per catalog entry and pane: Vista's 1:1, or the Xbox's with
+  positions ×2.5 and pictures ×1.25 (checked against the owner's Xbox
+  screenshot and three bitmaps only). The quarter and half dialogs are
+  decided in 2.7 by a header-fit check on the real map; a dialog's header
+  and legend boxes take its pane's scale. `H2LOBBY_SCALE` overrides any
+  entry for tuning.
+- **Code shape.** `App` stays the state machine. Each new screen's
+  binding goes in a child module, `lobby/app/<screen>.rs`, declared in
+  app.rs so it sees App's private fields. Old `draw_*` functions go when
+  their screen is replaced.
+- **Input.** Controller first. The stick counts past 0.9 (H), and a held
+  direction repeats every 250 ms (H; the first delay is an estimate).
+  Legends follow the device used last: A, B, X and Y glyphs after a pad,
+  key names after the keyboard. LB and RB keep their PC shortcuts but
+  stay off the legends (1.2), except as the Y menu's tabs.
+- **Server.** No change: `LIVE_PROTOCOL` stays 3. The leader's lobby
+  mode, map and playlist live on the leader's PC. Other players' emblems
+  and colours come later.
+- **Sign-in.** Its internals belong to `launcher-accounts`, which bumps
+  `LIVE_PROTOCOL` itself; the sign-in restyle waits for it.
 
-- The FRIENDS tab is today's friends list, with requests first.
-- The PLAYERS tab is everyone signed in.
-- Columns: gamertag, level icon, status ("In your Party", "In matchmaking",
-  "Playing custom game", "Offline" and the rest).
-- X opens the options; the player options dialog does today's popups.
-- View Gamer Profile opens the service record, restyled as a Halo 2
-  sub-screen.
+**Sub-phases**, each leaving every flow working (old screens stay
+reachable until their replacements land):
 
-**6. Notices and dialogs.**
+| # | Sub-phase | The owner sees |
+|---|---|---|
+| 2.1 | Sources (Cartographer first), the lobby flows test, per-screen timing, this plan | log lines only |
+| 2.2 | Menu music and UI sounds | music on start/main, button sounds |
+| 2.3 | Intro movie (Media Foundation) | the intro before the start screen, skippable |
+| 2.4 | The menu scene as data (new crate `h2scene`) | nothing |
+| 2.5 | The scene behind start/main (wgpu offscreen) | the darkened flythrough |
+| 2.6 | Halo 2's shell on every lobby screen; legends by device; stick repeat | framing, tracks, header and legend everywhere |
+| 2.7 | h2ui: any screen from its tags (library), catalog, menu_png | nothing |
+| 2.8 | Halo 2's dialogs; the invite notice | every popup and failure as a Halo 2 dialog |
+| 2.9 | The ONLINE menu, OptiMatch's playlists, Please Wait | Halo 2's Live screen, worded ONLINE |
+| 2.10 | The pregame lobby as the party's home | a Cartographer-style PREGAME LOBBY |
+| 2.11 | Game Setup, the Select Game/Variant/Map pickers, map pictures, Party Privacy | Halo 2's custom game setup |
+| 2.12 | Player Options; the back stack | Halo 2's per-player dialog |
+| 2.13 | The Y menu (FRIENDS, PLAYERS) | Halo 2's players list on Y |
+| 2.14 | The service record restyled; an on-screen keyboard | the record as a Halo 2 screen; Add Friend with a pad |
+| 2.15 | SETTINGS and CONTROLLER | Halo 2's settings screens |
+| 2.16 | BUTTON LAYOUT and THUMBSTICK LAYOUT | the controller picture with labels, Bumper Jumper |
 
-- An invite shows Halo 2's lower-left notice, "PARTY INVITE FROM
-  <gamertag>", with `receive_message`.
-- Today's A-accepts, B-declines popup stays, drawn as Halo 2's multiple
-  choice dialog. The invite is also in the Y menu, as on the Xbox.
+Where an open question to the owner has no answer yet, the plan's
+default holds: members see Cartographer's pregame layout with START GAME
+and GAME SETUP dimmed, and its chat box stays empty; no QUIT row on the
+main menu; LB and RB switch the Y menu's tabs; the intro plays on every
+launch, skippable; the scene at 30 fps; Quickmatch with no playlist
+chosen yet opens OptiMatch; MCC music later; emblems and colour bars
+later; the button layouts offered stay as they are.
 
-**7. Settings.**
+**What the first plan said that still holds**, by sub-phase:
 
-- SETTINGS, Edit Player, then CONTROLLER: Thumbstick Layout, Button
-  Layout, Look Sensitivity, Look Inversion, Automatic Look Centering and
-  Controller Vibration.
-- BUTTON LAYOUT is Halo 2's screen (layout below).
-- PC rows: mouse sensitivity, and the server address (which moves here
-  from the sign-in screen).
-- Appearance (model, colours, emblem) only if the profile bytes are shown
-  to work (`USE_ELITE`, the colour fields), and without the 3D model.
+- 2.9: "Please Wait" while connecting, then the ONLINE screen. Optimatch
+  opens the playlists, with your level icon and the player count from
+  the server's searching and playing numbers. Create Party opens the
+  pregame lobby: on h2live you are always in a party, so only the screen
+  changes.
+- 2.10, the pregame lobby: START GAME (leader) searches the playlist or
+  starts the custom game; GAME SETUP opens the setup screens. On the left
+  the mode block ("Matchmaking", the playlist, or the custom game's type
+  and map with its picture), the party's privacy and one status line; on
+  the right up to 16 players with their level icons, the count and who
+  leads. Select New Leader and Boot Player do today's PROMOTE and KICK. B
+  asks, then leaves the party. Y opens the players list; X changes teams
+  in a custom game.
+- 2.11: GAME SETUP offers Change Match Settings and Switch To: Custom
+  Game in matchmaking, or Change Map, Change Rules and Switch To:
+  Matchmaking in a custom game. Party Privacy offers Open and Invite
+  Only; Closed needs the server and comes later.
+- 2.12: the player options do today's popups (Join Party, invite, friend
+  request, Remove Friend, Make Party Leader, Boot From Party), and View
+  Gamer Profile opens our service record.
+- 2.8: an invitation shows Halo 2's lower-left notice with the gamertag
+  and `receive_message`; today's A-accepts, B-declines popup becomes the
+  multiple-choice dialog, and the invitation also shows in the Y menu.
+- 2.13: the FRIENDS tab is today's friends list, requests first; the
+  PLAYERS tab is everyone signed in, with level icons and a status column;
+  X opens the player options.
+- 2.14: the on-screen keyboard (controller-only players need one to
+  type a gamertag; `controller-wip` has one to borrow from).
+- 2.15: SETTINGS, Edit Player, then CONTROLLER (Thumbstick Layout,
+  Button Layout, Look Sensitivity, Look Inversion, Automatic Look
+  Centering, Controller Vibration), plus the PC's rows
+  (mouse sensitivity, and the server address, which moves here from the
+  sign-in screen). Appearance only if the profile bytes are shown to work,
+  and without the 3D model.
+- 2.16, BUTTON LAYOUT (0x28, H tags): the list at the top left, the help
+  text at the top right, the `button_config` controller picture in the
+  middle, and a label beside each button that changes with the focused
+  layout. Bumper Jumper and Recon use the same picture, with labels from
+  our tables.
+- **Done when** (for the whole phase): a whole session (sign in, invite,
+  party, search, custom game, friends, service record, a layout change)
+  works on the owner's PC through the new screens, with keyboard, mouse
+  and a pad.
 
-**8. Sounds and music,** from Vista first, then MCC (section 5).
+**Rules for every sub-phase.**
 
-**BUTTON LAYOUT (0x28)** (H tags):
+- **The gate**, before every commit: `cargo fmt --all`, `cargo clippy
+  --workspace --all-targets -- -D warnings`, `cargo test --workspace
+  --release` (which runs `crates/h2launch/tests/flows.rs`), and `cargo
+  build --release --target x86_64-pc-windows-gnu -p h2launch`, whose
+  exe must import neither of Media Foundation's DLLs (2.3's review: the
+  intro loads them when it plays, so an N edition without them still
+  starts the launcher): `x86_64-w64-mingw32-objdump -p
+  target/x86_64-pc-windows-gnu/release/h2launch.exe | grep -iE
+  'mfplat|mfreadwrite'` must print nothing.
+- **Docs**: README.md in plain words, "What Phase 2.N built" here,
+  lobby.md (labels, variables, recipes), PROGRESS.md.
+- **Pinned tests** (strings, pixels, positions) are updated to the new
+  truth, never loosened.
+- **Game files**: nothing from them is committed or pasted (maps,
+  pictures, fonts, sounds, movies, the tags' words, screenshots). Names,
+  offsets, positions, sizes and colours in our own words are fine.
+  Real-file tests are `#[ignore]` and read `H2_MAPS` or `H2_MCC_MAPS`.
+  The container's Cartographer copy is for those tests and for
+  scratchpad PNGs only.
+- **New crates** get a stub line in `Dockerfile.live`.
+- **The engine child** is polled every tick on every screen, and
+  `Told::next`, `on_match_over`, LeaveGame and `shutdown` stay wired.
+- **Frame order.** The intro: black, then the movie frame. The start
+  screen and main menu: the scene frame (or the still background), the
+  h2ui screen, then the Pen's popups and notices. Every other screen: the
+  kept shell still layer, the moving tracks (every frame), the h2ui body
+  (or the Pen's, until that screen converts), the header and legend, the
+  overlay and dialog, then the notices.
+- **CPU budget.** Every screen at most about 10 ms a frame at 1080p on
+  the owner's PC; the start screen and main menu with the scene at most
+  about 9 ms on the UI thread. The per-screen timer logs each one; a
+  screen over budget moves its still parts into a kept layer.
 
-- the list at the top left, the help text at the top right;
-- the `button_config` controller picture in the middle;
-- a label beside each button, which changes with the focused layout.
+**The new-screen checklist**, for every screen added or restyled:
 
-Bumper Jumper and Recon use the same picture, with labels from our tables.
+- a `label()`;
+- its music rule (on, off or keep);
+- its focus index in `cue_state`;
+- its name in the per-screen timer (`timer_name`);
+- its strings pushed into `drawn` once its intro is over;
+- `menu_settled` waiting for its intro;
+- `pad_is_the_lobbys` and `keys_are_the_games`, if it can show while the
+  engine runs;
+- `invite()`'s screen list, where invitations should show;
+- the flows scripts (`crates/h2launch/tests/flows/`) and lobby.md's
+  recipes, in the same commit as any label or navigation change;
+- the engine child still polled every tick, with `Told::next`,
+  `on_match_over`, LeaveGame and `shutdown` still wired.
 
-**Done when:** a whole session (sign in, invite, party, search, custom game,
-friends, service record, a layout change) works on the owner's PC through
-the new screens, with keyboard, mouse and a pad.
+**Corrections to the sections above.**
+
+- 1.3 said the lobby tracks whether a pad or the keyboard was used last.
+  It didn't; 2.6 added it.
+- Phase 3 said A cancels the countdown for the leader. In the
+  decompilation it is X, which cancels it for the leader and delays it
+  for the others.
+- The first plan had Quickmatch take the party's last playlist or the
+  busiest one. The decompilation shows it uses the playlist chosen last
+  in OptiMatch; with none chosen yet, Quickmatch opens OptiMatch (the
+  default above).
+- The playlist screen's level icon and player counts (1.2) are our
+  additions; Halo 2's playlist list had neither.
+- The scale decision above said a dialog's header and legend boxes take
+  its pane's scale. 2.7's pictures showed they don't: the globals' boxes
+  are already in Vista's units, and grown with an Xbox pane the quarter
+  header lands above and left of the dialog's frame, while as they are
+  it sits in the plate's top (9.2, "Phase 2.7's checks"). The legend
+  stays as the globals have it for every pane, and so does the header on
+  a full screen or a Vista pane. 2.7's second review found the globals'
+  header box, kept as it is, also lands on the Xbox dialogs' body text
+  or list, so a dialog at the Xbox's scale has its header in a box of our
+  own in its frame's top band (`layout::xbox_dialog_header`, estimates
+  for P6).
+
+#### What Phase 2.1 built (2026-10-11)
+
+No visible change; the log says more.
+
+- `lobby/sources.rs`: `Vista { root, maps }` (`mainmenu()`, `fonts()`
+  when `maps\fonts` holds `font_table.txt`, `movies()`), and `find`, in
+  the order above. A folder named in `H2LOBBY_VISTA` or `lobby.txt` that
+  holds no mainmenu.map (nor its `maps` folder) is passed over, and the
+  log says so. `lobby.txt` gained `vista = <folder>` (`MenuPrefs`, the
+  menus' own lines, written after the controls; later sub-phases add
+  theirs there).
+- The lobby finds the folder once (`Config::vista`) and logs either
+  `lobby: Halo 2 Vista files (Project Cartographer) in <maps>` or `lobby:
+  no Halo 2 Vista folder; menus from MCC, no music, scene or intro`.
+- Vista first, MCC second: `ranks::candidates` lists the Vista
+  mainmenu.map found, then each of `MAP_DIRS` not listed yet (none when
+  Vista is off), then MCC's, then `maps` beside the launcher. The rank
+  icons and the menus both use it. The fonts are `H2LOBBY_H2FONTS`, else
+  Vista's `maps\fonts`, else MCC's `halo2\h2_fonts` (`fonts_choice`);
+  the lobby's text and h2ui both read either through
+  `blam_cache::font::read_table`.
+- The per-screen timer: every screen's CPU time a frame, averaged over
+  its first 30 frames, logged once per screen and window size. The menus
+  keep `menus: 1920x1080, main menu 3.9 ms a frame on the CPU (background
+  20 ms once)`; the others say `lobby: 1920x1080, playlists 2.7 ms a
+  frame on the CPU`. On the lobby's own screens the whole draw is timed.
+- The flows test (`crates/h2launch/tests/flows.rs`, lobby.md "The flows
+  test"): real headless lobbies against an h2live and relay in the test
+  process. All seven are in the gate: matchmaking, a party searching
+  together (`party_matchmaking`, three lobbies), a custom game, the
+  party screen with three lobbies, friends, a setting kept across runs,
+  and a taken gamertag and the quit popup (about 45 s in the container,
+  side by side; the longest is `party_matchmaking` with its 20 s
+  countdown). A party of two can't search any default launcher
+  playlist alone (Head to Head takes parties of one, and Team Snipers
+  wants a third player to even its teams), so in the matchmaking flow
+  BRAVO accepts ALPHA's invitation, then leaves, and both search Head
+  to Head. The party search is `party_matchmaking`'s: ALPHA and BRAVO,
+  a party of two, search Team Snipers, and CHARLIE searching it alone
+  evens the teams.
+- Scripts may end a line with a `# comment`; the headless lobby runs
+  without any font (its text isn't drawn, but `see` still reads it).
+- On the container, flat, at 1280x720: about 1 ms a frame on the start
+  screen and main menu, 1.5 to 4 ms on the lobby's own screens; with the
+  Cartographer copy's art, about 4 to 5 ms on the start screen and main
+  menu (20 ms for the background once).
+
+**On the owner's PC (P1)**, from `lobby.log`:
+
+- it names the Cartographer folder for the menus (`menus: reading
+  ...mainmenu.map (Halo 2 Vista's)`), the fonts (`lobby: Halo 2's fonts
+  from ...\maps\fonts`) and the rank icons (`lobby: rank icons from ...
+  (Halo 2 Vista's)`);
+- with `H2LOBBY_VISTA=off` it names MCC's for all three;
+- each screen on show for about a second or more at his window size
+  (30 frames, added up over visits; resizing starts the count again)
+  logs a ms line; a short one, such as signing in, may not.
+
+#### What Phase 2.2 built (2026-10-11)
+
+Halo 2's menu music and sounds, from Cartographer's files (section 5).
+
+- **The tags.** `blam_cache::ui::Sounds::all` holds all 13 of the
+  globals' sound references (at 0x90, 8 bytes each); the five named
+  fields stay. `h2tool ui <mainmenu.map> globals` prints all 13. In
+  Halo 2 Vista's mainmenu.map they are, by index: 0 `cursor1`, 1
+  `forward1`, 2 `flag_fail`, 3 `advance`, 4 `back1`, 5 `transport`, 6
+  `cursor1` again, 7 `virtual_keyboard_click`, 8 `receive_message`, 9
+  `forward1` again, 10 `countdown_for_respawn` (under
+  `sound\game_sfx\multiplayer`), 11 none and 12 `pickup_health`.
+  Accessors: `receive_message()` (8), `countdown()` (10),
+  `keyboard_click()` (7), `tab()` (9) and `transport()` (5: the start
+  screen going on to the main menu, H, 0x22f28c; review round 1 renamed
+  it from a guessed `login()`). The globals' 0x1C0 is `music_silence_ms`
+  (was `music_fade_ms`; section 5), and `sound::Track` now reads its
+  flags, fade-in and fade-out (0x4, 0xC, 0x10).
+- **The mixer** (`lobby/audio.rs`), copied from `h2viewer/src/audio.rs`
+  without the game's voices and placing: linear resampling, looping, a
+  random next loop, per-voice fade-outs, 16 voices at most and MASTER
+  0.55. Beyond 16 the oldest menu sound makes room, never the music
+  (review round 3: the quietest went, and the music, at 0.50 under every
+  menu sound's 0.71, was the one dropped once a held Esc's repeats
+  stacked 16 `back` sounds, and it never came back on that screen).
+  New: `pause`, which stops the cpal stream, and `Output::{Device, Null,
+  Wav}`. (A fade back up, `fade_to`, went in review round 1: Halo 2
+  starts the music again from its beginning; round 3 narrowed the
+  mixer's fade to fade-outs.) cpal (0.16, as h2viewer) is new in
+  h2launch.
+- **Loading** (`lobby/sound.rs`, `load`, on its own thread): the globals
+  from `Menus::open`, then `MapSet::open` on the same map (with shared.map
+  beside it) to decode each sound's first variation at its tag's gain.
+  The music is the globals' looping sound: its first track's start, then
+  its loop's variations, picked at random one after another (by name if
+  that fails). In the container's copy: cursor 0.36 s, select 0.20 s,
+  back 0.77 s, error 0.51 s, advance 1.02 s, message 0.69 s, countdown
+  0.09 s, key click 0.17 s, transport 1.39 s; the music's start 29.7 s,
+  then loops of 56.5, 35.4, 75.5 and 150.0 s, gain 0.50 and fade-out
+  5.0 s (its track's); about 1 to 1.6 s to decode.
+  It never panics; failing, the menus are silent and the log says why.
+- **Gains**, from the tags: menu sounds at their tag's gain (-3 dB each
+  in Vista's), as Halo 2 plays them (0x236299, at a scale of 1); the
+  music at its track's gain times its start's own (-6 dB and 0 dB: 0.50).
+  Found by name, without its looping sound, the music takes 0.5 and a
+  5 s fade (estimates from Vista's track). Review round 1 dropped the
+  from-scratch game's 1.6 on the menu sounds, which put them 4 dB louder
+  against the music than the tags do. A match's engine starting fades
+  the music in 0.5 s (an estimate), then the stream pauses. (After P2
+  each also takes its sound class's gain, -4 dB in Vista's, and the mix
+  is no longer scaled by 0.55: "After P2" below.)
+- **`MenuSound`**, owned by the window and the headless loop: it starts
+  the loader when Vista's files were found, `H2LOBBY_SOUND` isn't `off`
+  and `lobby.txt`'s `menu_sound` (new in `MenuPrefs`) isn't `off`, and
+  opens the output only once sounds have come: the device with a window,
+  nowhere headless, a WAV with `H2LOBBY_AUDIO_WAV`. Each tick it plays
+  `App::take_cues()`, starts or fades the music by `App::music_on()` as
+  Halo 2 does (section 5: at most once every 6 s, each start a new voice
+  from the music's start, each stop its track's fade-out), and while
+  `App::engine_running()` fades every voice at once (`Audio::fade_all`:
+  the music, a stop's fade still running and a menu sound), drops the
+  cues, then stops every voice (`Audio::stop_all`) and pauses, so nothing
+  from before a match plays on after it. (Until review round 2 only the
+  playing music faded: a stop held by the 6 s rule and still fading when
+  the engine started was frozen by the pause and finished on the
+  carnage report.)
+- **App** stays free of cpal. `music_rule(screen, current)` is Halo 2's
+  (section 5): on at Start and Main; off on Live (searching too), Party,
+  Custom, Pregame and InGame, and whenever an engine runs; the rest keep
+  it. The cues come from a snapshot (`cue_state`: the screen, the popup,
+  the invitation shown, the focused row of the list on show, the custom
+  game's game and map and the controls, and a refused flag) before and
+  after `input` and `click` (their bodies are now `input_inner` and
+  `click_inner`): refused gives Error; another screen, popup or
+  invitation gives Back on B (or Esc, Backspace, the b key); else, when a
+  screen or a popup opened, Advance, after Select when the press was A
+  (Enter, Space, the pad's A or Start, or a click that picks; review
+  round 3: X, Y, the bumpers and the other shortcuts opening something
+  give Advance alone); else Select (the players and friends lists, the Y
+  menu's tabs, and a popup only closing; see the next point); only the
+  row or a value changing gives Cursor. `refuse()`
+  (a notice and the flag) is used for the leader-only notices, a friend
+  who can't be joined, a player who can't be asked (with the server's
+  own words: already a friend, already asked, asked you; ourselves only
+  sounds), and no maps for a custom game. A search started pushes Select
+  then Advance itself (Halo 2's matchmaking screen loading; ours stays
+  on the playlists), a custom game asked for Select only (Halo 2's START
+  GAME is a button that loads nothing), and the screens the lobby opens
+  by itself push Advance: the pregame lobby (`on_match`, not when the
+  same match comes again with a new host), the carnage report
+  (`poll_game`) and, since review round 3, the playlists once signed in
+  (`signed_in`: Halo 2's main menu loads its online screen by itself,
+  0x230ba6) and the failure screen (`fail`, and `poll_game` when the
+  server was lost during a match, unless the carnage report's advance
+  has just sounded; Halo 2's error dialogs from 0x1486b8 load forward),
+  once each. A new invitation on show
+  pushes Notify once (`tick`; one that has left the invitations list is
+  forgotten, so the same party inviting again sounds again), and so does
+  the server's notice of a friend request to us (Halo 2 sounds every
+  message, 0x2b740a). Presses that only send a request push their own
+  sound, as nothing on screen changes: the leader's B stopping a search
+  Back; make leader, party privacy, an invitation, a friend request,
+  accepting or declining one and taking ours back Select. A on the start
+  screen pushes Select, Advance (the main menu loading), then Transport.
+  Countdown and KeyClick wait for
+  the countdown and the on-screen keyboard. The sign-in functions are
+  unchanged but for `signed_in`'s Advance.
+- **Select, then advance, on a screen opening** (review round 2, from
+  the decompilation). One press that opens a screen plays two sounds in
+  Halo 2, in the same frame: the press's `forward1` (sound 1, from the
+  list item's A at 0x24ac05 or the button's at 0x2540e8, after its
+  handler has loaded the screen) and the new screen's `advance` (sound
+  3: every screen and dialog load calls 0x147f6d, which plays it unless
+  the load came from the back history or is the start screen's, id 9).
+  Forward loads (the main menu's rows, `dialog_ok` and `dialog_choice`)
+  have type 0; only B's reloads from the history set bit 0 (0x23553f),
+  so B plays `back1` alone. 0x236299 plays any sound below 13 through
+  0x1896c0 at a scale of 1 and drops none, so both are heard (until
+  round 2 this note wrongly said 0x236299 wasn't decompiled, and the
+  lobby played `select` alone). A Y-menu tab change plays only the tab's
+  sound (9, `forward1`, from the Y menu's tab bar, 0x2b41ea) and loads
+  no screen, and a dialog closing on a choice runs an animation, not a
+  load, so both stay `select` alone. The start screen's A gives
+  `forward1`, `advance` (the main menu, id 6, type 0, from 0x22f28c),
+  then `transport`. Only A and Start play `forward1` (0x24ac05 and
+  0x2540e8 check the press); Y opens the Y menu through 0x1494af and
+  0x1496c7, which play nothing, so that is `advance` alone, and so are
+  the lobby's shortcuts (X, Y, LB, RB) opening a screen or a popup
+  (review round 3; until then they sounded `select` too).
+- **LGPL** (review round 2). Since 2.2 the launcher calls
+  `blam_cache::sound`'s WMA decoding, so `crates/wma` (ported from
+  FFmpeg, LGPL 2.1 or later) is in `h2launch.exe`, linked statically. It
+  stays a crate of its own (AGENTS.md). The next friends' zip built with
+  2.2 (the READ ME isn't in the repository) must: say in its READ ME that
+  `h2launch.exe` contains the `wma` crate, a WMA decoder ported from
+  FFmpeg under the LGPL 2.1 or later; carry `crates/wma/LICENSE`; and
+  carry `crates/wma`'s source or the owner's written offer to provide it,
+  plus an offer of h2launch's own source or object files so the library
+  can be relinked (LGPL 2.1 section 6). The repository stays private, so
+  "see the repository" doesn't do.
+- **Checked in the container** (2026-10-11), headless with the uploaded
+  Cartographer folder: the start screen, then the main menu, down and up
+  gave a 23 s WAV with music from its first 0.05 s; a second run with no
+  presses, taken away from it sample for sample, left only the select
+  and two cursor sounds, each where its press was. Two lobbies through a
+  custom game (ALPHA recording, the stand-in engine playing 4 s): music on
+  the start screen and main menu (and the sign-in form), its fade over
+  5.5 s from the playlists (5 s since review round 1), silence through
+  the match, the select and back sounds after it, and the music from its
+  start again on the main menu.
+
+**On the owner's PC (P2)**, with Cartographer's folder found:
+
+- `lobby.log` has `sound: from ...mainmenu.map: cursor ...; music ...;
+  decoded in ... ms`, then `sound: playing to <the device's name> (the
+  default audio device)` (since the follow-ups below; until then just
+  "the audio device");
+- the music plays on the start screen and the main menu, and fades over
+  about 5 s on the playlists (a change within 6 s of the last waits);
+  back on the main menu it starts again from its beginning;
+- the cursor, select and back sounds play with the pad and the keyboard
+  (and a click on a main menu row); A on the start screen sounds select,
+  advance, then transport; a screen or popup opened with A sounds select
+  then advance, and with X, Y or a bumper advance alone; the playlists
+  after signing in, a failure screen, the pregame lobby and the carnage
+  report advance as they open;
+- holding Esc on the start screen never stops the music (when P2 was
+  written the quit popup opened and closed with each of Windows'
+  repeats; since 2.3's review round 2 a held key's repeats are dropped
+  for every button, so it opens once and stays);
+- a friend request to us sounds as a message;
+- silence through a match (nothing of the menu music playing on after
+  it, even when the match started within 6 s of the music starting), and
+  the music from its start again on the main menu after it;
+- with `H2LOBBY_VISTA=off`: silence, `sound: the menus are silent (no
+  Halo 2 Vista files)` and no error.
+
+**After P2 (the PC check's follow-ups, 2026-10-11).**
+
+- **The music's level.** P2's recording had the music on the start
+  screen and main menu at about -41 dB RMS (peaks 0.03 to 0.10 of full
+  scale), which sounded too quiet. The chain, checked against the tags
+  and the decompilation: Halo 2 plays a sound at its playback
+  parameters' base gain (0x10 of its gestalt playback entry), plus its
+  sound class's gain at the scale it plays at (the sound classes tag,
+  `sncl`: 0x5C bytes a class, the bounds at 0x20 for a scale of 0 and
+  0x24 for 1, interpolated in amplitude by 0x1251e0), plus a looping
+  sound's track gain and the permutation's own (0 for all of these),
+  added in decibels and capped at 0 dB (0x2197f0). Menu sounds play at a
+  scale of 1 (0x236299 through 0x1896c0), and so does the music
+  (0x235b5d starts its looping sound with 1.0, which 0x18a7b0 takes as
+  its scale). In Halo 2 Vista's mainmenu.map the menu sounds and the
+  music are class 50, whose bounds are 0 and -4 dB, so the menu sounds
+  are -3 - 4 = -7 dB (0.45) and the music 0 - 4 - 6 = -10 dB (0.32).
+  2.2 played them at -3 and -6 dB, then took the from-scratch game's
+  `MASTER` 0.55 (-5.2 dB, headroom for a battle's sounds, not in any
+  tag) off the whole mix: 1.2 dB under the tags. Now the class's gain is
+  read (`blam_cache::sound::class_gains`, the bounds at a scale of 1)
+  and `MASTER` is 1, so both play at the tags' level. No mix-up between
+  decibels and amplitude, and no halving by resampling or by channels,
+  was found. The quiet start is the music's own:
+  its start's first 5 s are -28 dB RMS in the file, the next -25 dB,
+  the whole start -18.6 dB and the loops -15.5 to -19 dB. Recorded again
+  in the container (start screen, then the main menu at 25 s): -38, -35,
+  -30, then -25 dB RMS a 5 s stretch, peaks up to 0.29. Louder than that
+  is the PC's own volume, as on the Xbox it was the TV's.
+- `sound: playing to` names the device (cpal's name), and the music and
+  the engine's changes are logged once each (lobby.md).
+- `H2LOBBY_AUDIO_WAV` keeps recording silence while the engine runs, and
+  `H2LOBBY_SCRIPT` is for headless lobbies only (the windowed lobby logs
+  that it ignores it); both said in lobby.md.
+
+#### What Phase 2.3 built (2026-10-11)
+
+Halo 2's intro movie before the start screen, from Cartographer's
+`movie` folder, decoded by Media Foundation (section 5's table).
+
+- **`lobby/intro.rs`.** A `MovieSource` decodes a movie on a thread of
+  its own and sends, down a `sync_channel` of `AHEAD` (4), the whole
+  soundtrack first (`Decoded::Sound`, a `Clip`), then each picture in
+  order (`Decoded::Picture`: its time, size and pixels), or why it
+  failed (`Decoded::Failed`, its last word). `MfSource` (Windows only)
+  is a close port of `menu-preview`'s `h2viewer/src/intro.rs` Media
+  Foundation code (not its ffmpeg path): Media Foundation's five
+  functions looked up in System32's `mfplat.dll` and `mfreadwrite.dll`
+  when it first plays (`LoadLibraryExW` with
+  `LOAD_LIBRARY_SEARCH_SYSTEM32`, then `GetProcAddress`; kept loaded),
+  never linked, COM and `MFStartup` on the thread, a source reader per stream from `MFCreateSourceReaderFromURL`
+  with `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING`, the sound read whole
+  as 16-bit PCM, the pictures as RGB32 through `IMF2DBuffer::Lock2D`
+  row by row at its pitch, then `MFShutdown`. Its blue, green, red,
+  unset bytes become opaque RGBA on that thread, so drawing needn't
+  swap them. `FakeSource` (tests) makes solid pictures and a short
+  sound, and can hold the channel open (a stall) or fail. Off Windows
+  there is no movie player (`intro::opener` is `None`).
+- **`Intro`** starts its clock at the decoder's first word, shows the
+  latest picture whose time has come and passes over earlier ones also
+  due (counted as late), ends when the decoder has finished and both
+  the last picture (held 1/30 s, an estimate) and the soundtrack have
+  played out, and gives up after `STALL` (5 s) without a word, as
+  `menu-preview`'s did. A decoder that ends with no pictures fails.
+- **Which file.** `Plan::find` takes Vista's `movies()` folder when it
+  holds `intro_60.wmv` or `intro_low_60.wmv`. The file is chosen at the
+  first draw: the low one in a window under 720 pixels tall, else the
+  full one, and the other when that one is missing. A file that is
+  there but can't be decoded isn't retried with the other (it ends the
+  intro, below).
+- **When it plays.** `mod.rs`'s `intro_plan`: a window (not headless),
+  `H2LOBBY_INTRO` not `off`, `lobby.txt`'s new `intro` line (`on` or
+  `off`, `MenuPrefs`, written after `menu_sound`) not `off`, a Halo 2
+  Vista folder, a movie player (Windows) and a movie. Otherwise the
+  lobby opens on the start screen as before, and the log says why
+  (`intro: none (<why>); the lobby opens on the start screen`). It
+  plays at every start (the plan's default).
+- **`Screen::Intro`** (label `intro`, timer name `intro`, music off,
+  focus 0, no strings in `drawn`; `menu_settled` is true on it, and
+  `pad_is_the_lobbys`, `keys_are_the_games` and `invite()` need nothing,
+  since no engine runs and nobody is signed in yet). Decoding starts at
+  its first draw, when the window's height is known. Each draw is black,
+  then the picture showing, as large as fits in the middle
+  (`intro::letterbox`), as one h2ui quad drawn by `h2ui::cpu` from a
+  small `Textures` (`MovieFrame`), through a `Kept` that draws again only
+  for a new picture or size.
+- **Skipping.** Any button: A, B, X, Y, LB, RB, LT, RT (the pad's Start
+  and Back are A and B), Enter, Esc, Backspace, Space, a letter, or a
+  click anywhere. A direction (stick, d-pad, arrows) and Tab don't, as
+  in Halo 2 (0x156ab0 skips on every button but the d-pad and the stick
+  clicks). The triggers (`Input::Lt`, `Input::Rt`, gilrs's
+  `LeftTrigger2` and `RightTrigger2`) do nothing on any other screen. Leaving it sounds nothing (`cue_for`: the press is no list
+  item's or button's, and the start screen's load plays no `advance`).
+  The second click of a double-click doesn't go on from the start
+  screen (the existing guard).
+- **The end.** At its end, on a skip, on a stall, or when it fails
+  (`intro: <why>; skipped`; Windows N without the Media Feature Pack
+  lands here, as `intro: Media Foundation isn't installed (...);
+  skipped`), the start screen comes in: its intro animations start at
+  its first draw, and its music starts (music rule on).
+- **Sound.** `App::take_cues` became `take_sound() -> Vec<SoundOut>`:
+  `Movie(clip)` when the soundtrack comes, `StopMovie` when the intro is
+  left, then the cues as `Cue(c)`. `MenuSound` opens the output when
+  the soundtrack comes (even before the menu sounds have loaded), plays
+  it once as music (never dropped for room) at its own level (gain 1:
+  Halo 2 plays its movies through Bink straight to the sound card at
+  Bink's full volume, 0x8000 on the front left and right in 0x156090,
+  with no sound class or track gain), and on `StopMovie` fades it out
+  in 50 ms (our choice, to avoid a click). With the menus' sound off
+  (`H2LOBBY_SOUND=off`, `menu_sound = off`) no device opens and the
+  movie plays silent.
+- **Frames.** `App::frame_interval()`: 16 ms while the intro plays (its
+  pictures come 60 a second), else 33 ms; `window.rs`'s `next_wake`
+  takes it.
+- **Tests (no game files).** `intro.rs`: pictures by their time and late
+  ones passed over; the end after the last picture and the sound; a
+  silent, stalled (on its thread) or failing decoder; the letterbox of
+  a 16:9 movie in 4:3, 16:9 and 21:9 windows; the file by window height;
+  why it is skipped; a player only on Windows. `app.rs` with
+  `FakeSource`: it plays before the start screen and goes on at its end
+  (black first, pictures letterboxed, the soundtrack then `StopMovie`,
+  no cue, the music after); every button and a click skip it and a
+  direction doesn't; a stall and a failure reach the start screen.
+  `mod.rs`: only with a window, a player and a movie. `sound.rs`: the
+  soundtrack once at its own level until skipped. `settings.rs`: the
+  `intro` line.
+- **Measured** in the container (release, by itself, not the timer's
+  line, since the container plays no movie): one picture of 1280x720
+  drawn into the window takes about 12 ms at 1280x720, 25 ms at
+  1920x1080 and 32 ms at 2560x1440 on the CPU. The owner's PC is
+  faster; the timer's `lobby: 1920x1080, intro <n> ms a frame on the
+  CPU` (the average of the first 30 new pictures' draws, so it needs
+  about half a second of pictures before a skip) and the end line's
+  late count say how it does there. Pictures that come due while one is
+  drawn are passed over, so the movie keeps time with its sound either
+  way.
+- **Review fixes (round 1).** Media Foundation is loaded at run time
+  (above): linked, its DLLs were load-time imports, and Windows refused
+  to start the whole exe (the lobby and each match's engine) on an N
+  edition without them; the gate now checks the cross-built exe imports
+  neither. The soundtrack plays at gain 1, not the music's 0.32. The
+  triggers skip the intro. The timer counts only draws of a new picture
+  (black frames while Media Foundation reads the soundtrack, and a
+  picture drawn again, made it read far too low). New tests: the
+  timer, the triggers, the movie chosen by the window's height (not its
+  width) through `App`, the mix at the tags' gains with nothing taken
+  off, and a sound's own and class decibels (`sound_db`); the stall
+  test waits for the last picture before moving the clock.
+- **Review fixes (round 2).** A key held down no longer goes on past
+  what it pressed. The window passed Windows' repeats of a held key
+  (`KeyEvent::repeat`) as presses, so Enter held about 0.6 s to skip
+  the intro went on to the main menu, then picked ONLINE and signed in
+  (with three menu sounds), and a held Esc opened and shut the Quit
+  popup with each repeat. Halo 2 sends a button only on its first frame
+  down and repeats only directions, every 250 ms
+  (`docs/notes/decomp/controller.md` section 7; the pad already behaved
+  so, as gilrs never repeats a button). Now `window.rs` sends repeats to
+  `App::key_repeated`, which drops A, B, LB and RB (Enter, Esc, PageUp,
+  PageDown) and, outside a field (`App::typing`: the sign-in form, the
+  Add Friend popup), the letters, Space and Backspace; the arrows, Tab
+  and typing in a field still repeat. `launcher-accounts` has the same
+  function; merged, it keeps that branch's popups in `typing` (its
+  password and new-account fields) and this one's LB and RB, which are
+  buttons (Halo 2's White and Black) and open screens. Test: a key held
+  to skip the intro leaves the start screen showing, with no popup and
+  no cue; on the main menu the arrows repeat and the buttons don't; in
+  the sign-in form letters and Backspace repeat. The README and the
+  launcher README now say it opens on the intro movie first.
+- Not here: the attract movie after idling, the credits, the scene.
+
+**On the owner's PC (P3)**, with Cartographer's `movie` folder found
+(`C:\Games\Halo 2 Project Cartographer\movie`):
+
+1. The intro plays with its sound, louder than the menu music, and
+   `lobby.log` has `intro: playing intro_60.wmv (<W>x<H> window)`
+   (`intro_low_60.wmv` in a window under 720 pixels tall) and `sound:
+   the intro's soundtrack, <n> s (gain 1.00)`.
+2. After a second or two, A skips it: the log has `intro: skipped at
+   <t> s`, no select or advance sound plays, the start screen comes in
+   and its music starts. The d-pad, the stick, the arrows and Tab don't
+   skip it; B, X, Y, the bumpers, the triggers, Enter, Esc, Space, a
+   letter and a click do. Holding Enter (or Esc) for a second or more
+   to skip it leaves the start screen showing, with no Quit popup.
+3. Left to play out, the log has `intro: played to the end (<t> s, <n>
+   pictures, <k> late ones passed over)`; a small late count is fine.
+4. After 30 new pictures the log has `lobby: 1920x1080, intro <n> ms a
+   frame on the CPU` (the container measured about 25 ms for one picture
+   at 1920x1080).
+5. With `H2LOBBY_INTRO=off` the log has `intro: none (H2LOBBY_INTRO=off);
+   the lobby opens on the start screen`; with `H2LOBBY_VISTA=off`,
+   `intro: none (no intro movie: no Halo 2 Vista folder); the lobby
+   opens on the start screen`; with `intro = off` in `lobby.txt`,
+   `intro: none (intro = off in lobby.txt); ...`. Each opens on the
+   start screen with its music.
+6. On a Windows N PC without the Media Feature Pack, if one is at hand:
+   the launcher still starts, and the log says `intro: Media Foundation
+   isn't installed (...); skipped`.
+
+**After P3 (2026-10-12).** P3 passed on the owner's PC on fcfb9e1, with
+these limits: it was driven by keys and clicks posted to a 1600x900
+window, so no pad button (A among them) was tried, and check 6 was
+skipped (no Windows N PC at hand).
+
+1. `intro: playing intro_60.wmv (1600x900 window)`, the audio device
+   named, the soundtrack 18.0 s at gain 1.00 and louder than the menu
+   music after it.
+2. Enter, Esc, Space, letters, Backspace and a click skipped it at about
+   2 s, with no select or back sound; the arrows and Tab didn't. Enter
+   or Esc held for 1.2 s gave one skip and no Quit popup, and the start
+   screen's music started from its beginning.
+3. Left to play: `played to the end (18.0 s, 540 pictures, 1 late)`
+   (2 late in another run).
+4. The intro took 7.9 to 8.2 ms a frame on the CPU at 1600x900, and the
+   start screen 2.1 ms. That isn't the 1080p the list asked for; P4's
+   list (after Phase 2.5) has it as its step 3.
+5. The three `intro: none` cases each opened on the start screen.
+
+It also found that the windowed lobby, started from its own console,
+exited with code 101 in about 1 launch in 7: `println!` panicked when
+its write raced the console being freed (`FreeConsole`). The log's
+console echo now ignores write errors (18279ad on `launcher-menu`, 0
+failures in 30 launches on the PC after; merged here as 81b2e07).
+
+#### What Phase 2.4 built (2026-10-12)
+
+The 3D scene behind the start screen and main menu, read into plain data
+by a new crate, `crates/h2scene`, on any thread and with no GPU. Nothing
+visible changes; 2.5 draws it.
+
+- **`blam-cache`** gained what `menu-preview` had added for it:
+  `model::sky_atmosphere` (a sky's `Atmosphere`: its atmospheric `Fog`,
+  the fog over the sky's model, and the clear colour when its flags ask
+  for one) and `shader::read_menu_shader`, which reads the cloud
+  templates the menu's way (two maps multiplied, doubled and added for
+  the added clouds, as bright as the colour's alpha) and shows plain
+  glows (`ShaderInfo::multiply`). `read_shader`, which h2viewer and
+  h2tool use, is unchanged.
+- **`h2scene`**, copied from `menu-preview`'s h2viewer (ours):
+  - `flythrough.rs`: the `mainmenu_flythrough` script's
+    `camera_set`s and `sleep`s at 30 ticks a second, each move a curve
+    that starts at the camera's speed and turn and is cut off by the
+    next. Its 70-degree field of view is still unverified (marked so).
+    New: `seconds`, `ticks`, `points`, `points_used` and `moves`, for
+    the example. Review round 1 changed how the points turn and the
+    curve (below).
+  - `camera.rs`: `look_to` (a view that banks with the camera's up),
+    `Lens` with the reversed-Z projection and `fov_magnification`, and
+    `menu_view_proj` (the camera at a time and its view-projection for
+    an aspect, as h2viewer drew it: 70 degrees across at any width from
+    4:3 up, near 0.05, far 2,000).
+  - `data.rs`: `Vertex` (position, normal, uv, lightmap uv, light; 56
+    bytes, `vertex_bytes` and `index_bytes` give the buffers' bytes, so
+    the renderer needs no casting crate), `Material` (colour map, the
+    second map's `AuxKind` (glow, mask, change colour, emblem, multiply,
+    multiply twice), `Blend`, `pass()`: Opaque, Alpha or Additive),
+    `MeshData::from_sections` (batched by material and lightmap page; a
+    damaged section drops its bad triangles instead of panicking),
+    `TextureData { w, h, mips }` with `mip_chain` (2x2 boxes down to
+    1x1) and the grey fallback, and `SceneData { level, bsps, meshes,
+    objects, sky, atmosphere, textures, materials, flythrough,
+    failed_textures }`.
+  - `light.rs`: `LevelLight`, the baked light on the floor under a
+    point, which lights each piece of scenery.
+  - `load.rs`: `load(mainmenu, log) -> Result<SceneData, String>`, a port
+    of `Backdrop::load` and the `Loader` parts it used (level, lightmap
+    pages, bitmaps, menu shaders, sky, atmosphere, scenery, placements);
+    the game's HUD, weapons, sounds, rigs and h2sim are left out.
+    Warnings go to `log`. An error, never a panic (a damaged map's panic
+    is caught): a missing file, a file that isn't a Halo 2 map, MCC's
+    format 13 ("MCC maps have no geometry reader yet"), no level
+    geometry, or no flythrough.
+  - `examples/scene_info.rs`: BSPs, triangles, textures, materials by
+    pass, scenery by tag name, fog, camera points, the loop and the load
+    time.
+- **Workspace**: `crates/h2scene` is a member; `Dockerfile.live` stubs
+  its `src/lib.rs` as it does h2ui's (checked by resolving the workspace
+  from only what `.dockerignore` lets through, with and without the
+  stub).
+- **Tests (no game files).** The flythrough's (copied: reading the
+  script, the loop back to rest, no jumps in speed or turn at the cuts);
+  the lens (70 degrees across 4:3, depth reversed, a banked
+  view tilts, the menu view centred on where the flythrough faces); `from_sections` on made-up sections (batches, shared
+  batches, lighting, damaged sections), the mip chain's sizes and
+  averages, the vertex bytes; `LevelLight` over two made-up floors and
+  a lightmap page; the sky's fog and clear colour and a postprocess
+  colour's alpha (copied); `load` on a missing path, on junk (empty,
+  text, zeros, a Vista header with nothing behind it) and on a format-13
+  header; `SceneData` is `Send`. Ignored, with `H2_MAPS`:
+  `reads_the_real_main_menu`.
+- **Measured in the container** on Cartographer's `mainmenu.map`
+  (`H2_MAPS=... cargo test --release -p h2scene -- --ignored` and the
+  example):
+  - 1 BSP, 38,738 level triangles (the plan's count exactly), 6,997 in
+    the scenery as placed and 184 in the sky: 45,919 in all;
+  - 39 textures with the fallback (19.4 MB with their mips), none that
+    failed to decode. The plan's 48 was h2viewer's loader for a whole
+    level, which adds the players' bodies and weapons;
+  - 40 materials: 27 opaque, 7 alpha-blended, 6 additive;
+  - 10 pieces of scenery: the carrier (5,510 triangles), two plasma
+    screens, the progress symbol (1,348), a cinematic anchor (6) and
+    five one-triangle stand-ins for the firing effects; 9 of them over
+    a floor that lights them. Whether Halo 2 draws the anchor and the
+    stand-ins is for 2.5's look check;
+  - the sky's fog: a brown haze, density up to 0.5, from 0 to 150
+    units; clear colour a dark grey;
+  - 18 camera points, 12 of them flown through in 13 moves; a loop of
+    2,990 ticks (99.7 s), starting on the first path point;
+  - the load: about 1.9 s the first time (the file read from disk),
+    about 110 ms once the file is in the disk cache.
+
+**On the owner's PC (with P4, its step 1)**, from the clone (`C:\Halo
+2 Rust Project` or the work folder):
+
+```
+cargo run --release -p h2scene --example scene_info -- "C:\Games\Halo 2 Project Cartographer\maps\mainmenu.map"
+```
+
+It should print the counts above (1 BSP, 45,919 triangles, 39 textures
+and 0 not decoded, 40 materials as 27/7/6, 10 objects, 18 camera points
+with 12 flown through, 2,990 ticks and 99.7 s) and a load time; and on
+MCC's `halo2\h2_maps_win64_dx11\mainmenu.map`, `error: MCC maps have no
+geometry reader yet`.
+
+**Review fixes, round 1 (2026-10-12).**
+
+- **The camera points turn as Halo 2 turns them.** Its `camera_set`
+  (0x16c2f0) makes a point's forward and up through 0x11df60 and
+  0x141ce0: yaw about +z first, then pitch, and the roll last, about
+  the world's +x (`camera::halo_rotation`). The port rolled about the
+  camera's own forward instead, which banked the menu's camera up to 45
+  degrees and pointed it into the sky at points 7 to 10. Now, on
+  Cartographer's map, the camera banks at most 13 degrees over the whole
+  loop (3 on average) and looks between 47 degrees down and 5 up; the
+  review found five of the twelve points level to a tenth of a degree. Placed scenery turns the same
+  way (0x0d5060, which fills in a scenario object's placement, uses the
+  same conversion through 0x11df60), so `placement_matrix` does
+  too; the carrier turns by yaw only and doesn't change, the plasma
+  screens do. h2viewer's own `placement_matrix` (the parked engine)
+  still rolls the old way; fix it there if that engine is picked up
+  again.
+- **The camera follows Halo 2's curve.** The observer solves, each
+  frame, a fifth-order curve from its position, velocity and
+  acceleration to the point at rest (0x16ff10, followed by 0x1701f0 and
+  0x170630), for moving and for turning. The port's cubic forgot the
+  acceleration at every cut, so it jumped there; `Motion` now carries
+  acceleration and the spin's rate of change, and each move is that
+  curve (the review measured the two paths up to 6.7 units apart on
+  the real loop). Still
+  open: the code that counts a move's ticks down hasn't been found; one
+  curve per move assumes it does (`camera_time` returns the ticks left,
+  and the script's last 300-tick move ends exactly as the loop starts
+  again). Halo 2 turns by a rotation vector in the world's frame, this
+  by one in the camera's frame at the start of the move, which is close.
+- **A damaged map can't take the lobby down.** `LevelLight::new` leaves
+  out a triangle with a vertex that isn't a finite number or that spans
+  more than 1,024 grid cells (2,048 units; the level is about 470
+  across), which would otherwise fill memory until the process
+  aborted, past `load`'s panic catch. The script reader looks at no
+  more than 4,096 expressions and 64 nested `begin`s, so a script that
+  leads back into itself can't recurse until the stack overflows.
+- **Tests.** Damaged vertices are left out of the light grid; damaged
+  scripts (a `begin` that is its own argument, `begin`s fanned out five
+  deep, 1,000 nested) end; moves to points the map lacks are dropped
+  and the rest fly, and no script, an empty one or one that never
+  waits gives no flythrough; acceleration and turning acceleration
+  don't jump at the cuts (under 2% of the strongest a frame, where the
+  old cubic jumped 5 to 54%); a level point stays level (the seventh
+  path point's rounded angles look 46 degrees down with no bank), and
+  placed scenery turns the same way; `halo_rotation` gives 0x141ce0's
+  forward, left and up. `shader::shader_info` (the template match, now
+  a pure function under `read_shader` and `read_menu_shader`) is tested
+  for the menu's three templates both ways (a glow shown, clouds
+  multiplied, added clouds doubled and as bright as slot 0's alpha),
+  and h2scene's `material` for which second map wins (glow, mask,
+  change colour, multiply; doubled only above 1; emblem) and for asking
+  for the colour map first. `reads_the_real_main_menu` now pins every
+  number above exactly (triangles, 39 textures, 40 materials as
+  27/7/6, 10 objects with 9 lit, the fog's 0.5 from 0 to 150, the clear
+  colour, 18 points with 12 flown in 13 moves, 2,990 ticks); if the
+  owner's map differs, change them here and in the test together.
+
+**Review fixes, round 2 (2026-10-12).**
+
+- **A lightmap page that can't be decoded is tried once.** The pages
+  are atlases many clusters and instances share; a page that failed
+  wasn't remembered, so it was read and inflated again for each
+  section that used it and counted each time, and the log's and
+  `scene_info`'s "not decoded" count could run far past the number of
+  bitmaps. It is now remembered either way (its sections are unlit), as
+  a failed bitmap already was (texture 0). Test: on a map with no tags,
+  a page asked for five times is counted once, another page of it once
+  more, and a bitmap asked for three times once.
+- **A `camera_set` to no point is skipped.** The reader turned a point
+  of -1 (the script's none) into point 0, so a damaged script would cut
+  the camera across to the first path point mid-loop. Halo 2's
+  `camera_set` (0x16c2f0) does nothing for a point below 0 or past the
+  last, so the move before runs on through the `sleep` after it; the
+  reader now skips it the same way. A move to a point past the map's
+  last is still dropped with its wait, as before. Test: (camera_set 0
+  0) (sleep 90) (camera_set -1 100) (sleep 50) (camera_set 1 500)
+  (sleep 250) reads as two moves, the first waiting 140 ticks.
+- **Docs.** The code that places scenario objects is cited as 0x0d5060
+  (it fills in a placement through 0x11df60); round 1 gave 0x0b7300,
+  the address the decompilation's file for it is named after, which is
+  another routine.
+  `docs/notes/mainmenu-plan.md`'s notes that the roll's sign was
+  unverified and should be flipped if the horizon tilted are marked
+  superseded; only the 70-degree field of view is still unverified.
+
+#### What Phase 2.5 built (2026-10-12)
+
+The darkened flythrough behind the start screen and the main menu, drawn
+by our own wgpu renderer offscreen and copied into the lobby's CPU
+canvas (option B for these two screens). Every failure falls back to
+the still background, and nothing touches the GPU while a match runs.
+
+- **`h2scene::render`** (`Renderer`), from `menu-preview`'s h2viewer
+  `gpu.rs` (ours), cut down to the scene: an instance from the
+  environment (so `WGPU_BACKEND` picks the backend), a low-power
+  adapter with no surface, refusing a software one (lavapipe, WARP)
+  unless allowed, `downlevel_defaults` limits raised to the adapter's
+  texture sizes, and an uncaptured-error handler and a device-lost
+  callback that mark it failed instead of panicking (checked after
+  each submit, so the error's own words reach the log). Textures are
+  sRGB with 2.4's mip chains (a level past the device's limit is left
+  out); the mesh shader without the players' camouflage, overshield,
+  emblems or HUD; five pipelines (opaque, alpha, additive, sky, sky
+  alpha). Each frame: the sky pass (near 1, far 10,000) then the world
+  pass (near 0.05, far 2,000, reversed Z in `Depth32Float`), opaque,
+  then alpha, then additive; then the veil pass into a `Bgra8UnormSrgb`
+  target; the copy to a buffer with rows padded to 256 bytes; the map;
+  and the unpacking into `0x00RRGGBB` pixels. `Eye::flythrough` is the
+  camera at a time on the loop (2.4's `camera_set` rotation; the roll
+  is settled and untouched).
+- **The veil** (`Veil`), a pass of our own, on sRGB-encoded values (as
+  Halo 2 Vista's Direct3D 9 blending was; corrected in the review fixes
+  below): each pixel keeps `saturation` of its colour (the rest is its
+  grey, the Rec. 709 luminance encoded), is brightened by `gain` and
+  clipped at white, is multiplied by the navy, then has `k` times the
+  navy added, and is decoded for the sRGB target. Halo 2 Vista's own
+  numbers for the darkening aren't known; ours are estimates read off
+  and fitted to the owner's Cartographer screenshot. Its scene clips at
+  exactly (44, 55, 88) (an eighth of its upper half: the lit carrier,
+  the lift's beam and the flak; nothing is brighter), its shadows go
+  down to about (6, 6, 10), and its sRGB ratios are the same at every
+  brightness (green 1.26 and blue 2.0 times red), which is the navy
+  scaled on encoded values. So the navy is (44, 55, 88), `k` 0 and saturation 0, and the
+  gain, 2.15, is fitted in the container (lavapipe, Cartographer's map,
+  a frame every 5 s of the loop) to the screenshot's scene away from the
+  logo, rows and text: there its mean is (28, 35, 56), its brightness
+  (Rec. 709, in bytes) 10 at the 1st percentile, 26, 39 and 43 at the
+  quartiles and 55 from the 95th, and 8 % of it is clipped. Veiled, 20
+  frames at 1280x720 average (28, 35, 57), with brightness 4, 28, 35,
+  43 and 55 at the same points, 7 % clipped, and the same ratios at
+  every brightness. Saturation 0 because the screenshot is all one hue:
+  multiplying the colours alone left the brown sky brown-black and the
+  water purple. `H2LOBBY_VEIL=r,g,b,k`, `r,g,b,k,s` or
+  `r,g,b,k,s,gain` tries others (`off` for none). (Retuned after P4:
+  a darker, bluer navy and a blur first; see "After P4" below.)
+- **Departure from the brief.** It asked for the veil as two blended
+  draws over the scene (multiply by the navy, then add it). That can't
+  grey the picture first, which the fit needed, so the scene is drawn
+  into a texture of its own and the veil is a full-screen pass that
+  reads it; `H2LOBBY_VEIL` takes the optional fifth number for the
+  saturation and sixth for the gain.
+- **`h2scene::backdrop`** (`Backdrop`, behind the `SceneSource` trait
+  the lobby's tests fake): a thread that reads mainmenu.map, then on
+  each ask opens the device if it has none (logging the adapter once
+  and each wake's time), draws the newest ask (older ones are dropped)
+  at `seconds` into the loop, and puts the frame in a one-slot mailbox
+  (the frame it replaces is drawn into next, if the lobby has let go of
+  it). Asked to sleep it drops the renderer and everything on the GPU
+  but keeps the scene's data. Its state is Loading, Ready or Failed
+  with why (an error or a panic on the thread). Draw and read-back
+  times are logged once per size.
+- **The lobby** (`App::scene_frame`, `draw_menu`): `mod.rs` starts the
+  `Backdrop` when Vista's files were found, `H2LOBBY_SCENE` isn't `off`,
+  `lobby.txt` doesn't say `background = still` (a new menu line), and
+  the lobby has a window (or `H2LOBBY_SCENE=on`, which also allows a
+  software GPU); otherwise it logs why not. On the start screen and the
+  main menu each draw asks for a frame of the window's size at the
+  flythrough's clock and copies the newest of that size in where the
+  still background would go (the still background otherwise, at a new
+  size until a frame of it comes). The intro wakes it ahead: its first
+  draw asks for the scene's first frame at the window's size (again only
+  at a new size), and the scene isn't put to sleep while the movie
+  plays, so the GPU device opens and the frame is drawn behind the movie
+  and the start screen has the scene whole from its first frame, as
+  Halo 2's did. A frame that comes only after the screen is up (no
+  intro, the intro skipped at once, a new window size) fades in over
+  the still background in 0.25 s (`SCENE_FADE`, an estimate, so it
+  doesn't pop in). The flythrough's clock runs only on those two
+  screens, at most 0.25 s a frame (`SCENE_STEP`). `tick` puts the scene
+  to sleep on every other screen (the intro aside) and while a match
+  exists, and `on_match` does before the engine starts; it wakes when
+  the menus next ask, the last frame showing meanwhile. A failure is
+  logged once (`menus: the scene can't be
+  drawn (<why>); the still background from now on`) and the still
+  background stays for the run. The lobby still draws every 33 ms (the
+  plan's 30 fps default); `H2LOBBY_SCENE_FPS=60` makes it 16 ms while
+  the scene shows. The per-screen timer adds the copy's time (`the
+  scene's frame copied in <n> ms`).
+- **`examples/scene_shot.rs`**: frames at chosen times and size to PNGs
+  with each one's mean colour and times, for the look check and for
+  tuning the veil on a PC.
+- **Tests (no game files).** Rows padded to 256 bytes and unpacked past
+  the padding; sRGB round trips; the veil's grey, gain, clip, multiply
+  and add on sRGB values, the menus' veil taking white to the navy and
+  black to black and keeping the navy's hue at every brightness, and
+  its four-, five- or six-number form; a software adapter refused unless
+  allowed (`refused`, for every kind of adapter, and `Renderer::new`
+  where lavapipe is the only one); the mailbox keeping the newest, only
+  the newest ask drawn, a missing map failing with why. A GPU test,
+  skipped with no adapter (or only a software one, unless
+  `H2LOBBY_SCENE=on`): a made-up red square in the sky and a lit green
+  one in the level, through the real pipelines and veil, checked pixel
+  by pixel against `Veil::apply_srgb` (it runs on lavapipe with
+  `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+  WGPU_BACKEND=vulkan H2LOBBY_SCENE=on`). The lobby, with a fake scene:
+  the intro asking for the scene's first frame once (again at a new
+  size), never putting it to sleep, and the start screen's first draw
+  having it whole behind it; with no intro, the scene's colour under the
+  start screen's and main menu's rows once faded in, the still
+  background before and a blend half way; none on
+  the settings or the playlists; a sleep (once) on leaving and none
+  asked for while a match is on (`on_match` sleeps it); the clock
+  carrying on where it stopped and stepping at most 0.25 s; a failed
+  scene giving the still background and one log line; the window's
+  16 ms only with `H2LOBBY_SCENE_FPS=60` and the scene showing; the
+  fade's alpha and the blend; the timer's line; `lobby.txt`'s
+  `background`; and the reasons it isn't started. Ignored, with `H2_MAPS`
+  (and `H2_SCENE_PNG` to write PNGs): `draws_the_real_main_menu`, at 10,
+  40 and 70 s, not flat and navy.
+- **Measured in the container** (lavapipe, a software GPU sharing the
+  CPU, so only the shape counts): the scene read in about 0.1 s, awake
+  (device, pipelines and 39 textures) in about 105 ms, 25 to 280 ms to
+  draw a 1280x720 frame and 1.5 to 2.2 ms to read it back; the main menu
+  8 to 18 ms a frame on the UI thread with the copy 0.6 to 2.1 ms. The
+  real-map test's frames at 640x360 average (25, 32, 51), (32, 40, 64)
+  and (33, 42, 67) with the veil as the review fixes left it.
+- **Looks like / still missing** (from the container's frames next to the
+  owner's screenshot): the carrier, the city, the tether and the water
+  in one navy, as in the screenshot. Missing: the carrier's gravity-lift
+  beam, the flak and other particles, the engines' glow, and bloom. The
+  70-degree field of view is still unverified. The cinematic anchor and
+  the one-triangle stand-ins for the firing effects showed nowhere in the
+  frames looked at.
+
+**On the owner's PC (P4)**, with Cartographer's files found, from the
+clone (`C:\Halo 2 Rust Project` or the work folder), built with `cargo
+build --release -p h2launch` and run as usual (a variable set first in
+the same console: `set H2LOBBY_SCENE=off` in cmd,
+`$env:H2LOBBY_SCENE="off"` in PowerShell). It also takes the two checks
+put off to it: 2.4's `scene_info` (step 1) and the intro's time at
+about 1080p (step 3).
+
+1. 2.4's scene, read on its own: `cargo run --release -p h2scene
+   --example scene_info -- "C:\Games\Halo 2 Project
+   Cartographer\maps\mainmenu.map"` prints the counts in "What Phase
+   2.4 built" (1 BSP, 45,919 triangles, 39 textures and 0 not decoded,
+   40 materials as 27/7/6, 10 objects, 18 camera points with 12 flown
+   through, 2,990 ticks and 99.7 s) and a load time; on MCC's
+   `halo2\h2_maps_win64_dx11\mainmenu.map` it prints `error: MCC maps
+   have no geometry reader yet`.
+2. Launched: the start screen has the flythrough behind it from its
+   first frame (it was woken and drawn while the intro played, so no
+   still navy or slanted framing bars show first), and it plays on
+   behind the main menu. `lobby.log` has `scene: ...mainmenu.map read in
+   <t> s (45919 triangles, 39 textures, a 99.7 s flythrough)`, `scene:
+   drawing on <your graphics card> (<kind>, <backend>)` and `scene:
+   awake in <n> ms`, the last before the `intro: skipped` or `intro:
+   played to the end` line. Skipped in its first second, the intro may
+   leave before the scene's first frame: the flythrough then fades in
+   over the still background in a quarter second. Note whether the
+   movie stutters as it starts (the scene waking on the GPU then).
+3. The intro at about 1080p: the window opens at 1280x720 (1600x900 at
+   125 % scaling) and has no full-screen mode, so maximise it in the
+   intro's first seconds and let it play on. A maximised window leaves
+   out the taskbar and its own title bar, so the log names a little
+   less than the screen: on a 1920x1080 screen about 1920x1009 (about
+   1920x990 at 125 %), some 93 % of 1080p's pixels and near enough to
+   stand for it. Write down the size the log names (`<W>x<H>` here and
+   in step 4). After 30 new pictures at that size the log has
+   `lobby: <W>x<H>, intro <n> ms a frame on the CPU` (P3 measured 7.9
+   to 8.2 ms at 1600x900). On a bigger screen, compare it with 1080p by
+   the pixel count: about `<n>` × (1920×1080) / (W×H).
+4. In the same maximised window, after half a minute on the main menu,
+   the log has `menus: <W>x<H>, main menu <n> ms a frame on the CPU
+   (the scene's frame copied in <m> ms; ...)` and `scene: <W>x<H>, <a>
+   ms to draw a frame and <b> ms to read it back (on its own thread)`.
+   The budget is about 9 ms at 1920x1080, scaled by the pixel count:
+   `<n>` at most about 9 × (W×H) / (1920×1080), which is about 8.4 at
+   1920x1009 and about 15 at 2560x1369.
+5. SETTINGS, then B: `scene: asleep (its GPU device closed)`, then
+   `scene: awake in <n> ms`, and the flythrough carries on from where it
+   was.
+6. A playlist match or a custom game (alone: ONLINE, then Custom Game
+   under the playlists, then START GAME): the log has `scene: asleep`
+   before the engine's lines. During the match Task Manager's Details
+   tab shows two h2launch.exe: the engine runs in a second copy, started
+   with `--session ...match-session.txt`. Right-click a column header,
+   choose Select columns and tick Command line (and GPU if it isn't
+   shown): the lobby is the h2launch.exe whose command line has no
+   `--session`, and its GPU column shows about 0. After the match, back
+   on the main menu, it wakes.
+7. `H2LOBBY_VISTA=off`: the still background, and `scene: none (no Halo 2
+   Vista folder); the menus have the still background`.
+   `H2LOBBY_SCENE=off`, or `background = still` in `lobby.txt`: the
+   still background, with that reason on the same line.
+8. A forced failure, `WGPU_BACKEND=metal` (Windows has no Metal): the
+   still background and one line, `menus: the scene can't be drawn (no
+   GPU adapter (...)); the still background from now on`.
+9. Resizing the window: the still background for a moment, then the
+   flythrough at the new size.
+10. Optional, the look: `cargo run --release -p h2scene --example
+    scene_shot -- "C:\Games\Halo 2 Project Cartographer\maps"
+    C:\h2work\scene 1920x1080 10 40 70` writes three PNGs (keep them on
+    the PC) and prints each frame's mean; the container's lavapipe gave
+    about (25, 32, 51), (32, 40, 64) and (33, 42, 67) at those times
+    (since P4's follow-ups, (8, 15, 36), (10, 19, 44) and (10, 20, 46)).
+    A real GPU should be within a few levels; if the PC's screen looks
+    lighter, darker, off-hue, sharper or softer next to the Xbox's
+    menu, try `H2LOBBY_VEIL=13,26,60,0,0,2.15,0.005` with other numbers
+    (the sixth, the gain, brightens all but the brightest; the first
+    three are the brightest colour; the seventh is the softness, from 0
+    to 0.02) and send the ones that look right.
+11. Optional: `H2LOBBY_SCENE_FPS=60` makes the flythrough smoother; its
+    frame time is in the same log line.
+
+**Review fixes, round 1 (2026-10-12).**
+
+- **The veil's tone range.** It had been fitted to the screenshot's
+  whole-frame mean alone (logo, rows and text included), with the
+  multiply in linear light: black came out (13, 17, 30) and white
+  (102, 123, 178), so the shadows were lifted, the highlights went past
+  the screenshot's ceiling of (44, 55, 88), and the picture was hazy and
+  flat. It now works on sRGB-encoded values with the screenshot's clip
+  colour as the navy, no added light and a gain (above), fitted to the
+  scene's own areas; the uniform's spare fourth number carries the gain.
+- **The start screen has the scene from its first frame.** The GPU was
+  opened only at the start screen's first draw, which showed the still
+  background, framing bars and all, while the scene faded in over it.
+  The intro now asks for the first frame (above).
+- **A software adapter refused unless allowed** is a function of its
+  own (`refused`) with a test of every kind of adapter.
+- This list was called P5 by mistake; the plan's P4 is the check after
+  2.5 (P5 is 2.7's `menu_png --all`). It now has the two checks put off
+  to P4 (2.4's `scene_info` and the intro at 1080p), and the match step
+  asks for a playlist match or a custom game (the lobby has no offline
+  match) and says which h2launch.exe is the lobby.
+
+**Review fixes, round 2 (2026-10-12).**
+
+- **The lobby's scene wiring has tests.** Every lobby test had put a
+  fake scene straight into `Config::scene`, so nothing in the gate ran
+  `start_scene`. Its options are now a function of their own
+  (`scene_options`: `H2LOBBY_SCENE=on` alone allows a software GPU;
+  `H2LOBBY_VEIL` unset gives the usual veil, `off` none, and one that
+  doesn't read the usual veil and a log line), with a unit test. A
+  program test (`tests/scene.rs`, no GPU and no game files) runs a
+  headless lobby on a made-up Vista folder whose mainmenu.map is junk:
+  with `H2LOBBY_SCENE=on` and a bad `H2LOBBY_VEIL` the log has the veil
+  line once and `menus: the scene can't be drawn (<that mainmenu.map>:
+  not a Halo 2 map)` once, and without `H2LOBBY_SCENE` it has
+  `scene: none (headless)`.
+- **Each screen's copy time is its own.** The per-screen timer had one
+  copy count for every screen at a size, so the main menu's line
+  could carry the start screen's copies (and say the scene's frame was
+  copied in when the scene had failed and none were). The count is now
+  kept with each screen's frames.
+- **P4's steps 3 and 4 at the size the log names.** The lobby window
+  has no full-screen mode, and a maximised window leaves out the
+  taskbar and its title bar, so it never logs exactly 1920x1080. The
+  steps now note the size the log gives and judge the budget against
+  1080p by the pixel count.
+
+**Results on the owner's PC (P4, 2026-10-12, about 14:30 UTC,
+e2f4e22).** Steps 1 to 7 passed, on an RTX 5080 with a 2560x1440 screen
+(the maximised window 2560x1351); steps 8 to 11 weren't reported.
+
+1. `scene_info` on Cartographer's mainmenu.map gave exactly the counts
+   above, loaded in 65 ms; on MCC's, the "no geometry reader yet" error.
+2. Read in 0.1 s, drawn on the RTX 5080 (discrete, Vulkan), awake in 365
+   to 381 ms (632 ms once, maximised), each time logged before the
+   intro's last line (played to the end: 18.0 s, 540 pictures, 1 late).
+3. The intro: 15.1 ms a frame at 2560x1351 (8.0 at 1600x900), about
+   9.1 ms at 1080p by the pixel count.
+4. The main menu 4.9 ms a frame at 2560x1351 (the scene's frame copied
+   in 0.6 ms); the scene 5.0 ms to draw and 2.8 ms to read back on its
+   own thread; the start screen 3.9 ms. The main menu's line came about
+   2 s after the menu opened (its first measurement), not after the half
+   minute the step said.
+5. SETTINGS: asleep (its GPU device closed), the settings 4.7 ms a frame;
+   back: awake in 254 ms.
+6. A custom game alone against a local h2live: asleep at sign-in (4.79 s
+   in), well before the engine started (17.8 s); the lobby's GPU at 0 %
+   for 8 s mid-match (the engine 7.3 to 7.8 %); after the match awake
+   in 227 ms.
+7. The three `scene: none (...)` lines (no Vista folder,
+   `H2LOBBY_SCENE=off`, `background = still`), each with the still
+   background.
+
+A side note: messages posted to the window as typed characters
+(`WM_CHAR`) don't reach the sign-in field, as winit wants real key
+events, so the session wrote `lobby.txt` itself. Not a fault of the
+lobby.
+
+The look, against a video of the owner's original Xbox's main menu
+(`scene_shot` at 1920x1080 at 10, 40 and 70 s; the frames deleted
+after): the same places (at 10 s the bridge's rails running down to the
+left with the city and towers behind, at 70 s the city from above with
+the carrier's hull), but ours too grey and too bright, and too sharp.
+Ours averaged (26, 32, 51), (32, 40, 64) and (34, 42, 67) over the
+frame; the top 30 % of the Xbox's frames averaged (7, 15, 37), (7, 14,
+33) and (12, 24, 51), a deep navy with almost no red: ours was about
+twice as bright, with three to four times the red and green for its
+blue. And where the Xbox's shapes are soft, defocused silhouettes, ours
+had crisp rails, window lights on the hull and building outlines.
+
+**After P4: the veil darker, bluer and soft (2026-10-12).**
+
+- **The navy is (13, 26, 60).** Each channel of the old navy was scaled
+  so the top 30 % of our frames comes out as the Xbox's does. In the
+  container (lavapipe, Cartographer's map, the same three times at
+  1920x1080, with the blur below) the top 30 % now average (8.8, 17.7,
+  40.9) against the Xbox's (8.7, 17.7, 40.3); one by one (9.7, 19.4,
+  44.9), (8.5, 17.1, 39.6) and (8.2, 16.5, 38.2) against (7, 15, 37),
+  (7, 14, 33) and (12, 24, 51), the frames' tops holding different
+  things (sky at 10 s, the city at 70 s). Whole frames come to (8, 15,
+  36), (10, 19, 44) and (10, 20, 46), and nothing is brighter than the
+  navy. The gain (2.15), `k` (0) and saturation (0) are kept. All still
+  estimates (`MENU_NAVY`'s comment says how they were reached).
+- **The scene is softened before the grade** (`Veil::softness`,
+  `MENU_SOFTNESS` 0.005): a blur whose spread is half a percent of the
+  frame's height (about 5 pixels at 1080p, 7 at 1351), chosen by eye on
+  the container's frames: the rails, the window lights and the
+  outlines go, the shapes stay. Two passes on the scene's own thread
+  before the veil (`Soft`): the scene boxed down into a small frame of
+  half-precision floats (each texel the mean of `f` by `f` pixels, `f`
+  the power of two nearest the spread, 2 to 64, from bilinear taps
+  between two by two pixels), then blurred there by 5 by 5 bilinear taps
+  with binomial weights; the veil reads the small frame stretched back
+  with bilinear filtering. The taps' step makes the box, the taps and
+  the stretch add up to the spread asked for, and is never more than
+  about 1.3 small texels, so thin lines don't flicker through gaps as
+  the camera moves. A sharp veil (softness 0: `Veil::NONE`,
+  `Veil::navy`) reads the scene's own pixels as before. `H2LOBBY_VEIL`
+  takes a seventh number for the softness (0 to 0.02, `MAX_SOFTNESS`;
+  `MENU_SOFTNESS` when left out).
+- **Cost.** On lavapipe a 1280x720 or 1920x1080 frame took about the
+  same with the blur as without (85 to 110 ms and 165 to 220 ms; the
+  container's noise is bigger than the difference). On a GPU the two
+  passes read the frame once and the small frame 25 times, little next
+  to the scene itself.
+- **Tests.** The blur's plan at every size from 90 to 4320 pixels high
+  (a power of two from 2 to 64, the taps at most 1.5 small texels apart,
+  the spreads adding up to the one asked for, the small frame covering
+  the frame, the uniform carrying it; the menus' box 2, 4 or 8 at the
+  usual sizes); the seven-number form and its limits; and a GPU test
+  (on lavapipe with `H2LOBBY_SCENE=on`): with the softest veil, the
+  middle of the made-up green square keeps its colour and its sharp edge
+  becomes a ramp over several pixels each way; set sharp again, the edge
+  is a step. The ignored real-map test still passes with the new veil
+  (on lavapipe at 640x360: (7, 15, 35), (9, 19, 44) and (9, 19, 46), 56
+  to 88 colours, the blues spread 28 to 46 levels).
+- **The menu layer over the flythrough** (a headless lobby with
+  Cartographer's files and the scene on lavapipe, 1280x720): the main
+  menu's glyph bands at five heights scroll over the darker scene and
+  stay visible, the two brightest bracketing the logo (three strips
+  overlapping just above it, two just below); the dotted timeline lines
+  run near the bottom; the logo, the rows and the small print are as
+  before. Nothing in Vista's main menu tags lights the logo row itself:
+  on the still navy, the rows between those two bands are as dark as the
+  gradient there. So between the bands the scene shows as it is; if the
+  Xbox video's brighter band across the logo row is more than those two
+  glyph bands, it is the Xbox's own art or scene, left for a look side
+  by side on the PC.
+
+**On the owner's PC (after P4's follow-ups):**
+
+1. The main menu next to the Xbox video: a dark, deep navy with almost
+   no red, the shapes soft; the glyph bands and the dotted lines over
+   it.
+2. `scene_shot ... 1920x1080 10 40 70` (step 10 above): means within a
+   few levels of (8, 15, 36), (10, 19, 44) and (10, 20, 46).
+3. Step 4's scene line in the maximised window: the scene's draw time
+   still about 5 ms at 2560x1351 (the blur adds little).
+4. If it looks off, `H2LOBBY_VEIL=13,26,60,0,0,2.15,0.005` with other
+   numbers (the seventh the softness) and send the ones that look right.
+
+**Re-check on the owner's PC (2026-10-12, about 17:00 UTC, afd799e):
+passed; the veil needs no more tuning.**
+
+1. `scene_shot` at 1920x1080: whole frames (8, 15, 35) at 10 s, (10,
+   19, 44) at 40 s and (10, 20, 46) at 70 s, each within one level of
+   the container's. The top 30 %: (9.7, 19.3, 44.6), (8.6, 17.1, 39.5)
+   and (8.3, 16.4, 37.8), on average (8.9, 17.6, 40.6) against the Xbox
+   video's (8.7, 17.7, 40.3). The three frames took 4.8, 0.9 and 0.8 ms
+   to draw and 2.4, 1.3 and 1.4 ms to read back.
+2. In the maximised window (2560x1351): the scene 1.1 ms to draw and 3.0
+   ms to read back at its first measurement after waking, the main menu
+   4.9 ms a frame, the start screen 3.9 ms, awake in 411 ms. The blur
+   costs nothing that shows.
+3. Next to the Xbox video: the same family of navy at the same
+   brightness, the darks a near-black navy, the shapes soft silhouettes
+   (a faint hint of the hull's window lights in one place; the Xbox may
+   be a little softer still, so `0.007` as the seventh number of
+   `H2LOBBY_VEIL` is the one to try if the owner sees the lights). The
+   glyph bands show, two bright strips on either side of the logo row,
+   and the dotted line runs faintly near the bottom; no band across the
+   logo row is missing. What differs is content: the Xbox's five rows
+   against our ONLINE and SETTINGS, and its logo about 40 % of the
+   width of its 4:3 frame against about 45 % of ours.
+4. A build note: on the PC, after a checkout, `cargo build` left an
+   older h2launch.exe in place twice (it reported the older commit);
+   `cargo clean -p h2launch -p h2scene -p h2ui` fixed it. Briefs for the
+   PC now check that `h2launch --version` names the checked-out commit
+   before testing.
+
+#### What Phase 2.6 built (2026-10-12)
+
+Every screen after the main menu sits in Halo 2's shell (1.3): the navy
+framing with its track strips scrolling, the screen's name as Halo 2's
+header at the top left, and its buttons as Halo 2's button legend at the
+bottom right, drawn by `h2ui` around the lobby's own body (which each
+later sub-phase restyles). The legends follow the device used last, and
+the pad moves as in Halo 2's menus.
+
+- **`h2ui`.**
+  - `DrawList.texts`: each line `Painter::text` draws, unless it is empty
+    or wholly transparent, so a caller can tell what was shown.
+  - `layout::Face` (A, B, X, Y, LB, RB, Start, Back, White, Black):
+    `glyph` gives Halo 2's code point for the six its fonts have
+    (U+E100 to U+E105) and the name for the others; `key_name` gives
+    the key that does the same (A ENTER, B ESC, X X, Y Y, LB Q, RB E,
+    Start ENTER, Back ESC; none for White and Black), which `legend()`
+    now uses. `LegendItem` is a face and its words.
+  - `ChromeLayout`: the shell's still and moving pictures, a header and
+    a legend box for each dialog size, and the overlay colour. Its
+    default is the built-in numbers: the framing alone, `HEADER_BOUNDS`
+    in the title font, left-justified, `LEGEND_BOUNDS` in the body font,
+    right-justified, the header colour, and the overlay of 1.3.
+  - `tags::chrome`: pane 0 of `game_shell_background`'s pictures (the
+    framing and 17 strips at depth 11, scale 1.1, in Vista's), split by
+    their scrolling; the globals' header boxes, header fonts and text
+    colour, their button-key boxes for the legends, and their overlay.
+    A box that isn't one (right not past left, or top not above bottom)
+    keeps the built-in one; a colour of all zeros or a clear overlay
+    keeps the built-in one. Each gives a `menus:` line. `wanted()` now
+    asks for the shell's pictures too, and `Shell::chrome` is built in
+    both passes of `from_tags`, as the layouts are.
+  - `chrome.rs`: `still` (the navy gradient, then the still pictures by
+    depth), `moving` (the strips, scrolling through `Painter::bitmap`'s
+    wraps), `header` (one line in its box, cut to fit with "..."), and
+    `legend`, which lays its items on one line ending at the box's right
+    edge, goes on past its left when wider, shrinks to fit when wider
+    than the window (a margin of 2 % each side, our own), and returns
+    each button's part as a pixel box. After a pad each button is its
+    glyph, a space and its words, a space between buttons (as Halo 2's
+    legend strings space them); after the keyboard it is the key's name,
+    three spaces and its words, six spaces between keys (our own
+    spacing: Halo 2 had no keyboard legends).
+  - `examples/menu_png.rs` also writes `shell-<look>-<size>.png`: the
+    shell with the header PREGAME LOBBY and the legend A SELECT, B BACK.
+- **Departure from the brief: the split, and the intros.** The brief put
+  a picture with a nonzero `wraps_per_second` *or an intro* among the
+  moving ones. In Vista's tags all 18 pictures have an intro (the
+  globals' animation 0, their slide-in), so that rule would have left
+  nothing to keep and drawn the framing every frame. The split is by
+  scrolling alone (2 still: the framing and one strip that doesn't
+  scroll; 16 moving), and every picture is drawn settled, as it is once
+  its intro is over. How the shell comes in is left to the screen
+  transitions.
+- **The lobby** (`lobby/app/shell.rs`, a child module of `app.rs`, the
+  pattern the later screens follow). On every screen but the intro,
+  the start screen and the main menu, each frame is: the shell's still
+  layer through its own `Kept` (`shell_backdrop`, apart from the menus'
+  backdrop, so going between the main menu and the other screens draws
+  neither again); the strips, every frame; the screen's body by the
+  lobby's `Pen` (`draw_body`: the screen's match as before, and who is
+  signed in on one small line at the top right: the highest level's
+  icon, the gamertag, then the level, the number online and the round
+  trip, in place of the two lines that were there); the header
+  (`screen_title`, the titles the lobby had) and the legend at the full
+  size; then a second `Pen` for the popups, the invitation and the
+  notices (`draw_over`, also run over the start screen and main menu).
+  The gradient, the dark top band, its edge line, the lobby's own title
+  and the "Keyboard: ..." line are gone. `Pen::hints` no longer draws:
+  it gathers A, B, X and Y (in capitals) for the legend; LB and RB keep
+  working but stay off it (1.2). A popup's own buttons are still drawn
+  by `hint_row`. Each legend button's pixel box becomes a click area
+  for its press under any popup's (so a popup alone takes clicks), and
+  the header's and legend's words go into `drawn` for the scripts'
+  `see`, which is case-blind, so no flow changed. The notices end above
+  the legend (y 652, the legend from 660).
+- **The device flag** (`App::keyboard`, false at first: the controller
+  comes first). `App::key`, a click and the wheel (`App::wheel`) set it;
+  `App::pad`, which the window's controller presses now come through,
+  clears it; the headless script's presses leave it.
+- **The pad** (`window.rs`): the stick counts past 90 % (`STICK`, was
+  60 %; H), still by its stronger axis only. `Repeat` holds the newest
+  direction pressed on the d-pad or the stick and repeats it 250 ms
+  after the press (an estimate) and then every 250 ms (H), one at a time
+  however late the window wakes; letting go stops it, and losing the
+  focus or the engine having the pad resets it. The window wakes for the
+  earlier of the next frame and the next repeat.
+- **The timer.** A shell screen's frame is timed whole, as before; the
+  frame that draws the still layer afresh (a new size) isn't.
+- **Tests (no game files).** `h2ui`: a made-up `game_shell_background`
+  (the framing, a still strip, two scrolling) splits into two still and
+  two moving, with the globals' boxes, fonts, colour and overlay taken
+  and a broken box keeping the built-in one; no tags gives the default;
+  the header in its box for each size; legend boxes in order, apart,
+  ending at the box's right within a pixel, with ENTER and ESC after a
+  keyboard and the glyphs (discs in the built-in font) after a pad; an
+  over-wide legend inside the window at three window shapes; the strips
+  moving between two clocks while the still list stays the same;
+  `DrawList.texts`; `Kept::draw` saying whether it drew. The lobby: the
+  sign-in screen's header colour inside the header box and no
+  "Keyboard:" line, the legend's B at the box's bottom right going back
+  when clicked; ENTER after `key(A)`, the glyphs again after `pad(Down)`,
+  the script's presses leaving it, a click and the wheel setting it; the
+  playlists' legend (PLAYERS, BACK, no service record or friends), the
+  status line, the invitation taking the legend's clicks, the legend's X
+  opening the players; with a made-up shell, the kept layer not drawn
+  again between frames (they are timed) while only the strip's pixels
+  change; the notices and the settings rows above the legend's top;
+  `Repeat`'s timing; the stick at 90 %. The flows pass unchanged.
+- **Measured in the container** (four shared cores; numbers vary by up
+  to a half between runs). The lobby headless at 1280x720: flat, the
+  playlists 2.4 ms and the settings 2.6 ms a frame; with Cartographer's
+  `mainmenu.map`, 5.2 and 5.4 ms. With that map's shell, the 16 strips
+  alone take 2.6 ms at 1280x720 (181,000 pixels) and 4.5 ms at
+  1920x1080 (407,000 pixels), the kept layer's copy 0.3 and 0.7 ms, and
+  the still layer 25 to 44 ms once; `menu_png`'s shell frame (copy,
+  strips, header, legend) 4.4 ms at 1280x720 and 4.8 to 8.3 ms at
+  1920x1080. So a shell screen at 1080p is about 7 to 9 ms here; the
+  budget is 10 ms on the owner's PC, which ran the intro and menus
+  faster than the container.
+- **Looks like** (the playlists and the settings next to the
+  Cartographer lobby screenshot, 1812 by 1176): the header starts 730
+  units left of the middle, which puts it at x 190 there and the
+  screenshot's at about 200; the legend ends 730 units right of the
+  middle, x 1621 there, and the screenshot's at about 1655 (its Halo 2
+  font is bigger than the built-in one). (2.7's second review: that
+  screenshot is a crop of a 1920x1200 window, our pixel being its pixel
+  plus (28, -4); drawn at 1920x1200, the header starts at x 230, about
+  202 in the screenshot's pixels against its 200.) The framing's bands
+  and the strips match; the navy between them is (9, 21, 42) against
+  the screenshot's (10, 22, 43). The container has no Halo 2 fonts, so
+  its header and legend are in the built-in font, smaller than the
+  screenshot's. Missing: the shell's slide-in and the screen
+  transitions, the overlay (used by 2.8's dialogs), and the bodies in
+  Halo 2's style.
+
+**On the owner's PC (after 2.6)**, with Cartographer's files found, from
+the clone, built with `cargo build --release -p h2launch` and run as
+usual:
+
+1. On the main menu pick ONLINE: the sign-in screen or the playlists
+   sit on the navy framing, thin track lines scroll slowly across it,
+   the screen's name is at the top left in the header's band (PLAYLISTS
+   in Halo 2's title font) and its buttons at the bottom right in the
+   legend's band. `lobby.log` has `menus: the shell's pictures from wgit
+   ...game_shell_background: 2 still, 16 scrolling` and `menus: headers
+   and button legends: 8 of 8 boxes from the globals, the headers'
+   colour from the globals, the overlay from the globals`.
+2. Every other screen after the main menu has the same: signing in,
+   searching, players, party, custom game, pregame, in game, carnage
+   report, offline, service record, friends and CONTROLLER (SETTINGS on
+   the main menu). Signed in, the top right has the level icon, the
+   gamertag, the level, the number online and the ms.
+3. With only a pad from the start, the legend shows the pad's A and B
+   (Halo 2's green and red buttons in the font's own colours, not tinted
+   blue; the words near white, as on his Xbox screenshot, next to the
+   header's light blue: white is an estimate, so say if they look too
+   bright). Press an arrow key: it says ENTER
+   and ESC. Press a pad button: the buttons again. A click or the wheel
+   also switches it to the keys. Click BACK in the legend: it goes back.
+   With a popup up (Y on the friends list opens ADD FRIEND), a click on
+   the legend does nothing; the popup's own buttons work.
+4. On CONTROLLER, hold the d-pad down: one move, then after a quarter
+   second one every quarter second; let go and it stops. The same with
+   the stick pushed all the way; a push of half to three quarters does
+   nothing now, and a diagonal push moves at most one way. Holding a
+   direction while switching to another window and back doesn't keep
+   repeating.
+5. Maximise the window (as in P4 step 3) and visit the playlists, the
+   players, the friends, the CONTROLLER and the carnage report after a
+   match: the log has `lobby: <W>x<H>, <screen> <n> ms a frame on the
+   CPU` for each, each at most about 10 ms at 1920x1080 (scaled by the
+   pixel count at another size: about 9.3 at 1920x1009).
+6. Every flow still works with the keyboard, the mouse and the pad: sign
+   in, invite a friend, the party, a search and a match, the carnage
+   report, LB's service record and RB's friends list (both still work,
+   though the legend doesn't show them), a custom game, a settings
+   change. The notices stack just above the legend.
+7. (After the review fixes below.) Double-click the legend's BACK on
+   PLAYERS ONLINE: the playlists, not the main menu. With a friend
+   request waiting (sent from another PC while this one was signed
+   out), "1 friend request" in gold under the top right line on every
+   screen. On SIGN IN after typing, the legend says CONTROLLER SETTINGS
+   with no X before it, and a click on it opens them; during a match,
+   IN GAME's legend says LEAVE GAME with no ESC or B. With a match
+   playing and the engine's window in front, find the lobby's
+   h2launch.exe (the one whose command line has no `--session`, as in
+   P4 step 6) in Resource Monitor's CPU tab, matched by its PID (Task
+   Manager's Details tab rounds to whole percents of all the
+   processors, too coarse here), and note its CPU. Then click the
+   lobby's window, the match still on: its CPU is several times higher
+   (it draws about 30 frames a second instead of 2) and its lines
+   scroll smoothly. Back on the engine's window it drops again. Above
+   the header band and below the legend band, the window's edge is one
+   flat grey-navy, a little lighter than the middle (as in
+   Cartographer's lobby), not near black.
+
+**Review fixes, round 1 (2026-10-12).**
+
+- **A double-click goes on once.** The legend ends at its box's right,
+  so BACK, last on most screens, sits in the same place from screen to
+  screen, and a double-click on PLAYERS ONLINE's BACK went through the
+  playlists to the main menu. A click within `DOUBLE_CLICK` (0.4 s) of
+  one that changed the screen or shut a popup now presses no button or
+  arrow and only selects a row, on every screen (the start screen and
+  main menu kept their own rules). Two clicks in a popup that is still
+  up both count.
+- **No key or button named that does nothing.** `LegendItem::keyless`
+  (`LegendItem::label_only`) shows an item's words alone, still
+  clickable. The shell (`App::unpressable`) uses it where the key the
+  legend would name is swallowed (`keys_are_the_games`: IN GAME's B
+  while the engine plays) or, after the pad, where the pad is the
+  game's (IN GAME while the engine plays); and for X and Y where a name
+  is typed (SIGN IN, ADD FRIEND), where the X and Y keys are letters.
+- **Friend requests are counted again.** The playlists' RB hint said
+  "Friends (2)" while requests waited (live-v3.md), and 2.6's legend
+  dropped RB with it. The count is now a gold line under the top right
+  status ("1 friend request", "2 friend requests"), on every shell
+  screen, so a request made while the player was offline (which gives
+  no notice) is seen.
+- **The window is drawn twice a second behind a match.** Windows sends
+  a covered window its paints, so the shell's strips were drawn 30
+  times a second for the whole match. `App::draw_interval` is now
+  500 ms (`FRAME_BEHIND_GAME`, our own choice) while the engine plays
+  and the lobby's window hasn't the focus, and the window still wakes
+  each `frame_interval` (33 ms), since each wake's `tick` polls the
+  server and the engine (`window::next_wake` gives both). The focus, a
+  key or a click draws at once.
+- **The legend's colours.** It had the globals' text colour, the
+  header's light blue, and with Halo 2's fonts its A, B, X and Y were
+  multiplied by it too. Measured on the references: Cartographer's
+  header is exactly the globals' colour but its legend words a neutral
+  grey (135, 135, 135) and its A disc's own colours untinted; on the
+  Xbox screenshot the legend words are near white, less blue than the
+  header. The legend now has its own colour, `colour::LEGEND`, white
+  (an estimate from the Xbox; the owner's priority), and
+  `tags::chrome` gives the globals' colour to the headers only. A
+  button glyph from a Halo 2 font is drawn in its own colours anywhere
+  (`Fonts::line` gives it white, so only the text's alpha applies), as
+  Halo 2 draws them, also inline. The in-game menu's legend
+  (`gamemenu`) takes the same colour.
+- **The kept background's test** drew SETTINGS first at a new size, so
+  its first frame went untimed for the size alone and couldn't show the
+  fresh still layer is left out. It now draws the main menu first at the
+  same size, as when SETTINGS is picked from it, and checks that frame
+  isn't timed.
+
+**Review fixes, round 2 (2026-10-12).**
+
+- **Halo 2's grey-navy above and below the bands.** `chrome::still`
+  laid the navy gradient (`NAVY_TOP` to `NAVY_BOTTOM`, made for the
+  start screen and main menu without the scene) under the framing, and
+  the framing is only partly opaque above the header band and below the
+  legend band, so those rows came out (9, 25, 48) at the top and a near
+  black (4, 12, 27) at the bottom (47 rows at 1080p). Cartographer's
+  lobby shows a flat (23, 32, 56) in both, the same across the width,
+  and the owner's Xbox screenshot about (21, 28, 50): lighter than the
+  framing's inside, where ours was darker at the bottom. Read from
+  Vista's map, the framing is a flat (9, 21, 42) at alpha 109/255 there
+  and 242/255 inside. Under the framing's picture the still layer now
+  fills the window with `colour::SHELL_BACKDROP`, (33, 40, 67), an
+  estimate: the colour under it that gives Cartographer's (23, 32, 56)
+  outside and (10, 22, 43) inside, drawn straight over. Measured with
+  `menu_png` and Vista's shell: (23, 32, 56) above the header band and
+  below the legend band at 1080p and 720p, (11, 22, 43) inside (was
+  (9, 21, 42)), and the glow under the bottom-left line now fades into
+  it as in Cartographer's. Without the framing's picture (the flat
+  look, or a map without it) the gradient stays: the built-in framing
+  has no flat shape, so a flat shell is the backdrop alone, and a
+  lighter field there would be wrong.
+- **Tests.**
+  - `h2ui`: the still layer's first quad is the grey-navy with the
+    framing's picture and the gradient without it (with or without the
+    other pictures); the framing's colour at alpha 109 and 242 over it
+    comes out on the CPU within a level of (23, 32, 56) and
+    (10, 22, 43); `Shell::open` on a made-up format-13 map with a
+    `game_shell_background` (the framing and one scrolling strip, their
+    pictures in textures.dat) keeps them as one still and one moving,
+    logs `the shell's pictures from wgit ...: 1 still, 1 scrolling`,
+    has the strip's picture (which only the chrome asks for) and draws
+    it scrolling. The real-map check (`#[ignore]`) also draws the still
+    layer at 1080p and wants the top and bottom rows within 2 of
+    (23, 32, 56).
+  - The lobby: a double-click on the invitation's DECLINE, whose second
+    click lands on the selected sixth playlist under it, only selects
+    that row (no search; a click a moment later searches), and two
+    quick clicks in the friend options popup, which stays up, select an
+    option and then pick it; on FRIENDS after the keyboard the legend
+    names X and Y, and under ADD FRIEND, where they type letters, it
+    gives DECLINE and ADD FRIEND alone (the glyphs again after the
+    pad).
+- **Step 7's CPU check** compared with a build the owner never ran (his
+  PC's last run was 2.5's P4, with the lobby's GPU measured, not its
+  CPU). It now compares the lobby behind the engine's window with the
+  lobby in front, in the same run.
+
+#### What Phase 2.7 built (2026-10-12)
+
+`h2ui` can now lay out and draw any screen of mainmenu.map from its
+tags. Nothing in the lobby uses it yet (2.8 onwards bind screens to it),
+so the owner sees no change; the lobby's log gains a line for each
+catalog screen.
+
+- **`blam-cache`.** `Screen.strings`: every string of the screen's own
+  string list, by its string id's name, with its English words (Vista's
+  language table, MCC's through the globals). The screen flags are named
+  (`QUARTER_DIALOG`, `PANE_PER_ITEM`, `NO_HEADER`, `HALF_DIALOG`,
+  `LARGE_DIALOG`, `NO_OVERLAY`).
+- **`h2ui::layout`.**
+  - `Scale::{Vista, Xbox}`: Vista's own units (1:1), or the Xbox's,
+    where places and boxes grow by `XBOX_POSITION` (2.5) and pictures by
+    `XBOX_BITMAP` (1.25) beyond their own scale. Both are checked
+    against the owner's Xbox lobby screenshot and three bitmaps only.
+    An Xbox pane's text grows by 1.25 too (`SlotText::glyphs`, review
+    round 1).
+  - `ScreenLayout`: a screen's whole tag name, its size (where its header
+    and legend go), whether it has a header, the header's string id and
+    words, its `button_key` number, whether it dims what is under it,
+    whether its panes follow its list, its panes and its string list.
+    `pane(k)` gives the last pane past the end.
+  - `PaneLayout`: its scale, its pictures, text slots (`SlotText`: the
+    string id it names, or `#<n>` when it names none, the tag's words,
+    and the text widget), lists, buttons (`ButtonLayout`: a text slot
+    and its picture) and players blocks (`PlayersLayout`: the first
+    row's corner, how many in how many rows and columns, the row and
+    column steps, filled down each column then across). `at_scale`
+    moves a pane to the other scale.
+  - A list skin's scroll arrows (`Arrows`: the bitmap, and each arrow's
+    bottom left from the list's corner), and `Flat::Panel`, a plain
+    panel with an edge for the flat look.
+- **`h2ui::catalog`.** The 27 screens the lobby will draw (`ScreenId`),
+  each with its whole tag name, a short name (`dialog_ok`, `online`,
+  `lobby`...) and its panes' scales. `H2LOBBY_SCALE` overrides any of
+  them for tuning: `<name>=xbox|vista` for all of a screen's panes,
+  `<name>:<pane>=...` for one, several separated by commas; what it
+  can't read is logged and left out.
+- **`h2ui::tags`.**
+  - `screen_layout` (a catalog screen, at its scales with the overrides)
+    and `screen_layout_at` (any screen by its whole tag name, at the
+    scales given). The name must match whole (any case): Vista has two
+    screens ending in `player_selected_dialog`. Each gives a `menus:
+    screen ...` line: its panes' scales, how many parked widgets were
+    left out, and its lists' skins.
+  - A widget with a place or box number of 9,000 or more either way is
+    parked off the screen (Halo 2 parks unused ones at ±9,999; a few
+    at about ±9,100 to ±9,600) and is left out.
+  - A button's picture goes at its text box's top left moved by the
+    tag's offset, whose y counts down (START GAME's at (-705, 492), as in
+    Cartographer's lobby), one depth under its text.
+  - A players block's row step is the tag's (negative) height, positive.
+  - List skins are shared by every screen and stay in Vista's units at
+    either scale; only a list's corner moves.
+  - `screen_wanted` gives what a screen draws (`Wants`): its pictures,
+    its buttons' resting frame, its skins' pictures and both arrows;
+    then, apart, each button's focused frame, read only where its
+    bitmap has it (`art::read_some`: a missing one isn't counted as
+    missing); and its skins' pictures again, read whole (every image),
+    since a row may show any frame of them (review round 1).
+  - `flat_for` gives the dialog frame pieces, the pregame lobby's button
+    and the default skin's backing and end cap a panel of their
+    pictures' sizes for the flat look.
+- **Text and painting.** `Fonts::wrap` breaks text at spaces and at
+  `\n` or `\r\n`, cutting a word wider than the box. `Painter::text_box`
+  draws one line as `text` did, or several from the box's top, each a
+  line's height below the last, leaving out any whose bottom is past the
+  box's (the first always shows). `DrawList::fill_area` counts the
+  window pixels its quads cover.
+- **`h2ui::screens`.**
+  - `Words::{Tag, TagOr, Ours, Hide}`: what a text slot shows. The tag's
+    words always go through `wording` first: Xbox Live becomes ONLINE
+    in capitals, else online (Online starting a sentence), and an "on"
+    just before it goes; after into, to, of, from, with or by, where the
+    name ends the phrase, it becomes "the online service" (review round
+    1); words still naming the Xbox, Bungie, clans or voice are refused
+    (hidden, or `TagOr`'s own words instead).
+  - Format tokens (U+E400 to U+E4FF) take the caller's values; a text
+    with one that has none is hidden.
+  - `Row` (a cell for each of the skin's texts, skin pictures shown at
+    another frame on that row, and whether it can be chosen; one that
+    can't is drawn at `DISABLED`, 0.4, our own), `ListState` (the rows,
+    the focus, the first shown), `Show` (keep, hide, or show another
+    picture in a pane picture's place, for a map's picture), and
+    `ScreenState` (the pane, when it opened, the chrome, the bindings,
+    the lists, the focused, dimmed and hidden buttons, the header's
+    words, the legend and the pictures). A dimmed row or button is
+    drawn at `DISABLED` and a click still finds it, for the binding to
+    refuse with the error sound; a hidden button has no picture, words
+    or click area, and the others keep their numbers (review round 1).
+  - `screen()` draws a pane: its pictures and buttons' pictures by
+    depth (a button focused at frame 1, or 0 when its bitmap has one
+    frame), its lists (each shown row's pictures, then its cells; the
+    arrows while rows are hidden above or below), its texts and buttons'
+    texts by depth, the header in the globals' box for the screen's size
+    (on a dialog at the Xbox's scale, our own box in its frame's top
+    band, review round 2) and the legend. It returns where clicks land
+    (`HitArea`: a row, a button with its picture, or a legend item).
+  - `overlay` (the dim under a dialog, drawn by the caller) and
+    `intro_end` (when a pane's last piece has come in, for the lobby's
+    `menu_settled`; it counts each list's skin pictures and its focused
+    row's fade up, as `App::menu_intro` does for the main menu).
+  - The start screen and main menu draw exactly as before: a test pins
+    their quads at two sizes and two times.
+- **`h2ui::shell`.** `Shell.screens` holds every catalog screen the tags
+  have, laid out in both passes as the menus are (the first asks for
+  their pictures). `Shell::open` reads `H2LOBBY_SCALE` and logs a line
+  for each catalog screen (or why it is missing), then `menus: <n>
+  catalog screens, <n> MB of pictures decoded, opened in <n> ms`.
+  `Shell::open_scaled` takes the variable's value as an argument (the
+  tests use it, so a value set in the console can't change them).
+- **`examples/menu_png.rs`.** `--screen <name or tag name>` (repeatable)
+  or `--all` draws screens from `--mcc` or `--vista`, each pane in the
+  map's look and the flat look, settled, over the shell (and the
+  overlay, for a dialog), to `<name>-<pane>-<look>-<w>x<h>.png`, at
+  1920x1080 and 1280x720 or `--size`. `--pane`, `--scale`, `--focus`
+  and `--words tag|ids|hide` (the tags' words through `wording`, each
+  slot's string id, or none) choose what is drawn. For each it prints
+  the quads, how much of the window they cover, the hit areas and the
+  time of a frame; for each small dialog, where its header box falls on
+  its frame pieces at both scales. `--frames <bitmap>` prints a bitmap's
+  images and sequences and writes each frame. Each screen given by its
+  tag name is drawn with its own pictures (review round 1: several
+  drew with the last one's).
+- **Tests** (no game files): an Xbox quarter dialog of two panes grows
+  its places by 2.5 and its pictures by 1.25 (flat panels too), keeps
+  its skin's numbers, places a button's picture from its text box, steps
+  a players block by 55 units for 22 Xbox pixels, and leaves its two
+  parked widgets out; the same screen at Vista's scale is 1:1, and
+  `at_scale` takes either to the other; the whole tag name tells two
+  screens with the same last name apart; the catalog's scales and the
+  overrides; `wording`, `Words` and the tokens; a drawn dialog shows the
+  reworded and our own words and hides the refused and unknown ones,
+  fills each row's cells, puts its header in the frame's top band (the
+  globals' box at Vista's scale; review round 2), dims the disabled
+  row, and its hit areas hold the rows' labels, the button's text and
+  picture and each legend item's glyphs; rows take
+  their own frames, the focused button its second frame (or its only
+  one), the arrows both, and a picture can be swapped or hidden;
+  `intro_end` and the overlay; and a made-up format-13 map's please-wait
+  dialog read through `Shell::open` (its strings from a `unic`, its
+  plate and button pictures from textures.dat) laid out exactly as the
+  same tags made by hand. The ignored real-map tests also want every
+  catalog screen found and every picture decoded, or a reason naming a
+  missing frame or the format; and, with both maps, every catalog
+  screen placed the same in MCC's as in Vista's. Vista's is pinned
+  exactly since review round 1: 87 of 94 bitmaps, the eight missing
+  frames of 9.2 and no others, both of the lobby button's frames and
+  both arrows of every catalog list.
+- **Departures from the brief.**
+  - The legend box keeps the globals' Vista units at both scales, and so
+    does the header box on a full screen or a Vista pane (the brief had
+    them grow with an Xbox pane; Corrections and 9.2). A dialog at the
+    Xbox's scale has its header in our own box (review round 2).
+  - `flat_for`'s sizes are the pictures' real ones, read with
+    `--frames` (256 by 256 for the frame corners, 512 by 512 for the
+    plates, 358 by 64 for the button, 400 by 42 for the backing, 56 by
+    68 for the end cap). Most of each picture is clear, so the flat
+    frame is only near the real one.
+  - `wording` also drops an "on" before the name, after a sentence on
+    the ONLINE screen came out "on online".
+  - Both arrows are placed from the list's corner (the first try put
+    the down arrow below the last row shown, far under ok_cancel's
+    dialog).
+- **Measured in the container** (four shared cores; 9.2 has the rest):
+  `Shell::open` on Cartographer's mainmenu.map takes 144 to 180 ms and
+  decodes 62.7 MB of pictures (87 of 94 bitmaps; the 7 others are
+  frames the tags ask for that their bitmaps haven't); 63.5 MB since
+  review round 1 reads the list skins' pictures whole. With the map's
+  art a pane takes 5 to 33 ms a frame at 1920x1080 (median 14.7) and 3
+  to 19 ms at 1280x720 (median 8.2), the shell's copy and strips
+  included; the flat look 0.9 to 4.4 ms. The full-screen pickers are
+  the slowest (select_variant 33 ms, select_game 27 to 31, the playlists
+  lobby 30, the keyboard 26, select_map 26), as their pictures cover
+  most of the window. That is over the 10 ms budget here; the owner's
+  PC has run the menus about twice as fast as the container, and P5
+  measures it there. A screen still over budget when it is bound moves
+  its still pictures into a kept layer (the rule above).
+
+**Review fixes, round 1** (2026-10-12):
+
+- A button can be hidden (`ScreenState::hidden_buttons`): no picture,
+  no words, no click area. Hiding its words alone keeps its picture and
+  click area, since the pregame lobby's chat box is a button with no
+  words; 2.10 hides FIND GAMES and GAME DETAILS this way.
+- A list skin's pictures are read whole, so a row can show any frame
+  (the Y menu's `live_icons` are 32 separate images). `Show::Picture`
+  still needs its picture in the art given to `screen` (2.11 reads the
+  map pictures itself).
+- `intro_end` counts the skins' pictures and the focus fade, as
+  `menu_intro` does: Vista's skin pictures come in over 320 ms, after
+  most catalog panes' 250 ms.
+- An Xbox pane's words are 1.25 times bigger, and wrap at that size.
+  The same body font on the Xbox screenshot and on Cartographer's lobby
+  measures 1.15 to 1.27 times bigger on the Xbox, in UI units; 1.25 is
+  an estimate within that. List skins keep their own size (2.7 found
+  their rows fit the Xbox frames so).
+- `wording` gives "the online service" after into, to, of, from, with
+  and by where the name ends the phrase ("LOGGED INTO THE ONLINE
+  SERVICE", "blocked by the online service."), "online" elsewhere ("of
+  online games"). Before, 17 of the 29 tag sentences it lets through
+  read wrongly ("into online", "with online").
+- Tests for a disabled button (dimmed, still clicked), a hidden one, the
+  glyph scale, skins read whole through `Shell::with_scales`, and
+  `H2LOBBY_SCALE`'s overrides through `Shell::open_scaled`; Vista's
+  pictures pinned exactly (above); menu_png keeps each tag-named
+  screen's pictures with it.
+- 9.2's account of xbox_live_menu's frames is corrected: the
+  bungie.net picture is frame 4, which no catalog pane draws.
+- Not done: our text is smaller than Halo 2's on every pane, not only
+  the Xbox ones. Cartographer's lobby draws the body font about one UI
+  unit per font pixel, and our `text::size` estimates give about 0.67 of
+  that ("Quick Options:" 112 pixels wide against 167 at the same size).
+  Fixing it changes every screen's text, the start screen and main menu
+  too, so it is left for its own step, checked against both references
+  (9.4).
+
+**Review fixes, round 2** (2026-10-12):
+
+- A bitmap is found by its whole tag name in any case, or by its last
+  part only where the name asked for or the one held has no folder (the
+  built-in short names). Before, a catalog bitmap that didn't load
+  (`pregame_lobby\item_background`) drew another folder's picture with
+  the same last name (the default skin's) instead of its flat shape.
+- **The Xbox dialogs' header.** The globals' header boxes, kept as they
+  are, fall on the Xbox dialogs' body: Please Wait's text (from 178
+  down), Player Options' rows and help, the playlists' first row. A
+  dialog at the Xbox's scale now has its header in our own box in its
+  frame's top band (`layout::XBOX_DIALOG_HEADER_BOUNDS`: large (-640,
+  482) to (55, 410), half (-611, 244) to (-20, 204), quarter (-319, 242)
+  to (350, 202)), placed from the frame's visible edges as Vista's
+  dialog_ok and large_error place theirs (about 16 to 18 units under the
+  top, 28 to 39 in). They are estimates, for P6's dialog screenshots. A
+  full screen and a Vista pane keep the globals' box; the legend keeps
+  it everywhere. `screens::header_widget` gives the box a pane uses.
+- **Drop shadow.** Halo 2's menu text has a hard black shadow down and
+  to the right. The decompilation draws it under every text, black at
+  the text's alpha, except a typed one behind a cursor (the tag's text
+  flag 8, `TextWidget::cursor`). `TextStyle::shadowed` adds it
+  (`paint::TEXT_SHADOW`, 2 units across and 2 down, an estimate: 2
+  pixels on Cartographer's lobby at 1920x1200, about one Xbox pixel at
+  an Xbox pane's 1.25), put on whole pixels and at least one. Pane
+  texts, buttons' words, list cells, the header and the legend have it;
+  the start screen and main menu are unchanged (their quads stay
+  pinned), which leaves them without it for now.
+- **The focused button's words** take the globals' header colour (the
+  Xbox code's: a button in focus draws its text in the interface
+  globals' title colour, ours `WIGL_TEXT_COLOR`), on every pane. A
+  resting button keeps its tag's colour: Cartographer's lobby shows
+  resting words grey (173), but the code gives a resting button its
+  definition's colour, and the legend already keeps the Xbox's white
+  (2.6), so that grey is not adopted.
+- Tests: a whole name never finds another folder's bitmap; a dialog's
+  header box goes with its pane's scale; the scroll arrows show only
+  towards hidden rows; a header is hidden on a screen without one or
+  with a token unknown; the focused button's words take the header
+  colour; texts, rows, the header and the legend have the shadow (2
+  pixels for 1.25 slots and 1 for the others at 1280x720, none under a
+  typed text); a focused button whose bitmap has one frame shows it; an
+  Xbox dialog's skin keeps its own corner, scale and 49-unit row step,
+  the same as at Vista's scale. The ignored real-map tests check, on
+  every catalog dialog with a header, that the header box starts inside
+  the frame drawn and ends above its bottom, and, at the Xbox's scale,
+  that it overlaps no text, row or picture of the pane (23 pane boxes,
+  4 of them Xbox).
+- `menu_png`'s usage names `--frames <bitmap>` (one map), and each
+  dialog prints the box its header is drawn in.
+- 9.2's lobby pane 0 comparison is corrected: the Cartographer
+  screenshot is a crop of a 1920x1200 window, and drawn at that size
+  pane 0 matches it to the pixel. The chat box was never off.
+
+**On the owner's PC (P5)**, from the clone, read-only (the PNGs stay on
+the PC; only the printed lines come back):
+
+1. Build the tool: `cargo build --release -p h2ui --example menu_png`.
+2. Draw every catalog screen from MCC's map:
+   `target\release\examples\menu_png.exe C:\h2work\p5 --mcc "C:\Program
+   Files (x86)\Steam\steamapps\common\Halo The Master Chief
+   Collection\halo2\h2_maps_win64_dx11\mainmenu.map" --all > p5.txt
+   2> p5-log.txt`. `p5-log.txt` should have 27 `menus: screen ...`
+   lines with panes (none `no ... screen in the tags`), `pictures for
+   87 of 94 bitmaps` or close, `drawn flat` lines only for missing
+   frames (`it has no frame ...`: beeper, xbox_live_menu, y_callout,
+   myhack, tabs, xbox_live, unknown) or naming a format, and `menus: 27
+   catalog screens, <n> MB of pictures decoded, opened in <n> ms`. Send
+   that last line and `p5.txt`'s timing lines (`<name> pane <k> ...
+   draw <n> ms a frame`), which say each screen's time at 1920x1080 and
+   1280x720.
+3. The same with `--vista` and Cartographer's `maps\mainmenu.map`, if
+   it is installed, to compare the times.
+4. The ignored tests: `set H2_MCC_MAPS=<MCC's h2_maps_win64_dx11>` and
+   `set H2_MAPS=<Cartographer's maps>`, then `cargo test --release -p
+   h2ui -- --ignored real_`: `real_mcc_menus_come_from_their_tags`,
+   `real_vista_menus_come_from_their_tags` and
+   `real_catalog_screens_are_placed_alike_in_both_maps` pass.
+5. Look at `online-0-mcc-1920x1080.png`, `please_wait-0-...`,
+   `player_options-0-...`, `lobby-0-...` and `lobby-2-...`: each dialog's
+   frame should look whole, with its header in the frame's top band,
+   clear of the body text and rows (`p5.txt`'s `header drawn in` lines
+   give each box), and no Xbox Live logo anywhere. Say what looks wrong;
+   don't send the pictures.
+6. The lobby is unchanged; its `lobby.log` has the 27 catalog lines and
+   the `menus: 27 catalog screens, ...` line, and the time it took to
+   open.
 
 ### Phase 3: matchmaking, pregame, loading and the carnage report
 
@@ -815,12 +2632,13 @@ the new screens, with keyboard, mouse and a pad.
 
 **2. The custom game countdown** in the leader's lobby:
 
-- "Game start countdown in progress"; A cancels for the leader.
+- "Game start countdown in progress"; X cancels it for the leader (the
+  decompilation; this said A before).
 - `countdown_for_respawn` at 3, 2, 1 and 0.
 - Then the leader's lobby sends the custom game as today. The server
   doesn't change.
 - The length is unverified. The code passes 10 and 3 (L).
-- X to delay, for the others, needs the server and comes later.
+- X delays it, for the others; that needs the server and comes later.
 
 **3. LOADING... and PLEASE WAIT.**
 
@@ -1213,7 +3031,8 @@ Expected Vista values are in brackets.
   advance, back1].
 - 26 skins at 0x138, header fonts at 0x160 below 12, and the full header
   rectangle at 0x178 [567, -730, 520, 50].
-- The music at 0x1B8 [`main_menu_music`], and the fade at 0x1C0 [5500].
+- The music at 0x1B8 [`main_menu_music`], and at 0x1C0 how long before
+  the attract movie it is stopped [5500] (not a fade; section 5).
 
 **E. `wgit main_menu`.**
 
@@ -1287,6 +3106,129 @@ parse turns into names.
 - The ignored real-file tests pass (`mainmenu` in blam-cache, `real_` in
   h2ui).
 
+**Phase 2.7's checks** (container, 2026-10-12, Cartographer's Vista
+`mainmenu.map` from the upload; `menu_png --all` and single screens; the
+PNGs stayed in the scratchpad):
+
+- **Every catalog screen is found** (27 of 27, 59 panes), and drawn in
+  the map's look and the flat look at 1920x1080 and 1280x720. Pictures
+  for 87 of 94 bitmaps, 62.7 MB decoded (63.5 MB once the skins'
+  pictures are read whole, review round 1), `Shell::open` in 144 to
+  180 ms.
+  The seven drawn flat are frames the tags ask for that their bitmaps
+  haven't: beeper's 6, xbox_live_menu's 7 (it has 6 images), y_callout's
+  5, xbox_live's 8, myhack's 1, tabs' 1 and 2, unknown's 2. What the Xbox
+  did with such a frame is unknown; they draw nothing here. 32 parked
+  widgets are left out of the pregame lobby's panes.
+- **The small dialogs come in two families.** error_dialog_ok's
+  (DialogOk, OkCancel, LargeError, MultipleChoice, Confirm, Privacy,
+  Leader, RestoreControls) is **Vista's**: at 1:1 its frame pieces make
+  one box (dialog_ok's from (-292, 242) to (406, -386)) with the
+  quarter header box (-252, 182) to (350, 142) in its top; at 2.5 the
+  pieces spread over nearly the whole screen and don't meet.
+  task_progress_dialog's (PleaseWait, Boot) is **the Xbox's**: at 1:1
+  its pieces don't meet; at 2.5 the top-left corner, the plate and the
+  bottom-right corner make one dialog, (-360, 383) to (505, -403), with
+  the same quarter header box in the plate's top (which there covers the
+  body text's first line; review round 2 gave the Xbox dialogs a header
+  box of their own, below). PlayerOptions (half)
+  is **the Xbox's** too: at 2.5 its frame holds its list and the legend;
+  at 1:1 the corners cut across the list. `menu_png`'s printed fit (the
+  header box in the top quarter of the pieces' bounding box) agrees for
+  the first family but says "outside" for task_progress at both
+  scales: its bottom-right corner piece is a 256-pixel picture, mostly
+  clear, so the bounding box reaches well below what shows. The
+  pictures decided.
+- **The header and legend boxes don't scale.** Grown with an Xbox pane,
+  the quarter header box lands at (-630, 455) to (875, 355), above and
+  left of the task_progress frame; as the globals have it, it sits in
+  the plate's top, and the legend in the frame's bottom right. So the
+  legend keeps Vista's units on every pane (a correction to the plan).
+  The header did too until review round 2, which found the globals'
+  boxes on the Xbox dialogs' body: Please Wait's text, Player Options'
+  rows and help, the playlists' first row. A dialog at the Xbox's scale
+  now has its header in our own box in its frame's top band (large
+  (-640, 482) to (55, 410), half (-611, 244) to (-20, 204), quarter
+  (-319, 242) to (350, 202)), placed from the frame's visible edges as
+  dialog_ok and large_error place theirs at 1:1; estimates, for P6. Drawn
+  on Cartographer's map, each header now sits in its frame's top band.
+- **List skins don't scale either.** In the Xbox screens (ONLINE, the
+  playlists, Player Options, Please Wait) the rows' backing and text at
+  the skin's own numbers fit the frames drawn at 2.5; at 2.5 they would
+  be wider than the frames.
+- **The arrows.** The default skin's arrows bitmap has two 52 by 34
+  images: the first points up, the second down. Both go from the list's
+  corner, as the skin places them.
+- **The pregame lobby's button** (`pregame_lobby\button`) has three 358
+  by 64 images: the first resting (a pale edge), the second focused (a
+  bright blue glow with arrow tips at both ends), the third like the
+  first with a softer, lighter edge (pressed or disabled, perhaps; not
+  used). The focused button shows the second.
+- **No Xbox Live logo.** xbox_live_menu's six frames (corrected in
+  review round 1, from the frames written out again): 0 to 3 are
+  diagrams of Spartans and squads with sliders and markers, the ones
+  the ONLINE screen's four panes draw at (108, 194), one a row; 4 is a
+  bungie.net name over a grid; 5 a grid corner, mostly clear (1024 by
+  512). No catalog pane asks for 4 or 5 (bungie_news, not in the
+  catalog, asks for 0 to 3). xbox_live's three: the unknown-map
+  picture (440 by 414), Spartans with a flag, a vehicle and a flag with
+  checkboxes. No frame of either shows the Xbox Live logo, and the
+  live_icons and live_icons_sm frames the beeper and the Y menu use are
+  status icons (a message, a person, a speaker), not a logo.
+- **The ONLINE panes' two missing pictures.** Each pane also asks for
+  xbox_live_menu's frame 7 at (-23, 5), behind the news texts (perhaps
+  the Xbox's news panel), and y_callout's frame 5 at (-252, -155),
+  under the Y button's hint (perhaps a callout's art; y_callout has one
+  19 by 10 image). Neither frame is
+  in Vista's bitmaps, so both draw nothing. 2.9's binding hides the
+  frame-7 widget (`Show::Hide`) unless P5 shows MCC's xbox_live_menu
+  has no frame 7 either, or one with no Bungie or Xbox Live branding.
+- **The ONLINE screen fills the 4:3 frame** at the Xbox's scale: its
+  pieces run from about -700 to +670 units across (the frame is ±800)
+  and from the header band down to about -200; at 1:1 they would sit in
+  the middle 40 %. Its description sentence ended "on" plus the Xbox's
+  service and came out "on online"; `wording` now drops the "on".
+- **Please Wait after review round 1.** Its body (the tag's words, now
+  "...into the online service...", at 1.25) wraps to two lines, which
+  start at its box's top, level with the header box: the two overlap.
+  One line used to sit centred under the header. Since review round 2
+  the header is in the frame's top band, (-319, 242) to (350, 202), clear
+  of the body from 178 down. Which words the binding shows is 2.9's to
+  settle (P6's dialog screenshot checks the header's place).
+- **The pregame lobby's pane 0 at 1:1** against the Cartographer lobby
+  screenshot. That screenshot (1812 by 1177) is a crop of a 1920x1200
+  window: its top rows are the window's border and its left and right
+  edges cut Cartographer's own notices. Drawn at 1920x1200, our pixel is
+  the screenshot's plus (28, -4), and at that one shift every part
+  matches to the pixel: the chat box and its arrows differ by under 1
+  grey level on average, the START GAME and GAME SETUP frames' ends by
+  about 0.4 to 0.6, the panels and the framing by 0.4 to 3 (more only
+  where the fonts differ). A pixel off either way raises the button
+  ends to 8 to 14. (Review round 2. The first comparison drew at 1812
+  by 1177, which shifts each part differently, and found the boxes
+  "within about 8 units" and the chat box 27 units right and 16 down;
+  both came from that size.) The mode block (`lobby_display`) at (-705,
+  350) and the map picture's place match too (its corner is -448).
+  Cartographer hides FIND GAMES and GAME DETAILS and shows a speaker
+  icon only on filled rows: the binding's job (2.10). 2.10's shot
+  against this reference must be drawn at 1920x1200 and cropped at (28,
+  -4). The same comparison shows the focused START GAME's words in the
+  header's colour and a drop shadow under the text, as round 2 draws
+  them.
+- **Pane 2 at 2.5 against the Xbox screenshot**, drawn at 1024x768 and
+  set beside the reference at the same height (415 pixels): the same
+  layout (header, START GAME and GAME SETUP at the top left, the panel,
+  the matchmaking block lower left, the roster column on the right with
+  its speaker icons and grey bars). The roster's rows are 18.5 pixels
+  apart there against about 19 on the reference: about 21 to 22 Xbox
+  pixels, as the tag's 22 (55 units) says. The bars span about 500 to
+  695 against the reference's 476 to 691; our top block sits a little
+  higher.
+- **Times** at 1920x1080 with the map's art: 5 to 33 ms a frame (median
+  14.7), 3 to 19 ms at 1280x720 (median 8.2), the flat look 0.9 to 4.4
+  ms; the full-screen pickers are the slowest ("What Phase 2.7 built").
+- MCC's map isn't in the container: P5 runs the same on the owner's PC.
+
 ### 9.3 Sounds and movies
 
 **I. Sounds.**
@@ -1318,7 +3260,11 @@ his memory of the Xbox, or with a capture of it, at 1080p and at 720p.
 
 Things nobody has checked:
 
-- the font sizes;
+- the font sizes. Measured in 2.7's review: on Vista's panes our text is
+  about 0.67 of Cartographer's (its body font drawn at about one UI unit
+  per font pixel, ours at `text::size`'s estimates); on the Xbox's
+  panes the Xbox drew the same font about 1.2 times Cartographer's size
+  in UI units, which `XBOX_BITMAP` now gives on top of ours;
 - whether unfocused rows really sit at 50%;
 - the bottom-right text;
 - how the Y menu tabs and the carnage report pages change;
@@ -1691,3 +3637,4 @@ moving and its presses reached the first run.
 | halo2.dll updates beyond 1.3528 | A breaks; offsets move | A stays optional; C needs no engine knowledge |
 | The `app.rs` restyle (4,300 lines) breaks lobby features | Regressions in friends, parties and custom games | Keep `App`'s logic and replace only drawing and navigation; rerun the multi-lobby scripts each phase |
 | Halo 2's own text or art ends up in the repository | Breaks the asset rules | Text read at run time; PNGs with art stay on the PC; review every diff for strings |
+| `crates/wma` (LGPL) is in `h2launch.exe` once the menus play music (2.2) | The friends' zip must meet the LGPL | Keep it a separate crate; the zip's READ ME names it, with its licence and source or a written offer ("What Phase 2.2 built") |

@@ -29,6 +29,7 @@ pub struct Settings {
     pub server: String,
     pub gamertag: String,
     pub controls: Controls,
+    pub menu: MenuPrefs,
 }
 
 impl Default for Settings {
@@ -37,6 +38,7 @@ impl Default for Settings {
             server: DEFAULT_SERVER.into(),
             gamertag: String::new(),
             controls: Controls::default(),
+            menu: MenuPrefs::default(),
         }
     }
 }
@@ -55,6 +57,7 @@ impl Settings {
             match k.trim().to_ascii_lowercase().as_str() {
                 "server" if !v.is_empty() => s.server = v.to_string(),
                 "gamertag" => s.gamertag = clean_gamertag(v),
+                k if s.menu.set(k, v) => {}
                 k => {
                     let _ = s.controls.set(k, v);
                 }
@@ -65,10 +68,11 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         format!(
-            "server = {}\ngamertag = {}\n{}",
+            "server = {}\ngamertag = {}\n{}{}",
             self.server,
             self.gamertag,
-            self.controls.lines()
+            self.controls.lines(),
+            self.menu.lines()
         )
     }
 
@@ -80,6 +84,82 @@ impl Settings {
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
         std::fs::write(path, self.to_text()).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+/// The menus' own lines in `lobby.txt`, written after the controls (later
+/// phases add theirs here): `vista = <folder>`, the Halo 2 Vista
+/// (Project Cartographer) folder or its maps folder, or `off`
+/// (`sources::find`; `H2LOBBY_VISTA` wins over it, unless it names a
+/// folder without a mainmenu.map); `menu_sound = on` or `off`, the
+/// menus' music and sounds (`sound::silent`; on unless it says off);
+/// `intro = on` or `off`, the intro movie as the lobby opens
+/// (`intro::skip_reason`; on unless it says off); and `background =
+/// scene` or `still`, what is behind the start screen and main menu: the
+/// flythrough (unless it says still) or the still background.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MenuPrefs {
+    pub vista: Option<PathBuf>,
+    pub sound: Option<bool>,
+    pub intro: Option<bool>,
+    /// `background`: Some(true) for the scene, Some(false) for still.
+    pub scene: Option<bool>,
+}
+
+/// `on` or `off` (any case); anything else is unsaid.
+fn on_off(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn on_off_word(on: bool) -> &'static str {
+    if on {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+impl MenuPrefs {
+    /// Takes the line `key = value` if it is one of the menus' (`key` in
+    /// lower case); false leaves it to the controls.
+    fn set(&mut self, key: &str, value: &str) -> bool {
+        match key {
+            "vista" => self.vista = (!value.is_empty()).then(|| PathBuf::from(value)),
+            "menu_sound" => self.sound = on_off(value),
+            "intro" => self.intro = on_off(value),
+            "background" => {
+                self.scene = match value.to_ascii_lowercase().as_str() {
+                    "scene" => Some(true),
+                    "still" => Some(false),
+                    _ => None,
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Its lines, each ending in a newline; none for what isn't set.
+    fn lines(&self) -> String {
+        let mut out = String::new();
+        if let Some(v) = &self.vista {
+            out.push_str(&format!("vista = {}\n", v.display()));
+        }
+        if let Some(on) = self.sound {
+            out.push_str(&format!("menu_sound = {}\n", on_off_word(on)));
+        }
+        if let Some(on) = self.intro {
+            out.push_str(&format!("intro = {}\n", on_off_word(on)));
+        }
+        if let Some(scene) = self.scene {
+            let word = if scene { "scene" } else { "still" };
+            out.push_str(&format!("background = {word}\n"));
+        }
+        out
     }
 }
 
@@ -138,6 +218,7 @@ mod tests {
                 mouse_sensitivity: 3.1,
                 mouse_inverted: true,
             },
+            menu: MenuPrefs::default(),
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
         assert_eq!(Settings::parse(""), Settings::default());
@@ -160,6 +241,61 @@ mod tests {
         assert!(old
             .to_text()
             .starts_with("server = 192.168.8.102\ngamertag = JOHN\n"));
+    }
+
+    #[test]
+    fn the_menus_lines_read_back_after_the_controls() {
+        let mut s =
+            Settings::parse("gamertag = JOHN\nvista = D:\\Games\\Halo 2 Project Cartographer\n");
+        let folder = PathBuf::from(r"D:\Games\Halo 2 Project Cartographer");
+        assert_eq!(s.menu.vista.as_ref(), Some(&folder));
+        let text = s.to_text();
+        assert!(
+            text.ends_with(&format!("vista = {}\n", folder.display())),
+            "{text}"
+        );
+        assert!(text.starts_with("server = "), "{text}");
+        assert_eq!(Settings::parse(&text), s);
+        // Unset, nothing is written; empty is unset; off is kept as said.
+        s.menu.vista = None;
+        assert!(!s.to_text().contains("vista"));
+        assert_eq!(Settings::parse("vista =\n").menu, MenuPrefs::default());
+        let off = Settings::parse("vista = off\n").menu.vista;
+        assert_eq!(off.as_deref(), Some(Path::new("off")));
+        // The menus' sound: on, off, or (unset, or anything else) unsaid.
+        let mut s = Settings::parse("gamertag = JOHN\nmenu_sound = OFF\n");
+        assert_eq!(s.menu.sound, Some(false));
+        assert!(s.to_text().ends_with("menu_sound = off\n"));
+        assert_eq!(Settings::parse(&s.to_text()), s);
+        s.menu.sound = Some(true);
+        assert_eq!(Settings::parse(&s.to_text()).menu.sound, Some(true));
+        for line in ["", "menu_sound =\n", "menu_sound = loud\n"] {
+            assert_eq!(Settings::parse(line).menu.sound, None, "{line:?}");
+        }
+        assert!(!Settings::default().to_text().contains("menu_sound"));
+        // The intro: the same, written after the sound.
+        let mut s = Settings::parse("intro = Off\nmenu_sound = on\n");
+        assert_eq!(s.menu.intro, Some(false));
+        assert!(s.to_text().ends_with("menu_sound = on\nintro = off\n"));
+        assert_eq!(Settings::parse(&s.to_text()), s);
+        s.menu.intro = Some(true);
+        assert_eq!(Settings::parse(&s.to_text()).menu.intro, Some(true));
+        for line in ["", "intro =\n", "intro = sometimes\n"] {
+            assert_eq!(Settings::parse(line).menu.intro, None, "{line:?}");
+        }
+        assert!(!Settings::default().to_text().contains("intro"));
+        // The background: scene or still, written after the intro.
+        let mut s = Settings::parse("background = Still\nintro = on\n");
+        assert_eq!(s.menu.scene, Some(false));
+        assert!(s.to_text().ends_with("intro = on\nbackground = still\n"));
+        assert_eq!(Settings::parse(&s.to_text()), s);
+        s.menu.scene = Some(true);
+        assert!(s.to_text().ends_with("background = scene\n"));
+        assert_eq!(Settings::parse(&s.to_text()).menu.scene, Some(true));
+        for line in ["", "background =\n", "background = movie\n"] {
+            assert_eq!(Settings::parse(line).menu.scene, None, "{line:?}");
+        }
+        assert!(!Settings::default().to_text().contains("background"));
     }
 
     #[test]

@@ -1080,10 +1080,12 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "blam-cache",
+ "cpal",
  "gilrs",
  "h2live",
  "h2net",
  "h2relay",
+ "h2scene",
  "h2ui",
  "png",
  "sha2",
@@ -1132,6 +1134,18 @@ dependencies = [
  "rustix 1.1.5",
  "sha2",
  "socket2",
+]
+
+[[package]]
+name = "h2scene"
+version = "0.1.0"
+dependencies = [
+ "blam-cache",
+ "bytemuck",
+ "glam",
+ "png",
+ "pollster",
+ "wgpu",
 ]
 
 [[package]]

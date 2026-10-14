@@ -39,9 +39,12 @@ pub struct Picture {
 
 /// A source of pictures.
 pub trait ArtSource {
-    /// The picture of a bitmap tag (by its whole name, or by the last part
-    /// of it) at `frame`: its sequence `frame`'s first sprite, or without
-    /// sequences its image `frame`.
+    /// The picture of a bitmap tag at `frame`: its sequence `frame`'s first
+    /// sprite, or without sequences its image `frame`. The tag is found by
+    /// its whole name (in any case), or by its last part where the name
+    /// asked for or the one held has no folder (the built-in short names,
+    /// `list_bkd`); never a bitmap of another folder with the same last
+    /// name.
     fn picture(&self, name: &str, frame: usize) -> Option<Picture>;
 
     /// The pixels behind a `Texture::Art` id this source gave.
@@ -142,14 +145,30 @@ impl MemoryArt {
         self.bitmaps.is_empty()
     }
 
-    /// A bitmap's place, by its whole name, else by the last part of it.
-    fn find(&self, name: &str) -> Option<usize> {
+    /// The bytes of its decoded pictures.
+    pub fn bytes(&self) -> usize {
         self.bitmaps
             .iter()
-            .position(|(n, _)| n == name)
+            .flat_map(|(_, b)| &b.images)
+            .map(|i| i.rgba.len())
+            .sum()
+    }
+
+    /// A bitmap's place, by its whole name, else by the last part of it
+    /// where one of the two names has no folder. Two whole tag names never
+    /// match by their last parts: a catalog screen's bitmap that didn't
+    /// load (`pregame_lobby\item_background`) must draw its flat shape,
+    /// not another folder's (`list_skins\default\item_background`).
+    fn find(&self, name: &str) -> Option<usize> {
+        let short = last_part(name);
+        let bare = |n: &str| last_part(n).len() == n.len();
+        self.bitmaps
+            .iter()
+            .position(|(n, _)| n.eq_ignore_ascii_case(name))
             .or_else(|| {
-                let short = last_part(name);
-                self.bitmaps.iter().position(|(n, _)| last_part(n) == short)
+                self.bitmaps.iter().position(|(n, _)| {
+                    (bare(name) || bare(n)) && last_part(n).eq_ignore_ascii_case(short)
+                })
             })
     }
 }
@@ -222,19 +241,75 @@ pub struct Loaded {
 /// empty, and its sequences, a sprite's part of its image as
 /// `blam_cache::ui::BitmapInfo::frame` cuts it.
 pub fn read(pictures: &mut dyn Pictures, wanted: &[(String, usize)]) -> Loaded {
-    let mut names: Vec<(&str, Vec<usize>)> = Vec::new();
-    for (name, frame) in wanted {
-        match names.iter_mut().find(|n| n.0.eq_ignore_ascii_case(name)) {
-            Some(n) if !n.1.contains(frame) => n.1.push(*frame),
-            Some(_) => {}
-            None => names.push((name, vec![*frame])),
+    read_some(pictures, wanted, &[], &[])
+}
+
+/// A bitmap `read_some` reads: its frames, whether each must be there,
+/// and whether its every image is read.
+struct Asked<'a> {
+    name: &'a str,
+    frames: Vec<(usize, bool)>,
+    all_images: bool,
+}
+
+/// One image of a bitmap, decoded.
+fn decode(pictures: &mut dyn Pictures, name: &str, image: usize) -> Result<ArtImage, String> {
+    match pictures.image(name, image) {
+        Ok(im) => Ok(ArtImage {
+            width: im.width as usize,
+            height: im.height as usize,
+            rgba: im.rgba,
+        }),
+        Err(e) => Err(format!("image {image}: {e}")),
+    }
+}
+
+/// As `read`, with the `extra` frames read too where their bitmaps have
+/// them: one a bitmap hasn't isn't missing (a button with one picture
+/// shows it when focused too, `screens::button_frame`). Each bitmap named
+/// in `every` has every image read (a list skin's pictures, which a row
+/// may show at another frame: `screens::Row::frames`).
+pub fn read_some(
+    pictures: &mut dyn Pictures,
+    wanted: &[(String, usize)],
+    extra: &[(String, usize)],
+    every: &[String],
+) -> Loaded {
+    let mut names: Vec<Asked> = Vec::new();
+    let all = wanted.iter().map(|w| (w, true));
+    for ((name, frame), needed) in all.chain(extra.iter().map(|w| (w, false))) {
+        match names.iter_mut().find(|n| n.name.eq_ignore_ascii_case(name)) {
+            Some(n) => match n.frames.iter_mut().find(|f| f.0 == *frame) {
+                Some(f) => f.1 |= needed,
+                None => n.frames.push((*frame, needed)),
+            },
+            None => names.push(Asked {
+                name,
+                frames: vec![(*frame, needed)],
+                all_images: false,
+            }),
+        }
+    }
+    for name in every {
+        match names.iter_mut().find(|n| n.name.eq_ignore_ascii_case(name)) {
+            Some(n) => n.all_images = true,
+            None => names.push(Asked {
+                name,
+                frames: Vec::new(),
+                all_images: true,
+            }),
         }
     }
     let mut out = Loaded {
         wanted: names.len(),
         ..Loaded::default()
     };
-    for (name, frames) in names {
+    for Asked {
+        name,
+        frames,
+        all_images,
+    } in names
+    {
         let info = match pictures.bitmap(name) {
             Ok(info) => info,
             Err(e) => {
@@ -244,29 +319,36 @@ pub fn read(pictures: &mut dyn Pictures, wanted: &[(String, usize)]) -> Loaded {
         };
         let mut images: Vec<ArtImage> = vec![ArtImage::default(); info.images.len()];
         let mut whole = true;
-        for frame in frames {
+        for (frame, needed) in frames {
             let shown = i16::try_from(frame).ok().and_then(|f| info.frame(f));
             let Some(shown) = shown else {
-                out.missing
-                    .push((name.to_string(), format!("it has no frame {frame}")));
-                whole = false;
+                if needed {
+                    out.missing
+                        .push((name.to_string(), format!("it has no frame {frame}")));
+                    whole = false;
+                }
                 continue;
             };
             if images[shown.image].width > 0 {
                 continue;
             }
-            match pictures.image(name, shown.image) {
-                Ok(im) => {
-                    images[shown.image] = ArtImage {
-                        width: im.width as usize,
-                        height: im.height as usize,
-                        rgba: im.rgba,
-                    };
-                }
-                Err(e) => {
-                    let why = format!("image {}: {e}", shown.image);
+            match decode(pictures, name, shown.image) {
+                Ok(image) => images[shown.image] = image,
+                Err(why) => {
                     out.missing.push((name.to_string(), why));
                     whole = false;
+                }
+            }
+        }
+        if all_images {
+            let left = images.iter_mut().enumerate().filter(|(_, i)| i.width == 0);
+            for (k, image) in left {
+                match decode(pictures, name, k) {
+                    Ok(read) => *image = read,
+                    Err(why) => {
+                        out.missing.push((name.to_string(), why));
+                        whole = false;
+                    }
                 }
             }
         }
@@ -413,6 +495,69 @@ mod tests {
         assert_eq!(loaded.found, 1);
         assert!(loaded.missing.is_empty());
         assert_eq!(loaded.art.picture("ui\\brace", 0).unwrap().size, [2.0, 2.0]);
+    }
+
+    #[test]
+    fn extra_frames_are_read_where_a_bitmap_has_them() {
+        let mut fake = Fake {
+            decoded: Vec::new(),
+        };
+        let wanted = [("ui\\brace".to_string(), 0)];
+        // Frame 1 exists, frame 7 doesn't: neither is missing.
+        let extra = [("ui\\brace".to_string(), 1), ("ui\\brace".to_string(), 7)];
+        let loaded = read_some(&mut fake, &wanted, &extra, &[]);
+        assert!(loaded.missing.is_empty(), "{:?}", loaded.missing);
+        assert_eq!((loaded.found, loaded.wanted), (1, 1));
+        assert!(loaded.art.picture("brace", 0).is_some());
+        assert!(loaded.art.picture("brace", 1).is_some());
+        // Wanted as well, a frame it hasn't is missing.
+        let both = [("ui\\brace".to_string(), 7)];
+        let loaded = read_some(&mut fake, &both, &extra, &[]);
+        assert_eq!(loaded.missing.len(), 1);
+        assert_eq!(loaded.found, 0);
+    }
+
+    #[test]
+    fn a_bitmap_read_whole_has_every_image() {
+        let mut fake = Fake {
+            decoded: Vec::new(),
+        };
+        // Frame 0 wanted, and every image: image 1 too, each read once.
+        let wanted = [("ui\\brace".to_string(), 0)];
+        let every = ["UI\\Brace".to_string()];
+        let loaded = read_some(&mut fake, &wanted, &[], &every);
+        let brace = |k| ("ui\\brace".to_string(), k);
+        assert_eq!(fake.decoded, [brace(0), brace(1)]);
+        assert_eq!((loaded.found, loaded.wanted), (1, 1));
+        assert!(loaded.missing.is_empty(), "{:?}", loaded.missing);
+        assert!(loaded.art.picture("brace", 0).is_some());
+        assert!(loaded.art.picture("brace", 1).is_some());
+        // Named only to be read whole, it is read; one that won't decode
+        // says why.
+        fake.decoded.clear();
+        let every = ["ui\\brace".to_string(), "ui\\broken".to_string()];
+        let loaded = read_some(&mut fake, &[], &[], &every);
+        assert_eq!(fake.decoded, [brace(0), brace(1)]);
+        assert_eq!((loaded.found, loaded.wanted), (1, 2));
+        assert_eq!(loaded.missing.len(), 1);
+        assert!(loaded.missing[0].1.contains("a format of its own"));
+    }
+
+    #[test]
+    fn a_whole_name_never_finds_another_folders_bitmap() {
+        let mut art = MemoryArt::new();
+        art.add_image("ui\\list_skins\\default\\item_background", image(4, 2, 1));
+        art.add_image("list_bkd", image(8, 2, 2));
+        // The lobby's item_background didn't load: it isn't the skin's.
+        let lobby = "ui\\screens\\pregame_lobby\\item_background";
+        assert!(art.picture(lobby, 0).is_none());
+        // Its whole name in another case, and its last part alone, find it.
+        let skin = art.picture("UI\\List_Skins\\Default\\Item_Background", 0);
+        assert_eq!(skin.unwrap().texture, Texture::Art(0));
+        assert_eq!(art.picture("item_background", 0).unwrap().size, [4.0, 2.0]);
+        // A short name held is found from a whole one.
+        let bkd = art.picture("ui\\global_bitmaps\\list_bkd", 0).unwrap();
+        assert_eq!(bkd.texture, Texture::Art(1));
     }
 
     #[test]

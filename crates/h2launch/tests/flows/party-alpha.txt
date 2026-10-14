@@ -1,0 +1,43 @@
+# (c) The party screen, ALPHA's side: invite BRAVO and CHARLIE, make the
+# party invite only, remove BRAVO, make CHARLIE leader, and leave.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type ALPHA
+0.2 a
+0 wait live 30
+0.2 x                       # the players list
+0 wait players 5
+0 see BRAVO 30
+0 see CHARLIE 30
+0 pick BRAVO
+0.2 a                       # invite
+0 pick CHARLIE
+0.2 a                       # invite
+0.2 b
+0 wait live 5
+0 see PARTY (3) 30          # both accepted
+0.2 y                       # the party screen
+0 wait party 5
+0.2 y                       # invite only
+0 see Let anyone join 10    # Y's hint once the server has it so
+0 pick BRAVO
+0.2 x                       # remove BRAVO: asked first
+0 wait remove 5
+0.2 a
+0 wait party 5
+0.2 b                       # the playlists' party panel counts them
+0 wait live 5
+0 see PARTY (2) 10
+0.2 y
+0 wait party 5
+0 pick CHARLIE
+0.2 a                       # make CHARLIE party leader
+0 see Member (you) 10
+0 pick ALPHA
+0.2 a                       # leave the party
+0 wait live 5
+0 see Press X to invite 10  # a party of one again
+1 quit

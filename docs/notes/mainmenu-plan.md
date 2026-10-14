@@ -12,7 +12,7 @@ Repo base: `/home/claude/halo2-rs` at 464878e.
 | Is any movie involved? | Only `movie\intro_60.wmv` (18 s, 1280x720), with `intro_low_60.wmv` for low resolutions. Halo 2 Vista plays it once at startup, **before** the start screen. `credits_60.wmv` belongs to the campaign ending, which is out of scope. | High that the intro plays at startup (Project Cartographer has a `skip_intro` option: "0 - Normal Intro / 1 - No Intro"). Medium on what it shows; 18 s fits the studio logo sequence. |
 | Startup order in H2V | intro movie, then the start screen (HALO 2 logo and "PRESS ANY KEY TO CONTINUE" over the flythrough), then the main menu (same logo, list fades in). The flythrough runs behind every menu screen. | High for the screens and their tags; medium for exact timing. |
 | Can the remake already render the scene? | **Yes.** Pointing `h2viewer` at mainmenu.map loads 48 textures and 38,738 triangles (carrier, tether, city, bridge, sky). A scratch prototype plays the scripted camera path. | Verified here with screenshots. |
-| Biggest visual gaps today | Sky shader blending (a black card behind the tether), the viewer's fixed grey fog, no flak or engine particles, no bloom, and the wrong blend for the menu water. The camera roll sign is not verified. | Seen in the screenshots. Causes are partly inferred; see section 1.2. |
+| Biggest visual gaps today | Sky shader blending (a black card behind the tether), the viewer's fixed grey fog, no flak or engine particles, no bloom, and the wrong blend for the menu water. | Seen in the screenshots. Causes are partly inferred; see section 1.2. |
 
 ## 1. What the original looks like
 
@@ -60,7 +60,7 @@ Sources: `cams` and `attach` examples in `$SP/mm-src/crates/blam-cache/examples/
   It runs at 30 ticks/s, so one loop is 2,990 ticks, about 99.7 s.
   - Each move is cut off halfway by the next `camera_set`. The camera never comes to rest except at the end.
   - The loop finishes on ui_path_01, so the restart is seamless.
-- **Camera points** (position; yaw, pitch, roll in degrees). Roll goes up to ±45°, so the camera banks hard.
+- **Camera points** (position; yaw, pitch, roll in degrees). Roll goes up to ±45° in the points. (Superseded, 2026-10-12: Halo 2 applies the roll last, about the world's x, so the camera banks at most about 13° over the loop; see item 5 of section 1.2.)
 
   ```
   ui_path_01 (-2.54,-35.52,219.59)  105.6  -1.4   4.9
@@ -97,7 +97,7 @@ Visible problems, with my best guess at the cause:
 2. **Grey wash.** The viewer's fog is fixed in `gpu.rs` (about line 328): `distance/400`, squared, mixed toward a constant `(0.62,0.70,0.80)`. The menu scene sits 200–400 units from the camera, so it fogs heavily. Turning fog off (`H2_FOG=0` scratch switch) gives the carrier its contrast back, but the scene is still mostly grey: the BSP shaders are `matte_grey`, `x03_metal_grey` and so on, and the sky is grey clouds. The real menu may be fairly grey too. **This needs a reference capture.**
 3. **Purple-grey water sheet** (`nm_arial_water`). Check its template; the water path in shader.rs uses a fixed tint.
 4. **No flak bursts or carrier engine glow** (prt3 particles, a light at a marker), no bloom, and no gravity-lift beam (an object function variable).
-5. **Camera roll.** The prototype uses `rot = Rz(yaw) * Ry(-pitch) * Rx(roll)`. The horizon tilts as expected at points 06–10, but the **sign of roll is not verified**.
+5. **Camera roll.** The prototype uses `rot = Rz(yaw) * Ry(-pitch) * Rx(roll)`. **Superseded (2026-10-12): that order is wrong.** Halo 2 turns a camera point by `Rx(roll) * Ry(-pitch) * Rz(yaw)`: yaw first, then pitch, and the roll last, about the world's x (`camera_set` at 0x16c2f0, through 0x11df60 and 0x141ce0). `camera::halo_rotation` in `crates/h2scene` does this, and a test pins it to 0x141ce0; see `docs/notes/launcher/menu.md`, "Review fixes, round 1". The prototype's order banked the camera up to 45° and pointed it at the sky at points 7 to 10.
 
 ### 1.3 Start screen and main menu screen (UI tags)
 
@@ -322,7 +322,7 @@ Rules for every step:
 ### Step 3: Flythrough camera
 1. Read the script **from the map**: find `mainmenu_flythrough` with `blam_cache::script::scripts` and walk its `begin` body, collecting `(camera_set <point> <ticks>)` and `(sleep <ticks>)`. Keep the table in `$SP/mm-src/crates/h2viewer/src/menupath.rs` as the fallback.
 2. Camera points come from `scenario::camera_points`, which reads name, position at 0x28 and orientation at 0x34 in radians.
-3. Orientation: `Quat::from_rotation_z(yaw) * Quat::from_rotation_y(-pitch) * Quat::from_rotation_x(roll)`. Forward = rot·X, up = rot·Z. **Check the roll sign against a reference capture**; flip it if the horizon tilts the wrong way.
+3. Orientation: Halo 2's, `camera::halo_rotation` in `crates/h2scene`: `Quat::from_rotation_x(roll) * Quat::from_rotation_y(-pitch) * Quat::from_rotation_z(yaw)`. Forward = rot·X, up = rot·Z. (Superseded, 2026-10-12: this said the prototype's z·y·x order and to flip the roll if the horizon tilted. Don't: the order is settled from the decompilation, item 5 of section 1.2.)
 4. Interpolation must keep the speed it had when a move is cut off halfway. The prototype uses a cubic Hermite from (current position, current velocity) to (target, at rest) over the move's length, and a smoothstep slerp for rotation. The campaign's `CameraMove` uses a plain smoothstep from rest, which jerks to a stop every 8 s on this script.
    - A first version may simulate from t=0 every frame (about 13 segments, cheap). Later, keep the state incrementally.
    - Rotation also restarts from rest at each retarget. Use a velocity-matched slerp (a squad between neighbours) if it looks jerky.
@@ -425,7 +425,7 @@ Change presentation only. Keep the rows, actions and network code.
   - Compare against `$SP/mm-mock/mainmenu-mock.png` for layout.
   - With mainmenu.map renamed away, the old orbit must still work, and with no fonts folder the 5x7 font.
 - **Reference capture from John** (most valuable single check): a 100 s video or a few screenshots of his own H2V main menu and start screen, plus one sub-screen, at 1280x720. Use it to settle:
-  - roll sign, field of view and colour or fog;
+  - field of view and colour or fog (the roll is settled: item 5 of section 1.2);
   - item order and labels;
   - what the bottom-right text shows;
   - font sizes;
@@ -441,7 +441,7 @@ Change presentation only. Keep the rows, actions and network code.
 - **The mouse cursor art** (`cursors\default`): keep the OS cursor.
 
 ## 6. Open points for John or the coordinator
-1. Can John send screenshots or a short capture of his own start screen and main menu (section 4)? They are the reference for the camera roll sign, colours, item order and font sizes.
+1. Can John send screenshots or a short capture of his own start screen and main menu (section 4)? They are the reference for the field of view, colours, item order and font sizes (the camera's roll is settled: item 5 of section 1.2).
 2. Can John send his `maps\fonts` folder for local testing (not for the repo)?
 3. Labels: keep ONLINE / MULTIPLAYER / SYSTEM LINK / PLAYER PROFILE / QUIT (recommended), or use H2V wording?
 4. Intro movie and start screen at every launch, with a "skip intro" option? Recommended: on, with the option.

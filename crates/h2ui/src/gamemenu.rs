@@ -480,7 +480,7 @@ fn legend(p: &mut Painter, name: &str, keyboard: bool, bounds: [f32; 4]) {
         return;
     };
     let fonts = p.fonts;
-    let style = TextStyle::new(ROW_FONT, rgba(colour::HEADER, 1.0), Justify::Right);
+    let style = TextStyle::new(ROW_FONT, rgba(colour::LEGEND, 1.0), Justify::Right);
     p.text(
         bounds,
         style,
@@ -506,6 +506,7 @@ pub fn crop(list: &DrawList, [x, y, w, h]: [u32; 4]) -> DrawList {
     DrawList {
         size: [w, h],
         quads,
+        texts: list.texts.clone(),
     }
 }
 
@@ -762,10 +763,18 @@ mod tests {
             *note = None;
         }
         let drawn = game_menu(&frame(view.clone()), &fonts, space);
-        // The header, the focused row and the legend in the header's
-        // colour; the other nine rows and the two side lines in the
-        // list's; every row above the note's line.
-        assert_eq!(glyph_rows(&drawn, colour::HEADER).len(), 3);
+        // The header and the focused row in the header's colour, the
+        // legend in its own (its words, and the built-in font's letters
+        // on their discs) in its box; the other nine rows and the two
+        // side lines in the list's; every row above the note's line.
+        assert_eq!(glyph_rows(&drawn, colour::HEADER).len(), 2);
+        let legend = glyph_rows(&drawn, colour::LEGEND);
+        let [_, top, _, bottom] = space.rect(legend_box(DialogSize::Large));
+        let inside = |y: &i32| (top - 1.0..=bottom + 1.0).contains(&(*y as f32));
+        assert!(
+            !legend.is_empty() && legend.iter().all(inside),
+            "{legend:?}"
+        );
         assert_eq!(glyph_rows(&drawn, colour::LIST_TEXT).len(), 9 + 2);
         assert!(row_band(MAX_ROWS - 1)[3] > NOTE_BOX[1]);
         for (w, h) in SIZES {

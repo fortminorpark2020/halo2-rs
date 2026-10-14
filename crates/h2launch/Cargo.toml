@@ -15,6 +15,9 @@ h2net = { path = "../h2net" }
 blam-cache = { path = "../blam-cache" }
 # The lobby's start screen and main menu, as the original Xbox Halo 2 drew them.
 h2ui = { path = "../h2ui" }
+# The main menu's flythrough behind them, from Halo 2 Vista's mainmenu.map,
+# drawn offscreen on the GPU on a thread of its own.
+h2scene = { path = "../h2scene" }
 # --check: the SHA-256 of halo2.dll.
 sha2 = "0.10"
 # --screenshot: the back buffer written as a PNG.
@@ -25,6 +28,8 @@ winit = "0.30"
 softbuffer = "0.4"
 ab_glyph = "0.2"
 gilrs = { version = "0.11.2", default-features = false, features = ["xinput"] }
+# The lobby's menu music and sounds, from Halo 2 Vista's files.
+cpal = "0.16"
 
 [dev-dependencies]
 # Made-up format-13 maps for the rank icons' tests.
@@ -40,6 +45,8 @@ features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    # The lobby's intro movie (lobby/intro.rs), decoded by Media Foundation.
+    "Win32_Media_MediaFoundation",
     "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",

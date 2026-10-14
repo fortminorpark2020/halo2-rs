@@ -313,7 +313,10 @@ h2launch --live 127.0.0.1 --instance b --name Bravo --pad none
 ## The lobby (milestone 4, being built)
 
 `h2launch` with no flags (or `--lobby`) opens a window of its own on Halo
-2's start screen; A (or Start) opens the main menu, with ONLINE and
+2's intro movie (on Windows, with Halo 2 Vista's `movie` folder; see
+`lobby.md`), then on its start screen, with Halo 2's main menu flythrough
+behind it and the main menu (drawn on the GPU from Halo 2 Vista's
+`mainmenu.map`, else a still background); A (or Start) opens the main menu, with ONLINE and
 SETTINGS. ONLINE shows the sign-in screen the first time (a gamertag
 and the server, h2.mohnjorrow.com by default, kept in `lobby.txt`) and
 signs in at once after that, then the playlists with your level in each

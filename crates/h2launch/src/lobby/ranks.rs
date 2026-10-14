@@ -3,11 +3,11 @@
 //! `docs/notes/launcher/live-v3.md` (section 4).
 //!
 //! They are two bitmap tags in `mainmenu.map`, 50 images each in level
-//! order (image index = level - 1). MCC's own mainmenu.map (cache format
-//! 13, its pixels in the textures.dat beside it) is tried first, through
-//! `blam_cache::mcc`; then a Halo 2 Vista one (format 8), read as the old
-//! game's emblems are. Both hold the same icons. Without either the lobby
-//! draws level numbers. Nothing here draws or keeps lobby state, and no
+//! order (image index = level - 1). A Halo 2 Vista one (format 8, Project
+//! Cartographer's; `sources`) is tried first, read as the old game's
+//! emblems are; then MCC's own (cache format 13, its pixels in the
+//! textures.dat beside it), through `blam_cache::mcc`. Both hold the same
+//! icons. Without either the lobby draws level numbers. Nothing here draws or keeps lobby state, and no
 //! image is shipped: they are read from the player's own files each time.
 
 use blam_cache::bitmap::{self, Image};
@@ -134,12 +134,18 @@ fn icons(images: Vec<Image>, tag: &str) -> Result<Vec<Icon>, String> {
 /// The maps to try, in order, or None when `env` (the variable the caller
 /// read: `H2LOBBY_RANKS` for the rank icons, `H2LOBBY_MENU` for the start
 /// screen and main menu) is `off`. With `env` set: only that (a folder
-/// means its mainmenu.map). Without: MCC's mainmenu.map (`mcc_maps`, its
-/// `halo2\h2_maps_win64_dx11`), each of MAP_DIRS' mainmenu.map, then
-/// `maps\mainmenu.map` beside the launcher (`exe_dir`). An empty `env`
-/// counts as unset.
+/// means its mainmenu.map). Without, Halo 2 Vista's first and MCC's
+/// second (menu.md, "Phase 2 (widened)"): the Vista mainmenu.map
+/// `sources::find` found (`vista_mainmenu`), then the mainmenu.map in
+/// each of `vista_dirs` (`MAP_DIRS`, or none when `H2LOBBY_VISTA` is
+/// off) not already listed, then MCC's (`mcc_maps`, its
+/// `halo2\h2_maps_win64_dx11`), then `maps\mainmenu.map` beside the
+/// launcher (`exe_dir`). The Vista folders come before MCC's even when
+/// the finder found none. An empty `env` counts as unset.
 pub fn candidates(
     env: Option<&OsStr>,
+    vista_mainmenu: Option<&Path>,
+    vista_dirs: &[&Path],
     mcc_maps: Option<&Path>,
     exe_dir: Option<&Path>,
 ) -> Option<Vec<PathBuf>> {
@@ -154,8 +160,14 @@ pub fn candidates(
             }
         }
         None => {
-            let mut out: Vec<PathBuf> = mcc_maps.map(|d| d.join(MAP_NAME)).into_iter().collect();
-            out.extend(MAP_DIRS.iter().map(|d| Path::new(d).join(MAP_NAME)));
+            let mut out: Vec<PathBuf> = vista_mainmenu.map(Path::to_path_buf).into_iter().collect();
+            for dir in vista_dirs {
+                let map = dir.join(MAP_NAME);
+                if !out.contains(&map) {
+                    out.push(map);
+                }
+            }
+            out.extend(mcc_maps.map(|d| d.join(MAP_NAME)));
             if let Some(dir) = exe_dir {
                 out.push(dir.join("maps").join(MAP_NAME));
             }
@@ -282,14 +294,27 @@ pub fn first_readable(candidates: &[PathBuf], log: &dyn Fn(&str)) -> Option<Rank
     None
 }
 
-/// What the lobby calls at start: `candidates` from the environment, MCC's
-/// maps folder (`mcc_maps`, when MCC was found) and the running launcher's
-/// folder, then `first_readable`. None means levels are drawn as numbers.
-pub fn load(mcc_maps: Option<&Path>, log: &dyn Fn(&str)) -> Option<RankIcons> {
+/// What the lobby calls at start: `candidates` from the environment, the
+/// Halo 2 Vista mainmenu.map found and the Vista folders to look in (see
+/// `candidates`), MCC's maps folder (`mcc_maps`, when MCC was found) and
+/// the running launcher's folder, then `first_readable`. None means
+/// levels are drawn as numbers.
+pub fn load(
+    vista_mainmenu: Option<&Path>,
+    vista_dirs: &[&Path],
+    mcc_maps: Option<&Path>,
+    log: &dyn Fn(&str),
+) -> Option<RankIcons> {
     let env = std::env::var_os(ENV);
     let exe = std::env::current_exe().ok();
     let exe_dir = exe.as_deref().and_then(Path::parent);
-    let Some(list) = candidates(env.as_deref(), mcc_maps, exe_dir) else {
+    let Some(list) = candidates(
+        env.as_deref(),
+        vista_mainmenu,
+        vista_dirs,
+        mcc_maps,
+        exe_dir,
+    ) else {
         log("lobby: rank icons off (H2LOBBY_RANKS=off); levels show as numbers");
         return None;
     };
@@ -371,8 +396,9 @@ mod tests {
     #[test]
     fn candidates_off_file_folder_and_unset() {
         let mcc_dir = Path::new(r"C:\MCC\halo2\h2_maps_win64_dx11");
+        let usual: Vec<&Path> = MAP_DIRS.iter().map(Path::new).collect();
         assert_eq!(
-            candidates(Some(OsStr::new("off")), Some(mcc_dir), None),
+            candidates(Some(OsStr::new("off")), None, &usual, Some(mcc_dir), None),
             None
         );
         let dir = folder("candidates");
@@ -380,39 +406,82 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         // A file is taken as it is, existing or not; nothing else is tried.
         let exe = Path::new("/launcher");
+        let vista = Path::new(r"D:\Cartographer\maps\mainmenu.map");
         assert_eq!(
-            candidates(Some(file.as_os_str()), Some(mcc_dir), Some(exe)),
+            candidates(
+                Some(file.as_os_str()),
+                Some(vista),
+                &usual,
+                Some(mcc_dir),
+                Some(exe)
+            ),
             Some(vec![file.clone()])
         );
         let gone = dir.join("gone.map");
         assert_eq!(
-            candidates(Some(gone.as_os_str()), None, None),
+            candidates(Some(gone.as_os_str()), None, &[], None, None),
             Some(vec![gone])
         );
         // A folder means its mainmenu.map.
         assert_eq!(
-            candidates(Some(dir.as_os_str()), Some(mcc_dir), Some(exe)),
+            candidates(
+                Some(dir.as_os_str()),
+                None,
+                &usual,
+                Some(mcc_dir),
+                Some(exe)
+            ),
             Some(vec![dir.join("mainmenu.map")])
         );
-        // Unset, or empty: MCC's maps, the Vista folders, then beside the
-        // launcher.
+        // Unset, or empty: the Vista map found, the Vista folders, MCC's
+        // maps, then beside the launcher.
         let want: Vec<PathBuf> = vec![
-            mcc_dir.join("mainmenu.map"),
+            vista.to_path_buf(),
             Path::new(r"C:\Games\Halo 2 Project Cartographer\maps").join("mainmenu.map"),
             Path::new(r"C:\Program Files (x86)\Microsoft Games\Halo 2\maps").join("mainmenu.map"),
             Path::new(r"C:\Program Files\Microsoft Games\Halo 2\maps").join("mainmenu.map"),
+            mcc_dir.join("mainmenu.map"),
             exe.join("maps").join("mainmenu.map"),
         ];
         assert_eq!(
-            candidates(None, Some(mcc_dir), Some(exe)),
+            candidates(None, Some(vista), &usual, Some(mcc_dir), Some(exe)),
             Some(want.clone())
         );
         assert_eq!(
-            candidates(Some(OsStr::new("")), Some(mcc_dir), Some(exe)),
+            candidates(
+                Some(OsStr::new("")),
+                Some(vista),
+                &usual,
+                Some(mcc_dir),
+                Some(exe)
+            ),
             Some(want.clone())
         );
-        // No MCC found, no launcher folder: the Vista folders alone.
-        assert_eq!(candidates(None, None, None), Some(want[1..4].to_vec()));
+        // None found: the Vista folders still come before MCC's.
+        assert_eq!(
+            candidates(None, None, &usual, Some(mcc_dir), Some(exe)),
+            Some(want[1..].to_vec())
+        );
+        // The Vista map found in one of the folders isn't listed twice.
+        let in_usual = Path::new(MAP_DIRS[1]).join("mainmenu.map");
+        assert_eq!(
+            candidates(None, Some(&in_usual), &usual, Some(mcc_dir), None),
+            Some(vec![
+                want[2].clone(),
+                want[1].clone(),
+                want[3].clone(),
+                want[4].clone()
+            ])
+        );
+        // Vista off (no folders), no MCC found, no launcher folder.
+        assert_eq!(
+            candidates(None, None, &[], Some(mcc_dir), Some(exe)),
+            Some(want[4..].to_vec())
+        );
+        assert_eq!(
+            candidates(None, None, &usual, None, None),
+            Some(want[1..4].to_vec())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -613,7 +682,7 @@ mod tests {
             assert_eq!(small.rgba[4..8], [level, 2, 3, 255]);
         }
         // The same file found by its folder, as H2LOBBY_RANKS may name it.
-        let list = candidates(Some(dir.as_os_str()), None, None).unwrap();
+        let list = candidates(Some(dir.as_os_str()), None, &[], None, None).unwrap();
         assert_eq!(existing(&list), std::slice::from_ref(&map));
         let _ = std::fs::remove_dir_all(&dir);
     }

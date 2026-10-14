@@ -440,6 +440,18 @@ impl Text {
         })
     }
 
+    /// No font at all: text takes no room and draws nothing. Only the
+    /// headless lobby uses it, on a PC without a font, where the script
+    /// reads what was drawn by name.
+    pub fn none() -> Text {
+        Text {
+            vector: None,
+            halo: Vec::new(),
+            caps: Vec::new(),
+            cache: HashMap::new(),
+        }
+    }
+
     /// The first font found on this PC.
     pub fn system() -> Result<Text, String> {
         let wanted = std::env::var("H2LOBBY_FONT").ok();
@@ -671,6 +683,27 @@ mod tests {
         std::fs::write(dir.join("font_table.txt"), table.join("\r\n")).unwrap();
         let text = Text::halo2(Some(&dir)).unwrap();
         (text, dir)
+    }
+
+    /// A Halo 2 Vista folder's `maps\fonts`, found through `sources`,
+    /// reads in both text systems: the lobby's and h2ui's.
+    #[test]
+    fn a_vista_fonts_folder_reads_in_both_text_systems() {
+        let root = std::env::temp_dir().join(format!("h2lobby-vista-fonts-{}", std::process::id()));
+        let fonts = root.join("maps").join("fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        std::fs::write(root.join("maps").join("mainmenu.map"), b"head").unwrap();
+        let vista = super::super::sources::Vista::at(&root).unwrap();
+        assert_eq!(vista.fonts(), None);
+        std::fs::write(fonts.join("handel_gothic-13"), font_file(&['I', '1'], 4)).unwrap();
+        let table = ["handel_gothic-13"; 12];
+        std::fs::write(fonts.join("font_table.txt"), table.join("\r\n")).unwrap();
+        let dir = vista.fonts().unwrap();
+        assert_eq!(dir, fonts);
+        let text = Text::halo2(Some(&dir)).unwrap();
+        assert_eq!(text.halo2_slots().len(), 12);
+        assert!(!h2ui::text::Fonts::read(&dir).loaded().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

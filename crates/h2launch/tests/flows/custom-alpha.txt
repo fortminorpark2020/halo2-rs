@@ -1,0 +1,45 @@
+# (b) A custom game, ALPHA's side: invite BRAVO, go down to the Custom
+# Game row, pick Team Slayer on Lockout and start it.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type ALPHA
+0.2 a
+0 wait live 30
+0.2 x                       # the players list
+0 wait players 5
+0 see BRAVO 30
+0 pick BRAVO
+0.2 a                       # invite
+0.2 b
+0 wait live 5
+0 see PARTY (2) 30          # BRAVO accepted
+# Down past the playlists to the last row (Settings), then one up.
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 down
+0.1 up
+0 see Any map and game type 5
+0.2 a                       # the custom game screen
+0 wait custom 5
+0.2 right                   # the next game type
+0 see Team Slayer 5
+0 see Lockout 5             # the map it opens on
+0.2 a                       # start
+0 wait pregame 30
+0 wait ingame 30
+0 wait carnage 60
+0.5 a                       # the leader goes back to pick the next
+0 wait custom 10
+1 quit

@@ -12,11 +12,24 @@
 //! move, and drawn on the CPU it costs more than the rest of a frame, so
 //! a caller draws it once for a window size (`cpu::Kept`) and copies it
 //! in under each frame's screen.
+//!
+//! Any other screen is drawn from its tag's layout (`screen`, from
+//! `tags::screen_layout`): its pane's pictures, lists, buttons and texts,
+//! its header and its button legend. Which words each text slot shows is
+//! the caller's binding (`Words`), never the tag's words unchecked: they
+//! go through `wording` first, and a slot the binding doesn't name is
+//! hidden.
+
+use std::borrow::Cow;
 
 use crate::anim::{self, Focus};
-use crate::art::ArtSource;
-use crate::layout::{self, colour, BitmapWidget, MainMenuLayout, Space, StartLayout};
-use crate::paint::{self, Anchor, DrawList, Painter};
+use crate::art::{last_part, ArtSource};
+use crate::chrome;
+use crate::layout::{
+    self, colour, BitmapWidget, ChromeLayout, Face, LegendItem, ListLayout, MainMenuLayout,
+    PaneLayout, ScreenLayout, SlotText, Space, StartLayout, TextWidget,
+};
+use crate::paint::{self, Anchor, Blend, DrawList, Painter, Quad, TextStyle, Texture};
 use crate::text::Fonts;
 
 /// The start screen's words.
@@ -101,7 +114,7 @@ pub fn start(clock: f64, s: &Start, art: &dyn ArtSource, fonts: &Fonts, space: S
 
 /// The first row shown of `rows` when `visible` show at once: the list
 /// keeps the focused row in sight.
-fn first_shown(rows: usize, visible: usize, focus: usize) -> usize {
+pub fn first_shown(rows: usize, visible: usize, focus: usize) -> usize {
     if rows <= visible || visible == 0 {
         return 0;
     }
@@ -161,11 +174,593 @@ pub fn main_menu_row_at(m: &MainMenu, space: Space, at: [f32; 2]) -> Option<usiz
         .map(|(_, k)| k)
 }
 
+/// What a text slot of a screen shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Words<'a> {
+    /// The tag's own words, through `wording` (hidden when it refuses
+    /// them, or the tag has none).
+    Tag,
+    /// The tag's words through `wording`, else these.
+    TagOr(Cow<'a, str>),
+    /// Our own words.
+    Ours(Cow<'a, str>),
+    /// Nothing.
+    Hide,
+}
+
+impl<'a> Words<'a> {
+    /// The words shown for a slot whose tag has `tag` (none when hidden).
+    pub fn resolve(&self, tag: Option<&str>) -> Option<Cow<'a, str>> {
+        let tag = || tag.and_then(wording).map(Cow::Owned);
+        match self {
+            Words::Tag => tag(),
+            Words::TagOr(ours) => tag().or_else(|| Some(ours.clone())),
+            Words::Ours(ours) => Some(ours.clone()),
+            Words::Hide => None,
+        }
+    }
+}
+
+/// Words the tags would have that never show (menu.md 4): the Xbox's
+/// own names, Bungie's, clans and voice.
+const REFUSED: [&str; 4] = ["xbox", "bungie", "clan", "voice"];
+
+/// Words after which the service's name is a noun ("logged into", "out
+/// of", "in to", "news from", "talking with", "blocked by"): there it
+/// becomes "the online service".
+const BEFORE_A_NOUN: [&str; 6] = ["into", "to", "of", "from", "with", "by"];
+
+/// A tag's words as the lobby may show them: "Xbox Live" becomes ONLINE
+/// in capitals and "online" otherwise ("Online" starting a sentence); an
+/// "on" just before it goes ("play on Xbox Live" reads "play online");
+/// after "into", "to", "of", "from", "with" or "by", where the name ends
+/// the phrase, it is "the online service" ("LOGGED INTO THE ONLINE
+/// SERVICE"). None when they still mention the Xbox, Bungie, clans or
+/// voice.
+pub fn wording(s: &str) -> Option<String> {
+    const NAME: &str = "xbox live";
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut at = 0;
+    while let Some(k) = lower[at..].find(NAME) {
+        let start = at + k;
+        let found = &s[start..start + NAME.len()];
+        let capitals = found == "XBOX LIVE";
+        out.push_str(&s[at..start]);
+        let kept = out.trim_end_matches(' ').len();
+        let word = out[..kept].rsplit([' ', '\n']).next().unwrap_or("");
+        let spaced = kept < out.len();
+        let before_a_noun = BEFORE_A_NOUN.iter().any(|w| word.eq_ignore_ascii_case(w));
+        if spaced && word.eq_ignore_ascii_case("on") {
+            out.truncate(kept - word.len());
+        }
+        // The name ends its phrase: the words end, or punctuation follows.
+        let after = s[start + NAME.len()..].trim_start_matches(' ');
+        let ends =
+            after.is_empty() || after.starts_with(['.', ',', '!', '?', ';', ':', ')', '\n', '\r']);
+        let noun = spaced && ends && before_a_noun;
+        let before = out.trim_end();
+        let starts = before.is_empty() || before.ends_with(['.', '!', '?', ':', '\n']);
+        out.push_str(match (noun, capitals) {
+            (true, true) => "THE ONLINE SERVICE",
+            (true, false) => "the online service",
+            (false, true) => "ONLINE",
+            (false, false) if starts => "Online",
+            (false, false) => "online",
+        });
+        at = start + NAME.len();
+    }
+    out.push_str(&s[at..]);
+    let left = out.to_ascii_lowercase();
+    if REFUSED.iter().any(|w| left.contains(w)) {
+        return None;
+    }
+    Some(out)
+}
+
+/// The format tokens in Halo 2's strings (U+E400 to U+E4FF): each one is
+/// the game's value for it (a gamertag, a playlist's name).
+pub fn is_token(c: char) -> bool {
+    ('\u{e400}'..='\u{e4ff}').contains(&c)
+}
+
+/// `text` with its tokens given by `tokens`; none when one isn't known.
+fn fill_tokens(text: &str, tokens: &dyn Fn(char) -> Option<String>) -> Option<String> {
+    if !text.chars().any(is_token) {
+        return Some(text.to_string());
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if is_token(c) {
+            out.push_str(&tokens(c)?);
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
+/// One row of a list: a cell for each of its skin's texts in order (the
+/// skin's first text, its second...), skin pictures shown at another
+/// frame on this row (by their tag's last name: a player's status icon in
+/// the Y menu's `live_icons`; every frame of a skin's pictures is read,
+/// `tags::screen_wanted`), and whether it can be chosen. One that can't
+/// is drawn dimmer (`DISABLED`), but a click still finds it, for the
+/// binding to refuse with Halo 2's error sound.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row<'a> {
+    pub cells: Vec<Cow<'a, str>>,
+    pub frames: Vec<(&'a str, usize)>,
+    pub enabled: bool,
+}
+
+impl<'a> Row<'a> {
+    /// A row with one cell.
+    pub fn new(text: impl Into<Cow<'a, str>>) -> Row<'a> {
+        Row {
+            cells: vec![text.into()],
+            frames: Vec::new(),
+            enabled: true,
+        }
+    }
+}
+
+/// How dim a row or button that can't be chosen is. Our own estimate.
+pub const DISABLED: f32 = 0.4;
+
+/// A list's rows and where it is: its focus (none when the focus is
+/// elsewhere on the screen: every row rests), and its first row shown
+/// (`first_shown` keeps the focused one in sight).
+#[derive(Clone, Copy, Debug)]
+pub struct ListState<'a> {
+    pub rows: &'a [Row<'a>],
+    pub focus: Option<Focus>,
+    pub first: usize,
+}
+
+/// What a screen's picture shows instead of its tag's (a map's picture, a
+/// level icon).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Show {
+    Keep,
+    Hide,
+    /// Another bitmap tag at a frame of it, at the same place and scale.
+    /// It must be in the art `screen` is given: the shell reads only the
+    /// frames its screens' tags name (a map's picture is the caller's).
+    Picture(String, usize),
+}
+
+/// A screen's state for `screen`.
+pub struct ScreenState<'a> {
+    /// Which pane shows.
+    pub pane: usize,
+    /// When it opened, on the menus' clock (seconds).
+    pub opened: f64,
+    /// The shell's chrome, for the header and the legend.
+    pub chrome: &'a ChromeLayout,
+    /// What each text slot (and button's text) shows. A button whose
+    /// words are hidden keeps its picture and its click area (the pregame
+    /// lobby's chat box is a button with no words); `hidden_buttons`
+    /// takes a button away.
+    pub words: &'a dyn Fn(&SlotText) -> Words<'a>,
+    /// The values of the tags' format tokens; a text with one that has
+    /// none is hidden.
+    pub tokens: &'a dyn Fn(char) -> Option<String>,
+    /// The pane's lists, in its order (one missing draws nothing).
+    pub lists: &'a [ListState<'a>],
+    /// Which button has the focus.
+    pub button_focus: Option<usize>,
+    /// Buttons drawn dimmed (`DISABLED`): a click still finds them, for
+    /// the binding to refuse with Halo 2's error sound.
+    pub disabled_buttons: &'a [usize],
+    /// Buttons not shown at all: no picture, no words, no click area
+    /// (the others keep their numbers). Keeping the focus off them is
+    /// the caller's.
+    pub hidden_buttons: &'a [usize],
+    /// The header's words (the tag's header string).
+    pub header: Words<'a>,
+    /// The legend's buttons, and whether to name the keys for them.
+    pub legend: &'a [LegendItem],
+    pub keyboard: bool,
+    /// What each of the pane's pictures shows.
+    pub pictures: &'a dyn Fn(&BitmapWidget) -> Show,
+}
+
+/// What a click at a hit area presses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiHit {
+    /// Row `k` of list `list` (its index in all of the list's rows).
+    Row(usize, usize),
+    Button(usize),
+    Legend(Face),
+}
+
+/// Where a click presses something: a box of window pixels (`[x0, y0,
+/// x1, y1]`, +y down).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HitArea {
+    pub rect: [f32; 4],
+    pub hit: UiHit,
+}
+
+impl HitArea {
+    /// The first area under window pixel `at`.
+    pub fn find(areas: &[HitArea], [x, y]: [f32; 2]) -> Option<UiHit> {
+        areas
+            .iter()
+            .find(|a| x >= a.rect[0] && x < a.rect[2] && y >= a.rect[1] && y < a.rect[3])
+            .map(|a| a.hit)
+    }
+}
+
+/// The overlay that dims what is under a dialog (the caller draws it
+/// between the screen under and the dialog).
+pub fn overlay(chrome: &ChromeLayout, space: Space) -> DrawList {
+    let mut list = DrawList {
+        size: space.size.map(|v| v as u32),
+        ..DrawList::default()
+    };
+    let [w, h] = space.size;
+    if chrome.overlay[3] > 0.0 && w > 0.0 && h > 0.0 {
+        list.quads.push(Quad {
+            texture: Texture::White,
+            rect: space.window(),
+            uv: [0.0, 0.0, 1.0, 1.0],
+            color: [chrome.overlay; 2],
+            blend: Blend::Plain,
+            wrap: [false; 2],
+        });
+    }
+    list
+}
+
+/// When the last piece of a screen's pane has come in, in seconds after
+/// it opened (the lobby's `menu_settled`): its pictures, texts, buttons
+/// and lists, each list's skin pictures (they come in from when the
+/// screen opened) and its focused row's fade up, as `App::menu_intro`
+/// counts the main menu's.
+pub fn intro_end(layout: &ScreenLayout, pane: usize) -> f64 {
+    let Some(p) = layout.pane(pane) else {
+        return 0.0;
+    };
+    let end = |a: Option<&anim::Animation>, delay_ms: f32| {
+        f64::from(a.map_or(0.0, anim::Animation::seconds)) + f64::from(delay_ms.max(0.0)) / 1000.0
+    };
+    let bitmaps = p.bitmaps.iter().map(|w| end(w.intro.as_ref(), w.delay_ms));
+    let texts = p
+        .texts
+        .iter()
+        .map(|t| end(t.widget.intro.as_ref(), t.widget.delay_ms));
+    let lists = p.lists.iter().map(|l| {
+        let skin = l
+            .skin
+            .bitmaps
+            .iter()
+            .map(|w| end(w.intro.as_ref(), w.delay_ms));
+        let gain = f64::from(l.skin.items.gain.seconds());
+        skin.fold(end(l.intro.as_ref(), l.delay_ms).max(gain), f64::max)
+    });
+    let buttons = p
+        .buttons
+        .iter()
+        .map(|b| end(b.text.widget.intro.as_ref(), b.text.widget.delay_ms));
+    bitmaps
+        .chain(texts)
+        .chain(lists)
+        .chain(buttons)
+        .fold(0.0, f64::max)
+}
+
+/// The frame of a button's picture: focused or not (`tags::BUTTON_FRAMES`;
+/// menu.md 9.2 says what the pregame lobby's button's frames are).
+pub fn button_frame(focused: bool) -> usize {
+    crate::tags::BUTTON_FRAMES[usize::from(focused)]
+}
+
+/// A text slot's words at `age`, through the binding and the tokens:
+/// none when hidden.
+fn slot_words(slot: &SlotText, s: &ScreenState) -> Option<String> {
+    let words = (s.words)(slot).resolve(slot.words.as_deref())?;
+    fill_tokens(&words, s.tokens).filter(|w| !w.is_empty())
+}
+
+/// A text widget's look `age` seconds after its screen opened.
+fn text_alpha(w: &TextWidget, age: f32, since_open: f64) -> (f32, [f32; 2]) {
+    let (a, offset) = anim::intro(w.intro.as_ref(), age, w.delay_ms);
+    let pulse = if w.pulsating {
+        anim::pulse(since_open)
+    } else {
+        1.0
+    };
+    (a * pulse, offset)
+}
+
+/// A screen of the tags (`tags::screen_layout`) at `clock`, in this order:
+/// its pane's pictures and its buttons' pictures (lower depths first), its
+/// lists (each row's pictures, then their texts), its texts and buttons'
+/// texts (lower depths first), then its header and its legend. The
+/// overlay under a dialog is the caller's (`overlay`). Returns where
+/// clicks press its rows, buttons and legend items.
+pub fn screen(
+    clock: f64,
+    layout: &ScreenLayout,
+    s: &ScreenState,
+    art: &dyn ArtSource,
+    fonts: &Fonts,
+    space: Space,
+) -> (DrawList, Vec<HitArea>) {
+    let mut p = Painter::new(space, art, fonts, clock);
+    let mut hits = Vec::new();
+    let Some(pane) = layout.pane(s.pane) else {
+        return (p.finish(), hits);
+    };
+    let since_open = clock - s.opened;
+    let age = since_open as f32;
+    pictures(&mut p, pane, s, age);
+    for (k, list) in pane.lists.iter().enumerate() {
+        if let Some(state) = s.lists.get(k) {
+            draw_list(&mut p, list, k, state, age, clock, &mut hits);
+        }
+    }
+    let focus_colour = s.chrome.header(layout.size).color;
+    words(&mut p, pane, s, focus_colour, age, since_open, &mut hits);
+    if layout.has_header {
+        let header = s.header.resolve(layout.header_words.as_deref());
+        if let Some(text) = header.and_then(|h| fill_tokens(&h, s.tokens)) {
+            let w = header_widget(layout, s.pane, s.chrome);
+            chrome::header_in(&mut p, &w, &text);
+        }
+    }
+    let legend = chrome::legend(&mut p, s.chrome, layout.size, s.legend, s.keyboard);
+    hits.extend(legend.into_iter().map(|(rect, face)| HitArea {
+        rect,
+        hit: UiHit::Legend(face),
+    }));
+    (p.finish(), hits)
+}
+
+/// Where and how a screen's header is drawn on pane `pane`: the globals'
+/// header for its size, in Vista's units whatever the pane's scale (grown
+/// with an Xbox pane it would land outside the frame), except on a dialog
+/// at the Xbox's scale, whose frame's top band is elsewhere
+/// (`layout::xbox_dialog_header`; menu.md 9.2). The legend keeps the
+/// globals' box on every pane.
+pub fn header_widget(layout: &ScreenLayout, pane: usize, chrome: &ChromeLayout) -> TextWidget {
+    let mut w = chrome.header(layout.size).clone();
+    let scale = layout.pane(pane).map_or(layout::Scale::Vista, |p| p.scale);
+    if let Some(bounds) = layout::xbox_dialog_header(layout.size, scale) {
+        w.bounds = bounds;
+    }
+    w
+}
+
+/// A pane's pictures and its buttons' pictures, by depth.
+fn pictures(p: &mut Painter, pane: &PaneLayout, s: &ScreenState, age: f32) {
+    let mut shown: Vec<(BitmapWidget, f32)> = Vec::new();
+    for w in &pane.bitmaps {
+        match (s.pictures)(w) {
+            Show::Keep => shown.push((w.clone(), 1.0)),
+            Show::Hide => {}
+            Show::Picture(name, frame) => shown.push((
+                BitmapWidget {
+                    name,
+                    frame,
+                    ..w.clone()
+                },
+                1.0,
+            )),
+        }
+    }
+    for (k, b) in pane.buttons.iter().enumerate() {
+        let Some(w) = &b.bitmap else { continue };
+        if s.hidden_buttons.contains(&k) {
+            continue;
+        }
+        let focused = s.button_focus == Some(k);
+        let dim = if s.disabled_buttons.contains(&k) {
+            DISABLED
+        } else {
+            1.0
+        };
+        // A button with one picture shows it focused too.
+        let mut frame = button_frame(focused);
+        if p.picture(&w.name, frame).is_none() && p.picture(&w.name, button_frame(false)).is_some()
+        {
+            frame = button_frame(false);
+        }
+        let w = BitmapWidget { frame, ..w.clone() };
+        shown.push((w, dim));
+    }
+    shown.sort_by_key(|(w, _)| w.depth);
+    for (w, dim) in &shown {
+        let (a, [dx, dy]) = anim::intro(w.intro.as_ref(), age, w.delay_ms);
+        let at = [w.corner[0] + dx, w.corner[1] + dy];
+        p.bitmap(w, at, Anchor::TopLeft, a * dim);
+    }
+}
+
+/// A list's shown rows: each one's pictures, then their texts (one cell a
+/// text), its scroll arrows, and where each row is for clicks.
+fn draw_list(
+    p: &mut Painter,
+    list: &ListLayout,
+    index: usize,
+    state: &ListState,
+    age: f32,
+    clock: f64,
+    hits: &mut Vec<HitArea>,
+) {
+    let (fade, [fx, fy]) = paint::relative(list.intro.as_ref(), age, list.delay_ms);
+    let look = &list.skin.items;
+    let rows = state.rows;
+    let first = state
+        .first
+        .min(rows.len().saturating_sub(list.visible.max(1)));
+    let shown: Vec<(usize, [f32; 2], f32)> = (first..rows.len())
+        .take(list.visible)
+        .enumerate()
+        .map(|(slot, k)| {
+            let [x, y] = list.corner(slot);
+            let focus = state
+                .focus
+                .map_or(look.resting(), |f| f.alpha_in(look, k, clock));
+            let dim = if rows[k].enabled { 1.0 } else { DISABLED };
+            (k, [x + fx, y + fy], focus * fade * dim)
+        })
+        .collect();
+    for &(k, corner, alpha) in &shown {
+        let row = &rows[k];
+        let mut skin: Vec<&BitmapWidget> = list.skin.bitmaps.iter().collect();
+        skin.sort_by_key(|w| w.depth);
+        for w in skin {
+            let (a, [dx, dy]) = anim::intro(w.intro.as_ref(), age, w.delay_ms);
+            let at = [corner[0] + w.corner[0] + dx, corner[1] + w.corner[1] + dy];
+            let frame = row
+                .frames
+                .iter()
+                .find(|(name, _)| last_part(&w.name).eq_ignore_ascii_case(last_part(name)));
+            match frame {
+                Some(&(_, frame)) => {
+                    let w = BitmapWidget { frame, ..w.clone() };
+                    p.bitmap(&w, at, Anchor::BottomLeft, a * alpha);
+                }
+                None => {
+                    p.bitmap(w, at, Anchor::BottomLeft, a * alpha);
+                }
+            }
+        }
+    }
+    for &(k, corner, alpha) in &shown {
+        let row = &rows[k];
+        // A shadow is listed after its label, and drawn under it; each
+        // text has Halo 2's drop shadow too.
+        for (t, cell) in list.skin.texts.iter().zip(&row.cells).rev() {
+            let bounds = layout::offset(t.bounds, corner);
+            p.text_box(bounds, shadowed(t, TextStyle::of(t, alpha)), cell);
+        }
+        if let Some(rect) = row_box(p, list, corner) {
+            hits.push(HitArea {
+                rect: p.space.rect(rect),
+                hit: UiHit::Row(index, k),
+            });
+        }
+    }
+    if let Some(arrows) = &list.skin.arrows {
+        // Both from the list's corner, as the skin places them; each shows
+        // while there are rows that way.
+        let more = [first > 0, first + list.visible < rows.len()];
+        for (frame, at) in [arrows.up, arrows.down].into_iter().enumerate() {
+            if more[frame] {
+                let w = BitmapWidget {
+                    frame,
+                    ..BitmapWidget::new(&arrows.bitmap, [0.0, 0.0])
+                };
+                let at = [list.corner[0] + fx + at[0], list.corner[1] + fy + at[1]];
+                p.bitmap(&w, at, Anchor::BottomLeft, fade);
+            }
+        }
+    }
+}
+
+/// A row's box (UI units) at `corner`: its skin's texts' boxes and the
+/// pictures that count towards its size.
+fn row_box(p: &Painter, list: &ListLayout, corner: [f32; 2]) -> Option<[f32; 4]> {
+    let texts = list.skin.texts.iter().map(|t| t.bounds);
+    let pictures = list
+        .skin
+        .bitmaps
+        .iter()
+        .filter(|w| !w.ignore_for_list_size)
+        .filter_map(|w| {
+            let [bw, bh] = p.size(w)?;
+            let [x, y] = w.corner;
+            Some([x, y + bh, x + bw, y])
+        });
+    let union = texts.chain(pictures).reduce(|a, b| {
+        [
+            a[0].min(b[0]),
+            a[1].max(b[1]),
+            a[2].max(b[2]),
+            a[3].min(b[3]),
+        ]
+    })?;
+    Some(layout::offset(union, corner))
+}
+
+/// A text's look with Halo 2's drop shadow under it, unless it is typed
+/// out behind a cursor (`TextWidget::cursor`).
+fn shadowed(t: &TextWidget, style: TextStyle) -> TextStyle {
+    if t.cursor {
+        style
+    } else {
+        style.shadowed()
+    }
+}
+
+/// A pane's texts and its buttons' texts by depth, and where each button
+/// is for clicks (its text's box and its picture's; a hidden one has
+/// none). The focused button's words are in the header's colour (the
+/// globals' text colour), as the Xbox code draws a button in the focus.
+fn words(
+    p: &mut Painter,
+    pane: &PaneLayout,
+    s: &ScreenState,
+    focus_colour: [f32; 3],
+    age: f32,
+    since_open: f64,
+    hits: &mut Vec<HitArea>,
+) {
+    let mut texts: Vec<(&SlotText, f32, bool)> =
+        pane.texts.iter().map(|t| (t, 1.0, false)).collect();
+    for (k, b) in pane.buttons.iter().enumerate() {
+        if s.hidden_buttons.contains(&k) {
+            continue;
+        }
+        let dim = if s.disabled_buttons.contains(&k) {
+            DISABLED
+        } else {
+            1.0
+        };
+        texts.push((&b.text, dim, s.button_focus == Some(k)));
+        let mut rect = b.text.widget.bounds;
+        if let Some([bw, bh]) = b.bitmap.as_ref().and_then(|w| p.size(w)) {
+            let [x, y] = b.bitmap.as_ref().map_or([0.0; 2], |w| w.corner);
+            rect = [
+                rect[0].min(x),
+                rect[1].max(y),
+                rect[2].max(x + bw),
+                rect[3].min(y - bh),
+            ];
+        }
+        hits.push(HitArea {
+            rect: p.space.rect(rect),
+            hit: UiHit::Button(k),
+        });
+    }
+    texts.sort_by_key(|(t, _, _)| t.widget.depth);
+    for (t, dim, focused) in texts {
+        let Some(words) = slot_words(t, s) else {
+            continue;
+        };
+        let (a, offset) = text_alpha(&t.widget, age, since_open);
+        let bounds = layout::offset(t.widget.bounds, offset);
+        let mut style = TextStyle {
+            scale: t.glyphs,
+            ..TextStyle::of(&t.widget, a * dim)
+        };
+        if focused {
+            style.color = crate::rgba(focus_colour, a * dim);
+        }
+        p.text_box(bounds, shadowed(&t.widget, style), &words);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::art::{ArtImage, FlatArt, MemoryArt};
-    use crate::paint::{Resources, Texture};
+    use crate::layout::ButtonLayout;
+    use crate::paint::{Resources, Texture, TEXT_SHADOW};
     use crate::Font;
 
     const SIZES: [(u32, u32); 8] = [
@@ -419,6 +1014,72 @@ mod tests {
         assert!(letters(0.125).iter().all(|a| (a - 0.5).abs() < 1e-4));
     }
 
+    /// A digest of a list's quads (every field's bits) and lines.
+    pub(crate) fn digest(list: &DrawList) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |v: u64| {
+            for b in v.to_le_bytes() {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        for q in &list.quads {
+            let texture = match q.texture {
+                Texture::White => 1,
+                Texture::Art(k) => 2 + (u64::from(k) << 8),
+                Texture::Font(k) => 3 + (u64::from(k) << 8),
+                Texture::Fallback => 4,
+            };
+            eat(texture);
+            for v in q.rect.iter().chain(&q.uv).chain(q.color.iter().flatten()) {
+                eat(u64::from(v.to_bits()));
+            }
+            eat(q.blend as u64 + 8 * u64::from(q.wrap[0]) + 16 * u64::from(q.wrap[1]));
+        }
+        for t in &list.texts {
+            t.bytes().for_each(|b| eat(u64::from(b)));
+        }
+        h
+    }
+
+    /// The start screen and the main menu draw exactly as they did before
+    /// screens could be drawn from any tag (2.7): their quads are pinned.
+    #[test]
+    fn the_start_screen_and_main_menu_are_unchanged() {
+        let fonts = Fonts::fallback();
+        let (start_layout, main_layout) = (StartLayout::default(), MainMenuLayout::default());
+        let mut got = Vec::new();
+        for (w, h) in [(1280, 720), (1920, 1080)] {
+            let space = Space::new(w, h);
+            for clock in [0.1, 3.0] {
+                let s = start(clock, &start_state(&start_layout), &FlatArt, &fonts, space);
+                let m = main_menu(
+                    clock,
+                    &main_state(&main_layout, &ROWS),
+                    &FlatArt,
+                    &fonts,
+                    space,
+                );
+                got.push(digest(&s));
+                got.push(digest(&m));
+            }
+        }
+        assert_eq!(got, PINNED);
+    }
+
+    /// Taken from the code before 2.7, at 1280x720 and 1920x1080, clocks
+    /// 0.1 and 3.0, start then main menu.
+    const PINNED: [u64; 8] = [
+        7197067043366583784,
+        4842540297417354659,
+        17459350917710010778,
+        13459257294002349554,
+        3003082628917096320,
+        9322449806419217081,
+        4061248620304994473,
+        13693663462508611468,
+    ];
+
     #[test]
     fn the_mouse_finds_the_row_under_it() {
         let layout = MainMenuLayout::default();
@@ -439,5 +1100,900 @@ mod tests {
         assert_eq!(first_shown(9, 6, 2), 0);
         assert_eq!(first_shown(3, 6, 2), 0);
         assert_eq!(Font::MainMenu, layout.list.skin.texts[0].font);
+    }
+
+    #[test]
+    fn wording_says_online_and_refuses_the_rest() {
+        let w = |s: &str| wording(s);
+        assert_eq!(w("SETTINGS").as_deref(), Some("SETTINGS"));
+        assert_eq!(
+            w("FIND A GAME ON XBOX LIVE").as_deref(),
+            Some("FIND A GAME ONLINE")
+        );
+        assert_eq!(w("Xbox Live friends").as_deref(), Some("Online friends"));
+        assert_eq!(
+            w("Meet up on Xbox Live.").as_deref(),
+            Some("Meet up online.")
+        );
+        assert_eq!(
+            w("Done. Xbox Live is next").as_deref(),
+            Some("Done. Online is next")
+        );
+        assert_eq!(w("Upon Xbox Live").as_deref(), Some("Upon online"));
+        assert_eq!(w("on Xbox Live").as_deref(), Some("Online"));
+        // After into, to, of, from, with or by it is a noun, where the
+        // name ends the phrase.
+        for (from, to) in [
+            ("LOGGED INTO XBOX LIVE", "LOGGED INTO THE ONLINE SERVICE"),
+            (
+                "Dropped out of Xbox Live, try again",
+                "Dropped out of the online service, try again",
+            ),
+            (
+                "You are logged in to Xbox Live.",
+                "You are logged in to the online service.",
+            ),
+            ("Blocked by Xbox Live.", "Blocked by the online service."),
+            ("NEWS FROM XBOX LIVE ?", "NEWS FROM THE ONLINE SERVICE ?"),
+            (
+                "Talking with Xbox Live\nNow",
+                "Talking with the online service\nNow",
+            ),
+            ("Most of Xbox Live games", "Most of online games"),
+        ] {
+            assert_eq!(w(from).as_deref(), Some(to), "{from}");
+        }
+        for refused in ["The Xbox pad", "BUNGIE NEWS", "Your clan", "Voice chat"] {
+            assert_eq!(w(refused), None, "{refused}");
+        }
+        // The binding's choices.
+        let tag = Some("PLAY ON XBOX LIVE");
+        assert_eq!(Words::Tag.resolve(tag).as_deref(), Some("PLAY ONLINE"));
+        assert_eq!(Words::Tag.resolve(None), None);
+        assert_eq!(Words::Tag.resolve(Some("bungie")), None);
+        let ours = Words::TagOr(Cow::Borrowed("OURS"));
+        assert_eq!(ours.resolve(tag).as_deref(), Some("PLAY ONLINE"));
+        assert_eq!(ours.resolve(Some("bungie")).as_deref(), Some("OURS"));
+        assert_eq!(ours.resolve(None).as_deref(), Some("OURS"));
+        let ours = Words::Ours(Cow::Borrowed("MINE"));
+        assert_eq!(ours.resolve(tag).as_deref(), Some("MINE"));
+        assert_eq!(Words::Hide.resolve(tag), None);
+        // Tokens: each one's value, or nothing when one has none.
+        let tokens = |c: char| (c == '\u{e401}').then(|| "JOHN".to_string());
+        assert!(is_token('\u{e400}') && is_token('\u{e4ff}') && !is_token('A'));
+        assert_eq!(
+            fill_tokens("\u{e401} IS IN", &tokens).as_deref(),
+            Some("JOHN IS IN")
+        );
+        assert_eq!(fill_tokens("\u{e402} IS IN", &tokens), None);
+        assert_eq!(fill_tokens("NONE", &tokens).as_deref(), Some("NONE"));
+    }
+
+    const LABEL: [f32; 3] = [0.9, 0.9, 0.9];
+    const BACKING: [f32; 4] = [0.1, 0.2, 0.3, 1.0];
+
+    fn panel(name: &str, corner: [f32; 2], size: [f32; 2]) -> BitmapWidget {
+        BitmapWidget {
+            flat: layout::Flat::Panel {
+                size,
+                color: BACKING,
+                edge: [0.5, 0.6, 0.7, 1.0],
+            },
+            ..BitmapWidget::new(name, corner)
+        }
+    }
+
+    fn slot(key: &str, words: &str, bounds: [f32; 4]) -> SlotText {
+        SlotText {
+            key: key.into(),
+            words: Some(words.into()),
+            widget: TextWidget::new(
+                Font::Body,
+                [0.7, 0.7, 0.7],
+                bounds,
+                crate::text::Justify::Left,
+            ),
+            glyphs: layout::XBOX_BITMAP,
+        }
+    }
+
+    /// A quarter dialog of one pane in the Xbox's numbers (already
+    /// scaled, as `tags::screen_layout` gives it): a plate, texts (one
+    /// in the tag's words to be reworded, one refused, one with a token,
+    /// one with a token that has no value), a list of three rows of two
+    /// cells with arrows, and two buttons.
+    fn dialog() -> ScreenLayout {
+        let skin = layout::SkinLayout {
+            bitmaps: vec![
+                panel("made_up_backing", [0.0, 0.0], [300.0, 40.0]),
+                BitmapWidget {
+                    ignore_for_list_size: true,
+                    ..panel("ui\\made_up\\made_up_icon", [260.0, 5.0], [30.0, 30.0])
+                },
+            ],
+            texts: vec![
+                TextWidget::new(
+                    Font::Body,
+                    LABEL,
+                    [10.0, 35.0, 150.0, 5.0],
+                    crate::text::Justify::Left,
+                ),
+                TextWidget::new(
+                    Font::Body,
+                    [0.8, 0.8, 0.8],
+                    [160.0, 35.0, 250.0, 5.0],
+                    crate::text::Justify::Right,
+                ),
+            ],
+            items: crate::anim::ItemLook::default(),
+            arrows: Some(layout::Arrows {
+                bitmap: "made_up_arrows".into(),
+                up: [-40.0, 10.0],
+                down: [-40.0, -160.0],
+            }),
+        };
+        let list = ListLayout {
+            skin,
+            corner: [-100.0, 20.0],
+            step: 45.0,
+            visible: 3,
+            wraps: false,
+            intro: None,
+            delay_ms: 0.0,
+        };
+        let pane = PaneLayout {
+            scale: layout::Scale::Xbox,
+            bitmaps: vec![
+                panel("made_up_plate", [-320.0, 260.0], [200.0, 100.0]),
+                panel("made_up_gone", [100.0, 260.0], [50.0, 50.0]),
+            ],
+            texts: vec![
+                slot(
+                    "dialog_body",
+                    "JOIN US ON XBOX LIVE",
+                    [-300.0, 150.0, 300.0, 110.0],
+                ),
+                slot(
+                    "dialog_refused",
+                    "BUNGIE THINGS",
+                    [-300.0, 100.0, 300.0, 60.0],
+                ),
+                slot(
+                    "dialog_token",
+                    "\u{e401} IS HERE",
+                    [-300.0, 60.0, 300.0, 30.0],
+                ),
+                slot(
+                    "dialog_unknown",
+                    "\u{e402} IS GONE",
+                    [-300.0, 30.0, 300.0, 0.0],
+                ),
+            ],
+            lists: vec![list],
+            buttons: vec![
+                ButtonLayout {
+                    text: slot("dialog_button", "PRESS", [-300.0, -200.0, -100.0, -240.0]),
+                    bitmap: Some(panel("made_up_button", [-310.0, -195.0], [220.0, 50.0])),
+                },
+                ButtonLayout {
+                    text: slot("dialog_single", "SINGLE", [0.0, -200.0, 200.0, -240.0]),
+                    bitmap: Some(panel("made_up_single", [-10.0, -195.0], [220.0, 50.0])),
+                },
+            ],
+            players: Vec::new(),
+        };
+        ScreenLayout {
+            id: None,
+            path: "ui\\screens\\made_up\\dialog".into(),
+            size: layout::DialogSize::Quarter,
+            has_header: true,
+            header_id: "dialog_header".into(),
+            header_words: Some("MADE UP".into()),
+            button_key: 2,
+            overlay: true,
+            pane_per_item: false,
+            panes: vec![pane],
+            strings: Vec::new(),
+        }
+    }
+
+    /// Five rows of two cells, the second disabled and showing frame 2 of
+    /// the icon.
+    fn dialog_rows() -> Vec<Row<'static>> {
+        (0..5)
+            .map(|k| Row {
+                cells: vec![format!("ROW {k}").into(), "CELL".into()],
+                frames: if k == 1 {
+                    vec![("made_up_icon", 2)]
+                } else {
+                    Vec::new()
+                },
+                enabled: k != 1,
+            })
+            .collect()
+    }
+
+    /// Draws `dialog()` with the second row focused (rows 1 to 3 shown),
+    /// `button_focus` and `pictures`.
+    fn draw_dialog(
+        art: &dyn ArtSource,
+        button_focus: Option<usize>,
+        pictures: &dyn Fn(&BitmapWidget) -> Show,
+    ) -> (DrawList, Vec<HitArea>, ScreenLayout, Space) {
+        let buttons = Buttons {
+            focus: button_focus,
+            ..Buttons::default()
+        };
+        draw_screen(dialog(), art, buttons, pictures)
+    }
+
+    /// Which of a drawn screen's buttons has the focus, is dimmed and is
+    /// hidden.
+    #[derive(Default)]
+    struct Buttons<'a> {
+        focus: Option<usize>,
+        disabled: &'a [usize],
+        hidden: &'a [usize],
+    }
+
+    /// As `draw_dialog`, any layout like `dialog()`'s.
+    fn draw_screen(
+        layout: ScreenLayout,
+        art: &dyn ArtSource,
+        buttons: Buttons,
+        pictures: &dyn Fn(&BitmapWidget) -> Show,
+    ) -> (DrawList, Vec<HitArea>, ScreenLayout, Space) {
+        draw_rows(layout, art, buttons, pictures, &dialog_rows(), 1)
+    }
+
+    /// As `draw_screen`, its list holding `rows` from the one at `first`
+    /// (the second focused).
+    fn draw_rows(
+        layout: ScreenLayout,
+        art: &dyn ArtSource,
+        buttons: Buttons,
+        pictures: &dyn Fn(&BitmapWidget) -> Show,
+        rows: &[Row],
+        first: usize,
+    ) -> (DrawList, Vec<HitArea>, ScreenLayout, Space) {
+        let fonts = Fonts::fallback();
+        let chrome = ChromeLayout::default();
+        let lists = [ListState {
+            rows,
+            focus: Some(Focus::on(1, 0.0)),
+            first,
+        }];
+        let words = |t: &SlotText| match t.key.as_str() {
+            "dialog_button" => Words::Ours(Cow::Borrowed("OURS")),
+            _ => Words::Tag,
+        };
+        let tokens = |c: char| (c == '\u{e401}').then(|| "JOHN".to_string());
+        let legend = [
+            LegendItem::new(Face::A, "SELECT"),
+            LegendItem::new(Face::B, "BACK"),
+        ];
+        let s = ScreenState {
+            pane: 0,
+            opened: 0.0,
+            chrome: &chrome,
+            words: &words,
+            tokens: &tokens,
+            lists: &lists,
+            button_focus: buttons.focus,
+            disabled_buttons: buttons.disabled,
+            hidden_buttons: buttons.hidden,
+            header: Words::Tag,
+            legend: &legend,
+            keyboard: false,
+            pictures,
+        };
+        let space = Space::new(1280, 720);
+        let (list, hits) = screen(10.0, &layout, &s, art, &fonts, space);
+        (list, hits, layout, space)
+    }
+
+    /// The chrome's header colour (the globals' text colour).
+    fn header_colour() -> [f32; 3] {
+        ChromeLayout::default()
+            .header(layout::DialogSize::Quarter)
+            .color
+    }
+
+    /// That the header's six glyphs ("MADE UP", in the header colour) are
+    /// in the box `bounds` (UI units), and `others` more glyphs of that
+    /// colour elsewhere (a focused button's words).
+    fn assert_header_in(list: &DrawList, space: Space, bounds: [f32; 4], others: usize) {
+        let [x0, y0, x1, y1] = space.rect(bounds);
+        let glyphs = list
+            .quads
+            .iter()
+            .filter(|q| q.texture == Texture::Fallback && q.color[0][..3] == header_colour());
+        let (mut inside, mut outside) = (0, 0);
+        for q in glyphs {
+            let [cx, cy] = [(q.rect[0] + q.rect[2]) * 0.5, (q.rect[1] + q.rect[3]) * 0.5];
+            if cx >= x0 && cx <= x1 && cy >= y0 - 2.0 && cy <= y1 + 2.0 {
+                inside += 1;
+            } else {
+                outside += 1;
+            }
+        }
+        assert_eq!((inside, outside), ("MADEUP".len(), others), "{bounds:?}");
+    }
+
+    #[test]
+    fn a_dialogs_header_box_goes_with_its_panes_scale() {
+        let chrome = ChromeLayout::default();
+        let keep = |_: &BitmapWidget| Show::Keep;
+        // At Vista's scale, and on a full screen at either scale, the
+        // globals' box.
+        for (size, scale) in [
+            (layout::DialogSize::Quarter, layout::Scale::Vista),
+            (layout::DialogSize::Full, layout::Scale::Xbox),
+            (layout::DialogSize::Full, layout::Scale::Vista),
+        ] {
+            let mut l = dialog();
+            l.size = size;
+            l.panes[0].scale = scale;
+            assert_eq!(
+                header_widget(&l, 0, &chrome).bounds,
+                layout::header_box(size)
+            );
+            let (list, _, _, space) = draw_screen(l, &FlatArt, Buttons::default(), &keep);
+            assert_header_in(&list, space, layout::header_box(size), 0);
+        }
+        // An Xbox dialog of each size: its own box, and the globals'
+        // font and colour.
+        for (k, size) in [
+            layout::DialogSize::Large,
+            layout::DialogSize::Half,
+            layout::DialogSize::Quarter,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut l = dialog();
+            l.size = size;
+            let w = header_widget(&l, 0, &chrome);
+            assert_eq!(w.bounds, layout::XBOX_DIALOG_HEADER_BOUNDS[k]);
+            assert_eq!(
+                (w.font, w.color),
+                (chrome.header(size).font, chrome.header(size).color)
+            );
+            // The pane asked for past the last is the last's.
+            assert_eq!(header_widget(&l, 9, &chrome).bounds, w.bounds);
+            let (list, _, _, space) = draw_screen(l, &FlatArt, Buttons::default(), &keep);
+            assert_header_in(&list, space, w.bounds, 0);
+        }
+    }
+
+    /// The middle of a box (UI units).
+    fn middle([l, t, r, b]: [f32; 4]) -> [f32; 2] {
+        [(l + r) * 0.5, (t + b) * 0.5]
+    }
+
+    #[test]
+    fn a_screen_draws_its_words_rows_and_buttons_where_clicks_find_them() {
+        let (list, hits, layout, space) = draw_dialog(&FlatArt, Some(0), &|_| Show::Keep);
+        render(&list, &FlatArt, &Fonts::fallback());
+        let texts = list.texts.join("|");
+        // The tag's words reworded, a refused one and one with a token
+        // that has no value hidden, our own for the button.
+        for shown in [
+            "JOIN US ONLINE",
+            "JOHN IS HERE",
+            "OURS",
+            "SINGLE",
+            "MADE UP",
+        ] {
+            assert!(list.texts.iter().any(|t| t == shown), "{shown}: {texts}");
+        }
+        for hidden in ["BUNGIE", "GONE", "XBOX", "PRESS"] {
+            assert!(!texts.contains(hidden), "{hidden}: {texts}");
+        }
+        // Rows 1 to 3 shown, each cell in its text.
+        for k in 1..4 {
+            assert!(
+                list.texts.iter().any(|t| *t == format!("ROW {k}")),
+                "{texts}"
+            );
+        }
+        assert!(
+            !texts.contains("ROW 0") && !texts.contains("ROW 4"),
+            "{texts}"
+        );
+        assert_eq!(list.texts.iter().filter(|t| *t == "CELL").count(), 3);
+        // A click in a row's label finds that row.
+        let l = &layout.panes[0].lists[0];
+        let label = l.skin.texts[0].bounds;
+        for slot in 0..3 {
+            let at = space.at(middle(layout::offset(label, l.corner(slot))));
+            assert_eq!(HitArea::find(&hits, at), Some(UiHit::Row(0, slot + 1)));
+        }
+        // A button's text and its picture are both it.
+        let b = &layout.panes[0].buttons[0];
+        assert_eq!(
+            HitArea::find(&hits, space.at(middle(b.text.widget.bounds))),
+            Some(UiHit::Button(0))
+        );
+        let [x, y] = b.bitmap.as_ref().unwrap().corner;
+        assert_eq!(
+            HitArea::find(&hits, space.at([x + 210.0, y - 45.0])),
+            Some(UiHit::Button(0))
+        );
+        assert_eq!(HitArea::find(&hits, [1.0, 1.0]), None);
+        // Each legend item's box holds its glyph and words.
+        let legend: Vec<&HitArea> = hits
+            .iter()
+            .filter(|h| matches!(h.hit, UiHit::Legend(_)))
+            .collect();
+        assert_eq!(legend.len(), 2);
+        for h in &legend {
+            let [x0, y0, x1, y1] = h.rect;
+            let inside = list.quads.iter().filter(|q| {
+                let [cx, cy] = [(q.rect[0] + q.rect[2]) * 0.5, (q.rect[1] + q.rect[3]) * 0.5];
+                q.texture != Texture::White && cx >= x0 && cx < x1 && cy >= y0 && cy < y1
+            });
+            assert!(inside.count() >= 4, "{h:?}");
+            assert_eq!(
+                HitArea::find(&hits, [(x0 + x1) * 0.5, (y0 + y1) * 0.5]),
+                Some(h.hit)
+            );
+        }
+        assert_eq!(legend[0].hit, UiHit::Legend(Face::A));
+        // A dialog at the Xbox's scale has its header in its frame's top
+        // band, not in the globals' quarter box.
+        let chrome = ChromeLayout::default();
+        let xbox = layout::XBOX_DIALOG_HEADER_BOUNDS[2];
+        assert_eq!(header_widget(&layout, 0, &chrome).bounds, xbox);
+        // (and the focused button's "OURS" in the header's colour too)
+        assert_header_in(&list, space, xbox, "OURS".len());
+        // The disabled row is dimmed: the focused row's labels at its
+        // focused alpha times DISABLED, the others resting.
+        let alphas: Vec<f32> = list
+            .quads
+            .iter()
+            .filter(|q| q.texture == Texture::Fallback && q.color[0][..3] == LABEL)
+            .map(|q| q.color[0][3])
+            .collect();
+        let resting = l.skin.items.resting();
+        assert!(
+            alphas.iter().any(|a| (a - DISABLED).abs() < 1e-4),
+            "{alphas:?}"
+        );
+        assert!(
+            alphas.iter().any(|a| (a - resting).abs() < 1e-4),
+            "{alphas:?}"
+        );
+    }
+
+    /// A bitmap of `frames` images of 8 by 8 pixels.
+    fn frames(art: &mut MemoryArt, name: &str, frames: usize) {
+        let images = (0..frames)
+            .map(|k| ArtImage {
+                width: 8,
+                height: 8,
+                rgba: vec![40 * k as u8 + 20; 8 * 8 * 4],
+            })
+            .collect();
+        art.add(
+            name,
+            crate::art::Bitmap {
+                images,
+                sequences: Vec::new(),
+            },
+        );
+    }
+
+    /// Every art quad's id.
+    fn art_ids(list: &DrawList) -> Vec<u32> {
+        list.quads
+            .iter()
+            .filter_map(|q| match q.texture {
+                Texture::Art(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rows_buttons_and_pictures_show_the_frames_asked_for() {
+        let mut art = MemoryArt::new();
+        frames(&mut art, "made_up_icon", 3); // ids 0 to 2
+        frames(&mut art, "made_up_button", 2); // 3 and 4
+        frames(&mut art, "made_up_single", 1); // 5
+        frames(&mut art, "made_up_arrows", 2); // 6 and 7
+        frames(&mut art, "made_up_map", 1); // 8
+        frames(&mut art, "made_up_plate", 1); // 9
+        let pictures = |w: &BitmapWidget| match w.name.as_str() {
+            "made_up_plate" => Show::Picture("made_up_map".into(), 0),
+            "made_up_gone" => Show::Hide,
+            _ => Show::Keep,
+        };
+        let (list, _, layout, space) = draw_dialog(&art, Some(0), &pictures);
+        render(&list, &art, &Fonts::fallback());
+        let ids = art_ids(&list);
+        let count = |id: u32| ids.iter().filter(|&&k| k == id).count();
+        // The icon: frame 2 on the row that asks for it, else its own.
+        assert_eq!((count(0), count(1), count(2)), (2, 0, 1));
+        // The focused button is lit; a button with one picture shows it
+        // focused or not.
+        assert_eq!((count(3), count(4), count(5)), (0, 1, 1));
+        // Both arrows: rows above and below those shown.
+        assert_eq!((count(6), count(7)), (1, 1));
+        // The plate shows the map instead; the hidden picture is gone.
+        assert_eq!((count(8), count(9)), (1, 0));
+        let gone = layout.panes[0].bitmaps[1].corner;
+        assert!(!list
+            .quads
+            .iter()
+            .any(|q| { q.texture == Texture::White && q.rect[0] == space.at(gone)[0] }));
+        // The up arrow's bottom left at the list's corner plus its place.
+        let l = &layout.panes[0].lists[0];
+        let up = list
+            .quads
+            .iter()
+            .find(|q| q.texture == Texture::Art(6))
+            .unwrap();
+        let arrows = l.skin.arrows.as_ref().unwrap();
+        let [x, y] = space.at([l.corner[0] + arrows.up[0], l.corner[1] + arrows.up[1]]);
+        assert!(
+            (up.rect[0] - x).abs() < 1e-3 && (up.rect[3] - y).abs() < 1e-3,
+            "{up:?}"
+        );
+        // So is the down arrow's, from the corner too (not under the last
+        // row shown).
+        let down = list
+            .quads
+            .iter()
+            .find(|q| q.texture == Texture::Art(7))
+            .unwrap();
+        let [x, y] = space.at([l.corner[0] + arrows.down[0], l.corner[1] + arrows.down[1]]);
+        assert!(
+            (down.rect[0] - x).abs() < 1e-3 && (down.rect[3] - y).abs() < 1e-3,
+            "{down:?}"
+        );
+        // Unfocused, the button rests.
+        let (list, ..) = draw_dialog(&art, None, &pictures);
+        let ids = art_ids(&list);
+        assert!(ids.contains(&3) && !ids.contains(&4));
+        // Focused, the button with one picture shows that picture (not a
+        // flat panel where its second would be), and the other rests.
+        let (list, _, layout, space) = draw_dialog(&art, Some(1), &pictures);
+        let ids = art_ids(&list);
+        let count = |id: u32| ids.iter().filter(|&&k| k == id).count();
+        assert_eq!((count(3), count(4), count(5)), (1, 0, 1));
+        let single = layout.panes[0].buttons[1].bitmap.as_ref().unwrap().corner;
+        let flat = |q: &Quad| q.texture == Texture::White && q.rect[0] == space.at(single)[0];
+        assert!(!list.quads.iter().any(flat));
+    }
+
+    #[test]
+    fn scroll_arrows_show_only_towards_hidden_rows() {
+        let mut art = MemoryArt::new();
+        frames(&mut art, "made_up_arrows", 2); // ids 0 (up) and 1 (down)
+        let five = dialog_rows();
+        let keep = |_: &BitmapWidget| Show::Keep;
+        // Three rows show at once. The first asked for is kept so they
+        // fill the list (9 is 2).
+        for (rows, first, arrows) in [
+            (&five[..], 0, (0, 1)),
+            (&five[..], 1, (1, 1)),
+            (&five[..], 2, (1, 0)),
+            (&five[..], 9, (1, 0)),
+            (&five[..3], 0, (0, 0)),
+            (&five[..3], 2, (0, 0)),
+        ] {
+            let buttons = Buttons::default();
+            let (list, ..) = draw_rows(dialog(), &art, buttons, &keep, rows, first);
+            let ids = art_ids(&list);
+            let count = |id: u32| ids.iter().filter(|&&k| k == id).count();
+            let shown = list.texts.iter().filter(|t| t.starts_with("ROW ")).count();
+            assert_eq!(shown, 3);
+            assert_eq!(
+                (count(0), count(1)),
+                arrows,
+                "{} rows from {first}",
+                rows.len()
+            );
+        }
+    }
+
+    /// How many glyphs are in the header's colour.
+    fn header_glyphs(list: &DrawList) -> usize {
+        let colour = header_colour();
+        let header = |q: &&Quad| q.texture == Texture::Fallback && q.color[0][..3] == colour;
+        list.quads.iter().filter(header).count()
+    }
+
+    #[test]
+    fn a_header_is_hidden_on_a_screen_without_one_or_with_a_token_unknown() {
+        let keep = |_: &BitmapWidget| Show::Keep;
+        // The tag's NO_HEADER: none, though the binding has words for it.
+        let mut l = dialog();
+        l.has_header = false;
+        let (list, ..) = draw_screen(l, &FlatArt, Buttons::default(), &keep);
+        assert!(!list.texts.iter().any(|t| t.contains("MADE UP")));
+        assert_eq!(header_glyphs(&list), 0);
+        // A token with no value hides it; one with a value is filled in.
+        let mut l = dialog();
+        l.header_words = Some("\u{e402} MADE UP".into());
+        let (list, ..) = draw_screen(l, &FlatArt, Buttons::default(), &keep);
+        assert!(!list.texts.iter().any(|t| t.contains("MADE UP")));
+        assert_eq!(header_glyphs(&list), 0);
+        let mut l = dialog();
+        l.header_words = Some("\u{e401} MADE UP".into());
+        let (list, ..) = draw_screen(l, &FlatArt, Buttons::default(), &keep);
+        assert!(list.texts.iter().any(|t| t == "JOHN MADE UP"));
+        assert_eq!(header_glyphs(&list), "JOHNMADEUP".len());
+    }
+
+    #[test]
+    fn the_focused_buttons_words_take_the_headers_colour() {
+        let keep = |_: &BitmapWidget| Show::Keep;
+        let glyphs = ["OURS".len(), "SINGLE".len()];
+        for focus in [None, Some(0), Some(1)] {
+            let buttons = Buttons {
+                focus,
+                ..Buttons::default()
+            };
+            let (list, _, layout, space) = draw_screen(dialog(), &FlatArt, buttons, &keep);
+            for (k, b) in layout.panes[0].buttons.iter().enumerate() {
+                let bounds = b.text.widget.bounds;
+                let lit = glyphs_in(&list, space, bounds, header_colour()).len();
+                let resting = glyphs_in(&list, space, bounds, SLOT).len();
+                let want = match focus == Some(k) {
+                    true => (glyphs[k], 0),
+                    false => (0, glyphs[k]),
+                };
+                assert_eq!((lit, resting), want, "{focus:?} {k}");
+            }
+        }
+    }
+
+    /// How many glyphs of colour `rgb` (their middles in the window
+    /// pixels `within`) there are, and how many have the black shadow
+    /// drawn before them `d` pixels down and right at their alpha.
+    fn shadowed(list: &DrawList, rgb: [f32; 3], d: f32, within: [f32; 4]) -> (usize, usize) {
+        let (mut lit, mut under) = (0, 0);
+        for (k, q) in list.quads.iter().enumerate() {
+            let [cx, cy] = [(q.rect[0] + q.rect[2]) * 0.5, (q.rect[1] + q.rect[3]) * 0.5];
+            let inside = cx >= within[0] && cx <= within[2] && cy >= within[1] && cy <= within[3];
+            if q.texture != Texture::Fallback || q.color[0][..3] != rgb || !inside {
+                continue;
+            }
+            lit += 1;
+            let black = [0.0, 0.0, 0.0, q.color[0][3]];
+            let twin =
+                |s: &Quad| s.color[0] == black && s.uv == q.uv && s.rect == q.rect.map(|v| v + d);
+            under += usize::from(list.quads[..k].iter().any(twin));
+        }
+        (lit, under)
+    }
+
+    #[test]
+    fn texts_rows_header_and_legend_have_halo_2s_drop_shadow() {
+        let keep = |_: &BitmapWidget| Show::Keep;
+        let (list, _, layout, space) = draw_screen(dialog(), &FlatArt, Buttons::default(), &keep);
+        let window = [0.0, 0.0, 1280.0, 720.0];
+        // 2 units, times the glyphs' scale, in whole pixels at 0.6 a unit:
+        // a slot's text at the Xbox's 1.25 drops 2 pixels (1.5 rounded),
+        // the rows' cells, the header and the legend 1 (1.2).
+        let drop = |scale: f32| (TEXT_SHADOW[0] * scale * space.k).round();
+        let legend = ChromeLayout::default()
+            .legend(layout::DialogSize::Quarter)
+            .color;
+        for (rgb, d) in [
+            (SLOT, drop(layout::XBOX_BITMAP)),
+            (LABEL, drop(1.0)),
+            ([0.8, 0.8, 0.8], drop(1.0)),
+            (header_colour(), drop(1.0)),
+            (legend, drop(1.0)),
+        ] {
+            let (lit, under) = shadowed(&list, rgb, d, window);
+            assert!(lit > 0 && under == lit, "{rgb:?}: {under} of {lit}");
+        }
+        assert_eq!((drop(layout::XBOX_BITMAP), drop(1.0)), (2.0, 1.0));
+        // A text typed behind a cursor has none; the others keep theirs.
+        let mut typed = dialog();
+        typed.panes[0].texts[0].widget.cursor = true;
+        let (list, ..) = draw_screen(typed, &FlatArt, Buttons::default(), &keep);
+        let body = space.rect(layout.panes[0].texts[0].widget.bounds);
+        let (lit, under) = shadowed(&list, SLOT, 2.0, body);
+        assert!(lit > 0 && under == 0, "{under} of {lit}");
+        let (lit, under) = shadowed(&list, SLOT, 2.0, window);
+        assert!(under > 0 && under < lit, "{under} of {lit}");
+        // (The start screen and the main menu keep their looks, the main
+        // menu's rows their skin's own shadow text: `PINNED` holds them.)
+    }
+
+    /// Every glyph quad of colour `rgb` whose middle is in `bounds` (UI
+    /// units): its alpha and height in pixels.
+    fn glyphs_in(list: &DrawList, space: Space, bounds: [f32; 4], rgb: [f32; 3]) -> Vec<[f32; 2]> {
+        let [x0, y0, x1, y1] = space.rect(bounds);
+        list.quads
+            .iter()
+            .filter(|q| q.texture == Texture::Fallback && q.color[0][..3] == rgb)
+            .filter(|q| {
+                let [cx, cy] = [(q.rect[0] + q.rect[2]) * 0.5, (q.rect[1] + q.rect[3]) * 0.5];
+                cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1
+            })
+            .map(|q| [q.color[0][3], q.rect[3] - q.rect[1]])
+            .collect()
+    }
+
+    const SLOT: [f32; 3] = [0.7, 0.7, 0.7];
+
+    #[test]
+    fn a_hidden_button_has_no_picture_words_or_click_area() {
+        let mut art = MemoryArt::new();
+        frames(&mut art, "made_up_button", 2); // ids 0 and 1
+        frames(&mut art, "made_up_single", 1); // 2
+        let hide_second = Buttons {
+            focus: Some(0),
+            hidden: &[1],
+            ..Buttons::default()
+        };
+        let (list, ..) = draw_screen(dialog(), &art, hide_second, &|_| Show::Keep);
+        let ids = art_ids(&list);
+        assert!(ids.contains(&1) && !ids.contains(&2), "{ids:?}");
+        assert!(
+            !list.texts.iter().any(|t| t == "SINGLE"),
+            "{:?}",
+            list.texts
+        );
+        // Flat, its panel isn't drawn and nothing there is clicked; the
+        // first keeps its number.
+        let hide_second = Buttons {
+            hidden: &[1],
+            ..Buttons::default()
+        };
+        let (list, hits, layout, space) =
+            draw_screen(dialog(), &FlatArt, hide_second, &|_| Show::Keep);
+        let [first, second] = [0, 1].map(|k| layout.panes[0].buttons[k].clone());
+        let corner = second.bitmap.as_ref().unwrap().corner;
+        let at = space.at(corner)[0];
+        assert!(!list
+            .quads
+            .iter()
+            .any(|q| q.texture == Texture::White && q.rect[0] == at));
+        // Its picture's left end, left of its words' box.
+        let inside = [corner[0] + 5.0, corner[1] - 25.0];
+        for point in [middle(second.text.widget.bounds), inside] {
+            assert_eq!(HitArea::find(&hits, space.at(point)), None, "{point:?}");
+        }
+        assert_eq!(
+            HitArea::find(&hits, space.at(middle(first.text.widget.bounds))),
+            Some(UiHit::Button(0))
+        );
+        // A button with no words (the pregame lobby's chat box) keeps its
+        // picture and its click area.
+        let mut quiet = dialog();
+        quiet.panes[0].buttons[1].text.words = None;
+        let (list, hits, ..) = draw_screen(quiet, &FlatArt, Buttons::default(), &|_| Show::Keep);
+        assert!(list
+            .quads
+            .iter()
+            .any(|q| q.texture == Texture::White && q.rect[0] == at));
+        assert!(!list.texts.iter().any(|t| t == "SINGLE"));
+        assert_eq!(
+            HitArea::find(&hits, space.at(inside)),
+            Some(UiHit::Button(1))
+        );
+    }
+
+    #[test]
+    fn a_disabled_button_is_dimmed_and_a_click_still_finds_it() {
+        let mut art = MemoryArt::new();
+        frames(&mut art, "made_up_button", 2); // ids 0 and 1
+        frames(&mut art, "made_up_single", 1); // 2
+        let dim_first = Buttons {
+            focus: Some(0),
+            disabled: &[0],
+            ..Buttons::default()
+        };
+        let (list, hits, layout, space) = draw_screen(dialog(), &art, dim_first, &|_| Show::Keep);
+        let alpha = |id: u32| {
+            list.quads
+                .iter()
+                .find(|q| q.texture == Texture::Art(id))
+                .map(|q| q.color[0][3])
+        };
+        // Its picture (lit: it has the focus) and its words (in the
+        // header's colour: it has the focus) at DISABLED, the other
+        // button's whole.
+        assert!((alpha(1).unwrap() - DISABLED).abs() < 1e-4);
+        assert!((alpha(2).unwrap() - 1.0).abs() < 1e-4);
+        let buttons = &layout.panes[0].buttons;
+        let dimmed = glyphs_in(&list, space, buttons[0].text.widget.bounds, header_colour());
+        let whole = glyphs_in(&list, space, buttons[1].text.widget.bounds, SLOT);
+        assert_eq!((dimmed.len(), whole.len()), (4, 6), "OURS, SINGLE");
+        assert!(dimmed.iter().all(|g| (g[0] - DISABLED).abs() < 1e-4));
+        assert!(whole.iter().all(|g| (g[0] - 1.0).abs() < 1e-4));
+        // A click on it is still it: the binding refuses it.
+        assert_eq!(
+            HitArea::find(&hits, space.at(middle(buttons[0].text.widget.bounds))),
+            Some(UiHit::Button(0))
+        );
+    }
+
+    #[test]
+    fn an_xbox_panes_words_are_drawn_bigger_than_at_vistas_scale() {
+        // The tallest glyph of the pane's texts and buttons' texts.
+        let tallest = |layout: ScreenLayout| {
+            let (list, _, _, space) =
+                draw_screen(layout, &FlatArt, Buttons::default(), &|_| Show::Keep);
+            let everywhere = [-1.0e4, 1.0e4, 1.0e4, -1.0e4];
+            let glyphs = glyphs_in(&list, space, everywhere, SLOT);
+            assert!(!glyphs.is_empty());
+            glyphs.iter().map(|g| g[1]).fold(0.0, f32::max)
+        };
+        let xbox = dialog();
+        let mut vista = dialog();
+        vista.panes[0] = vista.panes[0].at_scale(layout::Scale::Vista);
+        assert!((vista.panes[0].texts[0].glyphs - 1.0).abs() < 1e-6);
+        let ratio = tallest(xbox) / tallest(vista);
+        assert!((ratio - layout::XBOX_BITMAP).abs() < 0.03, "{ratio}");
+    }
+
+    #[test]
+    fn a_screen_says_when_it_has_come_in_and_dims_what_is_under_it() {
+        use crate::anim::Animation;
+        let mut layout = dialog();
+        // Nothing comes in but the focused row, fading up.
+        let gain = f64::from(crate::anim::FOCUS_IN_MS) / 1000.0;
+        assert!((intro_end(&layout, 0) - gain).abs() < 1e-6);
+        let p = &mut layout.panes[0];
+        p.texts[1].widget.intro = Some(Animation::focus_in());
+        p.texts[1].widget.delay_ms = 250.0;
+        p.lists[0].delay_ms = 100.0;
+        let end = f64::from(Animation::focus_in().seconds()) + 0.25;
+        assert!((intro_end(&layout, 0) - end).abs() < 1e-6);
+        // A skin's picture comes in after its own delay from when the
+        // screen opened, last of all here.
+        let skin = &mut layout.panes[0].lists[0].skin.bitmaps[0];
+        skin.intro = Some(Animation::focus_out());
+        skin.delay_ms = 300.0;
+        let end = f64::from(Animation::focus_out().seconds()) + 0.3;
+        assert!((intro_end(&layout, 0) - end).abs() < 1e-6);
+        // A pane past the last is the last; no panes, nothing to come in.
+        assert!((intro_end(&layout, 7) - end).abs() < 1e-6);
+        layout.panes.clear();
+        assert_eq!(intro_end(&layout, 0), 0.0);
+        let fonts = Fonts::fallback();
+        let chrome = ChromeLayout::default();
+        let (empty, hits) = screen(
+            1.0,
+            &layout,
+            &ScreenState {
+                pane: 0,
+                opened: 0.0,
+                chrome: &chrome,
+                words: &|_| Words::Tag,
+                tokens: &|_| None,
+                lists: &[],
+                button_focus: None,
+                disabled_buttons: &[],
+                hidden_buttons: &[],
+                header: Words::Tag,
+                legend: &[],
+                keyboard: false,
+                pictures: &|_| Show::Keep,
+            },
+            &FlatArt,
+            &fonts,
+            Space::new(640, 360),
+        );
+        assert!(empty.quads.is_empty() && hits.is_empty());
+        // The overlay: one quad over the window in the globals' colour.
+        let o = overlay(&chrome, Space::new(640, 360));
+        assert_eq!(o.quads.len(), 1);
+        assert_eq!(o.quads[0].rect, [0.0, 0.0, 640.0, 360.0]);
+        assert_eq!(o.quads[0].color, [chrome.overlay; 2]);
+        assert!(overlay(&chrome, Space::new(0, 0)).quads.is_empty());
+        let clear = ChromeLayout {
+            overlay: [0.0; 4],
+            ..ChromeLayout::default()
+        };
+        assert!(overlay(&clear, Space::new(640, 360)).quads.is_empty());
     }
 }

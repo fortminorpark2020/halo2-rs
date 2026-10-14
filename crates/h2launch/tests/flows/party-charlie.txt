@@ -1,0 +1,23 @@
+# (c) The party screen, CHARLIE's side: accept, see BRAVO removed, be
+# made leader, and be left leading an invite-only party of one.
+0 wait start 20
+0.2 a                       # PRESS START: the main menu
+0 wait main 10
+0.2 a                       # ONLINE: the sign-in form (no gamertag saved)
+0 wait signin 10
+0 type CHARLIE
+0.2 a
+0 wait live 30
+0 wait invite 60
+0.2 a                       # accept
+0 wait live 5
+0 see PARTY (3) 30
+0 see PARTY (2) 60          # BRAVO removed
+0.2 y                       # the party screen
+0 wait party 5
+0 see Party leader (you) 60 # ALPHA made us leader
+0.2 b
+0 wait live 5
+0 see Press X to invite 30  # ALPHA left
+0 see Invite only 5         # and it is still invite only
+1 quit

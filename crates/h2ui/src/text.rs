@@ -514,11 +514,15 @@ impl Fonts {
                     let left = pen + g.origin[0] * units;
                     let top = -g.origin[1] * units;
                     if g.size[0] > 0.0 && g.size[1] > 0.0 {
+                        // A button's glyph keeps its own colours (white
+                        // multiplies nothing), as Halo 2 draws its A, B, X
+                        // and Y in any text; letters take the text's.
+                        let own = button(c).map(|_| [1.0; 3]);
                         line.glyphs.push(PlacedGlyph {
                             texture: Texture::Font(k as u16),
                             uv: g.uv,
                             rect: [left, top, left + g.size[0] * units, top + g.size[1] * units],
-                            color: None,
+                            color: own,
                         });
                     }
                     pen = left + g.advance * units;
@@ -605,6 +609,43 @@ impl Fonts {
         String::new()
     }
 
+    /// `text` broken into lines no wider than `width` UI units in `font`
+    /// at `scale` times its size: at spaces, and at each line break (`\n`
+    /// or `\r\n`); a word wider than a line on its own is cut to fit it
+    /// (`fit`). Blank lines inside stay; none for empty text.
+    pub fn wrap(&self, font: Font, scale: f32, text: &str, width: f32) -> Vec<String> {
+        let room = if scale > 0.0 { width / scale } else { width };
+        let mut out = Vec::new();
+        for para in text.split('\n') {
+            let para = para.strip_suffix('\r').unwrap_or(para);
+            let mut line = String::new();
+            for word in para.split(' ').filter(|w| !w.is_empty()) {
+                let tried = if line.is_empty() {
+                    word.to_string()
+                } else {
+                    format!("{line} {word}")
+                };
+                if self.width(font, &tried) <= room {
+                    line = tried;
+                    continue;
+                }
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                }
+                if self.width(font, word) <= room {
+                    line = word.to_string();
+                } else {
+                    out.push(self.fit(font, word, room));
+                }
+            }
+            out.push(line);
+        }
+        while out.last().is_some_and(String::is_empty) {
+            out.pop();
+        }
+        out
+    }
+
     /// The pixels behind a font texture.
     pub fn image(&self, texture: Texture) -> Option<ImageRef<'_>> {
         match texture {
@@ -676,6 +717,33 @@ pub(crate) mod tests {
         let mut f = Fonts::new(&files);
         f.set_units_per_pixel(Font::MainMenu, 1.0);
         f
+    }
+
+    #[test]
+    fn text_wraps_at_spaces_and_line_breaks() {
+        let f = fonts();
+        // "LI" is 13 wide, a space 5, "LIL" 19 (the made-up font).
+        assert_eq!(f.width(Font::MainMenu, "LI LI"), 31.0);
+        assert_eq!(f.wrap(Font::MainMenu, 1.0, "LI LI", 31.0), ["LI LI"]);
+        assert_eq!(
+            f.wrap(Font::MainMenu, 1.0, "LI LI LI", 31.0),
+            ["LI LI", "LI"]
+        );
+        // Twice the size needs twice the room.
+        assert_eq!(f.wrap(Font::MainMenu, 2.0, "LI LI", 62.0), ["LI LI"]);
+        assert_eq!(f.wrap(Font::MainMenu, 2.0, "LI LI", 61.0), ["LI", "LI"]);
+        // Breaks, with or without a carriage return; a blank line stays,
+        // spaces at the ends and in a row don't count.
+        assert_eq!(
+            f.wrap(Font::MainMenu, 1.0, "LI\r\n\n  LI  LI \nI", 100.0),
+            ["LI", "", "LI LI", "I"]
+        );
+        // A word too wide on its own is cut.
+        let cut = f.wrap(Font::MainMenu, 1.0, "LILILILI I", 40.0);
+        assert!(cut[0].ends_with("...") && f.width(Font::MainMenu, &cut[0]) <= 40.0);
+        assert_eq!(cut[1], "I");
+        assert!(f.wrap(Font::MainMenu, 1.0, "", 10.0).is_empty());
+        assert!(f.wrap(Font::MainMenu, 1.0, "\n\n", 10.0).is_empty());
     }
 
     #[test]
@@ -808,6 +876,22 @@ pub(crate) mod tests {
         // The text after it follows the disc.
         assert!(line.glyphs[2].rect[0] > disc.rect[2]);
         assert!(wanted('\u{e103}') && wanted('e') && !wanted('\u{e200}'));
+    }
+
+    #[test]
+    fn a_halo_2_fonts_button_keeps_its_own_colours() {
+        let mut file = font();
+        file.glyphs.push(glyph('\u{e100}', 8, 10, 0, 10, 9));
+        let mut files = vec![None; 12];
+        files[Font::MainMenu.index()] = Some(file);
+        let mut f = Fonts::new(&files);
+        f.set_units_per_pixel(Font::MainMenu, 1.0);
+        let line = f.line(Font::MainMenu, 1.0, "\u{e100}A");
+        let (button, letter) = (line.glyphs[0], line.glyphs[1]);
+        assert_eq!(button.texture, Texture::Font(0));
+        // White: the font's own colours, untinted by the text's.
+        assert_eq!(button.color, Some([1.0; 3]));
+        assert_eq!((letter.texture, letter.color), (Texture::Font(0), None));
     }
 
     #[test]

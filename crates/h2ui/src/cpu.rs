@@ -105,6 +105,7 @@ impl<P: Pixel> Kept<P> {
 
     /// Puts `list`, drawn over black, in the `w` by `h` pixels of `px`
     /// (what was there is replaced), drawing it only if it isn't kept.
+    /// Returns whether it was drawn (not only copied in).
     pub fn draw(
         &mut self,
         list: &DrawList,
@@ -112,11 +113,12 @@ impl<P: Pixel> Kept<P> {
         w: usize,
         h: usize,
         textures: &dyn Textures,
-    ) {
+    ) -> bool {
         if w == 0 || h == 0 || px.len() < w * h {
-            return;
+            return false;
         }
-        if self.list.as_ref() != Some(list) || self.size != (w, h) {
+        let fresh = self.list.as_ref() != Some(list) || self.size != (w, h);
+        if fresh {
             self.px.clear();
             self.px.resize(w * h, P::from_rgb([0; 3]));
             draw(list, &mut self.px, w, h, textures);
@@ -124,6 +126,7 @@ impl<P: Pixel> Kept<P> {
             self.size = (w, h);
         }
         px[..w * h].copy_from_slice(&self.px);
+        fresh
     }
 }
 
@@ -494,6 +497,7 @@ mod tests {
         DrawList {
             size: [w, h],
             quads,
+            texts: Vec::new(),
         }
     }
 
@@ -750,12 +754,12 @@ mod tests {
         let red = list(vec![red_at(0.0)], 2, 1);
         let mut kept = Kept::default();
         let mut px = vec![BG; 2];
-        kept.draw(&red, &mut px, 2, 1, &textures);
+        assert!(kept.draw(&red, &mut px, 2, 1, &textures));
         assert_eq!(px, [0xFF_0000, 0]);
         assert_eq!(textures.1.get(), 1);
         // The same list again: copied, not drawn.
         px.fill(BG);
-        kept.draw(&red, &mut px, 2, 1, &textures);
+        assert!(!kept.draw(&red, &mut px, 2, 1, &textures));
         assert_eq!(px, [0xFF_0000, 0]);
         assert_eq!(textures.1.get(), 1);
         // Another list, another size, or forgotten: drawn again.
